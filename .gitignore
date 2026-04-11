@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+
+# Lockfile — reproducible from Cargo.toml
+Cargo.lock
+
+# Debug/temp files from development sessions
+dump_vfxb_bin
+dump_vfxb.rs
+dump_out.txt
+dump_exit.txt
+run_out.txt
+build_out.txt
+build_exit.txt
+rustc_out.txt
+rustc_exit.txt
+
+# Editor/IDE
+.vscode/
+.kiro/

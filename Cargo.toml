@@ -1,0 +1,46 @@
+[package]
+name = "hitbox_editor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hitbox_editor"
+path = "src/main.rs"
+
+[dependencies]
+# GUI + rendering
+eframe = { version = "0.33.0", default-features = false, features = ["wayland", "x11", "wgpu"] }
+egui = { version = "0.33.0" }
+egui-wgpu = "0.33.0"
+egui_extras = { version = "0.33.0", features = ["all_loaders"] }
+wgpu = "27.0.0"
+glam = { version = "0.28.0", features = ["bytemuck"] }
+
+# SSBU file formats
+ssbh_wgpu = { git = "https://github.com/ScanMountGoat/ssbh_wgpu" }
+ssbh_data = { version = "0.19.0", features = ["serde"] }
+nutexb_wgpu = { git = "https://github.com/ScanMountGoat/ssbh_wgpu" }
+prc = { package = "prc-rs", version = "1.6", features = ["xml-feat"] }
+motion_lib = { package = "motion_list_rs", version = "1.5" }
+hash40 = "1.3"
+eff_lib = { git = "https://github.com/ultimate-research/eff_lib", package = "eff_lib" }
+bytemuck = { version = "1", features = ["derive"] }
+
+# Async + HTTP (for ACMD fetch)
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# Utilities
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+rfd = "0.15"
+dirs = "5"
+
+# Optimize dependencies in debug builds — wgpu/ssbh_wgpu are unusably slow unoptimized
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
