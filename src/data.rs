@@ -376,6 +376,8 @@ pub struct AppState {
     pub ptcl: Option<crate::effects::PtclFile>,
     pub particle_system: crate::effects::ParticleSystem,
     pub trail_system: crate::effects::TrailSystem,
+    /// Set to true when a new ptcl file is loaded — consumed by the update loop to upload textures
+    pub pending_texture_upload: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +410,7 @@ impl Default for AppState {
             ptcl: None,
             particle_system: crate::effects::ParticleSystem::default(),
             trail_system: crate::effects::TrailSystem::default(),
+            pending_texture_upload: false,
         }
     }
 }
