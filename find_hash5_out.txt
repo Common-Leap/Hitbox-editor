@@ -1,0 +1,13 @@
+Scanning BRTI[8] 'ef_samus_burner00' for target IDs:
+  BRTI at 0x2ab8, len=0x2f0
+
+Scanning ALL BRTI structs for target IDs:
+
+Scanning entire BNTX for target IDs:
+
+All section magics in VFXB:
+  0x40: 'ESTA' size=0xc98cc
+  0xc9910: 'GRTF' size=0x9d8528
+  0xaa3530: 'PRMA' size=0x9530
+  0xaaca80: 'G3PR' size=0xe1350
+  0xb8e350: 'GRSN' size=0x227820

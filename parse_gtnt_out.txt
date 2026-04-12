@@ -1,0 +1,11 @@
+GTNT at 0xc9950
+Magic: b'\x04FX\xad'
+size=0x0 child_off=0x28 next=0x12 bin_off=0x73756d61 child_cnt=25966
+Binary data at 0x738206b1
+First 64 bytes: 
+
+Parsing GTNT entries:
+
+Total entries: 0
+
+TextureID -> Name mapping:

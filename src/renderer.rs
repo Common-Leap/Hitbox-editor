@@ -429,6 +429,7 @@ pub struct ViewportCallback {
     pub skel_path: Option<std::path::PathBuf>,
     pub particles: Vec<crate::effects::Particle>,
     pub trails: Vec<crate::effects::SwordTrail>,
+    pub emitter_sets: Vec<crate::effects::EmitterSet>,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -475,6 +476,9 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             // Render particles and trails into the particle target texture
             if !self.particles.is_empty() || !self.trails.is_empty() {
                 eprintln!("[RENDER] {} particles, {} trails, target={}", self.particles.len(), self.trails.len(), state.particle_target.is_some());
+                if state.particle_target.is_none() {
+                    eprintln!("[RENDER] WARNING: particle_target is None! viewport size={}x{}", w, h);
+                }
                 if let Some((_, ref target_view)) = state.particle_target {
                     let (view_proj, cam_right, cam_up) = state.camera_vectors();
                     if let Some(pr) = state.particle_renderer.as_mut() {
@@ -506,6 +510,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                             cam_up,
                             &self.particles,
                             &self.trails,
+                            &self.emitter_sets,
                         );
                         pr.prepare_composite(device, target_view);
                     }

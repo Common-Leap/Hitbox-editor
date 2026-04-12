@@ -1,0 +1,29 @@
+Checking CRC32 matches for unknown TextureIDs:
+
+  Looking for: 0xad584604
+
+  Looking for: 0x10edf80b
+
+  Looking for: 0xc6a6335c
+
+
+All CRC32 values for known texture names:
+  'ef_item_lightning01': 0x674a5fbb  (stripped 'item_lightning01': 0x61dd718e)
+  'ef_cmn_parts01': 0x5c14f4a8  (stripped 'cmn_parts01': 0x0eaf1d39)
+  'ef_cmn_impact14': 0x4df1af18  (stripped 'cmn_impact14': 0xcaabb723)
+  'ef_cmn_stone00': 0xf69f7681  (stripped 'cmn_stone00': 0xa4249f10)
+  'ef_cmn_mask01': 0x14296291  (stripped 'cmn_mask01': 0xc722c522)
+  'ef_cmn_impact08': 0x5d5cd272  (stripped 'cmn_impact08': 0xda06ca49)
+  'ef_cmn_smoke01': 0x929fe576  (stripped 'cmn_smoke01': 0xc0240ce7)
+  'ef_cmn_fire05': 0xfbd157e5  (stripped 'cmn_fire05': 0x28daf056)
+  'ef_item_impact01': 0xc6e5cfbf  (stripped 'item_impact01': 0x77697c83)
+  'ef_cmn_stone01': 0x81984617  (stripped 'cmn_stone01': 0xd323af86)
+  'ef_cmn_impact11': 0x3d9b5b97  (stripped 'cmn_impact11': 0xbac143ac)
+  'ef_item_flash05': 0x94d26e28  (stripped 'item_flash05': 0x13887613)
+  'ef_item_impact11': 0xdffefefe  (stripped 'item_impact11': 0x6e724dc2)
+  'ef_samus_color00': 0x16a86285  (stripped 'samus_color00': 0xa724d1b9)
+  'ef_cmn_impactflash00': 0x16479a49  (stripped 'cmn_impactflash00': 0x40f2c944)
+  'ef_cmn_wind00': 0x583cf044  (stripped 'cmn_wind00': 0x8b3757f7)
+  'ef_samus_wind00': 0xb8d30f09  (stripped 'samus_wind00': 0x3f891732)
+  'ef_captain_fireimpact00': 0x04a14680  (stripped 'captain_fireimpact00': 0x26e49c11)
+  'ef_cmn_impact00': 0x53875a40  (stripped 'cmn_impact00': 0xd4dd427b)

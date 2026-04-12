@@ -1,0 +1,16 @@
+Key texture info:
+  [8] 'ef_samus_burner00': 256x768 fmt=BC5_UNORM tile=1 size=0x55e00
+  [19] 'ef_cmn_flashline00': 256x128 fmt=BC5_UNORM tile=1 size=0xb600
+  [24] 'ef_cmn_smoke00': 128x128 fmt=BC3_SRGB tile=1 size=0x5e00
+  [30] 'ef_cmn_debris00': 512x128 fmt=BC5_UNORM tile=1 size=0x16600
+  [73] 'ef_cmn_flare01': 64x64 fmt=BC5_UNORM tile=1 size=0x1e00
+  [15] 'ef_cmn_flare00': 64x64 fmt=BC4_UNORM tile=1 size=0x1400
+  [17] 'ef_cmn_fire00': 256x128 fmt=BC7_SRGB tile=1 size=0xb600
+  [66] 'ef_cmn_flash01': 64x64 fmt=BC7_SRGB tile=1 size=0x1e00
+  [67] 'ef_samus_flash01': 640x256 fmt=BC4_UNORM tile=1 size=0x1b800
+
+Saving tex[73] raw pixel data...
+  tegra_swizzle not available, saving raw swizzled data
+  tex[73] 'ef_cmn_flare01': 64x64 fmt=BC5_UNORM mip0_ptr=0x0 pixel_start=0x15030 size=0x1e00
+  First 32 bytes: 4000000070bd00007e7777777777ffffa0000000f08205000402aefefdfcfcfc
+  fmt_type=0x1e expected_bc1_size=0x800 expected_bc3_size=0x1000 actual=0x1e00

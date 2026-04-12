@@ -1,0 +1,10 @@
+[CADP] emitter='burner1_L' cadp_idx=None last_tex_idx=None bntx_count=103
+[CADP] emitter='burner2_L' cadp_idx=None last_tex_idx=Some(8) bntx_count=103
+[CADP] emitter='flash1_L' cadp_idx=Some(19) last_tex_idx=Some(8) bntx_count=103
+[CADP] emitter='burner1_R' cadp_idx=None last_tex_idx=Some(19) bntx_count=103
+[CADP] emitter='burner2_R' cadp_idx=None last_tex_idx=Some(8) bntx_count=103
+[CADP] emitter='flash1_R' cadp_idx=Some(19) last_tex_idx=Some(8) bntx_count=103
+[CADP] emitter='burner1_L' cadp_idx=None last_tex_idx=None bntx_count=103
+[CADP] emitter='burner2_L' cadp_idx=None last_tex_idx=Some(8) bntx_count=103
+[CADP] emitter='flash1_L' cadp_idx=Some(19) last_tex_idx=Some(8) bntx_count=103
+[CADP] emitter='burner1_R' cadp_idx=None last_tex_idx=Some(19) bntx_count=103

@@ -1,0 +1,6 @@
+[GTNT] found as GRTF child at 0xc9930, bin_start=0xc9950 len=3824
+[GTNT] parsed 103 entries from GRTF child GTNT
+[EMTR] 'burner1_L' v=22 one_time=true dur=16 life=12 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR] 'burner2_L' v=22 one_time=true dur=15 life=8 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR] 'burner1_R' v=22 one_time=true dur=16 life=12 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR] 'burner2_R' v=22 one_time=true dur=15 life=8 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)

@@ -589,10 +589,11 @@ impl HitboxEditorApp {
         }
         if let Some(eff_path) = eff_path.filter(|p| p.exists()) {
             self.load_eff_file(&eff_path);
-            // Also load ef_sys.eff for system-wide effects (sys_smash_flash etc.)
+            // Also load ef_common.eff (system-wide effects: sys_smash_flash, sys_attack_arc, etc.)
             if let Some(root) = &self.state.data_root.clone() {
-                // Try common locations for the sys eff file
+                // Try known locations for the common/sys eff file
                 let sys_candidates = [
+                    root.join("effect").join("system").join("common").join("ef_common.eff"),
                     root.join("effect").join("fighter").join("sys").join("ef_sys.eff"),
                     root.join("effect").join("sys").join("ef_sys.eff"),
                     root.join("effect").join("common").join("ef_sys.eff"),
@@ -602,31 +603,81 @@ impl HitboxEditorApp {
                 let mut found_sys = false;
                 for p in &sys_candidates {
                     if p.exists() {
-                        eprintln!("[EFF] merging sys eff: {:?}", p);
-                        if let Some(eff_index) = &mut self.state.eff_index {
-                            let _ = eff_index.merge_from_file(p);
+                        eprintln!("[EFF] merging sys eff with ptcl: {:?}", p);
+                        if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
+                            let _ = eff_index.merge_from_file_with_ptcl(p, ptcl);
                         }
+                        self.state.pending_texture_upload = true;
                         found_sys = true;
                         break;
                     }
                 }
                 if !found_sys {
-                    // Scan effect/ for ef_sys.eff anywhere one level deep
+                    // Scan effect/ subdirs for ef_sys.eff or ef_common.eff one level deep
                     if let Ok(entries) = std::fs::read_dir(root.join("effect")) {
                         for entry in entries.flatten() {
-                            let p = entry.path().join("ef_sys.eff");
-                            eprintln!("[EFF] scanning for sys: {:?} exists={}", p, p.exists());
-                            if p.exists() {
-                                if let Some(eff_index) = &mut self.state.eff_index {
-                                    let _ = eff_index.merge_from_file(&p);
-                                }
-                                found_sys = true;
-                                break;
+                            let p1 = entry.path().join("ef_sys.eff");
+                            let p2 = entry.path().join("ef_common.eff");
+                            let p = if p1.exists() { p1 } else if p2.exists() { p2 } else { continue };
+                            eprintln!("[EFF] scanning for sys: {:?} exists=true", p);
+                            if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
+                                let _ = eff_index.merge_from_file_with_ptcl(&p, ptcl);
                             }
+                            self.state.pending_texture_upload = true;
+                            found_sys = true;
+                            break;
                         }
                     }
                     if !found_sys {
-                        eprintln!("[EFF] ef_sys.eff not found — sys effects will be skipped");
+                        eprintln!("[EFF] ef_sys.eff not found — injecting synthetic sys emitter sets");
+                        // Append synthetic emitter sets for common sys effects and register their handles
+                        if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
+                            let sys_effects: &[(&str, crate::effects::BlendType, f32, f32)] = &[
+                                // (name, blend, scale, lifetime)
+                                ("sys_smash_flash",    crate::effects::BlendType::Add,    0.4,  8.0),
+                                ("sys_attack_arc",     crate::effects::BlendType::Add,    0.3, 12.0),
+                                ("sys_attack_arc_b",   crate::effects::BlendType::Add,    0.3, 12.0),
+                                ("sys_attack_arc_lw",  crate::effects::BlendType::Add,    0.3, 12.0),
+                                ("sys_hit_smoke",      crate::effects::BlendType::Normal, 0.3, 10.0),
+                                ("sys_landing_smoke",  crate::effects::BlendType::Normal, 0.2,  8.0),
+                            ];
+                            for (name, blend, scale, lifetime) in sys_effects {
+                                let set_idx = ptcl.emitter_sets.len() as i32;
+                                eff_index.handles.entry(name.to_string()).or_insert(set_idx);
+                                eff_index.handles.entry(name.to_lowercase()).or_insert(set_idx);
+                                ptcl.emitter_sets.push(crate::effects::EmitterSet {
+                                    name: name.to_string(),
+                                    emitters: vec![crate::effects::EmitterDef {
+                                        name: name.to_string(),
+                                        emit_type: crate::effects::EmitType::Sphere,
+                                        blend_type: *blend,
+                                        display_side: crate::effects::DisplaySide::Both,
+                                        emission_rate: 6.0,
+                                        emission_rate_random: 0.0,
+                                        initial_speed: 0.15,
+                                        speed_random: 0.3,
+                                        accel: glam::Vec3::ZERO,
+                                        lifetime: *lifetime,
+                                        lifetime_random: 0.0,
+                                        scale: *scale,
+                                        scale_random: 0.0,
+                                        rotation_speed: 0.0,
+                                        color0: vec![crate::effects::ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 }],
+                                        color1: Vec::new(),
+                                        alpha0: crate::effects::AnimKey3v4k::default(),
+                                        alpha1: crate::effects::AnimKey3v4k::default(),
+                                        scale_anim: crate::effects::AnimKey3v4k::default(),
+                                        textures: Vec::new(),
+                                        mesh_type: 0,
+                                        primitive_index: 0,
+                                        texture_index: 0,
+                                        is_one_time: true,
+                                        emission_timing: 0,
+                                        emission_duration: 1,
+                                    }],
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -782,12 +833,20 @@ impl HitboxEditorApp {
                                 eff.handles.len(), ptcl.emitter_sets.len()
                             );
                             self.state.ptcl = Some(ptcl);
+                            self.state.pending_texture_upload = true;
                         }
                         Err(e) => {
-                            // VFXB (Switch format) — fall back to synthetic emitter sets
+                            // VFXB (Switch format) — fall back to name-aware synthetic emitter sets
                             eprintln!("[EFF] ptcl parse error ({e}), using synthetic emitter sets");
                             let max_idx = eff.handles.values().copied().max().unwrap_or(0).max(0) as usize;
-                            let ptcl = crate::effects::PtclFile::synthetic(max_idx);
+                            // Build a reverse map: set_index -> handle_name for color hinting
+                            let mut idx_to_name: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+                            for (name, &idx) in &eff.handles {
+                                // Only store lowercase names (skip duplicates)
+                                if name.chars().any(|c| c.is_uppercase()) { continue; }
+                                idx_to_name.entry(idx).or_insert_with(|| name.clone());
+                            }
+                            let ptcl = crate::effects::PtclFile::synthetic_named(max_idx, &idx_to_name);
                             self.state.status = format!(
                                 "Loaded {} effects (synthetic, VFXB format)",
                                 eff.handles.len()
@@ -799,6 +858,10 @@ impl HitboxEditorApp {
                     eprintln!("[EFF] ptcl_data is empty");
                 }
                 self.state.eff_index = Some(eff);
+                // If ACMD effects are already loaded, re-spawn them with the new .eff data
+                if !self.state.effects.is_empty() {
+                    self.respawn_effects();
+                }
             }
             Err(e) => {
                 eprintln!("[EFF] load error: {e}");
@@ -821,22 +884,57 @@ impl HitboxEditorApp {
             self.state.ptcl.is_some());
         if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index, &self.state.ptcl) {
             for ec in &self.state.effects {
-                if ec.follows_bone {
-                    let name_lower = ec.effect_name.to_lowercase();
-                    if name_lower.contains("sword") || name_lower.contains("trail")
-                        || name_lower.contains("after") || name_lower.contains("tex_")
-                    {
-                        self.state.trail_system.start_trail(&ec.effect_name, &ec.bone_name, &ec.bone_name);
-                    } else {
-                        self.state.particle_system.spawn_effect(
-                            &ec.effect_name, &ec.bone_name,
-                            ec.active_start as f32, ec.active_end as f32,
-                            eff_index, ptcl,
-                        );
-                    }
+                let name_lower = ec.effect_name.to_lowercase();
+
+                // Determine if this effect should be a trail ribbon.
+                // Trail effects are ones that follow a bone continuously and look like
+                // a swept surface — sword slashes, energy arcs, after-images, etc.
+                let is_trail = ec.follows_bone && (
+                    name_lower.contains("sword") ||
+                    name_lower.contains("trail") ||
+                    name_lower.contains("after") ||
+                    name_lower.contains("tex_") ||
+                    name_lower.contains("katana") ||
+                    name_lower.contains("blade") ||
+                    name_lower.contains("slash") ||
+                    name_lower.contains("arc") ||
+                    name_lower.contains("swing") ||
+                    name_lower.contains("energy") ||
+                    name_lower.contains("aura") ||
+                    name_lower.contains("ribbon")
+                );
+
+                if is_trail {
+                    // Look up the emitter color from ptcl
+                    let (color, blend) = eff_index.handles.get(&ec.effect_name)
+                        .or_else(|| eff_index.handles.get(&name_lower))
+                        .and_then(|&idx| if idx >= 0 { ptcl.emitter_sets.get(idx as usize) } else { None })
+                        .and_then(|set| set.emitters.first())
+                        .map(|emitter| {
+                            let c = crate::effects::sample_color_pub(&emitter.color0, 0.0);
+                            ([c[0], c[1], c[2], c[3]], emitter.blend_type)
+                        })
+                        .unwrap_or(([1.0, 1.0, 1.0, 1.0], crate::effects::BlendType::Add));
+
+                    // Find tip bone: prefer a "top" or "end" variant of the attach bone,
+                    // or a weapon tip bone if available.
+                    let bone_lower = ec.bone_name.to_lowercase();
+                    let tip_bone = self.bone_names.iter()
+                        .find(|b| {
+                            let bl = b.to_lowercase();
+                            (bl.contains("top") || bl.contains("tip") || bl.contains("end"))
+                                && (bl.contains(&bone_lower) || bone_lower.contains(&bl))
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| ec.bone_name.clone());
+
+                    self.state.trail_system.start_trail(
+                        &ec.effect_name, &tip_bone, &ec.bone_name, color, blend,
+                    );
                 } else {
                     self.state.particle_system.spawn_effect(
                         &ec.effect_name, &ec.bone_name,
+                        glam::Vec3::from(ec.offset),
                         ec.active_start as f32, ec.active_end as f32,
                         eff_index, ptcl,
                     );
@@ -1622,15 +1720,39 @@ impl eframe::App for HitboxEditorApp {
             }
         }
 
+        // Upload particle textures to GPU when a new ptcl file has been loaded
+        if self.state.pending_texture_upload {
+            if let Some(ptcl) = &self.state.ptcl {
+                if let Some(wgpu_state) = frame.wgpu_render_state() {
+                    let mut renderer = wgpu_state.renderer.write();
+                    if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
+                        if let Some(pr) = rs.particle_renderer.as_mut() {
+                            pr.upload_textures(&wgpu_state.device, &wgpu_state.queue, ptcl);
+                            pr.upload_meshes(&wgpu_state.device, ptcl);
+                            eprintln!("[TEX] texture upload complete");
+                        }
+                    }
+                }
+                self.state.pending_texture_upload = false;
+            }
+        }
+
         // Advance playback
-        if self.state.playing && self.state.total_frames > 0 {
+        if self.state.playing {
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(self.last_frame_time).as_secs_f32();
             if elapsed >= 1.0 / 24.0 {
-                self.state.current_frame = (self.state.current_frame + 1) % self.state.total_frames;
+                if self.state.total_frames > 0 {
+                    self.state.current_frame = (self.state.current_frame + 1) % self.state.total_frames;
+                } else {
+                    // No animation loaded — still advance a virtual frame counter so
+                    // particle simulation ticks forward (effects have active_start > 0).
+                    // Cap at 9999 to avoid triggering the backwards-scrub reset.
+                    self.state.current_frame = (self.state.current_frame + 1).min(9999);
+                }
                 self.last_frame_time = now;
             }
-            // Schedule next repaint at exactly the next frame boundary
+            // Always schedule next repaint while playing (particles need to animate)
             let next = std::time::Duration::from_secs_f32((1.0 / 24.0 - elapsed).max(0.0));
             ctx.request_repaint_after(next);
         }
@@ -1655,10 +1777,51 @@ impl eframe::App for HitboxEditorApp {
 
             // Only advance simulation when the frame actually changes
             if current_frame != self.last_simulated_frame {
-                if current_frame < self.last_simulated_frame {
-                    // Scrubbing backwards — reset and re-simulate from frame 0
+                if self.last_simulated_frame != u32::MAX && current_frame < self.last_simulated_frame {
+                    // Scrubbing backwards (or looping) — reset, re-spawn, re-simulate from frame 0
                     self.state.particle_system.reset();
                     self.state.trail_system.reset();
+                    // Re-spawn all effects so emitters are present for re-simulation
+                    if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
+                        for ec in &self.state.effects.clone() {
+                            let name_lower = ec.effect_name.to_lowercase();
+                            let is_trail = ec.follows_bone && (
+                                name_lower.contains("sword") || name_lower.contains("trail") ||
+                                name_lower.contains("after") || name_lower.contains("tex_") ||
+                                name_lower.contains("katana") || name_lower.contains("blade") ||
+                                name_lower.contains("slash") || name_lower.contains("arc") ||
+                                name_lower.contains("swing") || name_lower.contains("energy") ||
+                                name_lower.contains("aura") || name_lower.contains("ribbon")
+                            );
+                            if is_trail {
+                                let (color, blend) = eff_index.handles.get(&ec.effect_name)
+                                    .or_else(|| eff_index.handles.get(&name_lower))
+                                    .and_then(|&idx| if idx >= 0 { ptcl.emitter_sets.get(idx as usize) } else { None })
+                                    .and_then(|set| set.emitters.first())
+                                    .map(|emitter| {
+                                        let c = crate::effects::sample_color_pub(&emitter.color0, 0.0);
+                                        (c, emitter.blend_type)
+                                    })
+                                    .unwrap_or(([1.0, 1.0, 1.0, 1.0], crate::effects::BlendType::Add));
+                                let tip_bone = self.bone_names.iter()
+                                    .find(|b| {
+                                        let bl = b.to_lowercase();
+                                        (bl.contains("top") || bl.contains("tip") || bl.contains("end"))
+                                            && (bl.contains(&name_lower) || name_lower.contains(&bl))
+                                    })
+                                    .cloned()
+                                    .unwrap_or_else(|| ec.bone_name.clone());
+                                self.state.trail_system.start_trail(&ec.effect_name, &tip_bone, &ec.bone_name, color, blend);
+                            } else {
+                                self.state.particle_system.spawn_effect(
+                                    &ec.effect_name, &ec.bone_name,
+                                    glam::Vec3::from(ec.offset),
+                                    ec.active_start as f32, ec.active_end as f32,
+                                    eff_index, ptcl,
+                                );
+                            }
+                        }
+                    }
                     if let Some(ptcl) = &self.state.ptcl.clone() {
                         for f in 0..=current_frame {
                             self.state.particle_system.step(f as f32, &bone_matrices, ptcl);
@@ -1813,6 +1976,9 @@ impl eframe::App for HitboxEditorApp {
                         skel_path: self.current_skel_path.clone(),
                         particles: self.state.particle_system.particles.clone(),
                         trails: self.state.trail_system.trails.clone(),
+                        emitter_sets: self.state.ptcl.as_ref()
+                            .map(|p| p.emitter_sets.clone())
+                            .unwrap_or_default(),
                     },
                 );
                 ui.painter().add(callback);
@@ -1933,51 +2099,7 @@ impl eframe::App for HitboxEditorApp {
                             }
                         }
 
-                        // Draw particles as 2D projected circles
-                        for particle in &self.state.particle_system.particles {
-                            let Some(screen_pos) = rs.world_to_screen(particle.position, rect) else { continue };
-                            let screen_radius = rs.world_radius_to_screen(particle.position, particle.size, rect)
-                                .unwrap_or(particle.size * 40.0)
-                                .max(3.0);
-                            // Convert Vec4 color to egui Color32, modulate alpha by blend type
-                            let alpha = match particle.blend_type {
-                                crate::effects::BlendType::Add => (particle.color.w * 180.0) as u8,
-                                _ => (particle.color.w * 220.0) as u8,
-                            };
-                            let color = egui::Color32::from_rgba_unmultiplied(
-                                (particle.color.x * 255.0) as u8,
-                                (particle.color.y * 255.0) as u8,
-                                (particle.color.z * 255.0) as u8,
-                                alpha,
-                            );
-                            ui.painter().circle_filled(screen_pos, screen_radius, color);
-                        }
-
-                        // Draw sword trails as 2D projected line segments
-                        for trail in &self.state.trail_system.trails {
-                            if trail.samples.len() < 2 { continue; }
-                            let max_age = trail.max_samples as f32;
-                            for pair in trail.samples.windows(2) {
-                                let s0 = &pair[0];
-                                let s1 = &pair[1];
-                                let Some(p0_tip) = rs.world_to_screen(s0.tip, rect) else { continue };
-                                let Some(p0_base) = rs.world_to_screen(s0.base, rect) else { continue };
-                                let Some(p1_tip) = rs.world_to_screen(s1.tip, rect) else { continue };
-                                let Some(p1_base) = rs.world_to_screen(s1.base, rect) else { continue };
-                                let alpha0 = ((1.0 - s0.age / max_age).clamp(0.0, 1.0) * 200.0) as u8;
-                                let alpha1 = ((1.0 - s1.age / max_age).clamp(0.0, 1.0) * 200.0) as u8;
-                                let c0 = egui::Color32::from_rgba_unmultiplied(255, 200, 80, alpha0);
-                                let c1 = egui::Color32::from_rgba_unmultiplied(255, 200, 80, alpha1);
-                                ui.painter().line_segment([p0_tip, p1_tip], egui::Stroke::new(2.0, c0));
-                                ui.painter().line_segment([p0_base, p1_base], egui::Stroke::new(2.0, c1));
-                                // Fill the quad between tip and base edges
-                                ui.painter().add(egui::Shape::convex_polygon(
-                                    vec![p0_tip, p1_tip, p1_base, p0_base],
-                                    egui::Color32::from_rgba_unmultiplied(255, 200, 80, alpha0 / 3),
-                                    egui::Stroke::NONE,
-                                ));
-                            }
-                        }
+                        // Particles and trails are rendered by the GPU via ViewportCallback/ParticleRenderer.
                     }
                 }
             } else {

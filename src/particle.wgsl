@@ -80,5 +80,6 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(tex, tex_sampler, in.uv);
+    // Multiply texture color by particle color tint (both RGB and alpha)
     return tex_color * in.color;
 }

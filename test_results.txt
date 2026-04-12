@@ -1,0 +1,39 @@
+
+running 34 tests
+test effects::tests::test_bntx_magic_absent_returns_empty ... ok
+test effects::tests::test_bntx_zero_dimension_brti_skipped ... ok
+test effects::tests::test_bntx_zero_dimension_skipped ... ok
+test effects::tests::test_bug_condition_zeros_returns_some_with_defaults ... ok
+test effects::tests::test_eftf_parse_eftf_unchanged ... ok
+test effects::tests::test_eftf_dispatch ... ok
+test effects::tests::test_gtnt_empty_name_skipped ... ok
+test effects::tests::test_gtnt_null_offset_terminates ... ok
+test effects::tests::test_p10_name_aware_color_defaults ... ok
+test effects::tests::test_p11_eftf_parse_produces_valid_emitter_sets ... ok
+test effects::tests::prop_sampler_offset ... ok
+test effects::tests::test_p2_parse_vfxb_emitter_valid_defaults ... ok
+test effects::tests::test_p3_parse_vfxb_emitter_deterministic ... ok
+test effects::tests::test_p1_parse_vfxb_emitter_never_panics ... ok
+test effects::tests::test_p5_bntx_round_trip ... ok
+test effects::tests::test_p6_prima_triangle_invariant ... ok
+test effects::tests::test_parse_vfxb_short_input_returns_err ... ok
+test effects::tests::test_particle_system_step_unchanged ... ok
+test effects::tests::test_preservation_eftf_magic_takes_eftf_path ... ok
+test effects::tests::test_prima_absent_returns_empty ... ok
+test effects::tests::test_preservation_synthetic_produces_valid_emitters ... ok
+test effects::tests::test_prma_magic_dispatched ... ok
+test effects::tests::test_sampler_zero_textureid_skipped ... ok
+test effects::tests::test_section_oob_binary_skipped ... ok
+test effects::tests::test_trail_system_unchanged ... ok
+test effects::tests::test_vfxb_bad_magic_returns_err ... ok
+test effects::tests::test_vfxb_no_bntx_continues_parse ... ok
+test effects::tests::test_vfxb_short_data_returns_err ... ok
+test effects::tests::test_p4_parse_vfxb_emitter_correct_offsets ... ok
+test effects::tests::prop_shader_verbatim ... ok
+test effects::tests::prop_sampler_lookup_chain ... ok
+test effects::tests::prop_gtnt_deterministic ... ok
+test effects::tests::prop_gtnt_round_trip ... ok
+test effects::tests::prop_parse_vfxb_no_panic ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

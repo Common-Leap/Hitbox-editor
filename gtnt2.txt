@@ -1,0 +1,4 @@
+[GTNT] no GTNT magic found in GRTF payload bin_start=0xcb000 len=10317368
+[GTNT] built 410 hash40+crc32 entries from BNTX names
+[GTNT] no GTNT magic found in GRTF payload bin_start=0x3cc000 len=18889176
+[GTNT] built 776 hash40+crc32 entries from BNTX names

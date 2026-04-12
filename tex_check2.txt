@@ -1,0 +1,18 @@
+Trying multiple hash algorithms against unknown TextureIDs:
+
+  Target: 0xad584604
+
+  Target: 0x10edf80b
+
+  Target: 0xc6a6335c
+
+
+Checking if IDs are lower 32 bits of hash40 (crc32 part):
+  0xad584604: no match found via crc32 above
+  0x10edf80b: no match found via crc32 above
+  0xc6a6335c: no match found via crc32 above
+
+Unknown IDs in decimal:
+  0xad584604 = 2908243460
+  0x10edf80b = 284030987
+  0xc6a6335c = 3332780892

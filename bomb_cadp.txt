@@ -1,0 +1,20 @@
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=21 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=3 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR] 'smokeBomb' v=22 one_time=true dur=1 life=18 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=6 a0keys=2 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[CADP] emitter='smokeBomb' cadp_idx=None last_tex_idx=Some(73) bntx_count=103
+[EMTR] 'smokeLoop' v=22 one_time=true dur=1 life=20 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=4 a0keys=6 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(4.000,15.000)
+[EMTR] 'AttackBombFlash1B' v=22 one_time=true dur=1 life=10 scale=1.300 rate=2.00 speed=0.390 blend=Screen c0keys=4 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.300)
+[CADP] emitter='AttackBombFlash1B' cadp_idx=None last_tex_idx=Some(73) bntx_count=103
+[EMTR] 'fireBase' v=22 one_time=true dur=1 life=11 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=5 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.900)
+[EMTR] 'fire' v=22 one_time=true dur=2 life=14 scale=7.000 rate=3.00 speed=2.100 blend=Screen c0keys=2 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR] 'AttackBombRing' v=22 one_time=true dur=1 life=7 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=4 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[CADP] emitter='AttackBombRing' cadp_idx=None last_tex_idx=Some(30) bntx_count=103
+[EMTR] 'flareAdd2_Copy1' v=22 one_time=true dur=1 life=23 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=7 a0keys=5 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.650)
+[EMTR] 'flare1_alpha' v=22 one_time=false dur=1 life=3 scale=1.100 rate=1.00 speed=0.330 blend=Screen c0keys=0 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.100)
+[EMTR] 'flare1_base' v=22 one_time=false dur=1 life=6 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,25.000)
+[EMTR] 'flare2_add' v=22 one_time=false dur=1 life=7 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,20.000)
+[EMTR] 'flare1' v=22 one_time=false dur=1 life=6 scale=1.500 rate=1.00 speed=0.450 blend=Screen c0keys=0 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR] 'flare2' v=22 one_time=false dur=1 life=10 scale=2.000 rate=1.00 speed=0.600 blend=Screen c0keys=2 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR] 'flare1' v=22 one_time=false dur=1 life=10 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=0 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.150)
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=5 scale=1.000 rate=2.00 speed=0.300 blend=Screen c0keys=0 a0keys=2 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR] 'fire2_bk' v=22 one_time=false dur=6 life=12 scale=14.000 rate=0.90 speed=4.200 blend=Screen c0keys=3 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR] 'fire2_bk' v=22 one_time=false dur=6 life=12 scale=14.000 rate=0.90 speed=4.200 blend=Screen c0keys=3 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)

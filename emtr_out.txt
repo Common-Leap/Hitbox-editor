@@ -1,0 +1,6 @@
+[EMTR] TextureID 0x00000000ad584604 not found in GTNT map
+[EMTR] TextureID 0xffffffffffffffff not found in GTNT map
+[EMTR] TextureID 0xffffffffffffffff not found in GTNT map
+[EMTR] 'burner1_L' v=22 one_time=true dur=16 life=12 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=3 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   color0[0]: r=0.872 g=1.000 b=0.000 a=1.000
+[EMTR] TextureID 0x0000000010edf80b not found in GTNT map

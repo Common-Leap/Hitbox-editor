@@ -1,0 +1,10 @@
+ef_cmn_parts00
+ef_cmn_grade06
+ef_samus_impactline00
+ef_samus_tornado01
+ef_item_impact11
+ef_cmn_flare03
+ef_cmn_spark04
+ef_item_flash03
+ef_cmn_ring06
+ef_cmn_fire00

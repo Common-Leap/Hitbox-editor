@@ -1,0 +1,20 @@
+[EMTR] 'burner1_L' v=22 one_time=true dur=16 life=12 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=3 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[CADP] emitter='burner1_L' cadp_idx=None last_tex_idx=None bntx_count=103
+[EMTR] 'burner2_L' v=22 one_time=true dur=15 life=8 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[CADP] emitter='burner2_L' cadp_idx=None last_tex_idx=Some(0) bntx_count=103
+[EMTR] 'flash1_L' v=22 one_time=true dur=1 life=16 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=0 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[CADP] emitter='flash1_L' cadp_idx=Some(19) last_tex_idx=Some(0) bntx_count=103
+[EMTR] 'burner1_R' v=22 one_time=true dur=16 life=12 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=3 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[CADP] emitter='burner1_R' cadp_idx=None last_tex_idx=Some(19) bntx_count=103
+[EMTR] 'burner2_R' v=22 one_time=true dur=15 life=8 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[CADP] emitter='burner2_R' cadp_idx=None last_tex_idx=Some(19) bntx_count=103
+[EMTR] 'flash1_R' v=22 one_time=true dur=1 life=16 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=0 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[CADP] emitter='flash1_R' cadp_idx=Some(19) last_tex_idx=Some(19) bntx_count=103
+[EMTR] 'burner1_L' v=22 one_time=true dur=20 life=12 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=3 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[CADP] emitter='burner1_L' cadp_idx=None last_tex_idx=None bntx_count=103
+[EMTR] 'burner2_L' v=22 one_time=true dur=19 life=8 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[CADP] emitter='burner2_L' cadp_idx=None last_tex_idx=Some(0) bntx_count=103
+[EMTR] 'flash1_L' v=22 one_time=true dur=1 life=26 scale=1.000 rate=1.00 speed=0.300 blend=Screen c0keys=0 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[CADP] emitter='flash1_L' cadp_idx=Some(19) last_tex_idx=Some(0) bntx_count=103
+[EMTR] 'burner1_R' v=22 one_time=true dur=20 life=12 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=3 a0keys=4 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[CADP] emitter='burner1_R' cadp_idx=None last_tex_idx=Some(19) bntx_count=103

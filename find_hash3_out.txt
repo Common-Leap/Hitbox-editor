@@ -1,0 +1,7 @@
+Total texture names: 10
+Texture at index 19: 'N/A'
+
+Searching all 103 names × variants × hash functions:
+  No matches found.
+
+Hashes of tex[19] with all functions:

@@ -1,0 +1,53 @@
+BNTX: tex_count=104, data_blk_abs=0x15020
+Found 104 BRTI structs
+_STR names: 104
+
+BRTI name hash fields (checking offsets 0x00-0x60 for target values):
+  BRTI[0] 'ef_cmn_impactflash00': 42525449e0020000e00200000000000001020000000008000100000006200000
+  BRTI[1] 'ef_cmn_wind00': 42525449e0020000e00200000000000001020000000008000100000006200000
+  BRTI[2] 'ef_samus_wind00': 42525449d8020000d802000000000000010200000000070001000000011e0000
+  BRTI[3] 'ef_captain_fireimpact00': 42525449e0020000e002000000000000010200000000080001000000011d0000
+  BRTI[4] 'ef_cmn_impact00': 42525449f0020000f0020000000000000102000000000a0001000000011e0000
+  BRTI[5] 'ef_cmn_bomb_indirect00': 42525449e8020000e802000000000000010200000000090001000000011d0000
+  BRTI[6] 'ef_cmn_indirect00': 42525449f0020000f0020000000000000102000000000a0001000000011d0000
+  BRTI[7] 'ef_cloud_soil00': 42525449f0020000f0020000000000000102000000000a0001000000011e0000
+  BRTI[8] 'ef_samus_burner00': 42525449f0020000f0020000000000000102000000000a0001000000011e0000
+  BRTI[9] 'ef_samus_color00': 42525449f0020000f0020000000000000102000000000a0001000000011e0000
+
+Trying hash functions on all 104 names:
+  No matches. Printing hashes for first 5 names:
+  'ef_cmn_impactflash00':
+    crc32('ef_cmn_impactflash00') = 0x16479a49
+    nw4f('ef_cmn_impactflash00') = 0xeae41582
+    fnv1a('ef_cmn_impactflash00') = 0xaff19ef0
+    crc32('cmn_impactflash00') = 0x40f2c944
+    nw4f('cmn_impactflash00') = 0xf90415b1
+    fnv1a('cmn_impactflash00') = 0x0b7b0302
+  'ef_cmn_wind00':
+    crc32('ef_cmn_wind00') = 0x583cf044
+    nw4f('ef_cmn_wind00') = 0x4ad69851
+    fnv1a('ef_cmn_wind00') = 0x809cd6c6
+    crc32('cmn_wind00') = 0x8b3757f7
+    nw4f('cmn_wind00') = 0x28aa9857
+    fnv1a('cmn_wind00') = 0xcb8cf6e0
+  'ef_samus_wind00':
+    crc32('ef_samus_wind00') = 0xb8d30f09
+    nw4f('ef_samus_wind00') = 0xe0af5936
+    fnv1a('ef_samus_wind00') = 0x3f37b6a5
+    crc32('samus_wind00') = 0x3f891732
+    nw4f('samus_wind00') = 0x10af40bf
+    fnv1a('samus_wind00') = 0x06320baf
+  'ef_captain_fireimpact00':
+    crc32('ef_captain_fireimpact00') = 0x04a14680
+    nw4f('ef_captain_fireimpact00') = 0x6ee4eb3a
+    fnv1a('ef_captain_fireimpact00') = 0xf54e912c
+    crc32('captain_fireimpact00') = 0x26e49c11
+    nw4f('captain_fireimpact00') = 0x6efd62ca
+    fnv1a('captain_fireimpact00') = 0x94a12792
+  'ef_cmn_impact00':
+    crc32('ef_cmn_impact00') = 0x53875a40
+    nw4f('ef_cmn_impact00') = 0x6619d3ea
+    fnv1a('ef_cmn_impact00') = 0x30d4d2fa
+    crc32('cmn_impact00') = 0xd4dd427b
+    nw4f('cmn_impact00') = 0x9619ca63
+    fnv1a('cmn_impact00') = 0x8d539128

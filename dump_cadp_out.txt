@@ -1,0 +1,30 @@
+ESTA at 0x40, first ESET at 0x60
+
+EMTR[0] 'burner1_L' base=0xe8 attr_raw=0xffffffff
+  Header: 454d5452d80b0000ffffffffd80b0000ffffffff180100000000000000000000
+  No sub-sections (attr_raw=0xffffffff)
+
+EMTR[1] 'burner2_L' base=0xcc0 attr_raw=0xffffffff
+  Header: 454d5452000b0000ffffffff000b0000ffffffff400000000000000000000000
+  No sub-sections (attr_raw=0xffffffff)
+
+EMTR[2] 'flash1_L' base=0x17c0 attr_raw=0xb00
+  Header: 454d5452380b0000ffffffff380b0000000b0000400000000000000000000000
+  Sub-sections starting at 0x22c0:
+    [0] 'CADP' size=0x38 next=0xffffffff bin=0x22e0
+      CADP bin[0:16]: 13000000000000000000000000000000
+      tex_idx=19
+
+
+=== P_SamusAttackBomb ===
+Found ESET 'P_SamusAttackBomb' at 0x8cf8
+
+  EMTR[0] 'flare1' attr_raw=0xffffffff
+
+  EMTR[1] 'smokeBomb' attr_raw=0xffffffff
+
+  EMTR[2] 'smokeLoop' attr_raw=0xffffffff
+
+  EMTR[3] 'AttackBombFlash1B' attr_raw=0xffffffff
+
+  EMTR[4] 'fireBase' attr_raw=0xffffffff
