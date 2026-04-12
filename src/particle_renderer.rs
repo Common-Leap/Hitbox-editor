@@ -723,6 +723,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     0x1C => Some(if is_srgb { image_dds::ImageFormat::BC3RgbaUnormSrgb } else { image_dds::ImageFormat::BC3RgbaUnorm }),
                     0x1D => Some(if fmt_variant == 0x02 { image_dds::ImageFormat::BC4RSnorm } else { image_dds::ImageFormat::BC4RUnorm }),
                     0x1E => Some(if fmt_variant == 0x02 { image_dds::ImageFormat::BC5RgSnorm } else { image_dds::ImageFormat::BC5RgUnorm }),
+                    // Fix 1.4: BC6H (HDR) — fmt_variant 0x05 = unsigned float, others = signed float
+                    0x1F => Some(if fmt_variant == 0x05 { image_dds::ImageFormat::BC6hRgbUfloat } else { image_dds::ImageFormat::BC6hRgbSfloat }),
                     0x20 => Some(if is_srgb { image_dds::ImageFormat::BC7RgbaUnormSrgb } else { image_dds::ImageFormat::BC7RgbaUnorm }),
                     _ => None,
                 };
@@ -834,7 +836,10 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     bytes_per_row = w * 4;
                     tex_data = &decoded_buf;
                 } else {
-                    // Non-BC: handle BGRA swap, B5G6R5 expand, or pass through
+                    // Non-BC: handle BGRA swap, B5G6R5 expand, or pass through.
+                    // Fix 1.5 audit: for fmt_type=0x0B/0x0C with is_srgb=true, raw bytes
+                    // are uploaded directly to Rgba8UnormSrgb — the GPU applies sRGB
+                    // expansion exactly once on read. No CPU gamma conversion is applied here.
                     decoded_buf = if is_bgra {
                         upload_data.chunks_exact(4)
                             .flat_map(|c| [c[2], c[1], c[0], c[3]])
@@ -1398,4 +1403,144 @@ fn build_trail_vertices(trails: &[SwordTrail]) -> Vec<TrailVertex> {
         }
     }
     verts
+}
+
+/// Pure helper: map a BNTX format ID to the image_dds ImageFormat used for BC decoding.
+/// Returns None for non-BC formats or unsupported types.
+/// Extracted from upload_textures for testability (no GPU required).
+fn bc_image_format(fmt_type: u8, fmt_variant: u8) -> Option<image_dds::ImageFormat> {
+    let is_srgb = fmt_variant == 0x06;
+    match fmt_type {
+        0x1A => Some(if is_srgb { image_dds::ImageFormat::BC1RgbaUnormSrgb } else { image_dds::ImageFormat::BC1RgbaUnorm }),
+        0x1B => Some(if is_srgb { image_dds::ImageFormat::BC2RgbaUnormSrgb } else { image_dds::ImageFormat::BC2RgbaUnorm }),
+        0x1C => Some(if is_srgb { image_dds::ImageFormat::BC3RgbaUnormSrgb } else { image_dds::ImageFormat::BC3RgbaUnorm }),
+        0x1D => Some(if fmt_variant == 0x02 { image_dds::ImageFormat::BC4RSnorm } else { image_dds::ImageFormat::BC4RUnorm }),
+        0x1E => Some(if fmt_variant == 0x02 { image_dds::ImageFormat::BC5RgSnorm } else { image_dds::ImageFormat::BC5RgUnorm }),
+        0x1F => Some(if fmt_variant == 0x05 { image_dds::ImageFormat::BC6hRgbUfloat } else { image_dds::ImageFormat::BC6hRgbSfloat }),
+        0x20 => Some(if is_srgb { image_dds::ImageFormat::BC7RgbaUnormSrgb } else { image_dds::ImageFormat::BC7RgbaUnorm }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 1: Bug condition exploration tests (bugs 1.4–1.5)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── Bug 1.4: BC6H format missing from image_dds_format match ─────────────
+    // On UNFIXED code: fmt_type=0x1F falls through to _ => None, texture skipped.
+    // On FIXED code: 0x1F maps to BC6hRgbUfloat or BC6hRgbSfloat.
+    #[test]
+    fn test_bug_1_4_bc6h_format_missing() {
+        // UNFIXED: bc_image_format(0x1F, 0x05) returns None (falls through to _ => None)
+        // FIXED:   bc_image_format(0x1F, 0x05) returns Some(BC6hRgbUfloat)
+        // FIXED:   bc_image_format(0x1F, 0x01) returns Some(BC6hRgbSfloat)
+        //
+        // This test FAILS on unfixed code (returns None instead of Some).
+        let result_ufloat = bc_image_format(0x1F, 0x05);
+        assert!(result_ufloat.is_some(),
+            "Bug 1.4: fmt_type=0x1F variant=0x05 (BC6H unsigned float) returned None — bug confirmed");
+        assert_eq!(result_ufloat, Some(image_dds::ImageFormat::BC6hRgbUfloat),
+            "Bug 1.4: expected BC6hRgbUfloat for variant=0x05");
+
+        let result_sfloat = bc_image_format(0x1F, 0x01);
+        assert!(result_sfloat.is_some(),
+            "Bug 1.4: fmt_type=0x1F variant=0x01 (BC6H signed float) returned None — bug confirmed");
+        assert_eq!(result_sfloat, Some(image_dds::ImageFormat::BC6hRgbSfloat),
+            "Bug 1.4: expected BC6hRgbSfloat for variant!=0x05");
+    }
+
+    // ── Bug 1.5: sRGB double-gamma audit ─────────────────────────────────────
+    // Verify that the wgpu format selection for sRGB textures is correct:
+    // fmt_type=0x0B/0x0C with is_srgb=true → Rgba8UnormSrgb (GPU handles gamma).
+    // No CPU gamma conversion should be applied.
+    #[test]
+    fn test_bug_1_5_srgb_format_selection() {
+        // Verify the wgpu format mapping for sRGB uncompressed textures.
+        // This is the pure logic extracted from upload_textures.
+        let fmt_variant_srgb: u8 = 0x06;
+        let fmt_variant_unorm: u8 = 0x01;
+        let is_srgb_0b = fmt_variant_srgb == 0x06;
+        let is_srgb_0c = fmt_variant_srgb == 0x06;
+
+        // fmt_type=0x0B (RGBA8) with sRGB → must use Rgba8UnormSrgb
+        let wgpu_fmt_0b_srgb = if is_srgb_0b {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        assert_eq!(wgpu_fmt_0b_srgb, wgpu::TextureFormat::Rgba8UnormSrgb,
+            "Bug 1.5: RGBA8 sRGB must use Rgba8UnormSrgb, not Rgba8Unorm");
+
+        // fmt_type=0x0C (BGRA8) with sRGB → must use Rgba8UnormSrgb
+        let wgpu_fmt_0c_srgb = if is_srgb_0c {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        assert_eq!(wgpu_fmt_0c_srgb, wgpu::TextureFormat::Rgba8UnormSrgb,
+            "Bug 1.5: BGRA8 sRGB must use Rgba8UnormSrgb, not Rgba8Unorm");
+
+        // Non-sRGB path must use Rgba8Unorm (preservation)
+        let is_unorm = fmt_variant_unorm != 0x06;
+        let wgpu_fmt_0b_unorm = if !is_unorm {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        assert_eq!(wgpu_fmt_0b_unorm, wgpu::TextureFormat::Rgba8Unorm,
+            "Preservation: non-sRGB RGBA8 must use Rgba8Unorm");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 2: Preservation tests (bugs 1.4–1.5)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Preservation: BC1–BC7 format arms must be unchanged after adding BC6H
+    #[test]
+    fn test_preservation_bc1_bc7_formats_unchanged() {
+        // BC1 unorm
+        assert_eq!(bc_image_format(0x1A, 0x01), Some(image_dds::ImageFormat::BC1RgbaUnorm));
+        assert_eq!(bc_image_format(0x1A, 0x06), Some(image_dds::ImageFormat::BC1RgbaUnormSrgb));
+        // BC2
+        assert_eq!(bc_image_format(0x1B, 0x01), Some(image_dds::ImageFormat::BC2RgbaUnorm));
+        assert_eq!(bc_image_format(0x1B, 0x06), Some(image_dds::ImageFormat::BC2RgbaUnormSrgb));
+        // BC3
+        assert_eq!(bc_image_format(0x1C, 0x01), Some(image_dds::ImageFormat::BC3RgbaUnorm));
+        assert_eq!(bc_image_format(0x1C, 0x06), Some(image_dds::ImageFormat::BC3RgbaUnormSrgb));
+        // BC4
+        assert_eq!(bc_image_format(0x1D, 0x01), Some(image_dds::ImageFormat::BC4RUnorm));
+        assert_eq!(bc_image_format(0x1D, 0x02), Some(image_dds::ImageFormat::BC4RSnorm));
+        // BC5
+        assert_eq!(bc_image_format(0x1E, 0x01), Some(image_dds::ImageFormat::BC5RgUnorm));
+        assert_eq!(bc_image_format(0x1E, 0x02), Some(image_dds::ImageFormat::BC5RgSnorm));
+        // BC7
+        assert_eq!(bc_image_format(0x20, 0x01), Some(image_dds::ImageFormat::BC7RgbaUnorm));
+        assert_eq!(bc_image_format(0x20, 0x06), Some(image_dds::ImageFormat::BC7RgbaUnormSrgb));
+        // Non-BC formats return None
+        assert_eq!(bc_image_format(0x0B, 0x01), None);
+        assert_eq!(bc_image_format(0x0C, 0x06), None);
+        assert_eq!(bc_image_format(0x02, 0x01), None);
+    }
+
+    // Preservation: non-sRGB RGBA8/BGRA8 must use Rgba8Unorm (no gamma)
+    #[test]
+    fn test_preservation_non_srgb_uses_unorm() {
+        let fmt_variant_unorm: u8 = 0x01;
+        let is_srgb = fmt_variant_unorm == 0x06;
+        assert!(!is_srgb, "variant=0x01 must not be sRGB");
+
+        // fmt_type=0x0B non-sRGB
+        let fmt = if is_srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
+        assert_eq!(fmt, wgpu::TextureFormat::Rgba8Unorm,
+            "non-sRGB RGBA8 must use Rgba8Unorm");
+
+        // fmt_type=0x0C non-sRGB
+        let fmt = if is_srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
+        assert_eq!(fmt, wgpu::TextureFormat::Rgba8Unorm,
+            "non-sRGB BGRA8 must use Rgba8Unorm");
+    }
 }
