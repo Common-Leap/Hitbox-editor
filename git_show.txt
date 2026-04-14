@@ -1,0 +1,10 @@
+commit c70916a3be23b10e6bbf94715cd7fe6528190d95
+Author: Common Leap <jace198a@gmail.com>
+Date:   Sat Apr 11 20:13:18 2026 -0700
+
+    Texture swizzling update
+
+ src/effects.rs           | 425 +++++++++++++++++++++++++++++++++++++++++++----
+ src/particle_renderer.rs | 147 +++++++++++++++-
+ test_run_output.txt      | 286 +++++++++++++++++++++++++++++++
+ 3 files changed, 827 insertions(+), 31 deletions(-)

@@ -1,0 +1,15 @@
+test effects::tests::test_vfxb_bad_magic_returns_err ... ok
+test particle_renderer::tests::test_preservation_bc1_bc7_formats_unchanged ... ok
+test particle_renderer::tests::test_preservation_etmm_billboard_only_ptcl_tex_cache_from_emitters ... ok
+test particle_renderer::tests::test_preservation_non_srgb_uses_unorm ... ok
+test particle_renderer::tests::test_preservation_etmm_fallback_to_white_when_tex_idx_max ... ok
+test particle_renderer::tests::test_bug_etmm_b_upload_gap_submesh_index_not_covered ... ok
+test effects::tests::prop_sampler_lookup_chain ... ok
+test effects::tests::prop_gtnt_round_trip ... ok
+test effects::tests::prop_gtnt_deterministic ... ok
+test effects::tests::prop_parse_vfxb_no_panic ... ok
+test effects::tests::test_real_eff_texture_resolution ... ok
+test effects::tests::test_eff_handle_values ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+

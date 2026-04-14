@@ -1,0 +1,29 @@
+Texture: ef_cmn_grade00 [11]
+  Size: 256x128
+  Format: 0x1e01 (BC5 unorm)
+  tile_mode: 0 (0=block-linear, 1=linear)
+  block_height_log2: 2
+  comp_sel: 0x03020202
+  data_size: 46592
+  pixel_start: 0x25f800
+  First 32 bytes (raw swizzled): ff00499224499224ff00499224499224ff00499224499224ff00499224499224
+tegra_swizzle not available, checking raw data
+
+Mip0 size: 32768 bytes
+Raw data length: 32768
+Non-zero R0 values in first 64 blocks: 64/64
+
+First 10 BC5 blocks (raw, may be swizzled):
+  Block 0: R0=255 R1=0 G0=255 G1=0
+  Block 1: R0=255 R1=0 G0=255 G1=0
+  Block 2: R0=255 R1=0 G0=255 G1=0
+  Block 3: R0=255 R1=0 G0=255 G1=0
+  Block 4: R0=255 R1=0 G0=255 G1=0
+  Block 5: R0=255 R1=0 G0=2 G1=1
+  Block 6: R0=255 R1=0 G0=255 G1=0
+  Block 7: R0=255 R1=0 G0=2 G1=1
+  Block 8: R0=255 R1=0 G0=3 G1=1
+  Block 9: R0=255 R1=0 G0=6 G1=4
+
+Non-zero bytes in first 1024 bytes: 832/1024
+First 64 bytes: ff00499224499224ff00499224499224ff00499224499224ff00499224499224ff00499224499224ff00499224499224ff00499224499224ff00499224499224

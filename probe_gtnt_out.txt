@@ -1,0 +1,51 @@
+VFXB version=22 block_offset=0x40
+Section at 0x40: b'ESTA'
+Section at 0xc9910: b'GRTF'
+  GRTF bin_start=0xcb000 bin_len=10317368
+  BNTX found at 0xcb000
+  GRTF child_cnt=1 child_off_rel=0x20
+  GRTF child[0] at 0xc9930: b'GTNT'
+  GTNT (GRTF child) bin_start=0xc9950 len=3824
+    GTNT entry: id=0x00000000ad584604 name='ef_samus_burner00'
+    GTNT entry: id=0x0000000010edf80b name='ef_samus_flash01'
+    GTNT entry: id=0x00000000c6a6335c name='ef_cmn_grade00'
+    GTNT entry: id=0x0000000081d59f24 name='ef_cmn_bomb_indirect00'
+    GTNT entry: id=0x00000000f23f06f8 name='ef_cmn_smoke11'
+    GTNT entry: id=0x00000000da3564c9 name='ef_cmn_smoke14'
+    GTNT entry: id=0x000000007cdcd964 name='ef_cmn_smoke15'
+    GTNT entry: id=0x000000006deca699 name='ef_cmn_impact00'
+    GTNT entry: id=0x000000000e16323b name='ef_cmn_fireimpact02'
+    GTNT entry: id=0x0000000003b50f63 name='ef_cmn_fire00'
+    GTNT entry: id=0x000000001ae8d00e name='ef_cmn_debris00'
+    GTNT entry: id=0x000000006e974b28 name='ef_samus_impact08'
+    GTNT entry: id=0x00000000e3fca3b9 name='ef_item_impact14'
+    GTNT entry: id=0x000000006deca695 name='ef_cmn_impact04'
+    GTNT entry: id=0x0000000029afd82e name='ef_cmn_spark04'
+    GTNT entry: id=0x00000000777c8ebe name='ef_cmn_flare03'
+    GTNT entry: id=0x00000000c055070e name='ef_cmn_parts01'
+    GTNT entry: id=0x00000000a5d28eae name='ef_samus_impactring04'
+    GTNT entry: id=0x00000000c9515bfd name='ef_cmn_ring00'
+    GTNT entry: id=0x00000000a5d28eaf name='ef_samus_impactring05'
+Section at 0xaa3530: b'PRMA'
+Section at 0xaaca80: b'G3PR'
+Section at 0xb8e350: b'GRSN'
+
+GTNT found: True
+GRTF found: True
+
+flare1 tex_id: 0x00000000c6a6335c
+smokeBomb tex_ids: 0x0000000081d59f24, 0x00000000f23f06f8
+
+BNTX has 104 textures
+
+All CRC32 values for first 10 textures:
+  [0] 'ef_cmn_impactflash00' crc32=0x16479a49
+  [1] 'ef_cmn_wind00' crc32=0x583cf044
+  [2] 'ef_samus_wind00' crc32=0xb8d30f09
+  [3] 'ef_captain_fireimpact00' crc32=0x04a14680
+  [4] 'ef_cmn_impact00' crc32=0x53875a40
+  [5] 'ef_cmn_bomb_indirect00' crc32=0x041d4cfb
+  [6] 'ef_cmn_indirect00' crc32=0x0a3317e7
+  [7] 'ef_cloud_soil00' crc32=0x8ac1994a
+  [8] 'ef_samus_burner00' crc32=0xdc77bf21
+  [9] 'ef_samus_color00' crc32=0x16a86285

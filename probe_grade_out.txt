@@ -1,0 +1,15 @@
+[ 11] ef_cmn_grade00: 256x128 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=46592 first_bytes=ff00499224499224ff00499224499224
+[  5] ef_cmn_bomb_indirect00: 256x256 fmt=0x1d01(type=0x1d,var=0x01) tile=0 swizzle=0x02020202 size=46080 first_bytes=ff00499224499224ff00499224499224
+[ 86] ef_cmn_smoke11: 128x512 fmt=0x1d01(type=0x1d,var=0x01) tile=0 swizzle=0x02020202 size=47104 first_bytes=ff00499224499224ff00499224499224
+[ 48] ef_cmn_fireimpact02: 256x128 fmt=0x1c06(type=0x1c,var=0x06) tile=0 swizzle=0x05040302 size=46592 first_bytes=ff00499224499224ffffffff00000000
+[ 17] ef_cmn_fire00: 256x128 fmt=0x2006(type=0x20,var=0x06) tile=0 swizzle=0x05040302 size=46592 first_bytes=400d4683d16000004844444444444444
+[ 30] ef_cmn_debris00: 512x128 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=91648 first_bytes=ff00499224499224ff00499224499224
+[ 36] ef_samus_impact08: 128x128 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=24064 first_bytes=0211366ccf8e6dc3000ac00010080008
+[ 37] ef_cmn_impact04: 128x64 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=8192 first_bytes=3628692b00005000ff00499224499224
+[ 39] ef_cmn_spark04: 128x128 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=24064 first_bytes=ff00499224499224ff00499224499224
+[ 40] ef_samus_impactring04: 133x133 fmt=0x1c06(type=0x1c,var=0x06) tile=0 swizzle=0x05040302 size=52736 first_bytes=ff00499224499224ffffffff00000000
+[ 31] ef_cmn_ring00: 128x320 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=89600 first_bytes=ff00499224499224030168dba2000000
+[ 45] ef_item_impact14: 256x128 fmt=0x1c06(type=0x1c,var=0x06) tile=0 swizzle=0x05040302 size=46592 first_bytes=ff00499224499224ffffffff00000000
+[  4] ef_cmn_impact00: 512x512 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=351744 first_bytes=ff00000000000000ff00499224499224
+[ 97] ef_cmn_flare03: 256x256 fmt=0x1e01(type=0x1e,var=0x01) tile=0 swizzle=0x03020202 size=89600 first_bytes=ff00499224499224030149d236680b00
+[ 78] ef_cmn_parts01: 128x128 fmt=0x1c06(type=0x1c,var=0x06) tile=0 swizzle=0x05040302 size=24064 first_bytes=5d5c0000044000040000000000000000

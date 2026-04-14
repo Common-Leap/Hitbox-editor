@@ -1,0 +1,127 @@
+BNTX has 104 textures
+
+GTNT names in BNTX:
+  FOUND: 'ef_cmn_grade00' at index 11
+  FOUND: 'ef_cmn_bomb_indirect00' at index 5
+  FOUND: 'ef_cmn_smoke11' at index 86
+  FOUND: 'ef_cmn_smoke14' at index 46
+  FOUND: 'ef_cmn_smoke15' at index 92
+  FOUND: 'ef_cmn_impact00' at index 4
+  FOUND: 'ef_cmn_fireimpact02' at index 48
+  FOUND: 'ef_cmn_fire00' at index 17
+  FOUND: 'ef_cmn_debris00' at index 30
+  FOUND: 'ef_samus_impact08' at index 36
+  FOUND: 'ef_item_impact14' at index 45
+  FOUND: 'ef_cmn_impact04' at index 37
+  FOUND: 'ef_cmn_spark04' at index 39
+  FOUND: 'ef_cmn_flare03' at index 97
+  FOUND: 'ef_cmn_parts01' at index 78
+  FOUND: 'ef_samus_impactring04' at index 40
+  FOUND: 'ef_cmn_ring00' at index 31
+  FOUND: 'ef_samus_impactring05' at index 91
+
+All BNTX texture names:
+  [  0] ef_cmn_impactflash00
+  [  1] ef_cmn_wind00
+  [  2] ef_samus_wind00
+  [  3] ef_captain_fireimpact00
+  [  4] ef_cmn_impact00
+  [  5] ef_cmn_bomb_indirect00
+  [  6] ef_cmn_indirect00
+  [  7] ef_cloud_soil00
+  [  8] ef_samus_burner00
+  [  9] ef_samus_color00
+  [ 10] ef_item_aura00
+  [ 11] ef_cmn_grade00
+  [ 12] ef_samus_grade00
+  [ 13] ef_cmn_white00
+  [ 14] ef_samus_babbule00
+  [ 15] ef_cmn_flare00
+  [ 16] ef_samus_square00
+  [ 17] ef_cmn_fire00
+  [ 18] ef_item_fire00
+  [ 19] ef_cmn_flashline00
+  [ 20] ef_samus_impactline00
+  [ 21] ef_cmn_line00
+  [ 22] ef_samus_line00
+  [ 23] ef_cmn_stone00
+  [ 24] ef_cmn_smoke00
+  [ 25] ef_samus_finalbeam00
+  [ 26] ef_samus_arc00
+  [ 27] ef_samus_spinsonic00
+  [ 28] ef_cmn_parts00
+  [ 29] ef_item_parts00
+  [ 30] ef_cmn_debris00
+  [ 31] ef_cmn_ring00
+  [ 32] ef_lucario_ring00
+  [ 33] ef_cmn_lightning00
+  [ 34] ef_samus_lightning00
+  [ 35] ef_cmn_impact08
+  [ 36] ef_samus_impact08
+  [ 37] ef_cmn_impact04
+  [ 38] ef_cmn_smoke04
+  [ 39] ef_cmn_spark04
+  [ 40] ef_samus_impactring04
+  [ 41] ef_samus_ring04
+  [ 42] ef_cmn_lightning04
+  [ 43] ef_pikachu_lightning04
+  [ 44] ef_cmn_impact14
+  [ 45] ef_item_impact14
+  [ 46] ef_cmn_smoke14
+  [ 47] output
+  [ 48] ef_cmn_fireimpact02
+  [ 49] ef_cmn_grade02
+  [ 50] ef_cmn_flare02
+  [ 51] ef_cmn_flashline02
+  [ 52] ef_lucario_impactline02
+  [ 53] ef_cmn_line02
+  [ 54] ef_samus_line02
+  [ 55] ef_mario_line02
+  [ 56] ef_cmn_smoke02
+  [ 57] ef_samus_arc02
+  [ 58] ef_item_parts02
+  [ 59] ef_cmn_lightning02
+  [ 60] ef_cmn_impact12
+  [ 61] ef_cmn_impact06
+  [ 62] ef_samus_impact06
+  [ 63] ef_cmn_grade06
+  [ 64] ef_cmn_line06
+  [ 65] ef_cmn_spark06
+  [ 66] ef_cmn_flash01
+  [ 67] ef_samus_flash01
+  [ 68] ef_cmn_wind01
+  [ 69] ef_cmn_light01
+  [ 70] ef_cmn_fireimpact01
+  [ 71] ef_cmn_grade01
+  [ 72] ef_samus_grade01
+  [ 73] ef_cmn_flare01
+  [ 74] ef_samus_line01
+  [ 75] ef_cmn_smoke01
+  [ 76] ef_samus_arc01
+  [ 77] ef_samus_spinsonic01
+  [ 78] ef_cmn_parts01
+  [ 79] ef_cmn_spark01
+  [ 80] ef_cmn_mask01
+  [ 81] ef_samus_impactring01
+  [ 82] ef_item_lightning01
+  [ 83] ef_samus_tornado01
+  [ 84] ef_cmn_impact11
+  [ 85] ef_item_impact11
+  [ 86] ef_cmn_smoke11
+  [ 87] ef_cmn_impact05_ani
+  [ 88] ef_item_impact09
+  [ 89] ef_cmn_flashline05
+  [ 90] ef_cmn_smoke05
+  [ 91] ef_samus_impactring05
+  [ 92] ef_cmn_smoke15
+  [ 93] ef_samus_impact03
+  [ 94] ef_cmn_indirect03
+  [ 95] ef_samus_spin03
+  [ 96] ef_lucario_grade03
+  [ 97] ef_cmn_flare03
+  [ 98] ef_cmn_smoke03
+  [ 99] ef_cmn_ring03
+  [100] ef_cmn_lightning03
+  [101] ef_item_lightning03
+  [102] ef_item_impact13
+  [103] ef_item_debris07

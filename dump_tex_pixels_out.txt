@@ -1,0 +1,10 @@
+BNTX at 0xcb000
+GRTF at 0xc9910
+GRTF bin at 0xcb000
+BNTX in GRTF at 0xcb000
+_STR at 0xcb4d8
+Traceback (most recent call last):
+  File "/home/leap/Workshop/Hitbox editor/dump_tex_pixels.py", line 70, in <module>
+    pos += brti_size.max(0x90)
+           ^^^^^^^^^^^^^
+AttributeError: 'int' object has no attribute 'max'

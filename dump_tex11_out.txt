@@ -1,0 +1,30 @@
+BNTX at 0xcb000
+Found 104 BRTI blocks
+BRTD at 0xdfff0
+  [ 0] 128x128 fmt_type=0x20 var=0x06 swizzle=(5,4,3,2) data_size=24064
+  [ 1] 128x128 fmt_type=0x20 var=0x06 swizzle=(5,4,3,2) data_size=24064
+  [ 2] 64x64 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=7680
+  [ 3] 128x128 fmt_type=0x1d var=0x01 swizzle=(2,2,2,2) data_size=13312
+  [ 4] 512x512 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=351744
+  [ 5] 256x256 fmt_type=0x1d var=0x01 swizzle=(2,2,2,2) data_size=46080
+  [ 6] 512x512 fmt_type=0x1d var=0x01 swizzle=(2,2,2,2) data_size=177152
+  [ 7] 256x512 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=177152
+  [ 8] 256x768 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=351744
+  [ 9] 512x512 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=351744
+  [10] 256x256 fmt_type=0x1d var=0x01 swizzle=(2,2,2,2) data_size=46080
+  [11] 256x128 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=46592
+  [12] 256x128 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=46592
+  [13] 960x256 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=331776
+  [14] 128x128 fmt_type=0x1d var=0x01 swizzle=(2,2,2,2) data_size=13312
+  [15] 64x64 fmt_type=0x1d var=0x01 swizzle=(2,2,2,2) data_size=5120
+  [16] 64x64 fmt_type=0x07 var=0x01 swizzle=(1,4,3,2) data_size=13312
+  [17] 256x128 fmt_type=0x20 var=0x06 swizzle=(5,4,3,2) data_size=46592
+  [18] 32x64 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=5120
+  [19] 256x128 fmt_type=0x1e var=0x01 swizzle=(3,2,2,2) data_size=46592
+
+Texture 11 details:
+  fmt_type=0x1e (BC5)
+  swizzle: R_out=3 G_out=2 B_out=2 A_out=2
+  (0=zero, 1=one, 2=R, 3=G, 4=B, 5=A)
+  → output RGBA = (G, R, R, R)
+  Alpha = R channel of BC5 → intensity mask (correct for transparency)

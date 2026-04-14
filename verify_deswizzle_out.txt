@@ -1,0 +1,16 @@
+Texture 11: 256x128 data_size=46592
+tile_mode=0 block_height_log2=2
+block_height = 1 << 2 = 4
+mip0_ptr=0x25f800 (relative to vfxb start)
+GRTF bin start = 0xcb000
+BNTX in GRTF sub-slice at offset 0x0
+bntx_base in Rust = 0x0
+Rust mip0_ptr = 0x194800 (in GRTF sub-slice)
+GRTF section size = 0x9d8528
+mip0_ptr in bounds: True
+
+First 32 bytes at mip0 (absolute): ff00499224499224ff00499224499224ff00499224499224ff00499224499224
+BRTD data start: 0xe0000
+Sequential cursor for tex 11: 0x17f800
+BRTD sequential start for tex 11: 0x25f800
+First 32 bytes at BRTD sequential: ff00499224499224ff00499224499224ff00499224499224ff00499224499224

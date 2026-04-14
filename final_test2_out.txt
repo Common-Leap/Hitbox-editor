@@ -1,0 +1,25 @@
+test effects::tests::prop_gtnt_deterministic ... ok
+test effects::tests::prop_parse_vfxb_no_panic ... ok
+test effects::tests::prop_gtnt_round_trip ... ok
+test effects::tests::test_real_eff_texture_resolution ... ok
+test effects::tests::test_eff_handle_values ... ok
+
+failures:
+
+---- effects::tests::test_bug_condition_tex_pat_anim_scale_read stdout ----
+[EMTR] '' v=35 one_time=false dur=0 life=20 scale=20.000 rate=8.00 speed=6.000 blend=Normal c0keys=0 a0keys=0 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+
+thread 'effects::tests::test_bug_condition_tex_pat_anim_scale_read' (86026) panicked at src/effects.rs:4804:9:
+assertion `left == right` failed: tex_pat_anim_scale_read: tex_scale_uv should be [0.5, 0.25] (authored), got [1.0, 1.0]
+  left: [1.0, 1.0]
+ right: [0.5, 0.25]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    effects::tests::test_bug_condition_tex_pat_anim_scale_read
+
+test result: FAILED. 70 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `--bin hitbox_editor`

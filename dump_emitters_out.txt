@@ -1,0 +1,467 @@
+VFXB at 0x1000
+VFX version=22 block_offset=0x40
+
+ESTA at 0x40
+
+  ESET[2] 'P_SamusAttackBomb' (13 emitters)
+    EMTR[0] 'flare1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[1] 'smokeBomb':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1098907648 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(1.00,0.00,0.00,0.93)
+      tex_ids=['0x0000000081d59f24', '0x00000000f23f06f8']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[2] 'smokeLoop':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1098907648 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(1.00,0.00,0.00,0.95)
+      tex_ids=['0x00000000da3564c9', '0x000000007cdcd964']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[3] 'AttackBombFlash1B':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000006deca699']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[4] 'fireBase':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000000e16323b']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[5] 'fire':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(1.00,0.00,0.01,0.87)
+      tex_ids=['0x0000000003b50f63']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[6] 'debris1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,0.83)
+      tex_ids=['0x000000001ae8d00e']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[7] 'AttackBombRing':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000006e974b28']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[8] 'flash1_2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000e3fca3b9']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[9] 'impact':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000006deca695']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[10] 'spark1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(1.00,0.00,0.02,0.88)
+      tex_ids=['0x000000001ae8d00e']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[11] 'debris2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.03,0.93)
+      tex_ids=['0x0000000029afd82e']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[12] 'flareAdd2_Copy1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+
+  ESET[10] 'P_SamusChargeShotBulletBomb' (8 emitters)
+    EMTR[0] 'flare1_add':
+      is_one_time=False timing=1065353216 duration=1088421888
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[1] 'ring1_add':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000cb4531fd']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[2] 'ring2_Copy1':
+      is_one_time=False timing=1065353216 duration=1086324736
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c9515bfd']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[3] 'impact':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000006deca695']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[4] 'line1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,0.95)
+      tex_ids=['0x00000000b484e57d']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[5] 'line2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x0000000041b97a5d']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[6] 'flash1_2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000e3fca3b9']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[7] 'flare2':
+      is_one_time=False timing=1065353216 duration=1088421888
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+
+  ESET[16] 'P_SamusScrewAttack' (12 emitters)
+    EMTR[0] 'illution2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000b1283053', '0x000000001acd58da']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[1] 'flare1_bk':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[2] 'flare1_add':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[3] 'rotate1_colorA':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000008025352d']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[4] 'lightning1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000000924c333']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[5] 'rotate2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000dd02349e', '0x00000000dd02349e']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[6] 'ring_colorA':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000b1283054', '0x00000000dd02349e']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[7] 'impactflash2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000494c2c31']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[8] 'impactflash2_flare':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000bccb77f4']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[9] 'lightning2_add':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,0.77)
+      tex_ids=['0x000000007e86f0c7']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[10] 'lightning2_normal':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,0.77)
+      tex_ids=['0x000000007e86f0c7']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[11] 'flare1':
+      is_one_time=False timing=1065353216 duration=1082130432
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000005f72ec8f']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+
+  ESET[27] 'P_SamusAttackAirLw' (3 emitters)
+    EMTR[0] 'arc1_2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000003301ad02']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[1] 'arc2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1084227584 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000905a3867', '0x00000000c6a6335c', '0x00000000edb2c3cc']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[2] 'arc1_1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000003301ad02']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+
+  ESET[31] 'P_SamusDashAttack' (3 emitters)
+    EMTR[0] 'impact1_b':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000cb4531fd']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[1] 'flare1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=1073741824 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000c6a6335c']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[2] 'impact1_f':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=1 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000cb4531fd']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+
+  ESET[34] 'P_SamusBombJump' (2 emitters)
+    EMTR[0] 'wind1':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x00000000b1283054', '0x00000000dd02349e']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)
+    EMTR[1] 'wind2':
+      is_one_time=False timing=1065353216 duration=1101004800
+      emission_rate(walk)=20.00 emission_rate_direct=0.00
+      particle_life(walk)=0 particle_life_direct=0
+      scale_x_direct=1.0000 scale_y_direct=1.0000
+      mesh_type=0 primitive_index=0 blend_type=0
+      emit_type=0 infinite_life=False
+      color0=(-1.00,0.00,0.00,1.00)
+      tex_ids=['0x000000003a5ac003', '0x000000003a5ac003']
+      emitter_trans=(0.000,0.000,0.000)
+      emitter_scale=(0.000,0.000,0.000)

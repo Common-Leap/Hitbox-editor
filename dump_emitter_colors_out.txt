@@ -1,0 +1,155 @@
+VFXB version=0x16
+Found P_SamusAttackBomb at 0x8cf8
+
+=== EMTR 'flare1' (static=0x8e50) ===
+  TexPatAnim[0] at 0x8f10: scaleU=2.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0x90c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0x9570: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0x95ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0x95bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.8173 b=0.4603 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.4603 g=1.0000 b=1.0000 a=0.3978
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=3
+  color0[0] (R,G,B,time): r=1.0000 g=0.7555 b=0.2778 t=0.2200
+
+=== EMTR 'smokeBomb' (static=0x9950) ===
+  TexPatAnim[0] at 0x9a10: scaleU=16.0000 scaleV=2.0000 offsetU=2.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0x9bc0: scrollU=0.0000 scrollV=0.0100
+  EmitterInfo Trans at 0xa070: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xa0ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xa0bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=0.0397 g=0.0075 b=0.0000 a=0.0000
+  EmitterInfo Color0 (abs 2392): r=0.0000 g=0.0000 b=0.0000 a=0.0000
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=6
+  color0[0] (R,G,B,time): r=1.0000 g=0.9594 b=0.7937 t=0.0200
+
+=== EMTR 'smokeLoop' (static=0xa450) ===
+  TexPatAnim[0] at 0xa510: scaleU=2.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xa6c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xab70: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xabac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xabbc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=1.0000 b=1.0000 a=0.0000
+  EmitterInfo Color0 (abs 2392): r=1.0000 g=0.0000 b=1.0000 a=1.0000
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=4
+  color0[0] (R,G,B,time): r=0.9921 g=0.8634 b=0.3386 t=0.0800
+
+=== EMTR 'AttackBombFlash1B' (static=0xaf50) ===
+  TexPatAnim[0] at 0xb010: scaleU=6.0000 scaleV=2.0000 offsetU=0.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xb1c0: scrollU=0.0000 scrollV=0.0120
+  EmitterInfo Trans at 0xb670: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xb6ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xb6bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.6975 b=0.3016 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.3016 g=1.0000 b=0.7778 a=0.1102
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=4
+  color0[0] (R,G,B,time): r=1.0000 g=1.0000 b=1.0000 t=0.0000
+
+=== EMTR 'fireBase' (static=0xba50) ===
+  TexPatAnim[0] at 0xbb10: scaleU=11.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xbcc0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xc170: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xc1ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xc1bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.6632 b=0.1270 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.1270 g=1.0000 b=1.0000 a=0.4724
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=5
+  color0[0] (R,G,B,time): r=1.0000 g=0.8959 b=0.7302 t=0.3000
+
+=== EMTR 'fire' (static=0xc550) ===
+  TexPatAnim[0] at 0xc610: scaleU=16.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xc7c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xcc70: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xccac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xccbc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.6975 b=0.3016 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.3016 g=1.0000 b=0.7778 a=0.1102
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=2
+  color0[0] (R,G,B,time): r=1.0000 g=0.6883 b=0.0794 t=0.0800
+
+=== EMTR 'debris1' (static=0xd050) ===
+  TexPatAnim[0] at 0xd110: scaleU=4.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xd2c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xd770: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xd7ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xd7bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=1.0000 g=1.0000 b=0.0000 a=0.0000
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=0
+
+=== EMTR 'AttackBombRing' (static=0xdb50) ===
+  TexPatAnim[0] at 0xdc10: scaleU=2.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xddc0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xe270: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xe2ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xe2bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.6632 b=0.1270 a=0.5000
+  EmitterInfo Color0 (abs 2392): r=0.1270 g=0.5000 b=1.0000 a=0.4724
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=4
+  color0[0] (R,G,B,time): r=1.0000 g=0.9851 b=0.7302 t=0.3000
+
+=== EMTR 'flash1_2' (static=0xe650) ===
+  TexPatAnim[0] at 0xe710: scaleU=2.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xe8c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xed70: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xedac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xedbc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.7875 b=0.1984 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.1984 g=1.0000 b=1.0000 a=0.2835
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=0
+
+=== EMTR 'impact' (static=0xf150) ===
+  TexPatAnim[0] at 0xf210: scaleU=5.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xf3c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0xf870: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0xf8ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0xf8bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=1.0000 g=1.0000 b=0.3413 a=0.4243
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=0
+
+=== EMTR 'spark1' (static=0xfc50) ===
+  TexPatAnim[0] at 0xfd10: scaleU=4.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0xfec0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0x10370: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0x103ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0x103bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.9129 b=0.6465 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.6465 g=1.0000 b=1.0000 a=0.7830
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=3
+  color0[0] (R,G,B,time): r=1.0000 g=0.9129 b=0.6465 t=0.0000
+
+=== EMTR 'debris2' (static=0x10750) ===
+  TexPatAnim[0] at 0x10810: scaleU=4.0000 scaleV=1.0000 offsetU=1.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0x109c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0x10e70: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0x10eac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0x10ebc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=1.0000 g=0.9129 b=0.6465 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.6465 g=1.0000 b=1.0000 a=0.7830
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=3
+  color0[0] (R,G,B,time): r=1.0000 g=0.9129 b=0.6465 t=0.0000
+
+=== EMTR 'flareAdd2_Copy1' (static=0x11250) ===
+  TexPatAnim[0] at 0x11310: scaleU=0.0000 scaleV=1.0000 offsetU=0.0000 offsetV=1.0000
+  TexScrollAnim[0] at 0x114c0: scrollU=0.0000 scrollV=0.0000
+  EmitterInfo Trans at 0x11970: x=-4.0000 y=0.0000 z=0.0000
+  EmitterInfo Color0 (walk) at 0x119ac: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color1 (walk) at 0x119bc: r=1.0000 g=1.0000 b=1.0000 a=1.0000
+  EmitterInfo Color0 (abs 2384): r=0.7619 g=0.0720 b=0.0000 a=1.0000
+  EmitterInfo Color0 (abs 2392): r=0.0000 g=1.0000 b=1.0000 a=0.0000
+  Walk offset vs abs 2384: diff=1884 (expected 2384 for v22)
+  num_color0_keys=7
+  color0[0] (R,G,B,time): r=1.0000 g=0.9729 b=0.5079 t=0.0000

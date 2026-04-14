@@ -1,0 +1,749 @@
+VFXB at 0x1000, version=22, block_offset=0x40
+
+ESET 'P_SamusAttackBomb' (13 emitters)
+  [0] 'flare1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.400 (walk_x=0.400 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x00000000c6a6335c']
+  [1] 'smokeBomb':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=10.000 (walk_x=10.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.004000000189989805, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(1.5707963705062866, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=6 a0keys=2 tex_ids=['0x0000000081d59f24', '0x00000000f23f06f8']
+  [2] 'smokeLoop':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=15.000 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.004000000189989805, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=4 a0keys=6 tex_ids=['0x00000000da3564c9', '0x000000007cdcd964']
+  [3] 'AttackBombFlash1B':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=25.000 (walk_x=1.300 walk_y=25.000 direct_x=0.000)
+    speed=-1.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(-1.5707963705062866, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=4 a0keys=1 tex_ids=['0x000000006deca699']
+  [4] 'fireBase':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.900 (walk_x=0.900 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=5 a0keys=3 tex_ids=['0x000000000e16323b']
+  [5] 'fire':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=7.000 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.009999999776482582, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=1 tex_ids=['0x0000000003b50f63']
+  [6] 'debris1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=6.000 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(1.5707963705062866, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x000000001ae8d00e']
+  [7] 'AttackBombRing':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.500 (walk_x=0.500 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=4 a0keys=4 tex_ids=['0x000000006e974b28']
+  [8] 'flash1_2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=0.500 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000e3fca3b9']
+  [9] 'impact':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=1.500 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000006deca695']
+  [10] 'spark1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=6.000 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.019999999552965164, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x000000001ae8d00e']
+  [11] 'debris2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=1.500 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.029999999329447746, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x0000000029afd82e']
+  [12] 'flareAdd2_Copy1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.650 (walk_x=0.650 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(-4.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=7 a0keys=5 tex_ids=['0x00000000c6a6335c']
+
+ESET 'P_SamusChargeShotBullet' (8 emitters)
+  [0] 'ring1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.700 (walk_x=1.700 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x00000000c6a6335c']
+  [1] 'flare1_alpha':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.100 (walk_x=1.100 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000c6a6335c']
+  [2] 'flare1_base':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=25.000 (walk_x=25.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x00000000777c8ebe']
+  [3] 'flare2_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=20.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(1.5707961320877075, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000c055070e']
+  [4] 'ring1_sub':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=1.200 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.10000000149011612, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=2 tex_ids=['0x00000000a5d28eae']
+  [5] 'ring1_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=10.000 (walk_x=1.250 walk_y=10.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.10000000149011612, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000a5d28eae']
+  [6] 'ring2_Copy1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.400 (walk_x=0.400 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000c9515bfd']
+  [7] 'flash1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=0.750 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000a5d28eaf']
+
+ESET 'P_SamusChargeShotHold' (4 emitters)
+  [0] 'flare1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.500 (walk_x=1.500 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000005f72ec8f']
+  [1] 'flare2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=2.000 (walk_x=2.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=1 tex_ids=['0x0000000086a41854']
+  [2] 'line1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=2.000 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000b484e57d']
+  [3] 'particle':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=5.000 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000001dad9273']
+
+ESET 'P_SamusChargeShotShot' (8 emitters)
+  [0] 'coneimpact1_b':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.900 (walk_x=0.900 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 5.0, 0.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000006e974b33']
+  [1] 'coneimpact2_b':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.000 (walk_x=1.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 5.0, -2.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x00000000a5d28eab']
+  [2] 'coneimpact3_b':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.100 (walk_x=1.100 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 5.0, -2.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000000e44a22c']
+  [3] 'impact1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=6.400 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 10.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000006e974b2e']
+  [4] 'coneimpact1_f':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.900 (walk_x=0.900 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 5.0, 0.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000006e974b33']
+  [5] 'coneimpact2_f':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.000 (walk_x=1.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 5.0, -2.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x00000000a5d28eab']
+  [6] 'coneimpact3_f':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.100 (walk_x=1.100 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 5.0, -2.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000000e44a22c']
+  [7] 'impact2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=2.400 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 10.0) rot=(-1.221730351448059, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=3 tex_ids=['0x000000006deca697']
+
+ESET 'P_SamusChargeShotMax' (7 emitters)
+  [0] 'MaxFlashA':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=20.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x00000000fbaf9252']
+  [1] 'flashline2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=0.300 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000008f9f4b91']
+  [2] 'flashline2_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=0.300 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000008f9f4b91']
+  [3] 'flashline2_add2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=0.300 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000008f9f4b91']
+  [4] 'flashline2_add3':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=0.300 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000008f9f4b91']
+  [5] 'ring1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.300 (walk_x=0.300 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000c9515bfa']
+  [6] 'flare1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.150 (walk_x=0.150 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x00000000c6a6335c']
+
+ESET 'P_SamusChargeShotBulletSub' (1 emitters)
+  [0] 'flare1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.000 (walk_x=1.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=2 tex_ids=['0x0000000055c8ca11']
+
+ESET 'P_SamusChargeShotBulletSubA' (5 emitters)
+  [0] 'fulare_blue':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=10.000 (walk_x=0.500 walk_y=10.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(1.5707961320877075, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x00000000c6a6335c']
+  [1] 'fire2_bk':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.029999999329447746, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+  [2] 'bullet_fire_addA':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+  [3] 'bullet_fire_addB':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+  [4] 'bullet_fire_sub':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+
+ESET 'P_SamusChargeShotBulletSubB' (4 emitters)
+  [0] 'fire2_bk':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.029999999329447746, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+  [1] 'bullet_fire_addA':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+  [2] 'bullet_fire_addB':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+  [3] 'bullet_fire_sub':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=35.000 (walk_x=14.000 walk_y=35.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000002909aa15', '0x0000000003b50f63']
+
+ESET 'P_SamusChargeShotBulletBomb' (8 emitters)
+  [0] 'flare1_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.300 (walk_x=1.300 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000c6a6335c']
+  [1] 'ring1_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=1.000 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.10000000149011612, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000cb4531fd']
+  [2] 'ring2_Copy1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=0.500 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000c9515bfd']
+  [3] 'impact':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=1.500 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=1 tex_ids=['0x000000006deca695']
+  [4] 'line1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=2.800 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x00000000b484e57d']
+  [5] 'line2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=6.000 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x0000000041b97a5d']
+  [6] 'flash1_2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=0.800 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000e3fca3b9']
+  [7] 'flare2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.000 (walk_x=1.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000c6a6335c']
+
+ESET 'P_SamusChargeShotGround' (12 emitters)
+  [0] 'soil1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=10.000 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.09999999403953552, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x00000000edec4a2f']
+  [1] 'stoneu1_L':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=3.000 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.09999999403953552, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000004f97f26a']
+  [2] 'stoneu2_S':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=1.500 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.19999998807907104, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000004f97f26a']
+  [3] 'impact1_b_Copy1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.600 (walk_x=0.600 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,0.800,0.800) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 10.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000957305dd']
+  [4] 'particle1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=70.000 (walk_x=3.000 walk_y=70.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000006efec164']
+  [5] 'smoke2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=8.400 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.009999999776482582, 0.0)
+    trans=(0.0, 2.0, 5.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x0000000094e67b94']
+  [6] 'smoke2_2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=30.000 (walk_x=7.700 walk_y=30.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.020999997854232788, 0.0)
+    trans=(0.0, 2.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x0000000094e67b94']
+  [7] 'smoke1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=30.000 (walk_x=9.100 walk_y=30.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.0279999990016222, 0.0)
+    trans=(0.0, 2.0, 1.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x00000000f23f06f9']
+  [8] 'smoke3':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=9.800 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 10.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x000000004f97925e']
+  [9] 'impact2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=2.000 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, -1.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x000000006deca697']
+  [10] 'impact1_f':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.600 (walk_x=0.600 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 10.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000957305dd']
+  [11] 'Fire_Copy1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=20.000 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, 0.009999999776482582, 0.0)
+    trans=(0.0, 1.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000000e163238']
+
+ESET 'P_SamusScrewAttack' (12 emitters)
+  [0] 'illution2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=2.300 (walk_x=2.300 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000b1283053', '0x000000001acd58da']
+  [1] 'flare1_bk':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.700 (walk_x=0.700 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=4 a0keys=5 tex_ids=['0x00000000c6a6335c']
+  [2] 'flare1_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=0.800 (walk_x=0.800 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=4 tex_ids=['0x00000000c6a6335c']
+  [3] 'rotate1_colorA':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=1.950 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, -1.0, 0.0) rot=(0.0, 1.5707961320877075, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=2 tex_ids=['0x000000008025352d']
+  [4] 'lightning1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=13.000 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=1 tex_ids=['0x000000000924c333']
+  [5] 'rotate2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=15.000 (walk_x=2.300 walk_y=15.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000dd02349e', '0x00000000dd02349e']
+  [6] 'ring_colorA':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=30.000 (walk_x=0.300 walk_y=30.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, -1.0, 0.0) rot=(0.0, 1.5707961320877075, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=1 a0keys=3 tex_ids=['0x00000000b1283054', '0x00000000dd02349e']
+  [7] 'impactflash2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=40.000 (walk_x=0.200 walk_y=40.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=1 tex_ids=['0x00000000494c2c31']
+  [8] 'impactflash2_flare':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=50.000 (walk_x=15.000 walk_y=50.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=1 tex_ids=['0x00000000bccb77f4']
+  [9] 'lightning2_add':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=22.000 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(1.5707963705062866, 1.5707963705062866, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=3 a0keys=3 tex_ids=['0x000000007e86f0c7']
+  [10] 'lightning2_normal':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=60.000 (walk_x=25.000 walk_y=60.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(1.5707963705062866, 1.5707963705062866, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=4 a0keys=3 tex_ids=['0x000000007e86f0c7']
+  [11] 'flare1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=20.00 (walk=0.00 direct=0.00)
+    scale=43.000 (walk_x=43.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=5 a0keys=4 tex_ids=['0x000000005f72ec8f']
+
+ESET 'P_SamusAttackAirLw' (3 emitters)
+  [0] 'arc1_2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=2.300 (walk_x=2.300 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x000000003301ad02']
+  [1] 'arc2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=2.300 (walk_x=2.300 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=2 a0keys=3 tex_ids=['0x00000000905a3867', '0x00000000c6a6335c', '0x00000000edb2c3cc']
+  [2] 'arc1_1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=2.300 (walk_x=2.300 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=3 tex_ids=['0x000000003301ad02']
+
+ESET 'P_SamusDashAttack' (3 emitters)
+  [0] 'impact1_b':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.000 (walk_x=1.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 8.0) rot=(-1.5707963705062866, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=2 tex_ids=['0x00000000cb4531fd']
+  [1] 'flare1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=20.000 (walk_x=0.800 walk_y=20.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, -3.0) rot=(0.0, 0.0, 0.0) scale=(0.0, 0.0, 0.0)
+    c0keys=0 a0keys=4 tex_ids=['0x00000000c6a6335c']
+  [2] 'impact1_f':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=1.000 (walk_x=1.000 walk_y=0.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 8.0) rot=(-1.5707963705062866, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=2 tex_ids=['0x00000000cb4531fd']
+
+ESET 'P_SamusBombJump' (2 emitters)
+  [0] 'wind1':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=30.000 (walk_x=0.200 walk_y=30.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, -1.0, 0.0) rot=(0.0, 1.5707961320877075, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=1 a0keys=2 tex_ids=['0x00000000b1283054', '0x00000000dd02349e']
+  [1] 'wind2':
+    one_time=True timing=0.0 dur=0.0 rate=0.00
+    life=0.00 (walk=0.00 direct=0.00)
+    scale=15.000 (walk_x=2.200 walk_y=15.000 direct_x=0.000)
+    speed=0.000 blend=0 emit_type=219 mesh=0
+    color0=(1.000,1.000,1.000) gravity=(0.0, -0.0, 0.0)
+    trans=(0.0, 0.0, 0.0) rot=(0.0, 0.0, 0.0) scale=(1.0, 1.0, 1.0)
+    c0keys=0 a0keys=4 tex_ids=['0x000000003a5ac003', '0x000000003a5ac003']

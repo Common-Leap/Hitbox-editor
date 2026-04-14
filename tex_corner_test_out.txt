@@ -1,0 +1,32 @@
+[GRTF] tex[3] = 'ef_cmn_smoke03'
+[EMTR] 'smokeBomb' v=22 one_time=true dur=1 life=18 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=6 a0keys=2 tex_resolved=2 tex_idx=5 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR] 'smokeLoop' v=22 one_time=true dur=1 life=20 scale=75.000 rate=1.00 speed=22.500 blend=Screen c0keys=4 a0keys=6 tex_resolved=2 tex_idx=46 | direct_scale=(0.000,0.000) walk_scale=(4.000,15.000)
+[EMTR] 'smoke2' v=22 one_time=true dur=4 life=13 scale=42.000 rate=1.00 speed=12.600 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=56 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.400)
+[EMTR] 'smoke2_2' v=22 one_time=true dur=5 life=14 scale=38.500 rate=1.00 speed=11.550 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=56 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.700)
+[EMTR] 'smoke1' v=22 one_time=true dur=1 life=20 scale=45.500 rate=1.00 speed=13.650 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=75 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.100)
+[EMTR] 'smoke3' v=22 one_time=true dur=1 life=9 scale=49.000 rate=1.00 speed=14.700 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=24 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.800)
+[EMTR] 'smoke2' v=22 one_time=false dur=1 life=1 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=38 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR] 'smoke1' v=22 one_time=false dur=1 life=1 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=98 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR] 'smoke2' v=22 one_time=true dur=4 life=13 scale=60.000 rate=1.00 speed=18.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,12.000)
+[EMTR] 'smoke2_2' v=22 one_time=true dur=5 life=14 scale=55.000 rate=1.00 speed=16.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR] 'smoke1' v=22 one_time=true dur=1 life=20 scale=65.000 rate=1.00 speed=19.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,13.000)
+[EMTR] 'smoke3' v=22 one_time=true dur=1 life=9 scale=70.000 rate=1.00 speed=21.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR] 'smoke2' v=22 one_time=false dur=1 life=1 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=38 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR] 'smoke1' v=22 one_time=false dur=1 life=1 scale=12.500 rate=1.00 speed=3.750 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=98 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.500)
+[EMTR] 'Smoke1' v=22 one_time=true dur=5 life=15 scale=55.000 rate=2.00 speed=16.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR] 'Smoke2' v=22 one_time=true dur=8 life=15 scale=55.000 rate=2.00 speed=16.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR] 'smoke1_b' v=22 one_time=true dur=40 life=12 scale=90.000 rate=1.00 speed=27.000 blend=Screen c0keys=0 a0keys=2 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(0.800,18.000)
+[EMTR] 'smoke1_f' v=22 one_time=true dur=14 life=12 scale=90.000 rate=1.00 speed=27.000 blend=Screen c0keys=0 a0keys=2 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(0.800,18.000)
+[EMTR] 'smoke2' v=22 one_time=true dur=14 life=12 scale=90.000 rate=1.00 speed=27.000 blend=Screen c0keys=0 a0keys=2 tex_resolved=2 tex_idx=98 | direct_scale=(0.000,0.000) walk_scale=(0.800,18.000)
+[TEST] parsed 48 emitter sets, 103 bntx_textures
+[TEST] set[0] name='P_SamusJumpJet' emitters=6
+[TEST]   emitter[0] 'burner1_L' tex_idx=8 textures=1
+[TEST]   emitter[1] 'burner2_L' tex_idx=67 textures=1
+[TEST]   emitter[2] 'flash1_L' tex_idx=11 textures=1
+[TEST]   emitter[3] 'burner1_R' tex_idx=8 textures=1
+[TEST]   emitter[4] 'burner2_R' tex_idx=67 textures=1
+[TEST]   emitter[5] 'flash1_R' tex_idx=11 textures=1
+[TEST] tex[11]: 256x128 fmt=0x1e01 data_offset=1093632 data_size=32768
+[TEST] tex[11] corner alpha: top_left=146 bottom_right=255 center=0
+test effects::tests::test_real_eff_texture_resolution ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.02s

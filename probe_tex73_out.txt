@@ -1,0 +1,30 @@
+Total BNTX textures: 104
+Total texture names: 104
+  [0] 'ef_cmn_impactflash00': 128x128 fmt=0x2006 (type=0x20 variant=0x06)
+  [30] 'ef_cmn_debris00': 512x128 fmt=0x1e01 (type=0x1e variant=0x01)
+  [73] 'ef_cmn_flare01': 64x64 fmt=0x1e01 (type=0x1e variant=0x01)
+  [74] 'ef_samus_line01': 96x96 fmt=0x1d01 (type=0x1d variant=0x01)
+  [75] 'ef_cmn_smoke01': 128x128 fmt=0x2006 (type=0x20 variant=0x06)
+
+All texture names (first 10 and around index 73):
+  [0] ef_cmn_impactflash00
+  [1] ef_cmn_wind00
+  [2] ef_samus_wind00
+  [3] ef_captain_fireimpact00
+  [4] ef_cmn_impact00
+  [5] ef_cmn_bomb_indirect00
+  [6] ef_cmn_indirect00
+  [7] ef_cloud_soil00
+  [8] ef_samus_burner00
+  [9] ef_samus_color00
+  ...
+  [70] ef_cmn_fireimpact01
+  [71] ef_cmn_grade01
+  [72] ef_samus_grade01
+  [73] ef_cmn_flare01
+  [74] ef_samus_line01
+  [75] ef_cmn_smoke01
+  [76] ef_samus_arc01
+  [77] ef_samus_spinsonic01
+  [78] ef_cmn_parts01
+  [79] ef_cmn_spark01

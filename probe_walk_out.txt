@@ -1,0 +1,86 @@
+version=22
+base = 0x8e50
+start: off=0x0
+after Flags: off=0x10
+after NumKeys: off=0x28
+after Unknown1/2: off=0x30
+after LoopRates: off=0x58
+after Unknown3/4: off=0x60
+after gravity+scale: off=0x70
+after AirRes: off=0x74
+after val_0x74: off=0x80
+after CenterXY: off=0x90
+after Amplitude: off=0xb0
+after Coeff: off=0xc0
+TexPatAnim: tex_pat_count=3, stride=432
+after TexPatAnim: off=0x270
+TexScrollAnim: count=3, stride=240
+after TexScrollAnim: off=0x360
+after ColorScale: off=0x370
+after Color/Alpha tables: off=0x570
+after SoftEdge: off=0x590
+after Decal: off=0x5a0
+after AddVelToScale: off=0x5b0
+after ScaleAnim: off=0x630
+after ParamAnim: off=0x6b0
+rotation_speed at: off+8=0x6b8, val=0.0000
+after RotateInit: off=0x6f0
+after ScaleLimitDist: off=0x700
+
+=== EmitterInfo starts at off=0x700 ===
+after IsParticleDraw: off=0x710
+after RandomSeed: off=0x720
+Trans at off=0x720: (-4.000, 0.000, 0.000)
+after TransRand: off=0x738
+Rotate at off=0x738: (0.000, 0.000, 0.000)
+after RotateRand: off=0x750
+Scale at off=0x750: (1.000, 1.000, 1.000)
+Color0 RGBA at off=0x75c: (1.0000, 1.0000, 1.0000, 1.0000)
+  raw bytes: 0000803f0000803f0000803f0000803f
+Color1 RGB at off+16=0x76c: (1.0000, 1.0000, 1.0000)
+after Color0/1: off=0x77c
+after EmissionRange: off=0x788
+EmitterInheritance size=24
+after EmitterInheritance: off=0x7a0
+
+=== Emission at off=0x7a0 ===
+is_one_time=True timing=0 duration=1 rate=1.000
+
+=== EmitterShapeInfo at off=0x7e8 ===
+emit_type=0
+shape_size=92
+
+=== EmitterRenderState at off=0x844 ===
+mesh_type=0 blend_type=3 display_side=0
+
+=== ParticleData at off=0x854 ===
+infinite_life=False particle_life=0 particle_life_random=21
+ParticleData size=80
+
+EmitterCombiner size=24 at off=0x8a4
+ShaderRefInfo size=80 at off=0x8bc
+ActionInfo size=4 at off=0x90c
+
+=== ParticleVelocityInfo at off=0x910 ===
+speed=0.0000 vel_random=0.0000
+
+=== ParticleColor at off=0x940 ===
+  [0x0] = 0.0000  (0x00000000)
+  [0x4] = 0.0000  (0x00000000)
+  [0x8] = 0.0000  (0x00000000)
+  [0xc] = 0.0000  (0x00020202)
+  [0x10] = 1.0000  (0x3f800000)
+  [0x14] = 0.8173  (0x3f5138cf)
+  [0x18] = 0.4603  (0x3eebaeb9)
+  [0x1c] = 1.0000  (0x3f800000)
+  [0x20] = 1.0000  (0x3f800000)
+  [0x24] = 0.3978  (0x3ecbb2eb)
+  [0x28] = 0.0000  (0x00000000)
+
+=== ParticleScale at off=0x96c ===
+scale_x=1.0000 scale_y=0.4000 scale_random=0.4000
+
+=== Sampler base = base+0x9a0 = 0x97f0 ===
+Current off = 0x96c (relative to base)
+Sampler base relative = 0x9a0
+Difference = 0x34 bytes

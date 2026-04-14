@@ -1,0 +1,91 @@
+=== FMAT ===
+tex_name_arr at fmat+0x28: 0x21a0
+Data at tex_name_arr 0x21a0:
+  +0x00: 00 00 00 00 00 00 00 00 00 00 02 00 00 01 2a 00
+  +0x10: 00 00 00 00 00 00 50 41 00 00 00 00 00 00 00 00
+  +0x20: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+tex_name_arr[0] ptr: 0x0
+  -> ''
+
+FMAT byte scan for num_tex (values 1-8):
+
+FMAT sequential read layout:
+  +0x00: magic = b'FMAT'
+  +0x04: block_size = 0x1
+  +0x08: name_ptr = 0x132d6 -> ''
+
+FMAT all u64 values:
+  fmat+0x00: 0x154414d46  
+  fmat+0x08: 0x132d6  -> b'\x08\x00la' / ""
+  fmat+0x10: 0x0  
+  fmat+0x18: 0x0  
+  fmat+0x20: 0x0  
+  fmat+0x28: 0x21a0  -> b'\x00\x00\x00\x00' / ""
+  fmat+0x30: 0x2250  -> b'\x04.\x01\x00' / "."
+  fmat+0x38: 0x21c8  -> b'\x00\x00\x00\x00' / ""
+  fmat+0x40: 0x21a8  -> b'\x00\x00\x02\x00' / ""
+  fmat+0x48: 0x2258  -> b'\x00\x00\x00\x00' / ""
+  fmat+0x50: 0x0  
+  fmat+0x58: 0x0  
+
+=== FVTX ===
+attrib_arr=0x2098 buf_arr=0x2120 num_vertices=3
+FVTX byte/u16 scan for counts (1-32):
+  fvtx+0x4a: byte=3
+  fvtx+0x4c: byte=4
+  fvtx+0x4d: byte=1
+  fvtx+0x5c: byte=1
+
+Data at attrib_arr 0x2098:
+  +0x00: 32 2f 01 00 00 00 00 00 05 18 00 00 00 00 00 00
+  +0x10: ea 2f 01 00 00 00 00 00 02 0e 00 00 0c 00 00 00
+  +0x20: 32 30 01 00 00 00 00 00 01 0b 00 00 10 00 00 00
+  +0x30: 2c 30 01 00 00 00 00 00 01 12 00 00 14 00 00 00
+
+Data at buf_arr 0x2120:
+  +0x00: 00 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  +0x10: 18 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  +0x20: 00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00
+  +0x30: ff ff ff ff 01 00 00 00 94 2d 01 00 00 00 00 00
+
+=== FSHP ===
+FSHP all u64 values:
+  fshp+0x00: 0x250485346  
+  fshp+0x08: 0x13502  -> b'\x10\x00fl'
+  fshp+0x10: 0x1d50  -> b'FVTX'
+  fshp+0x18: 0x1fc8  -> b'8 \x00\x00'
+  fshp+0x20: 0x0  
+  fshp+0x28: 0x0  
+  fshp+0x30: 0x0  
+  fshp+0x38: 0x2000  -> b'\x00\x00@\xb6'
+  fshp+0x40: 0x2030  -> b'\xb81\xc4A'
+  fshp+0x48: 0x0  
+  fshp+0x50: 0x0  
+  fshp+0x58: 0x1000000  
+
+FSHP u16 scan (values 0-256):
+  fshp+0x1a: u16=0
+  fshp+0x1c: u16=0
+  fshp+0x1e: u16=0
+  fshp+0x20: u16=0
+  fshp+0x22: u16=0
+  fshp+0x24: u16=0
+  fshp+0x26: u16=0
+  fshp+0x28: u16=0
+  fshp+0x2a: u16=0
+  fshp+0x2c: u16=0
+  fshp+0x2e: u16=0
+  fshp+0x30: u16=0
+  fshp+0x32: u16=0
+  fshp+0x34: u16=0
+  fshp+0x36: u16=0
+  fshp+0x3a: u16=0
+  fshp+0x3c: u16=0
+  fshp+0x3e: u16=0
+
+mesh_arr at fshp+0x18: 0x1fc8
+Data at mesh_arr 0x1fc8:
+  +0x00: 38 20 00 00 00 00 00 00 00 00 0e 00 00 00 00 00
+  +0x10: 40 20 00 00 00 00 00 00 88 20 00 00 00 00 00 00
+  +0x20: 00 00 00 00 03 00 00 00 01 00 00 00 2c 01 00 00
+  +0x30: 00 00 00 00 01 00 00 00 00 00 40 b6 00 00 80 36

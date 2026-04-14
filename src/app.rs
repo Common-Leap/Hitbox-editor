@@ -671,6 +671,12 @@ impl HitboxEditorApp {
                                         mesh_type: 0,
                                         primitive_index: 0,
                                         texture_index: 0,
+                                        emitter_offset: glam::Vec3::ZERO,
+                                        emitter_rotation: glam::Vec3::ZERO,
+                                        emitter_scale: glam::Vec3::ONE,
+                                        tex_scale_uv: [1.0, 1.0],
+                                        tex_offset_uv: [0.0, 0.0],
+                                        tex_scroll_uv: [0.0, 0.0],
                                         is_one_time: true,
                                         emission_timing: 0,
                                         emission_duration: 1,
@@ -882,6 +888,13 @@ impl HitboxEditorApp {
             self.state.effects.len(),
             self.state.eff_index.is_some(),
             self.state.ptcl.is_some());
+        // Build a lowercase→canonical bone name map for effect bone name normalization
+        // (same as hitbox normalization in fetch_acmd, but applied to effects here)
+        let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
+            .iter()
+            .map(|n| (n.to_lowercase(), n.clone()))
+            .collect();
+
         if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index, &self.state.ptcl) {
             for ec in &self.state.effects {
                 let name_lower = ec.effect_name.to_lowercase();
@@ -904,6 +917,11 @@ impl HitboxEditorApp {
                     name_lower.contains("ribbon")
                 );
 
+                // Normalize bone name to match skeleton casing (e.g. "armr" → "ArmR")
+                let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_else(|| ec.bone_name.clone());
+
                 if is_trail {
                     // Look up the emitter color from ptcl
                     let (color, blend) = eff_index.handles.get(&ec.effect_name)
@@ -918,7 +936,7 @@ impl HitboxEditorApp {
 
                     // Find tip bone: prefer a "top" or "end" variant of the attach bone,
                     // or a weapon tip bone if available.
-                    let bone_lower = ec.bone_name.to_lowercase();
+                    let bone_lower = canonical_bone.to_lowercase();
                     let tip_bone = self.bone_names.iter()
                         .find(|b| {
                             let bl = b.to_lowercase();
@@ -926,15 +944,16 @@ impl HitboxEditorApp {
                                 && (bl.contains(&bone_lower) || bone_lower.contains(&bl))
                         })
                         .cloned()
-                        .unwrap_or_else(|| ec.bone_name.clone());
+                        .unwrap_or_else(|| canonical_bone.clone());
 
                     self.state.trail_system.start_trail(
-                        &ec.effect_name, &tip_bone, &ec.bone_name, color, blend,
+                        &ec.effect_name, &tip_bone, &canonical_bone, color, blend,
                     );
                 } else {
                     self.state.particle_system.spawn_effect(
-                        &ec.effect_name, &ec.bone_name,
+                        &ec.effect_name, &canonical_bone,
                         glam::Vec3::from(ec.offset),
+                        glam::Vec3::from(ec.rotation),
                         ec.active_start as f32, ec.active_end as f32,
                         eff_index, ptcl,
                     );
@@ -1783,8 +1802,15 @@ impl eframe::App for HitboxEditorApp {
                     self.state.trail_system.reset();
                     // Re-spawn all effects so emitters are present for re-simulation
                     if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
+                        let bone_name_map_rescrub: std::collections::HashMap<String, String> = self.bone_names
+                            .iter()
+                            .map(|n| (n.to_lowercase(), n.clone()))
+                            .collect();
                         for ec in &self.state.effects.clone() {
                             let name_lower = ec.effect_name.to_lowercase();
+                            let canonical_bone = bone_name_map_rescrub.get(&ec.bone_name.to_lowercase())
+                                .cloned()
+                                .unwrap_or_else(|| ec.bone_name.clone());
                             let is_trail = ec.follows_bone && (
                                 name_lower.contains("sword") || name_lower.contains("trail") ||
                                 name_lower.contains("after") || name_lower.contains("tex_") ||
@@ -1803,19 +1829,21 @@ impl eframe::App for HitboxEditorApp {
                                         (c, emitter.blend_type)
                                     })
                                     .unwrap_or(([1.0, 1.0, 1.0, 1.0], crate::effects::BlendType::Add));
+                                let bone_lower = canonical_bone.to_lowercase();
                                 let tip_bone = self.bone_names.iter()
                                     .find(|b| {
                                         let bl = b.to_lowercase();
                                         (bl.contains("top") || bl.contains("tip") || bl.contains("end"))
-                                            && (bl.contains(&name_lower) || name_lower.contains(&bl))
+                                            && (bl.contains(&bone_lower) || bone_lower.contains(&bl))
                                     })
                                     .cloned()
-                                    .unwrap_or_else(|| ec.bone_name.clone());
-                                self.state.trail_system.start_trail(&ec.effect_name, &tip_bone, &ec.bone_name, color, blend);
+                                    .unwrap_or_else(|| canonical_bone.clone());
+                                self.state.trail_system.start_trail(&ec.effect_name, &tip_bone, &canonical_bone, color, blend);
                             } else {
                                 self.state.particle_system.spawn_effect(
-                                    &ec.effect_name, &ec.bone_name,
+                                    &ec.effect_name, &canonical_bone,
                                     glam::Vec3::from(ec.offset),
+                                    glam::Vec3::from(ec.rotation),
                                     ec.active_start as f32, ec.active_end as f32,
                                     eff_index, ptcl,
                                 );
@@ -1978,6 +2006,9 @@ impl eframe::App for HitboxEditorApp {
                         trails: self.state.trail_system.trails.clone(),
                         emitter_sets: self.state.ptcl.as_ref()
                             .map(|p| p.emitter_sets.clone())
+                            .unwrap_or_default(),
+                        bfres_models: self.state.ptcl.as_ref()
+                            .map(|p| p.bfres_models.clone())
                             .unwrap_or_default(),
                     },
                 );

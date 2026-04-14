@@ -1,0 +1,12 @@
+tegra_swizzle not available, using manual decode
+Texture 11: 256x128 data_size=46592 block_height_log2=2
+Raw data: 46592 bytes, first 8: ff00499224499224
+
+--- Linear decode (no deswizzle) ---
+Top-left 4x4: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+Center 4x4: [255, 255, 255, 255, 182, 182, 182, 182, 179, 179, 180, 179, 175, 176, 176, 175]
+Corner avg: 0.0
+Center avg: 255.0
+
+--- Checking if data might be linear (tile_mode=1) ---
+tile_mode = 0 (0=block-linear, 1=linear)

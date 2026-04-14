@@ -1,0 +1,14 @@
+Found 104 BRTI, BRTD at 0xdfff0
+Texture 11: 256x128 fmt=0x1e data_size=46592
+mip0_ptr=0x25f800
+
+R channel values (0=transparent, 255=opaque):
+Top-left corner (block 0,0): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+Top-right corner: [2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+Bottom-left corner: [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+Bottom-right corner: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+Center: [255, 255, 255, 255, 182, 182, 182, 182, 179, 179, 180, 179, 175, 176, 176, 175]
+
+Corner avg R: 0.0
+Center avg R: 197.9
+→ Texture has transparent edges (radial gradient) — shape should work!

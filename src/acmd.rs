@@ -477,6 +477,29 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             }
         }
 
+        // Check for bare EFFECT macro calls (outside is_excute blocks).
+        // Some effect functions place EFFECT macros directly in the function body
+        // without an is_excute wrapper — route them through parse_excute_block_effects.
+        let is_effect_macro = line.contains("macros::EFFECT(")
+            || line.contains("macros::EFFECT_FOLLOW(")
+            || line.contains("macros::EFFECT_FLIP(")
+            || line.contains("macros::EFFECT_FOLLOW_FLIP(")
+            || line.contains("macros::FOOT_EFFECT(")
+            || line.contains("macros::LANDING_EFFECT(")
+            || line.contains("macros::EFFECT_OFF_KIND(")
+            || line.contains("macros::AFTER_IMAGE4_ON")
+            || line.contains("macros::AFTER_IMAGE_ON")
+            || line.contains("macros::AFTER_IMAGE_OFF(")
+            || line.contains("macros::LAST_EFFECT_SET_RATE(");
+        if is_effect_macro {
+            let effect_macros = parse_excute_block_effects(&[line]);
+            if !effect_macros.is_empty() {
+                stmts.push(EffectStmt::Excute(effect_macros));
+            }
+            pos += 1;
+            continue;
+        }
+
         if !line.is_empty() {
             stmts.push(EffectStmt::Raw(line.to_string()));
         }
@@ -1114,4 +1137,135 @@ pub fn export_acmd_source(
         .map(|f| format!("// === {} ===\n{}", f.rel_path, f.contents))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::EffectScript;
+
+    // ── Helper: wrap a body line in a minimal effect function ─────────────────
+    fn wrap_effect_fn(body: &str) -> String {
+        format!(
+            "unsafe extern \"C\" fn effect_test(agent: &mut L2CAgentBase) {{\n    {body}\n}}\n"
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 1: Bug condition exploration tests
+    // These tests MUST FAIL on unfixed code — failure confirms the bug exists.
+    // They will PASS after the fix in task 3 is applied.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Property 1: Bug Condition — bare EFFECT macro produces EffectCall
+    /// CRITICAL: MUST FAIL on unfixed code (bare EFFECT is treated as Raw and discarded).
+    #[test]
+    fn test_bug_condition_bare_effect_produces_effect_call() {
+        let src = wrap_effect_fn(
+            r#"macros::EFFECT(agent, Hash40::new("test_effect"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);"#,
+        );
+        let script = parse_effect_script(&src);
+        let calls = script.to_effect_calls();
+        assert!(!calls.is_empty(), "bare EFFECT should produce at least one EffectCall, got 0");
+        assert_eq!(calls[0].effect_name, "test_effect",
+            "effect_name should be 'test_effect', got '{}'", calls[0].effect_name);
+    }
+
+    /// Property 1b: bare EFFECT_FOLLOW produces EffectCall with follows_bone=true
+    #[test]
+    fn test_bug_condition_bare_effect_follow_follows_bone() {
+        let src = wrap_effect_fn(
+            r#"macros::EFFECT_FOLLOW(agent, Hash40::new("follow_eff"), Hash40::new("hip"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);"#,
+        );
+        let script = parse_effect_script(&src);
+        let calls = script.to_effect_calls();
+        assert!(!calls.is_empty(), "bare EFFECT_FOLLOW should produce EffectCall");
+        assert!(calls[0].follows_bone, "EFFECT_FOLLOW should set follows_bone=true");
+        assert_eq!(calls[0].effect_name, "follow_eff");
+    }
+
+    /// Property 1c: bare AFTER_IMAGE4_ON_arg29 produces EffectCall (AfterImage)
+    #[test]
+    fn test_bug_condition_bare_after_image_produces_effect_call() {
+        // AFTER_IMAGE4_ON_arg29: args[1]=tex1, args[4]=bone
+        let src = wrap_effect_fn(
+            r#"macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("sword_trail"), Hash40::new("tex2"), 4, Hash40::new("sword"), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);"#,
+        );
+        let script = parse_effect_script(&src);
+        let calls = script.to_effect_calls();
+        assert!(!calls.is_empty(), "bare AFTER_IMAGE4_ON_arg29 should produce EffectCall");
+        assert_eq!(calls[0].effect_name, "sword_trail");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Task 2: Preservation tests
+    // These tests MUST PASS on unfixed code — they confirm baseline behavior.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Preservation: is_excute-wrapped EFFECT still produces EffectCall
+    #[test]
+    fn test_preservation_is_excute_wrapped_effect_unchanged() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("wrapped_eff"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);
+    }
+}
+"#;
+        let script = parse_effect_script(src);
+        let calls = script.to_effect_calls();
+        assert!(!calls.is_empty(), "is_excute-wrapped EFFECT should produce EffectCall");
+        assert_eq!(calls[0].effect_name, "wrapped_eff");
+    }
+
+    /// Preservation: frame(...) advances the frame counter
+    #[test]
+    fn test_preservation_frame_call_advances_counter() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("late_eff"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);
+    }
+}
+"#;
+        let script = parse_effect_script(src);
+        let calls = script.to_effect_calls();
+        assert!(!calls.is_empty(), "should produce EffectCall after frame(10)");
+        assert_eq!(calls[0].active_start, 10, "active_start should be 10 after frame(10)");
+    }
+
+    /// Preservation: non-EFFECT bare lines stay as Raw (no EffectCall produced)
+    #[test]
+    fn test_preservation_non_effect_bare_line_stays_raw() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    WorkModule::on_flag(agent.module_accessor, *FIGHTER_STATUS_WORK_ID_FLAG_RESERVE_ATTACK);
+}
+"#;
+        let script = parse_effect_script(src);
+        let calls = script.to_effect_calls();
+        assert!(calls.is_empty(), "non-EFFECT bare line should produce no EffectCall, got {}", calls.len());
+    }
+
+    /// Preservation: for loop with is_excute still works
+    #[test]
+    fn test_preservation_for_loop_with_is_excute_unchanged() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    for _ in 0..2 {
+        wait(agent.lua_state_agent, 4.0);
+        if macros::is_excute(agent) {
+            macros::EFFECT(agent, Hash40::new("loop_eff"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);
+        }
+    }
+}
+"#;
+        let script = parse_effect_script(src);
+        let calls = script.to_effect_calls();
+        // Loop runs 2 times, each spawning 1 effect at frames 4 and 8
+        assert_eq!(calls.len(), 2, "for loop should produce 2 EffectCalls, got {}", calls.len());
+        assert_eq!(calls[0].active_start, 4);
+        assert_eq!(calls[1].active_start, 8);
+    }
 }

@@ -1,0 +1,1247 @@
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src/app.rs:218:15
+    |
+218 | ...   egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBeha...
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src/app.rs:216:33
+    |
+216 |             ui.memory_mut(|m| m.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:222:37
+    |
+222 |                 ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                     ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:227:41
+    |
+227 |                     ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `r64`
+   --> src/effects.rs:489:9
+    |
+489 |     let r64 = |off: usize| -> u64 {
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_r64`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `g`
+    --> src/effects.rs:3319:21
+     |
+3319 |             let (r, g, b, blend, _, _) = name_hint_defaults(name);
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_g`
+
+warning: variable does not need to be mutable
+    --> src/effects.rs:5107:13
+     |
+5107 |         let mut data = vec![0u8; 4096];
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `param_path` is never read
+   --> src/data.rs:352:9
+    |
+349 | pub struct FighterEntry {
+    |            ------------ field in this struct
+...
+352 |     pub param_path: PathBuf,
+    |         ^^^^^^^^^^
+    |
+    = note: `FighterEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fetch_acmd_script` is never used
+  --> src/acmd.rs:19:8
+   |
+19 | pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Resu...
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `export_acmd_source` is never used
+    --> src/acmd.rs:1105:8
+     |
+1105 | pub fn export_acmd_source(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `render_settings`, `pending_particles`, and `pending_trails` are never read
+  --> src/renderer.rs:74:9
+   |
+70 | pub struct HitboxRenderState {
+   |            ----------------- fields in this struct
+...
+74 |     pub render_settings: RenderSettings,
+   |         ^^^^^^^^^^^^^^^
+...
+93 |     pub pending_particles: Vec<crate::effects::Particle>,
+   |         ^^^^^^^^^^^^^^^^^
+94 |     pub pending_trails: Vec<crate::effects::SwordTrail>,
+   |         ^^^^^^^^^^^^^^
+
+warning: methods `bone_names` and `bone_world_positions` are never used
+   --> src/renderer.rs:272:12
+    |
+101 | impl HitboxRenderState {
+    | ---------------------- methods in this implementation
+...
+272 |     pub fn bone_names(&self) -> Vec<String> {
+    |            ^^^^^^^^^^
+...
+375 |     pub fn bone_world_positions(&self) -> std::collections::HashMap<Str...
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `merge_from_file` is never used
+  --> src/effects.rs:99:12
+   |
+35 | impl EffIndex {
+   | ------------- method in this implementation
+...
+99 |     pub fn merge_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+   |            ^^^^^^^^^^^^^^^
+
+warning: fields `emit_type` and `lifetime_random` are never read
+   --> src/effects.rs:128:9
+    |
+126 | pub struct EmitterDef {
+    |            ---------- fields in this struct
+127 |     pub name: String,
+128 |     pub emit_type: EmitType,
+    |         ^^^^^^^^^
+...
+141 |     pub lifetime_random: f32,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `EmitterDef` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `original_format`, `original_data_size`, and `mipmap_count` are never read
+   --> src/effects.rs:316:9
+    |
+310 | pub struct TextureRes {
+    |            ---------- fields in this struct
+...
+316 |     pub original_format: u32,
+    |         ^^^^^^^^^^^^^^^
+317 |     pub original_data_offset: u32,
+318 |     pub original_data_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+321 |     pub mipmap_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `TextureRes` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `name` is never read
+   --> src/effects.rs:356:9
+    |
+355 | pub struct BfresModel {
+    |            ---------- field in this struct
+356 |     pub name: String,
+    |         ^^^^
+    |
+    = note: `BfresModel` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `texture_section_offset` is never read
+   --> src/effects.rs:366:9
+    |
+362 | pub struct PtclFile {
+    |            -------- field in this struct
+...
+366 |     pub texture_section_offset: usize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PtclFile` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `bntx_surface_format_to_id` is never used
+   --> src/effects.rs:698:4
+    |
+698 | fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bntx_block_dim` is never used
+   --> src/effects.rs:724:4
+    |
+724 | fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::...
+    |    ^^^^^^^^^^^^^^
+
+warning: function `bntx_bytes_per_pixel` is never used
+   --> src/effects.rs:738:4
+    |
+738 | fn bntx_bytes_per_pixel(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `texture_idx` and `blend_type` are never read
+    --> src/effects.rs:2635:9
+     |
+2624 | pub struct Particle {
+     |            -------- fields in this struct
+...
+2635 |     pub texture_idx: usize,
+     |         ^^^^^^^^^^^
+2636 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `Particle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `life_t` is never used
+    --> src/effects.rs:2642:12
+     |
+2641 | impl Particle {
+     | ------------- method in this implementation
+2642 |     pub fn life_t(&self) -> f32 {
+     |            ^^^^^^
+
+warning: field `blend_type` is never read
+    --> src/effects.rs:2912:9
+     |
+2905 | pub struct SwordTrail {
+     |            ---------- field in this struct
+...
+2912 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `SwordTrail` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `deswizzle_tegra` is never used
+  --> src/particle_renderer.rs:13:4
+   |
+13 | fn deswizzle_tegra(
+   |    ^^^^^^^^^^^^^^^
+
+warning: fields `blit_bind_group_for` and `trail_cam_bgl` are never read
+   --> src/particle_renderer.rs:258:5
+    |
+247 | pub struct ParticleRenderer {
+    |            ---------------- fields in this struct
+...
+258 |     blit_bind_group_for: bool, // unused sentinel, kept for future use
+    |     ^^^^^^^^^^^^^^^^^^^
+...
+265 |     trail_cam_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+
+warning: `hitbox_editor` (bin "hitbox_editor" test) generated 25 warnings (run `cargo fix --bin "hitbox_editor" -p hitbox_editor --tests` to apply 3 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.22s
+warning: the following packages contain code that will be rejected by a future version of Rust: quick-xml v0.18.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/main.rs (target/debug/deps/hitbox_editor-a6f911c62be0ffcf)
+
+running 1 test
+[VFXB] version=0x16 block_offset=0x40
+[BNTX] found 104 BRTI structs, 104 textures
+[BNTX] _STR names: ["ef_cmn_impactflash00", "ef_cmn_wind00", "ef_samus_wind00", "ef_captain_fireimpact00", "ef_cmn_impact00"]
+[BNTX] deswizzle error tex 16: Expected at least 16384 bytes but found 13312 bytes
+[BNTX] parsed 103 textures, 7314496 section bytes
+[GRTF] parsed 103 BNTX textures
+[GRTF] tex[0] = 'ef_cmn_smoke04'
+[GRTF] tex[1] = 'ef_lucario_grade03'
+[GRTF] tex[2] = 'ef_cmn_indirect03'
+[GRTF] tex[3] = 'ef_cmn_wind01'
+[GRTF] tex[4] = 'ef_cmn_light01'
+[GRTF] ordered[0] = 128x128
+[GRTF] ordered[1] = 128x128
+[GRTF] ordered[2] = 64x64
+[GRTF] ordered[3] = 128x128
+[GRTF] ordered[4] = 512x512
+[GRTF] ordered[5] = 256x256
+[GRTF] ordered[6] = 512x512
+[GRTF] ordered[7] = 256x512
+[GRTF] ordered[8] = 256x768
+[GRTF] ordered[9] = 512x512
+[GRTF] ordered[10] = 256x256
+[GRTF] ordered[11] = 256x128
+[GRTF] ordered[12] = 256x128
+[GRTF] ordered[13] = 960x256
+[GRTF] ordered[14] = 128x128
+[GRTF] ordered[15] = 64x64
+[GRTF] ordered[16] = 64x64
+[GRTF] ordered[17] = 256x128
+[GRTF] ordered[18] = 32x64
+[GRTF] ordered[19] = 256x128
+[GRTF] ordered[20] = 64x64
+[GRTF] ordered[21] = 512x256
+[GRTF] ordered[22] = 64x128
+[GRTF] ordered[23] = 128x128
+[GRTF] ordered[24] = 128x128
+[GRTF] ordered[25] = 256x128
+[GRTF] ordered[26] = 256x256
+[GRTF] ordered[27] = 64x128
+[GRTF] ordered[28] = 64x128
+[GRTF] ordered[29] = 128x128
+[GRTF] ordered[30] = 512x128
+[GRTF] ordered[31] = 128x320
+[GRTF] ordered[32] = 128x128
+[GRTF] ordered[33] = 128x128
+[GRTF] ordered[34] = 256x128
+[GRTF] ordered[35] = 128x64
+[GRTF] ordered[36] = 128x128
+[GRTF] ordered[37] = 128x64
+[GRTF] ordered[38] = 256x768
+[GRTF] ordered[39] = 128x128
+[GRTF] ordered[40] = 133x133
+[GRTF] ordered[41] = 256x128
+[GRTF] ordered[42] = 256x128
+[GRTF] ordered[43] = 1024x1024
+[GRTF] ordered[44] = 384x128
+[GRTF] ordered[45] = 256x128
+[GRTF] ordered[46] = 32x32
+[GRTF] ordered[47] = 256x256
+[GRTF] ordered[48] = 256x128
+[GRTF] ordered[49] = 128x128
+[GRTF] ordered[50] = 128x128
+[GRTF] ordered[51] = 32x32
+[GRTF] ordered[52] = 192x256
+[GRTF] ordered[53] = 256x256
+[GRTF] ordered[54] = 256x256
+[GRTF] ordered[55] = 128x128
+[GRTF] ordered[56] = 512x512
+[GRTF] ordered[57] = 768x1024
+[GRTF] ordered[58] = 128x128
+[GRTF] ordered[59] = 256x512
+[GRTF] ordered[60] = 32x32
+[GRTF] ordered[61] = 64x64
+[GRTF] ordered[62] = 128x256
+[GRTF] ordered[63] = 512x512
+[GRTF] ordered[64] = 32x64
+[GRTF] ordered[65] = 640x256
+[GRTF] ordered[66] = 64x64
+[GRTF] ordered[67] = 640x256
+[GRTF] ordered[68] = 640x256
+[GRTF] ordered[69] = 256x128
+[GRTF] ordered[70] = 512x256
+[GRTF] ordered[71] = 256x256
+[GRTF] ordered[72] = 256x256
+[GRTF] ordered[73] = 64x64
+[GRTF] ordered[74] = 96x96
+[GRTF] ordered[75] = 128x128
+[GRTF] ordered[76] = 128x64
+[GRTF] ordered[77] = 384x256
+[GRTF] ordered[78] = 128x128
+[GRTF] ordered[79] = 256x256
+[GRTF] ordered[80] = 128x128
+[GRTF] ordered[81] = 640x256
+[GRTF] ordered[82] = 32x32
+[GRTF] ordered[83] = 256x256
+[GRTF] ordered[84] = 768x256
+[GRTF] ordered[85] = 128x256
+[GRTF] ordered[86] = 128x512
+[GRTF] ordered[87] = 64x128
+[GRTF] ordered[88] = 512x256
+[GRTF] ordered[89] = 256x256
+[GRTF] ordered[90] = 256x128
+[GRTF] ordered[91] = 128x512
+[GRTF] ordered[92] = 128x128
+[GRTF] ordered[93] = 512x256
+[GRTF] ordered[94] = 256x256
+[GRTF] ordered[95] = 256x256
+[GRTF] ordered[96] = 256x256
+[GRTF] ordered[97] = 256x256
+[GRTF] ordered[98] = 64x256
+[GRTF] ordered[99] = 128x128
+[GRTF] ordered[100] = 128x128
+[GRTF] ordered[101] = 256x256
+[GRTF] ordered[102] = 128x128
+[GTNT] found as GRTF child at 0xc9930, bin_start=0xc9950 len=3824
+[GTNT] parsed 103 entries from GRTF child GTNT
+[PRMA] parsed 0 primitives
+[GRSN] stored 2255728 shader bytes
+[G3PR] BFRES len=921040 num_models=1 model_arr=0xf0
+[G3PR] FMDL[0]: num_vbufs=1 num_shapes=1 num_mats=1 fvtx=0x1d50 fshp=0x1e50 fmat=0x1da8
+[G3PR] FVTX[0]: num_attribs=4 num_buffers=1 num_vertices=3
+[G3PR]   attrib[0]: '' buf=5 off=0x0 fmt=0x0000
+[G3PR]   attrib[1]: '' buf=2 off=0x0 fmt=0x000c
+[G3PR]   attrib[2]: '' buf=1 off=0x0 fmt=0x0010
+[G3PR]   attrib[3]: '' buf=1 off=0x0 fmt=0x0014
+[G3PR]   buf[0]: data_off=0x600 stride=24
+[G3PR] FMAT[0]: tex_name_arr=0x21a0 num_tex_refs=0
+[G3PR] FSHP[0]: mesh_arr=0x1fc8 ibuf_off=0x2038 index_count=0 index_fmt=3
+[G3PR] parsed model '
+': 0 meshes
+[G3PR] parsed 1 BFRES models
+[EMTR] 'burner1_L' v=22 one_time=true dur=16 life=12 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.727 g=0.872 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=15 life=8 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.357 b=0.739 a=1.000
+[EMTR] 'flash1_L' v=22 one_time=true dur=1 life=16 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=16 life=12 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.727 g=0.872 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=15 life=8 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.357 b=0.739 a=1.000
+[EMTR] 'flash1_R' v=22 one_time=true dur=1 life=16 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'burner1_L' v=22 one_time=true dur=20 life=12 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.727 g=0.872 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=19 life=8 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.357 b=0.739 a=1.000
+[EMTR] 'flash1_L' v=22 one_time=true dur=1 life=26 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=20 life=12 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.727 g=0.872 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=19 life=8 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.357 b=0.739 a=1.000
+[EMTR] 'flash1_R' v=22 one_time=true dur=1 life=26 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=21 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.755 b=0.278 a=1.000
+[EMTR] 'smokeBomb' v=22 one_time=true dur=1 life=18 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=6 a0keys=2 tex_resolved=2 tex_idx=5 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=0.959 b=0.794 a=1.000
+[EMTR] 'smokeLoop' v=22 one_time=true dur=1 life=20 scale=75.000 rate=1.00 speed=22.500 blend=Screen c0keys=4 a0keys=6 tex_resolved=2 tex_idx=46 | direct_scale=(0.000,0.000) walk_scale=(4.000,15.000)
+[EMTR]   tex[0]: 32x32 fmt=0x1c06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.992 g=0.863 b=0.339 a=1.000
+[EMTR] 'AttackBombFlash1B' v=22 one_time=true dur=1 life=10 scale=6.500 rate=2.00 speed=1.950 blend=Screen c0keys=4 a0keys=1 tex_resolved=1 tex_idx=4 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.300)
+[EMTR]   tex[0]: 512x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'fireBase' v=22 one_time=true dur=1 life=11 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=5 a0keys=3 tex_resolved=1 tex_idx=48 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.900)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=0.896 b=0.730 a=1.000
+[EMTR] 'fire' v=22 one_time=true dur=2 life=14 scale=35.000 rate=3.00 speed=10.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=17 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR]   tex[0]: 256x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=0.688 b=0.079 a=1.000
+[EMTR] 'debris1' v=22 one_time=true dur=14 life=6 scale=30.000 rate=1.00 speed=9.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=30 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.000)
+[EMTR]   tex[0]: 512x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'AttackBombRing' v=22 one_time=true dur=1 life=7 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=4 a0keys=4 tex_resolved=1 tex_idx=36 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.985 b=0.730 a=1.000
+[EMTR] 'flash1_2' v=22 one_time=true dur=2 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=45 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact' v=22 one_time=true dur=2 life=7 scale=20.000 rate=2.00 speed=6.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=37 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 128x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'spark1' v=22 one_time=true dur=15 life=8 scale=30.000 rate=0.80 speed=9.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=30 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.000)
+[EMTR]   tex[0]: 512x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.913 b=0.647 a=1.000
+[EMTR] 'debris2' v=22 one_time=true dur=5 life=8 scale=7.500 rate=1.00 speed=2.250 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=39 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.913 b=0.647 a=1.000
+[EMTR] 'flareAdd2_Copy1' v=22 one_time=true dur=1 life=23 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=7 a0keys=5 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.650)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.973 b=0.508 a=1.000
+[EMTR] 'ring1' v=22 one_time=true dur=1 life=30 scale=8.500 rate=1.00 speed=2.550 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.700)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1_alpha' v=22 one_time=false dur=1 life=3 scale=5.500 rate=1.00 speed=1.650 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.100)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1_base' v=22 one_time=false dur=1 life=6 scale=125.000 rate=1.00 speed=37.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=97 | direct_scale=(0.000,0.000) walk_scale=(1.000,25.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare2_add' v=22 one_time=false dur=1 life=7 scale=100.000 rate=1.00 speed=30.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=78 | direct_scale=(0.000,0.000) walk_scale=(1.000,20.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring1_sub' v=22 one_time=false dur=1 life=5 scale=6.000 rate=1.00 speed=1.800 blend=Screen c0keys=3 a0keys=2 tex_resolved=1 tex_idx=40 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.200)
+[EMTR]   tex[0]: 133x133 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.480 g=0.143 b=1.000 a=1.000
+[EMTR] 'ring1_add' v=22 one_time=false dur=1 life=6 scale=6.250 rate=1.00 speed=1.875 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=40 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.250)
+[EMTR]   tex[0]: 133x133 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring2_Copy1' v=22 one_time=false dur=1 life=5 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=31 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR]   tex[0]: 128x320 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flash1' v=22 one_time=false dur=70 life=7 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=91 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.750)
+[EMTR]   tex[0]: 128x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=false dur=1 life=6 scale=7.500 rate=1.00 speed=2.250 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=15 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare2' v=22 one_time=false dur=1 life=10 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=102 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.315 b=1.000 a=1.000
+[EMTR] 'line1' v=22 one_time=false dur=1 life=9 scale=10.000 rate=1.20 speed=3.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'particle' v=22 one_time=false dur=1 life=5 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=28 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 64x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'coneimpact1_b' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=93 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.900)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.766 g=0.766 b=0.766 a=1.000
+[EMTR] 'coneimpact2_b' v=22 one_time=true dur=1 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=81 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 640x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'coneimpact3_b' v=22 one_time=true dur=1 life=4 scale=5.500 rate=1.00 speed=1.650 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=2 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.100)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1' v=22 one_time=true dur=1 life=8 scale=32.000 rate=2.00 speed=9.600 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=62 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.400)
+[EMTR]   tex[0]: 128x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'coneimpact1_f' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=93 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.900)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'coneimpact2_f' v=22 one_time=true dur=1 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=81 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 640x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'coneimpact3_f' v=22 one_time=true dur=1 life=4 scale=5.500 rate=1.00 speed=1.650 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=2 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.100)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact2' v=22 one_time=true dur=1 life=10 scale=12.000 rate=2.00 speed=3.600 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=61 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.400)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'MaxFlashA' v=22 one_time=false dur=1 life=5 scale=100.000 rate=1.00 speed=30.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=66 | direct_scale=(0.000,0.000) walk_scale=(1.000,20.000)
+[EMTR]   tex[0]: 64x64 fmt=0x2006 wrap=0 blk_h=1 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flashline2' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=19 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flashline2_add' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=19 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flashline2_add2' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=19 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flashline2_add3' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=19 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring1' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=99 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.150)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=5 scale=5.000 rate=2.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=14 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'fulare_blue' v=22 one_time=false dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.688 g=0.000 b=1.000 a=1.000
+[EMTR] 'fire2_bk' v=22 one_time=false dur=6 life=12 scale=70.000 rate=0.90 speed=21.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.001 g=0.000 b=0.071 a=1.000
+[EMTR] 'bullet_fire_addA' v=22 one_time=false dur=1 life=13 scale=70.000 rate=2.00 speed=21.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.619 g=0.803 b=1.000 a=1.000
+[EMTR] 'bullet_fire_addB' v=22 one_time=false dur=1 life=15 scale=70.000 rate=2.00 speed=21.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'bullet_fire_sub' v=22 one_time=false dur=1 life=11 scale=70.000 rate=2.00 speed=21.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=0.842 b=0.619 a=1.000
+[EMTR] 'fire2_bk' v=22 one_time=false dur=6 life=12 scale=70.000 rate=0.90 speed=21.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.001 g=0.000 b=0.071 a=1.000
+[EMTR] 'bullet_fire_addA' v=22 one_time=false dur=1 life=15 scale=70.000 rate=2.00 speed=21.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.619 g=0.803 b=1.000 a=1.000
+[EMTR] 'bullet_fire_addB' v=22 one_time=false dur=1 life=20 scale=70.000 rate=2.00 speed=21.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'bullet_fire_sub' v=22 one_time=false dur=1 life=13 scale=70.000 rate=2.00 speed=21.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.001 g=0.000 b=0.071 a=1.000
+[EMTR] 'flare1_add' v=22 one_time=true dur=8 life=3 scale=6.500 rate=1.00 speed=1.950 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring1_add' v=22 one_time=true dur=1 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=84 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 768x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring2_Copy1' v=22 one_time=true dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=31 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 128x320 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact' v=22 one_time=true dur=2 life=7 scale=20.000 rate=2.00 speed=6.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=37 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 128x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line1' v=22 one_time=true dur=1 life=11 scale=14.000 rate=10.00 speed=4.200 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.800)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line2' v=22 one_time=true dur=3 life=8 scale=30.000 rate=3.00 speed=9.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=79 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flash1_2' v=22 one_time=true dur=2 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=45 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.800)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare2' v=22 one_time=true dur=10 life=3 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'soil1' v=22 one_time=true dur=5 life=14 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=7 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 256x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.444 g=0.710 b=0.746 a=1.000
+[EMTR] 'stoneu1_L' v=22 one_time=true dur=5 life=14 scale=15.000 rate=0.50 speed=4.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=23 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.444 g=0.710 b=0.746 a=1.000
+[EMTR] 'stoneu2_S' v=22 one_time=true dur=5 life=18 scale=7.500 rate=1.30 speed=2.250 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=23 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.444 g=0.710 b=0.746 a=1.000
+[EMTR] 'impact1_b_Copy1' v=22 one_time=true dur=10 life=8 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=3 | direct_scale=(0.000,0.000) walk_scale=(0.014,0.600)
+[EMTR]   tex[0]: 128x128 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.800 g=0.800 b=0.800 a=1.000
+[EMTR] 'particle1' v=22 one_time=true dur=6 life=10 scale=15.000 rate=2.50 speed=4.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=65 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke2' v=22 one_time=true dur=4 life=13 scale=42.000 rate=1.00 speed=12.600 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=56 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.400)
+[EMTR]   tex[0]: 512x512 fmt=0x1c06 wrap=0 blk_h=4 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke2_2' v=22 one_time=true dur=5 life=14 scale=38.500 rate=1.00 speed=11.550 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=56 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.700)
+[EMTR]   tex[0]: 512x512 fmt=0x1c06 wrap=0 blk_h=4 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke1' v=22 one_time=true dur=1 life=20 scale=45.500 rate=1.00 speed=13.650 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=75 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.100)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke3' v=22 one_time=true dur=1 life=9 scale=49.000 rate=1.00 speed=14.700 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=24 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.800)
+[EMTR]   tex[0]: 128x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact2' v=22 one_time=true dur=2 life=4 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=61 | direct_scale=(0.000,0.000) walk_scale=(0.014,2.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=10 life=8 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=3 | direct_scale=(0.000,0.000) walk_scale=(0.014,0.600)
+[EMTR]   tex[0]: 128x128 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'Fire_Copy1' v=22 one_time=true dur=10 life=12 scale=100.000 rate=2.00 speed=30.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,20.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.115 g=0.226 b=1.000 a=1.000
+[EMTR] 'smoke2' v=22 one_time=false dur=1 life=1 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=38 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1c06 wrap=0 blk_h=4 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.508 g=0.779 b=1.000 a=1.000
+[EMTR] 'smoke1' v=22 one_time=false dur=1 life=1 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=98 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 64x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.476 g=0.765 b=1.000 a=1.000
+[EMTR] 'Flare' v=22 one_time=false dur=18 life=5 scale=40.000 rate=1.00 speed=12.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'Fire' v=22 one_time=false dur=1 life=4 scale=32.500 rate=1.00 speed=9.750 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.500)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_b' v=22 one_time=true dur=1 life=8 scale=4.000 rate=1.00 speed=1.200 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=87 | direct_scale=(0.000,0.000) walk_scale=(0.014,0.800)
+[EMTR]   tex[0]: 64x128 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.800 g=0.800 b=0.800 a=1.000
+[EMTR] 'smoke2' v=22 one_time=true dur=4 life=13 scale=60.000 rate=1.00 speed=18.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,12.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke2_2' v=22 one_time=true dur=5 life=14 scale=55.000 rate=1.00 speed=16.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke1' v=22 one_time=true dur=1 life=20 scale=65.000 rate=1.00 speed=19.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,13.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke3' v=22 one_time=true dur=1 life=9 scale=70.000 rate=1.00 speed=21.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact2' v=22 one_time=true dur=2 life=4 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=61 | direct_scale=(0.000,0.000) walk_scale=(0.014,4.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=1 life=8 scale=4.000 rate=1.00 speed=1.200 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=87 | direct_scale=(0.000,0.000) walk_scale=(0.014,0.800)
+[EMTR]   tex[0]: 64x128 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke2' v=22 one_time=false dur=1 life=1 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=38 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1c06 wrap=0 blk_h=4 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.778 g=0.667 b=0.648 a=1.000
+[EMTR] 'smoke1' v=22 one_time=false dur=1 life=1 scale=12.500 rate=1.00 speed=3.750 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=98 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.500)
+[EMTR]   tex[0]: 64x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.800 b=0.679 a=1.000
+[EMTR] 'Flare' v=22 one_time=false dur=1 life=5 scale=40.000 rate=1.00 speed=12.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'Fire' v=22 one_time=false dur=1 life=4 scale=30.000 rate=1.00 speed=9.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'Smoke1' v=22 one_time=true dur=5 life=15 scale=55.000 rate=2.00 speed=16.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.988 b=0.918 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=8 scale=100.000 rate=1.00 speed=30.000 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,20.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.791 b=0.297 a=1.000
+[EMTR] 'spark1' v=22 one_time=true dur=6 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=4 a0keys=3 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'Smoke2' v=22 one_time=true dur=8 life=15 scale=55.000 rate=2.00 speed=16.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=90 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.988 b=0.918 a=1.000
+[EMTR] 'impact1' v=22 one_time=true dur=2 life=6 scale=5.000 rate=2.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=87 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.200)
+[EMTR]   tex[0]: 64x128 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=0.950 b=0.600 a=1.000
+[EMTR] 'illution2' v=22 one_time=true dur=1 life=36 scale=11.500 rate=1.00 speed=3.450 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=1 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.300)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1_bk' v=22 one_time=false dur=1 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=4 a0keys=5 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.700)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.017 g=0.078 b=0.365 a=1.000
+[EMTR] 'flare1_add' v=22 one_time=false dur=1 life=7 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.800)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.151 g=0.298 b=1.000 a=1.000
+[EMTR] 'rotate1_colorA' v=22 one_time=false dur=34 life=8 scale=9.750 rate=1.00 speed=2.925 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=95 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.950)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.835 b=1.000 a=1.000
+[EMTR] 'lightning1' v=22 one_time=false dur=7 life=3 scale=65.000 rate=1.00 speed=19.500 blend=Screen c0keys=3 a0keys=1 tex_resolved=1 tex_idx=42 | direct_scale=(0.000,0.000) walk_scale=(1.000,13.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'rotate2' v=22 one_time=true dur=1 life=8 scale=11.500 rate=1.00 speed=3.450 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=27 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.300)
+[EMTR]   tex[0]: 64x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring_colorA' v=22 one_time=false dur=10 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=1 a0keys=3 tex_resolved=2 tex_idx=68 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 640x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impactflash2' v=22 one_time=false dur=7 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.200)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.012 g=0.000 b=0.786 a=1.000
+[EMTR] 'impactflash2_flare' v=22 one_time=false dur=7 life=4 scale=75.000 rate=1.00 speed=22.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,15.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.062 b=0.794 a=1.000
+[EMTR] 'lightning2_add' v=22 one_time=false dur=6 life=8 scale=110.000 rate=1.50 speed=33.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=33 | direct_scale=(0.000,0.000) walk_scale=(1.000,22.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning2_normal' v=22 one_time=false dur=6 life=8 scale=125.000 rate=1.00 speed=37.500 blend=Screen c0keys=4 a0keys=3 tex_resolved=1 tex_idx=33 | direct_scale=(0.000,0.000) walk_scale=(1.000,25.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.556 g=0.885 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=false dur=1 life=2 scale=215.000 rate=1.00 speed=64.500 blend=Screen c0keys=5 a0keys=4 tex_resolved=1 tex_idx=15 | direct_scale=(0.000,0.000) walk_scale=(1.000,43.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.036 g=0.333 b=0.897 a=1.000
+[EMTR] 'Flare2' v=22 one_time=true dur=80 life=2 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=15 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning2' v=22 one_time=true dur=40 life=3 scale=15.000 rate=0.70 speed=4.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=33 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning1' v=22 one_time=true dur=50 life=3 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=1 tex_resolved=1 tex_idx=42 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=80 life=5 scale=30.000 rate=1.00 speed=9.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=15 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.036 g=0.333 b=0.897 a=1.000
+[EMTR] 'flere1' v=22 one_time=false dur=1 life=3 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1' v=22 one_time=false dur=1 life=3 scale=7.500 rate=1.00 speed=2.250 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=44 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR]   tex[0]: 384x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact3' v=22 one_time=false dur=100 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=4 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.100)
+[EMTR]   tex[0]: 512x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.803 b=1.000 a=1.000
+[EMTR] 'lightningring1' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=59 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR]   tex[0]: 256x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'lightningring1_Copy1' v=22 one_time=false dur=1 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=59 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR]   tex[0]: 256x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'flash1_Copy1' v=22 one_time=false dur=1 life=4 scale=17.500 rate=1.00 speed=5.250 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.500)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flash2' v=22 one_time=false dur=1 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=5 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.150)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impactflash2' v=22 one_time=false dur=1 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'impactflash2_flare1' v=22 one_time=false dur=1 life=4 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.029 g=0.000 b=0.460 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=6 scale=7.500 rate=1.00 speed=2.250 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.040 g=0.451 b=1.000 a=1.000
+[EMTR] 'impact1' v=22 one_time=true dur=1 life=2 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=88 | direct_scale=(0.000,0.000) walk_scale=(3.000,0.500)
+[EMTR]   tex[0]: 512x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact3' v=22 one_time=true dur=1 life=5 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=88 | direct_scale=(0.000,0.000) walk_scale=(3.000,1.500)
+[EMTR]   tex[0]: 512x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact3_Copy1' v=22 one_time=true dur=10 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=4 a0keys=1 tex_resolved=1 tex_idx=4 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.300)
+[EMTR]   tex[0]: 512x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.317 g=0.597 b=1.000 a=1.000
+[EMTR] 'lightningring1' v=22 one_time=false dur=1 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=59 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR]   tex[0]: 256x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'lightningring2' v=22 one_time=false dur=1 life=5 scale=5.000 rate=0.60 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=59 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.400)
+[EMTR]   tex[0]: 256x512 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'impactflash2' v=22 one_time=false dur=1 life=4 scale=7.500 rate=0.50 speed=2.250 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.500)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'impactflash2_flare1' v=22 one_time=false dur=1 life=4 scale=35.000 rate=0.50 speed=10.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.051 g=0.000 b=0.460 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=false dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.150)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare2' v=22 one_time=false dur=1 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=1 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=22 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 64x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.727 g=0.872 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=2 life=8 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.357 b=0.739 a=1.000
+[EMTR] 'impact3' v=22 one_time=true dur=1 life=3 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=88 | direct_scale=(0.000,0.000) walk_scale=(3.000,0.700)
+[EMTR]   tex[0]: 512x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'particle3' v=22 one_time=true dur=2 life=6 scale=10.000 rate=3.00 speed=3.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=12 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring1b' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=100 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.800)
+[EMTR]   tex[0]: 128x128 fmt=0x1a06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'ring1' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=100 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.800)
+[EMTR]   tex[0]: 128x128 fmt=0x1a06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'impactflash2' v=22 one_time=true dur=1 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.130)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] 'impactflash2_flare1' v=22 one_time=true dur=1 life=4 scale=75.000 rate=1.00 speed=22.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=73 | direct_scale=(0.000,0.000) walk_scale=(1.000,15.000)
+[EMTR]   tex[0]: 64x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.051 g=0.000 b=0.460 a=1.000
+[EMTR] 'ArcAlpha' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=2 tex_idx=74 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 96x96 fmt=0x1d01 wrap=0 blk_h=2 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ArcLight' v=22 one_time=true dur=1 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=54 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'arc1' v=22 one_time=true dur=1 life=5 scale=5.500 rate=1.00 speed=1.650 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=53 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.100)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'arccylinder1' v=22 one_time=true dur=1 life=16 scale=5.400 rate=1.00 speed=1.620 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=35 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.080)
+[EMTR]   tex[0]: 128x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'arc2' v=22 one_time=true dur=1 life=16 scale=5.500 rate=1.00 speed=1.650 blend=Screen c0keys=2 a0keys=1 tex_resolved=2 tex_idx=53 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.100)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'arccylinder2' v=22 one_time=true dur=1 life=8 scale=5.750 rate=1.00 speed=1.725 blend=Screen c0keys=3 a0keys=1 tex_resolved=2 tex_idx=35 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.150)
+[EMTR]   tex[0]: 128x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.690 b=0.690 a=1.000
+[EMTR] 'arc1_2' v=22 one_time=true dur=1 life=10 scale=11.500 rate=1.00 speed=3.450 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=26 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.300)
+[EMTR]   tex[0]: 256x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'arc2' v=22 one_time=true dur=1 life=9 scale=11.500 rate=1.00 speed=3.450 blend=Screen c0keys=2 a0keys=3 tex_resolved=3 tex_idx=76 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.300)
+[EMTR]   tex[0]: 128x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.585 g=1.000 b=0.365 a=1.000
+[EMTR] 'arc1_1' v=22 one_time=true dur=1 life=11 scale=11.500 rate=1.00 speed=3.450 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=26 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.300)
+[EMTR]   tex[0]: 256x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'glass1_alpha' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=94 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.950)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.370 g=0.257 b=0.422 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=16 scale=200.000 rate=1.00 speed=60.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,40.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.405 g=0.888 b=1.000 a=1.000
+[EMTR] 'flare3' v=22 one_time=true dur=1 life=16 scale=125.000 rate=1.00 speed=37.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,25.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.405 g=0.888 b=1.000 a=1.000
+[EMTR] 'glassFlare1' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=72 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.950)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.459 g=0.111 b=0.617 a=1.000
+[EMTR] 'lightning1_flare1' v=22 one_time=true dur=34 life=6 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'glass1' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.950)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.541 g=0.304 b=0.648 a=1.000
+[EMTR] 'samus1' v=22 one_time=true dur=1 life=30 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=12 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'kirakira1' v=22 one_time=true dur=18 life=10 scale=17.500 rate=10.00 speed=5.250 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=16 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.500)
+[EMTR]   tex[0]: 64x64 fmt=0x0701 wrap=0 blk_h=3 swizzle=0x01040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'kirakira2' v=22 one_time=true dur=15 life=8 scale=17.500 rate=5.00 speed=5.250 blend=Screen c0keys=2 a0keys=4 tex_resolved=1 tex_idx=16 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.500)
+[EMTR]   tex[0]: 64x64 fmt=0x0701 wrap=0 blk_h=3 swizzle=0x01040302
+[EMTR]   color0[0]: r=0.000 g=1.000 b=0.906 a=1.000
+[EMTR] 'lightning1' v=22 one_time=true dur=34 life=6 scale=35.000 rate=1.00 speed=10.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=34 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'pointlight1' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=1 tex_resolved=1 tex_idx=13 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 960x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.560 g=0.261 b=0.695 a=1.000
+[EMTR] 'glass1_alpha' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=94 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.950)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.370 g=0.257 b=0.422 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=16 scale=200.000 rate=1.00 speed=60.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,40.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.405 g=0.888 b=1.000 a=1.000
+[EMTR] 'flare3' v=22 one_time=true dur=1 life=16 scale=125.000 rate=1.00 speed=37.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,25.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.405 g=0.888 b=1.000 a=1.000
+[EMTR] 'glassFlare1' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=72 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.950)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.459 g=0.111 b=0.617 a=1.000
+[EMTR] 'lightning1_flare1' v=22 one_time=true dur=34 life=6 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=50 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'glass1' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.950)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.541 g=0.304 b=0.648 a=1.000
+[EMTR] 'samus1' v=22 one_time=true dur=1 life=30 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=12 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'kirakira1' v=22 one_time=true dur=18 life=10 scale=17.500 rate=10.00 speed=5.250 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=16 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.500)
+[EMTR]   tex[0]: 64x64 fmt=0x0701 wrap=0 blk_h=3 swizzle=0x01040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'kirakira2' v=22 one_time=true dur=15 life=8 scale=17.500 rate=5.00 speed=5.250 blend=Screen c0keys=2 a0keys=4 tex_resolved=1 tex_idx=16 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.500)
+[EMTR]   tex[0]: 64x64 fmt=0x0701 wrap=0 blk_h=3 swizzle=0x01040302
+[EMTR]   color0[0]: r=0.000 g=1.000 b=0.906 a=1.000
+[EMTR] 'lightning1' v=22 one_time=true dur=34 life=6 scale=35.000 rate=1.00 speed=10.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=34 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'pointlight1' v=22 one_time=true dur=1 life=48 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=1 tex_resolved=1 tex_idx=13 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 960x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.560 g=0.261 b=0.695 a=1.000
+[EMTR] 'tornado2_b' v=22 one_time=true dur=12 life=16 scale=5.000 rate=2.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=83 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'tornado1_b' v=22 one_time=true dur=12 life=16 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=83 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.700)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'tornado1_f' v=22 one_time=true dur=12 life=16 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=83 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.700)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'tornado2_f' v=22 one_time=true dur=12 life=16 scale=5.000 rate=2.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=83 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_b' v=22 one_time=true dur=12 life=7 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=84 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 768x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=14 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.800)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=12 life=7 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=84 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 768x256 fmt=0x1c06 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'indirect1' v=22 one_time=true dur=1 life=36 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=1 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'wind1' v=22 one_time=true dur=30 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=1 a0keys=2 tex_resolved=2 tex_idx=68 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.200)
+[EMTR]   tex[0]: 640x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'wind2' v=22 one_time=true dur=1 life=30 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=77 | direct_scale=(0.000,0.000) walk_scale=(0.500,2.000)
+[EMTR]   tex[0]: 384x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'wind3' v=22 one_time=true dur=30 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=1 a0keys=2 tex_resolved=2 tex_idx=68 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.230)
+[EMTR]   tex[0]: 640x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=12 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_b' v=22 one_time=true dur=10 life=2 scale=11.000 rate=1.00 speed=3.300 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=41 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.200)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line1' v=22 one_time=true dur=1 life=8 scale=10.000 rate=7.00 speed=3.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.569 b=0.183 a=1.000
+[EMTR] 'impact1_f_Copy1' v=22 one_time=true dur=10 life=2 scale=11.000 rate=1.00 speed=3.300 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=41 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.200)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact' v=22 one_time=true dur=1 life=7 scale=40.000 rate=4.00 speed=12.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=37 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.000)
+[EMTR]   tex[0]: 128x64 fmt=0x1e01 wrap=0 blk_h=1 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impactline1_b' v=22 one_time=true dur=1 life=14 scale=6.000 rate=1.00 speed=1.800 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=20 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.200)
+[EMTR]   tex[0]: 64x64 fmt=0x1a06 wrap=0 blk_h=1 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.786 g=0.223 b=0.000 a=1.000
+[EMTR] 'impactline1_f' v=22 one_time=true dur=1 life=12 scale=6.000 rate=1.00 speed=1.800 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=20 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.200)
+[EMTR]   tex[0]: 64x64 fmt=0x1a06 wrap=0 blk_h=1 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=10 life=2 scale=11.000 rate=1.00 speed=3.300 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=41 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.200)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'fire' v=22 one_time=true dur=2 life=14 scale=70.000 rate=3.00 speed=21.000 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=17 | direct_scale=(0.000,0.000) walk_scale=(1.000,14.000)
+[EMTR]   tex[0]: 256x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=0.688 b=0.079 a=1.000
+[EMTR] 'debris' v=22 one_time=true dur=10 life=4 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=30 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 512x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'spark1' v=22 one_time=true dur=20 life=10 scale=50.000 rate=0.80 speed=15.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=30 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 512x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.913 b=0.647 a=1.000
+[EMTR] 'flareAdd2_Copy1' v=22 one_time=true dur=1 life=25 scale=6.500 rate=1.00 speed=1.950 blend=Screen c0keys=7 a0keys=5 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.300)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=0.973 b=0.508 a=1.000
+[EMTR] 'wind1' v=22 one_time=true dur=30 life=4 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=1 a0keys=2 tex_resolved=2 tex_idx=68 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.200)
+[EMTR]   tex[0]: 640x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'wind2' v=22 one_time=true dur=1 life=30 scale=11.000 rate=1.00 speed=3.300 blend=Screen c0keys=0 a0keys=4 tex_resolved=2 tex_idx=77 | direct_scale=(0.000,0.000) walk_scale=(0.500,2.200)
+[EMTR]   tex[0]: 384x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'glow1' v=22 one_time=true dur=1 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.250)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.900 g=1.000 b=0.254 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=2 life=6 scale=37.500 rate=1.00 speed=11.250 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.500)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.961 g=1.000 b=0.000 a=1.000
+[EMTR] 'impact1_2_Copy1' v=22 one_time=true dur=1 life=3 scale=13.000 rate=1.00 speed=3.900 blend=Screen c0keys=0 a0keys=3 tex_resolved=2 tex_idx=96 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.600)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impactline1_b' v=22 one_time=true dur=1 life=9 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=52 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.600)
+[EMTR]   tex[0]: 192x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=0.567 b=0.000 a=1.000
+[EMTR] 'impact1_Copy1' v=22 one_time=true dur=1 life=3 scale=13.000 rate=2.00 speed=3.900 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=32 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.600)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impactline1_f' v=22 one_time=true dur=1 life=5 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=52 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.800)
+[EMTR]   tex[0]: 192x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line1_Copy1' v=22 one_time=true dur=1 life=10 scale=5.000 rate=5.00 speed=1.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flare1' v=22 one_time=true dur=1 life=120 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=4 a0keys=3 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.561 g=0.143 b=1.000 a=1.000
+[EMTR] 'flash3' v=22 one_time=true dur=1 life=30 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=5 a0keys=2 tex_resolved=1 tex_idx=51 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 32x32 fmt=0x1a06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.966 g=0.135 b=1.000 a=1.000
+[EMTR] 'lightning1' v=22 one_time=true dur=50 life=3 scale=110.000 rate=1.00 speed=33.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=42 | direct_scale=(0.000,0.000) walk_scale=(1.000,22.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] TexName 'ef_cmn_lightning07' not found in BNTX map
+[EMTR] 'LightningLine1' v=22 one_time=true dur=140 life=4 scale=85.000 rate=1.00 speed=25.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,17.000)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line1' v=22 one_time=true dur=60 life=7 scale=10.000 rate=2.00 speed=3.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ring1' v=22 one_time=true dur=1 life=50 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=99 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flash1' v=22 one_time=true dur=45 life=6 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=69 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flash2' v=22 one_time=true dur=50 life=4 scale=80.000 rate=1.00 speed=24.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,16.000)
+[EMTR]   tex[0]: 128x128 fmt=0x2006 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'particle' v=22 one_time=true dur=55 life=5 scale=25.000 rate=6.00 speed=7.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=28 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 64x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning1_straip' v=22 one_time=true dur=50 life=5 scale=75.000 rate=1.00 speed=22.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=2 tex_idx=43 | direct_scale=(0.000,0.000) walk_scale=(1.000,15.000)
+[EMTR]   tex[0]: 1024x1024 fmt=0x1c06 wrap=0 blk_h=4 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.849 g=0.675 b=1.000 a=1.000
+[EMTR] 'lightning2' v=22 one_time=true dur=40 life=8 scale=175.000 rate=1.00 speed=52.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=33 | direct_scale=(0.000,0.000) walk_scale=(1.000,35.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'flash4' v=22 one_time=true dur=1 life=23 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=4 a0keys=2 tex_resolved=1 tex_idx=51 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 32x32 fmt=0x1a06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'pointLight' v=22 one_time=true dur=1 life=160 scale=12.500 rate=1.00 speed=3.750 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.500)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_b' v=22 one_time=true dur=140 life=9 scale=13.000 rate=1.00 speed=3.900 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=60 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.600)
+[EMTR]   tex[0]: 32x32 fmt=0x1a06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.354 b=0.548 a=1.000
+[EMTR] 'flareCenter' v=22 one_time=true dur=1 life=160 scale=8.000 rate=1.00 speed=2.400 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=11 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.600)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.594 g=0.206 b=1.000 a=1.000
+[EMTR] 'beamblack' v=22 one_time=true dur=1 life=140 scale=23.000 rate=1.00 speed=6.900 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=25 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.600)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'beamMain' v=22 one_time=true dur=1 life=140 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=25 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.003 b=0.016 a=1.000
+[EMTR] 'beam_Line' v=22 one_time=true dur=150 life=6 scale=6.500 rate=1.00 speed=1.950 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=55 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.300)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] TexName 'ef_cmn_lightning07' not found in BNTX map
+[EMTR] 'beam_lightning_black' v=22 one_time=true dur=140 life=4 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[CADP] emitter='beam_lightning_black' cadp_idx=None last_tex_idx=Some(55) bntx_count=103
+[EMTR] 'beam_Line_white' v=22 one_time=true dur=145 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=55 | direct_scale=(0.000,0.000) walk_scale=(1.000,0.600)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] TexName 'ef_cmn_lightning07' not found in BNTX map
+[EMTR] 'LightningLine1' v=22 one_time=true dur=140 life=4 scale=110.000 rate=1.00 speed=33.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,22.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning2' v=22 one_time=true dur=155 life=6 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=1 tex_resolved=2 tex_idx=5 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=0.786 a=1.000
+[EMTR] 'fire2' v=22 one_time=true dur=140 life=16 scale=130.000 rate=2.00 speed=39.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=2 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,26.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'beamMain_outLine' v=22 one_time=true dur=1 life=135 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=101 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=140 life=9 scale=13.000 rate=1.00 speed=3.900 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=60 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.600)
+[EMTR]   tex[0]: 32x32 fmt=0x1a06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.881 g=1.000 b=0.980 a=1.000
+[EMTR] 'ring2' v=22 one_time=true dur=160 life=10 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=31 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 128x320 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.802 g=1.000 b=0.930 a=1.000
+[EMTR] 'line1' v=22 one_time=true dur=155 life=7 scale=10.000 rate=2.00 speed=3.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=21 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 512x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'centerFlash' v=22 one_time=true dur=150 life=4 scale=20.000 rate=1.00 speed=6.000 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=89 | direct_scale=(0.000,0.000) walk_scale=(1.000,4.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'wave' v=22 one_time=true dur=120 life=40 scale=13.500 rate=1.00 speed=4.050 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=85 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.700)
+[EMTR]   tex[0]: 128x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'impact1_b' v=22 one_time=true dur=1 life=5 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=60 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 32x32 fmt=0x1a06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.354 b=0.548 a=1.000
+[EMTR] 'beamMain' v=22 one_time=true dur=1 life=40 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=25 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.000 g=0.173 b=1.000 a=1.000
+[EMTR] 'beamMain_Sub' v=22 one_time=true dur=1 life=24 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=1 tex_idx=25 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line1' v=22 one_time=true dur=55 life=20 scale=15.000 rate=2.00 speed=4.500 blend=Screen c0keys=4 a0keys=3 tex_resolved=1 tex_idx=64 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 32x64 fmt=0x1d01 wrap=0 blk_h=1 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.698 b=0.859 a=1.000
+[EMTR] 'particle1' v=22 one_time=true dur=25 life=50 scale=90.000 rate=13.00 speed=27.000 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=58 | direct_scale=(0.000,0.000) walk_scale=(1.000,18.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.556 g=1.000 b=0.990 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=1 life=5 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=3 a0keys=3 tex_resolved=2 tex_idx=60 | direct_scale=(0.000,0.000) walk_scale=(1.000,2.000)
+[EMTR]   tex[0]: 32x32 fmt=0x1a06 wrap=0 blk_h=0 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.881 g=1.000 b=0.980 a=1.000
+[EMTR] TexName 'ef_item_debris07' not found in BNTX map
+[EMTR] 'ground1' v=22 one_time=true dur=20 life=64 scale=140.000 rate=1.00 speed=42.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,28.000)
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[CADP] emitter='ground1' cadp_idx=None last_tex_idx=None bntx_count=103
+[EMTR] 'ground2' v=22 one_time=true dur=20 life=72 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=3 tex_resolved=1 tex_idx=10 | direct_scale=(0.000,0.000) walk_scale=(0.250,1.000)
+[EMTR]   tex[0]: 256x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.184 g=0.528 b=0.800 a=1.000
+[EMTR] 'smoke1_b' v=22 one_time=true dur=40 life=12 scale=90.000 rate=1.00 speed=27.000 blend=Screen c0keys=0 a0keys=2 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(0.800,18.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ground3_b' v=22 one_time=true dur=18 life=14 scale=4.000 rate=1.00 speed=1.200 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=10 | direct_scale=(0.000,0.000) walk_scale=(0.250,0.800)
+[EMTR]   tex[0]: 256x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.323 b=0.800 a=1.000
+[EMTR] 'impact1_b' v=22 one_time=true dur=20 life=8 scale=4.500 rate=1.00 speed=1.350 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=48 | direct_scale=(0.000,0.000) walk_scale=(0.014,0.900)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.800 g=0.800 b=0.800 a=1.000
+[EMTR] 'particle1' v=22 one_time=true dur=50 life=18 scale=30.000 rate=1.00 speed=9.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=28 | direct_scale=(0.000,0.000) walk_scale=(1.000,6.000)
+[EMTR]   tex[0]: 64x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'fire1' v=22 one_time=true dur=40 life=16 scale=60.000 rate=1.00 speed=18.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,12.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'ground3_f' v=22 one_time=true dur=20 life=12 scale=4.500 rate=1.00 speed=1.350 blend=Screen c0keys=2 a0keys=2 tex_resolved=1 tex_idx=10 | direct_scale=(0.000,0.000) walk_scale=(0.250,0.900)
+[EMTR]   tex[0]: 256x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.178 g=0.495 b=0.800 a=1.000
+[EMTR] 'impact1_f' v=22 one_time=true dur=20 life=8 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=48 | direct_scale=(0.000,0.000) walk_scale=(0.014,1.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1c06 wrap=0 blk_h=2 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.800 g=0.800 b=0.800 a=1.000
+[EMTR] 'smoke1_f' v=22 one_time=true dur=14 life=12 scale=90.000 rate=1.00 speed=27.000 blend=Screen c0keys=0 a0keys=2 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(0.800,18.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'smoke2' v=22 one_time=true dur=14 life=12 scale=90.000 rate=1.00 speed=27.000 blend=Screen c0keys=0 a0keys=2 tex_resolved=2 tex_idx=98 | direct_scale=(0.000,0.000) walk_scale=(0.800,18.000)
+[EMTR]   tex[0]: 64x256 fmt=0x1e01 wrap=0 blk_h=3 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'fire2' v=22 one_time=true dur=15 life=12 scale=120.000 rate=2.00 speed=36.000 blend=Screen c0keys=0 a0keys=3 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,24.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning1' v=22 one_time=true dur=34 life=4 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=3 a0keys=1 tex_resolved=1 tex_idx=42 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'FinSamusAfterThunder' v=22 one_time=true dur=6 life=4 scale=60.000 rate=1.00 speed=18.000 blend=Screen c0keys=2 a0keys=1 tex_resolved=1 tex_idx=42 | direct_scale=(0.000,0.000) walk_scale=(1.000,12.000)
+[EMTR]   tex[0]: 256x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'lightning3' v=22 one_time=true dur=6 life=6 scale=35.000 rate=1.00 speed=10.500 blend=Screen c0keys=0 a0keys=1 tex_resolved=1 tex_idx=43 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR]   tex[0]: 1024x1024 fmt=0x1c06 wrap=0 blk_h=4 swizzle=0x05040302
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] TextureID 0x000000000bf51c92 not found in GTNT map
+[EMTR] 'grade1' v=22 one_time=true dur=1 life=300 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=4 a0keys=3 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   color0[0]: r=0.071 g=0.452 b=1.000 a=1.000
+[CADP] emitter='grade1' cadp_idx=Some(0) last_tex_idx=None bntx_count=103
+[EMTR] 'line1' v=22 one_time=true dur=1 life=70 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=2 tex_idx=55 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'line2' v=22 one_time=true dur=1 life=230 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=0 a0keys=2 tex_resolved=2 tex_idx=55 | direct_scale=(0.000,0.000) walk_scale=(1.000,1.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'stone1' v=22 one_time=true dur=130 life=80 scale=55.000 rate=20.00 speed=16.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=23 | direct_scale=(0.000,0.000) walk_scale=(1.000,11.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'stone1_L' v=22 one_time=true dur=130 life=40 scale=150.000 rate=1.00 speed=45.000 blend=Screen c0keys=0 a0keys=4 tex_resolved=1 tex_idx=23 | direct_scale=(0.000,0.000) walk_scale=(1.000,30.000)
+[EMTR]   tex[0]: 128x128 fmt=0x1e01 wrap=0 blk_h=2 swizzle=0x03020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'burner1_L' v=22 one_time=true dur=77 life=12 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=77 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=77 life=12 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=77 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner1_L' v=22 one_time=true dur=120 life=12 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=120 life=12 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'fire1_ptc' v=22 one_time=true dur=270 life=12 scale=35.000 rate=1.00 speed=10.500 blend=Screen c0keys=0 a0keys=4 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,7.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+[EMTR] 'burner1_L_fire' v=22 one_time=true dur=200 life=12 scale=45.000 rate=1.00 speed=13.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R_fire' v=22 one_time=true dur=200 life=12 scale=45.000 rate=1.00 speed=13.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=120 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=120 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner1_L' v=22 one_time=true dur=40 life=12 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=40 life=12 scale=25.000 rate=1.00 speed=7.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'fire1_ptc' v=22 one_time=true dur=28 life=16 scale=40.000 rate=1.00 speed=12.000 blend=Screen c0keys=2 a0keys=4 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.344 g=0.829 b=1.000 a=1.000
+[EMTR] 'burner1_L_fire' v=22 one_time=true dur=20 life=12 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R_fire' v=22 one_time=true dur=20 life=12 scale=50.000 rate=1.00 speed=15.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=40 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=40 life=8 scale=15.000 rate=1.00 speed=4.500 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[VFXB] parsed 48 emitter sets, 7314496 texture bytes, 0 primitives, 1 bfres_models
+[TEST] parsed 48 emitter sets, 103 bntx_textures
+[TEST] set[0] name='P_SamusJumpJet' emitters=6
+[TEST]   emitter[0] 'burner1_L' tex_idx=8 textures=1
+[TEST]   emitter[1] 'burner2_L' tex_idx=67 textures=1
+[TEST]   emitter[2] 'flash1_L' tex_idx=11 textures=1
+[TEST]   emitter[3] 'burner1_R' tex_idx=8 textures=1
+[TEST]   emitter[4] 'burner2_R' tex_idx=67 textures=1
+[TEST]   emitter[5] 'flash1_R' tex_idx=11 textures=1
+[TEST] tex[11]: 256x128 fmt=0x1e01 data_offset=1093632 data_size=32768
+[TEST] tex[11] corner alpha: top_left=146 bottom_right=255 center=0
+
+thread 'effects::tests::test_real_eff_texture_resolution' (125972) panicked at src/effects.rs:3893:17:
+tex[11] top-left alpha=146 should be < 50 (transparent edge)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test effects::tests::test_real_eff_texture_resolution ... FAILED
+
+failures:
+
+failures:
+    effects::tests::test_real_eff_texture_resolution
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `--bin hitbox_editor`
+exit=101

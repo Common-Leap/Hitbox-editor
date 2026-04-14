@@ -1,0 +1,387 @@
+ESTA at 0x40
+Found P_SamusAttackBomb at 0x8cf8
+
+=== EMTR 'flare1' ===
+  emtr_bin=0x8e00 emtr_static=0x8e50
+  num_color0=3 num_alpha0=4 num_color1=3 num_alpha1=1 num_scale=4
+  Color0 table at 0x91c0:
+    key[0]: bytes=0000803f6466413fe4388e3eae47613e
+           f[0]=1.0000 f[1]=0.7555 f[2]=0.2778 f[3]=0.2200
+           (if time,R,G,B): t=1.0000 r=0.7555 g=0.2778 b=0.2200
+           (if R,G,B,time): r=1.0000 g=0.7555 b=0.2778 t=0.2200
+    key[1]: bytes=0000803fa052a93e000000005c8f023f
+           f[0]=1.0000 f[1]=0.3307 f[2]=0.0000 f[3]=0.5100
+           (if time,R,G,B): t=1.0000 r=0.3307 g=0.0000 b=0.5100
+           (if R,G,B,time): r=1.0000 g=0.3307 b=0.0000 t=0.5100
+    key[2]: bytes=7fdf773f00000000000000000000803f
+           f[0]=0.9683 f[1]=0.0000 f[2]=0.0000 f[3]=1.0000
+           (if time,R,G,B): t=0.9683 r=0.0000 g=0.0000 b=1.0000
+           (if R,G,B,time): r=0.9683 g=0.0000 b=0.0000 t=1.0000
+  EmitterInfo Color0 at 0x97a0 (base+2384 for v22):
+    bytes: 0000803fcf38513fb9aeeb3e0000803f
+    f[0]=1.0000
+    f[1]=0.8173
+    f[2]=0.4603
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.8173 b=0.4603 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.8173 r=0.4603 a=1.0000
+  EmitterInfo Color0 at 0x97a8 (base+2392):
+    bytes: b9aeeb3e0000803f0000803febb2cb3e
+    (if R,G,B,A): r=0.4603 g=1.0000 b=1.0000 a=0.3978
+    (if B,G,R,A): b=0.4603 g=1.0000 r=1.0000 a=0.3978
+
+=== EMTR 'smokeBomb' ===
+  emtr_bin=0x9900 emtr_static=0x9950
+  num_color0=6 num_alpha0=2 num_color1=8 num_alpha1=4 num_scale=4
+  Color0 table at 0x9cc0:
+    key[0]: bytes=0000803fed99753fb32c4b3f0ad7a33c
+           f[0]=1.0000 f[1]=0.9594 f[2]=0.7937 f[3]=0.0200
+           (if time,R,G,B): t=1.0000 r=0.9594 g=0.7937 b=0.0200
+           (if R,G,B,time): r=1.0000 g=0.9594 b=0.7937 t=0.0200
+    key[1]: bytes=9de7793f6134553f1cdf7d3e8fc2753d
+           f[0]=0.9762 f[1]=0.8328 f[2]=0.2479 f[3]=0.0600
+           (if time,R,G,B): t=0.9762 r=0.8328 g=0.2479 b=0.0600
+           (if R,G,B,time): r=0.9762 g=0.8328 b=0.2479 t=0.0600
+    key[2]: bytes=6666a63f2db2dd3e2506013ecdcccc3d
+           f[0]=1.3000 f[1]=0.4330 f[2]=0.1260 f[3]=0.1000
+           (if time,R,G,B): t=1.3000 r=0.4330 g=0.1260 b=0.1000
+           (if R,G,B,time): r=1.3000 g=0.4330 b=0.1260 t=0.1000
+    key[3]: bytes=6666a63f6210983ec1caa13d0ad7233e
+           f[0]=1.3000 f[1]=0.2970 f[2]=0.0790 f[3]=0.1600
+           (if time,R,G,B): t=1.3000 r=0.2970 g=0.0790 b=0.1600
+           (if R,G,B,time): r=1.3000 g=0.2970 b=0.0790 t=0.1600
+    key[4]: bytes=46bc193f4d45703dad1884380000803e
+           f[0]=0.6005 f[1]=0.0587 f[2]=0.0001 f[3]=0.2500
+           (if time,R,G,B): t=0.6005 r=0.0587 g=0.0001 b=0.2500
+           (if R,G,B,time): r=0.6005 g=0.0587 b=0.0001 t=0.2500
+    key[5]: bytes=3f0cc33c86193d3c6191b33b3d0ad73e
+           f[0]=0.0238 f[1]=0.0115 f[2]=0.0055 f[3]=0.4200
+           (if time,R,G,B): t=0.0238 r=0.0115 g=0.0055 b=0.4200
+           (if R,G,B,time): r=0.0238 g=0.0115 b=0.0055 t=0.4200
+  EmitterInfo Color0 at 0xa2a0 (base+2384 for v22):
+    bytes: 318a223dd3baf53b0000000000000000
+    f[0]=0.0397
+    f[1]=0.0075
+    f[2]=0.0000
+    f[3]=0.0000
+    (if R,G,B,A): r=0.0397 g=0.0075 b=0.0000 a=0.0000
+    (if B,G,R,A): b=0.0397 g=0.0075 r=0.0000 a=0.0000
+  EmitterInfo Color0 at 0xa2a8 (base+2392):
+    bytes: 00000000000000000000000000000000
+    (if R,G,B,A): r=0.0000 g=0.0000 b=0.0000 a=0.0000
+    (if B,G,R,A): b=0.0000 g=0.0000 r=0.0000 a=0.0000
+
+=== EMTR 'smokeLoop' ===
+  emtr_bin=0xa400 emtr_static=0xa450
+  num_color0=4 num_alpha0=6 num_color1=3 num_alpha1=4 num_scale=4
+  Color0 table at 0xa7c0:
+    key[0]: bytes=e0f77d3f2a095d3feb57ad3e0ad7a33d
+           f[0]=0.9921 f[1]=0.8634 f[2]=0.3386 f[3]=0.0800
+           (if time,R,G,B): t=0.9921 r=0.8634 g=0.3386 b=0.0800
+           (if R,G,B,time): r=0.9921 g=0.8634 b=0.3386 t=0.0800
+    key[1]: bytes=0000803f16c6913e2008823dec51b83d
+           f[0]=1.0000 f[1]=0.2847 f[2]=0.0635 f[3]=0.0900
+           (if time,R,G,B): t=1.0000 r=0.2847 g=0.0635 b=0.0900
+           (if R,G,B,time): r=1.0000 g=0.2847 b=0.0635 t=0.0900
+    key[2]: bytes=b32ccb3eb794193d000000003d0a573e
+           f[0]=0.3968 f[1]=0.0375 f[2]=0.0000 f[3]=0.2100
+           (if time,R,G,B): t=0.3968 r=0.0375 g=0.0000 b=0.2100
+           (if R,G,B,time): r=0.3968 g=0.0375 b=0.0000 t=0.2100
+    key[3]: bytes=3f0cc33c70ce0d3c2b08823b295c8f3e
+           f[0]=0.0238 f[1]=0.0087 f[2]=0.0040 f[3]=0.2800
+           (if time,R,G,B): t=0.0238 r=0.0087 g=0.0040 b=0.2800
+           (if R,G,B,time): r=0.0238 g=0.0087 b=0.0040 t=0.2800
+  EmitterInfo Color0 at 0xada0 (base+2384 for v22):
+    bytes: 0000803f0000803f0000803f00000000
+    f[0]=1.0000
+    f[1]=1.0000
+    f[2]=1.0000
+    f[3]=0.0000
+    (if R,G,B,A): r=1.0000 g=1.0000 b=1.0000 a=0.0000
+    (if B,G,R,A): b=1.0000 g=1.0000 r=1.0000 a=0.0000
+  EmitterInfo Color0 at 0xada8 (base+2392):
+    bytes: 0000803f000000000000803f0000803f
+    (if R,G,B,A): r=1.0000 g=0.0000 b=1.0000 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.0000 r=1.0000 a=1.0000
+
+=== EMTR 'AttackBombFlash1B' ===
+  emtr_bin=0xaf00 emtr_static=0xaf50
+  num_color0=4 num_alpha0=1 num_color1=3 num_alpha1=1 num_scale=2
+  Color0 table at 0xb2c0:
+    key[0]: bytes=0000803f0000803f0000803f00000000
+           f[0]=1.0000 f[1]=1.0000 f[2]=1.0000 f[3]=0.0000
+           (if time,R,G,B): t=1.0000 r=1.0000 g=1.0000 b=0.0000
+           (if R,G,B,time): r=1.0000 g=1.0000 b=1.0000 t=0.0000
+    key[1]: bytes=0000803ff8fb7d3f000000000ad7a33d
+           f[0]=1.0000 f[1]=0.9921 f[2]=0.0000 f[3]=0.0800
+           (if time,R,G,B): t=1.0000 r=0.9921 g=0.0000 b=0.0800
+           (if R,G,B,time): r=1.0000 g=0.9921 b=0.0000 t=0.0800
+    key[2]: bytes=0000803fc9e3f13e000000003333b33e
+           f[0]=1.0000 f[1]=0.4724 f[2]=0.0000 f[3]=0.3500
+           (if time,R,G,B): t=1.0000 r=0.4724 g=0.0000 b=0.3500
+           (if R,G,B,time): r=1.0000 g=0.4724 b=0.0000 t=0.3500
+    key[3]: bytes=0000803f3f22113e000000000000803f
+           f[0]=1.0000 f[1]=0.1417 f[2]=0.0000 f[3]=1.0000
+           (if time,R,G,B): t=1.0000 r=0.1417 g=0.0000 b=1.0000
+           (if R,G,B,time): r=1.0000 g=0.1417 b=0.0000 t=1.0000
+  EmitterInfo Color0 at 0xb8a0 (base+2384 for v22):
+    bytes: 0000803fda91323fa7699a3e0000803f
+    f[0]=1.0000
+    f[1]=0.6975
+    f[2]=0.3016
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.6975 b=0.3016 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.6975 r=0.3016 a=1.0000
+  EmitterInfo Color0 at 0xb8a8 (base+2392):
+    bytes: a7699a3e0000803f721c473f84c3e13d
+    (if R,G,B,A): r=0.3016 g=1.0000 b=0.7778 a=0.1102
+    (if B,G,R,A): b=0.3016 g=1.0000 r=0.7778 a=0.1102
+
+=== EMTR 'fireBase' ===
+  emtr_bin=0xba00 emtr_static=0xba50
+  num_color0=5 num_alpha0=3 num_color1=4 num_alpha1=1 num_scale=5
+  Color0 table at 0xbdc0:
+    key[0]: bytes=0000803fe258653faeeb3a3f9a99993e
+           f[0]=1.0000 f[1]=0.8959 f[2]=0.7302 f[3]=0.3000
+           (if time,R,G,B): t=1.0000 r=0.8959 g=0.7302 b=0.3000
+           (if R,G,B,time): r=1.0000 g=0.8959 b=0.7302 t=0.3000
+    key[1]: bytes=0000803f3cc5293f1f08023e5c8f023f
+           f[0]=1.0000 f[1]=0.6632 f[2]=0.1270 f[3]=0.5100
+           (if time,R,G,B): t=1.0000 r=0.6632 g=0.1270 b=0.5100
+           (if R,G,B,time): r=1.0000 g=0.6632 b=0.1270 t=0.5100
+    key[2]: bytes=0000803fa352a93e000000006666263f
+           f[0]=1.0000 f[1]=0.3307 f[2]=0.0000 f[3]=0.6500
+           (if time,R,G,B): t=1.0000 r=0.3307 g=0.0000 b=0.6500
+           (if R,G,B,time): r=1.0000 g=0.3307 b=0.0000 t=0.6500
+    key[3]: bytes=ccb22c3fcad0c33d0000000048e13a3f
+           f[0]=0.6746 f[1]=0.0956 f[2]=0.0000 f[3]=0.7300
+           (if time,R,G,B): t=0.6746 r=0.0956 g=0.0000 b=0.7300
+           (if R,G,B,time): r=0.6746 g=0.0956 b=0.0000 t=0.7300
+    key[4]: bytes=8120083f64cccd3d000000000000803f
+           f[0]=0.5317 f[1]=0.1005 f[2]=0.0000 f[3]=1.0000
+           (if time,R,G,B): t=0.5317 r=0.1005 g=0.0000 b=1.0000
+           (if R,G,B,time): r=0.5317 g=0.1005 b=0.0000 t=1.0000
+  EmitterInfo Color0 at 0xc3a0 (base+2384 for v22):
+    bytes: 0000803f3cc5293f1f08023e0000803f
+    f[0]=1.0000
+    f[1]=0.6632
+    f[2]=0.1270
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.6632 b=0.1270 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.6632 r=0.1270 a=1.0000
+  EmitterInfo Color0 at 0xc3a8 (base+2392):
+    bytes: 1f08023e0000803f0000803fc9e3f13e
+    (if R,G,B,A): r=0.1270 g=1.0000 b=1.0000 a=0.4724
+    (if B,G,R,A): b=0.1270 g=1.0000 r=1.0000 a=0.4724
+
+=== EMTR 'fire' ===
+  emtr_bin=0xc500 emtr_static=0xc550
+  num_color0=2 num_alpha0=1 num_color1=3 num_alpha1=1 num_scale=1
+  Color0 table at 0xc8c0:
+    key[0]: bytes=0000803fb433303f278aa23d0ad7a33d
+           f[0]=1.0000 f[1]=0.6883 f[2]=0.0794 f[3]=0.0800
+           (if time,R,G,B): t=1.0000 r=0.6883 g=0.0794 b=0.0800
+           (if R,G,B,time): r=1.0000 g=0.6883 b=0.0794 t=0.0800
+    key[1]: bytes=0000803f3f22113e000000003333b33e
+           f[0]=1.0000 f[1]=0.1417 f[2]=0.0000 f[3]=0.3500
+           (if time,R,G,B): t=1.0000 r=0.1417 g=0.0000 b=0.3500
+           (if R,G,B,time): r=1.0000 g=0.1417 b=0.0000 t=0.3500
+  EmitterInfo Color0 at 0xcea0 (base+2384 for v22):
+    bytes: 0000803fda91323fa7699a3e0000803f
+    f[0]=1.0000
+    f[1]=0.6975
+    f[2]=0.3016
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.6975 b=0.3016 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.6975 r=0.3016 a=1.0000
+  EmitterInfo Color0 at 0xcea8 (base+2392):
+    bytes: a7699a3e0000803f721c473f84c3e13d
+    (if R,G,B,A): r=0.3016 g=1.0000 b=0.7778 a=0.1102
+    (if B,G,R,A): b=0.3016 g=1.0000 r=0.7778 a=0.1102
+
+=== EMTR 'debris1' ===
+  emtr_bin=0xd000 emtr_static=0xd050
+  num_color0=0 num_alpha0=3 num_color1=0 num_alpha1=1 num_scale=2
+  Color0 table at 0xd3c0:
+  EmitterInfo Color0 at 0xd9a0 (base+2384 for v22):
+    bytes: 0000803f0000803f0000803f0000803f
+    f[0]=1.0000
+    f[1]=1.0000
+    f[2]=1.0000
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=1.0000 b=1.0000 a=1.0000
+    (if B,G,R,A): b=1.0000 g=1.0000 r=1.0000 a=1.0000
+  EmitterInfo Color0 at 0xd9a8 (base+2392):
+    bytes: 0000803f0000803f0000000000000000
+    (if R,G,B,A): r=1.0000 g=1.0000 b=0.0000 a=0.0000
+    (if B,G,R,A): b=1.0000 g=1.0000 r=0.0000 a=0.0000
+
+=== EMTR 'AttackBombRing' ===
+  emtr_bin=0xdb00 emtr_static=0xdb50
+  num_color0=4 num_alpha0=4 num_color1=3 num_alpha1=1 num_scale=2
+  Color0 table at 0xdec0:
+    key[0]: bytes=0000803f47317c3faeeb3a3f9a99993e
+           f[0]=1.0000 f[1]=0.9851 f[2]=0.7302 f[3]=0.3000
+           (if time,R,G,B): t=1.0000 r=0.9851 g=0.7302 b=0.3000
+           (if R,G,B,time): r=1.0000 g=0.9851 b=0.7302 t=0.3000
+    key[1]: bytes=0000803f5754343f1f08023e5c8f023f
+           f[0]=1.0000 f[1]=0.7044 f[2]=0.1270 f[3]=0.5100
+           (if time,R,G,B): t=1.0000 r=0.7044 g=0.1270 b=0.5100
+           (if R,G,B,time): r=1.0000 g=0.7044 b=0.1270 t=0.5100
+    key[2]: bytes=0000803fa352a93e000000005c8f423f
+           f[0]=1.0000 f[1]=0.3307 f[2]=0.0000 f[3]=0.7600
+           (if time,R,G,B): t=1.0000 r=0.3307 g=0.0000 b=0.7600
+           (if R,G,B,time): r=1.0000 g=0.3307 b=0.0000 t=0.7600
+    key[3]: bytes=7c9ee73eb423a43e000000000000803f
+           f[0]=0.4524 f[1]=0.3206 f[2]=0.0000 f[3]=1.0000
+           (if time,R,G,B): t=0.4524 r=0.3206 g=0.0000 b=1.0000
+           (if R,G,B,time): r=0.4524 g=0.3206 b=0.0000 t=1.0000
+  EmitterInfo Color0 at 0xe4a0 (base+2384 for v22):
+    bytes: 0000803f3cc5293f1f08023e0000003f
+    f[0]=1.0000
+    f[1]=0.6632
+    f[2]=0.1270
+    f[3]=0.5000
+    (if R,G,B,A): r=1.0000 g=0.6632 b=0.1270 a=0.5000
+    (if B,G,R,A): b=1.0000 g=0.6632 r=0.1270 a=0.5000
+  EmitterInfo Color0 at 0xe4a8 (base+2392):
+    bytes: 1f08023e0000003f0000803fc9e3f13e
+    (if R,G,B,A): r=0.1270 g=0.5000 b=1.0000 a=0.4724
+    (if B,G,R,A): b=0.1270 g=0.5000 r=1.0000 a=0.4724
+
+=== EMTR 'flash1_2' ===
+  emtr_bin=0xe600 emtr_static=0xe650
+  num_color0=0 num_alpha0=3 num_color1=0 num_alpha1=1 num_scale=3
+  Color0 table at 0xe9c0:
+  EmitterInfo Color0 at 0xefa0 (base+2384 for v22):
+    bytes: 0000803f699b493fb32c4b3e0000803f
+    f[0]=1.0000
+    f[1]=0.7875
+    f[2]=0.1984
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.7875 b=0.1984 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.7875 r=0.1984 a=1.0000
+  EmitterInfo Color0 at 0xefa8 (base+2392):
+    bytes: b32c4b3e0000803f0000803f4622913e
+    (if R,G,B,A): r=0.1984 g=1.0000 b=1.0000 a=0.2835
+    (if B,G,R,A): b=0.1984 g=1.0000 r=1.0000 a=0.2835
+
+=== EMTR 'impact' ===
+  emtr_bin=0xf100 emtr_static=0xf150
+  num_color0=0 num_alpha0=1 num_color1=0 num_alpha1=1 num_scale=2
+  Color0 table at 0xf4c0:
+  EmitterInfo Color0 at 0xfaa0 (base+2384 for v22):
+    bytes: 0000803f0000803f0000803f0000803f
+    f[0]=1.0000
+    f[1]=1.0000
+    f[2]=1.0000
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=1.0000 b=1.0000 a=1.0000
+    (if B,G,R,A): b=1.0000 g=1.0000 r=1.0000 a=1.0000
+  EmitterInfo Color0 at 0xfaa8 (base+2392):
+    bytes: 0000803f0000803feebaae3e8738d93e
+    (if R,G,B,A): r=1.0000 g=1.0000 b=0.3413 a=0.4243
+    (if B,G,R,A): b=1.0000 g=1.0000 r=0.3413 a=0.4243
+
+=== EMTR 'spark1' ===
+  emtr_bin=0xfc00 emtr_static=0xfc50
+  num_color0=3 num_alpha0=4 num_color1=3 num_alpha1=1 num_scale=2
+  Color0 table at 0xffc0:
+    key[0]: bytes=0000803f42b1693fc981253f00000000
+           f[0]=1.0000 f[1]=0.9129 f[2]=0.6465 f[3]=0.0000
+           (if time,R,G,B): t=1.0000 r=0.9129 g=0.6465 b=0.0000
+           (if R,G,B,time): r=1.0000 g=0.9129 b=0.6465 t=0.0000
+    key[1]: bytes=0000803f42b1693fc981253f52b89e3e
+           f[0]=1.0000 f[1]=0.9129 f[2]=0.6465 f[3]=0.3100
+           (if time,R,G,B): t=1.0000 r=0.9129 g=0.6465 b=0.3100
+           (if R,G,B,time): r=1.0000 g=0.9129 b=0.6465 t=0.3100
+    key[2]: bytes=0000803f0000000000000000c3f5683f
+           f[0]=1.0000 f[1]=0.0000 f[2]=0.0000 f[3]=0.9100
+           (if time,R,G,B): t=1.0000 r=0.0000 g=0.0000 b=0.9100
+           (if R,G,B,time): r=1.0000 g=0.0000 b=0.0000 t=0.9100
+  EmitterInfo Color0 at 0x105a0 (base+2384 for v22):
+    bytes: 0000803f42b1693fc981253f0000803f
+    f[0]=1.0000
+    f[1]=0.9129
+    f[2]=0.6465
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.9129 b=0.6465 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.9129 r=0.6465 a=1.0000
+  EmitterInfo Color0 at 0x105a8 (base+2392):
+    bytes: c981253f0000803f0000803fdc73483f
+    (if R,G,B,A): r=0.6465 g=1.0000 b=1.0000 a=0.7830
+    (if B,G,R,A): b=0.6465 g=1.0000 r=1.0000 a=0.7830
+
+=== EMTR 'debris2' ===
+  emtr_bin=0x10700 emtr_static=0x10750
+  num_color0=3 num_alpha0=4 num_color1=3 num_alpha1=1 num_scale=2
+  Color0 table at 0x10ac0:
+    key[0]: bytes=0000803f42b1693fc981253f00000000
+           f[0]=1.0000 f[1]=0.9129 f[2]=0.6465 f[3]=0.0000
+           (if time,R,G,B): t=1.0000 r=0.9129 g=0.6465 b=0.0000
+           (if R,G,B,time): r=1.0000 g=0.9129 b=0.6465 t=0.0000
+    key[1]: bytes=0000803f42b1693fc981253f52b89e3e
+           f[0]=1.0000 f[1]=0.9129 f[2]=0.6465 f[3]=0.3100
+           (if time,R,G,B): t=1.0000 r=0.9129 g=0.6465 b=0.3100
+           (if R,G,B,time): r=1.0000 g=0.9129 b=0.6465 t=0.3100
+    key[2]: bytes=0000803f0000000000000000c3f5683f
+           f[0]=1.0000 f[1]=0.0000 f[2]=0.0000 f[3]=0.9100
+           (if time,R,G,B): t=1.0000 r=0.0000 g=0.0000 b=0.9100
+           (if R,G,B,time): r=1.0000 g=0.0000 b=0.0000 t=0.9100
+  EmitterInfo Color0 at 0x110a0 (base+2384 for v22):
+    bytes: 0000803f42b1693fc981253f0000803f
+    f[0]=1.0000
+    f[1]=0.9129
+    f[2]=0.6465
+    f[3]=1.0000
+    (if R,G,B,A): r=1.0000 g=0.9129 b=0.6465 a=1.0000
+    (if B,G,R,A): b=1.0000 g=0.9129 r=0.6465 a=1.0000
+  EmitterInfo Color0 at 0x110a8 (base+2392):
+    bytes: c981253f0000803f0000803fdc73483f
+    (if R,G,B,A): r=0.6465 g=1.0000 b=1.0000 a=0.7830
+    (if B,G,R,A): b=0.6465 g=1.0000 r=1.0000 a=0.7830
+
+=== EMTR 'flareAdd2_Copy1' ===
+  emtr_bin=0x11200 emtr_static=0x11250
+  num_color0=7 num_alpha0=5 num_color1=3 num_alpha1=1 num_scale=1
+  Color0 table at 0x115c0:
+    key[0]: bytes=0000803f8f0e793f2008023f00000000
+           f[0]=1.0000 f[1]=0.9729 f[2]=0.5079 f[3]=0.0000
+           (if time,R,G,B): t=1.0000 r=0.9729 g=0.5079 b=0.0000
+           (if R,G,B,time): r=1.0000 g=0.9729 b=0.5079 t=0.0000
+    key[1]: bytes=0000803f16c6913e2008823d295c8f3d
+           f[0]=1.0000 f[1]=0.2847 f[2]=0.0635 f[3]=0.0700
+           (if time,R,G,B): t=1.0000 r=0.2847 g=0.0635 b=0.0700
+           (if R,G,B,time): r=1.0000 g=0.2847 b=0.0635 t=0.0700
+    key[2]: bytes=0000803f8f0e793f2008023f8fc2f53d
+           f[0]=1.0000 f[1]=0.9729 f[2]=0.5079 f[3]=0.1200
+           (if time,R,G,B): t=1.0000 r=0.9729 g=0.5079 b=0.1200
+           (if R,G,B,time): r=1.0000 g=0.9729 b=0.5079 t=0.1200
+    key[3]: bytes=0000803f7a33773f344d533f9a99193e
+           f[0]=1.0000 f[1]=0.9656 f[2]=0.8254 f[3]=0.1500
+           (if time,R,G,B): t=1.0000 r=0.9656 g=0.8254 b=0.1500
+           (if R,G,B,time): r=1.0000 g=0.9656 b=0.8254 t=0.1500
+    key[4]: bytes=0000803f150a053f000000005c8f423e
+           f[0]=1.0000 f[1]=0.5197 f[2]=0.0000 f[3]=0.1900
+           (if time,R,G,B): t=1.0000 r=0.5197 g=0.0000 b=0.1900
+           (if R,G,B,time): r=1.0000 g=0.5197 b=0.0000 t=0.1900
+    key[5]: bytes=0000803f1f08023e1f08023ee17a143f
+           f[0]=1.0000 f[1]=0.1270 f[2]=0.1270 f[3]=0.5800
+           (if time,R,G,B): t=1.0000 r=0.1270 g=0.1270 b=0.5800
+           (if R,G,B,time): r=1.0000 g=0.1270 b=0.1270 t=0.5800
+    key[6]: bytes=0000803f00000000000000000000803f
+           f[0]=1.0000 f[1]=0.0000 f[2]=0.0000 f[3]=1.0000
+           (if time,R,G,B): t=1.0000 r=0.0000 g=0.0000 b=1.0000
+           (if R,G,B,time): r=1.0000 g=0.0000 b=0.0000 t=1.0000
+  EmitterInfo Color0 at 0x11ba0 (base+2384 for v22):
+    bytes: 310c433f0670933d000000000000803f
+    f[0]=0.7619
+    f[1]=0.0720
+    f[2]=0.0000
+    f[3]=1.0000
+    (if R,G,B,A): r=0.7619 g=0.0720 b=0.0000 a=1.0000
+    (if B,G,R,A): b=0.7619 g=0.0720 r=0.0000 a=1.0000
+  EmitterInfo Color0 at 0x11ba8 (base+2392):
+    bytes: 000000000000803f0000803f00000000
+    (if R,G,B,A): r=0.0000 g=1.0000 b=1.0000 a=0.0000
+    (if B,G,R,A): b=0.0000 g=1.0000 r=1.0000 a=0.0000

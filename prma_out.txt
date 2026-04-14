@@ -1,0 +1,15 @@
+bntx_base=0xcb000 brtd_data_start=0xe0030
+BRTI[0] "ef_cmn_impactflash00": 128x128 tile=0 pts_addr=0x1628 pts_addr_abs=0xcc628 mip0_ptr=0xe0000 pixel_start=0xe0000
+  First 16 bytes: a0000000e072050000000000fcfcfcfc
+BRTI[1] "ef_cmn_wind00": 128x128 tile=0 pts_addr=0x1908 pts_addr_abs=0xcc908 mip0_ptr=0xe5e00 pixel_start=0xe5e00
+  First 16 bytes: 40400010000400000000000000000000
+BRTI[2] "ef_samus_wind00": 64x64 tile=0 pts_addr=0x1be8 pts_addr_abs=0xccbe8 mip0_ptr=0xebc00 pixel_start=0xebc00
+  First 16 bytes: fdf6000000db9624dbfb2099ffffcfff
+BRTI[3] "ef_captain_fireimpact00": 128x128 tile=0 pts_addr=0x1ec0 pts_addr_abs=0xccec0 mip0_ptr=0xeda00 pixel_start=0xeda00
+  First 16 bytes: ff00499224499224ff00499224499224
+BRTI[4] "ef_cmn_impact00": 512x512 tile=0 pts_addr=0x21a0 pts_addr_abs=0xcd1a0 mip0_ptr=0xf0e00 pixel_start=0xf0e00
+  First 16 bytes: ff00000000000000ff00499224499224
+BRTI[8] "ef_samus_burner00": 256x768 tile=0 pts_addr=0x2d58 pts_addr_abs=0xcdd58 mip0_ptr=0x1a8800 pixel_start=0x1a8800
+  First 16 bytes: ff00499224499224ff00499224499224
+BRTI[19] "ef_cmn_flashline00": 256x128 tile=0 pts_addr=0x4d30 pts_addr_abs=0xcfd30 mip0_ptr=0x2dba00 pixel_start=0x2dba00
+  First 16 bytes: ff00499224499224ff00499224499224

@@ -1,0 +1,10 @@
+test effects::tests::prop_sampler_lookup_chain ... ok
+test effects::tests::test_p4_parse_vfxb_emitter_correct_offsets ... ok
+test effects::tests::prop_gtnt_deterministic ... ok
+test effects::tests::prop_gtnt_round_trip ... ok
+test effects::tests::prop_parse_vfxb_no_panic ... ok
+test effects::tests::test_real_eff_texture_resolution ... ok
+test effects::tests::test_eff_handle_values ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
