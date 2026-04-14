@@ -196,8 +196,10 @@ pub struct ParticleInstance {
     pub size: f32,
     pub color: glam::Vec4,
     pub rotation: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    pub _pad_rot: f32,
+    pub tex_scale: glam::Vec2,
+    pub tex_offset: glam::Vec2,
+    pub _pad: f32,
     pub _pad2: f32,
 }
 #[derive(Debug)]

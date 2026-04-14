@@ -15,8 +15,10 @@ struct ParticleInstance {
     size: f32,
     color: vec4<f32>,
     rotation: f32,
-    _pad0: f32,
-    _pad1: f32,
+    _pad_rot: f32,
+    tex_scale: vec2<f32>,
+    tex_offset: vec2<f32>,
+    _pad: f32,
     _pad2: f32,
 }
 
@@ -72,7 +74,7 @@ fn vs_main(
 
     var out: VertexOutput;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    out.uv = QUAD_UV[vertex_idx];
+    out.uv = QUAD_UV[vertex_idx] * p.tex_scale + p.tex_offset;
     out.color = p.color;
     return out;
 }
@@ -80,6 +82,12 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(tex, tex_sampler, in.uv);
-    // Multiply texture color by particle color tint (both RGB and alpha)
-    return tex_color * in.color;
+    // Use texture as alpha mask (R channel) multiplied by particle color.
+    // BC5 textures store intensity in R; BC7/other textures use full RGBA.
+    // The tex_color.a already encodes the mask (set by upload_textures swizzle).
+    let result = vec4<f32>(in.color.rgb, tex_color.a * in.color.a);
+    if result.a < 0.01 {
+        discard;
+    }
+    return result;
 }

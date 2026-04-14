@@ -430,6 +430,7 @@ pub struct ViewportCallback {
     pub particles: Vec<crate::effects::Particle>,
     pub trails: Vec<crate::effects::SwordTrail>,
     pub emitter_sets: Vec<crate::effects::EmitterSet>,
+    pub bfres_models: Vec<crate::effects::BfresModel>,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -511,6 +512,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                             &self.particles,
                             &self.trails,
                             &self.emitter_sets,
+                            &self.bfres_models,
                         );
                         pr.prepare_composite(device, target_view);
                     }
