@@ -1,0 +1,10 @@
+assist
+boss
+campaign
+ending
+enemy
+fighter
+pokemon
+stage
+system
+ui

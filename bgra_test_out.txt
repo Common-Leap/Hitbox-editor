@@ -1,0 +1,307 @@
+warning: unused import: `crate::data::EffectScript`
+    --> src/acmd.rs:1145:9
+     |
+1145 |     use crate::data::EffectScript;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: duplicated attribute
+    --> src/effects.rs:5929:5
+     |
+5929 |     #[test]
+     |     ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+warning: duplicated attribute
+    --> src/effects.rs:5930:1
+     |
+5930 | #[test]
+     | ^^^^^^^
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src/app.rs:218:15
+    |
+218 | ...   egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBeha...
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src/app.rs:216:33
+    |
+216 |             ui.memory_mut(|m| m.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:222:37
+    |
+222 |                 ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                     ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:227:41
+    |
+227 |                     ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `r64`
+   --> src/effects.rs:489:9
+    |
+489 |     let r64 = |off: usize| -> u64 {
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_r64`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scale_from_direct`
+    --> src/effects.rs:2200:25
+     |
+2200 |         let (raw_scale, scale_from_direct) =
+     |                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scale_from_direct`
+
+warning: unused variable: `g`
+    --> src/effects.rs:3327:21
+     |
+3327 |             let (r, g, b, blend, _, _) = name_hint_defaults(name);
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_g`
+
+warning: variable does not need to be mutable
+    --> src/effects.rs:5140:13
+     |
+5140 |         let mut data = vec![0u8; 4096];
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `param_path` is never read
+   --> src/data.rs:352:9
+    |
+349 | pub struct FighterEntry {
+    |            ------------ field in this struct
+...
+352 |     pub param_path: PathBuf,
+    |         ^^^^^^^^^^
+    |
+    = note: `FighterEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fetch_acmd_script` is never used
+  --> src/acmd.rs:19:8
+   |
+19 | pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Resu...
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `export_acmd_source` is never used
+    --> src/acmd.rs:1128:8
+     |
+1128 | pub fn export_acmd_source(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `render_settings`, `pending_particles`, and `pending_trails` are never read
+  --> src/renderer.rs:74:9
+   |
+70 | pub struct HitboxRenderState {
+   |            ----------------- fields in this struct
+...
+74 |     pub render_settings: RenderSettings,
+   |         ^^^^^^^^^^^^^^^
+...
+93 |     pub pending_particles: Vec<crate::effects::Particle>,
+   |         ^^^^^^^^^^^^^^^^^
+94 |     pub pending_trails: Vec<crate::effects::SwordTrail>,
+   |         ^^^^^^^^^^^^^^
+
+warning: methods `bone_names` and `bone_world_positions` are never used
+   --> src/renderer.rs:272:12
+    |
+101 | impl HitboxRenderState {
+    | ---------------------- methods in this implementation
+...
+272 |     pub fn bone_names(&self) -> Vec<String> {
+    |            ^^^^^^^^^^
+...
+375 |     pub fn bone_world_positions(&self) -> std::collections::HashMap<Str...
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `merge_from_file` is never used
+  --> src/effects.rs:99:12
+   |
+35 | impl EffIndex {
+   | ------------- method in this implementation
+...
+99 |     pub fn merge_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+   |            ^^^^^^^^^^^^^^^
+
+warning: fields `emit_type` and `lifetime_random` are never read
+   --> src/effects.rs:128:9
+    |
+126 | pub struct EmitterDef {
+    |            ---------- fields in this struct
+127 |     pub name: String,
+128 |     pub emit_type: EmitType,
+    |         ^^^^^^^^^
+...
+141 |     pub lifetime_random: f32,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `EmitterDef` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `original_format`, `original_data_size`, and `mipmap_count` are never read
+   --> src/effects.rs:316:9
+    |
+310 | pub struct TextureRes {
+    |            ---------- fields in this struct
+...
+316 |     pub original_format: u32,
+    |         ^^^^^^^^^^^^^^^
+317 |     pub original_data_offset: u32,
+318 |     pub original_data_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+321 |     pub mipmap_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `TextureRes` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `name` is never read
+   --> src/effects.rs:356:9
+    |
+355 | pub struct BfresModel {
+    |            ---------- field in this struct
+356 |     pub name: String,
+    |         ^^^^
+    |
+    = note: `BfresModel` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `texture_section_offset` is never read
+   --> src/effects.rs:366:9
+    |
+362 | pub struct PtclFile {
+    |            -------- field in this struct
+...
+366 |     pub texture_section_offset: usize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PtclFile` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `bntx_surface_format_to_id` is never used
+   --> src/effects.rs:698:4
+    |
+698 | fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bntx_block_dim` is never used
+   --> src/effects.rs:724:4
+    |
+724 | fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::...
+    |    ^^^^^^^^^^^^^^
+
+warning: function `bntx_bytes_per_pixel` is never used
+   --> src/effects.rs:738:4
+    |
+738 | fn bntx_bytes_per_pixel(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `texture_idx` and `blend_type` are never read
+    --> src/effects.rs:2637:9
+     |
+2626 | pub struct Particle {
+     |            -------- fields in this struct
+...
+2637 |     pub texture_idx: usize,
+     |         ^^^^^^^^^^^
+2638 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `Particle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `life_t` is never used
+    --> src/effects.rs:2644:12
+     |
+2643 | impl Particle {
+     | ------------- method in this implementation
+2644 |     pub fn life_t(&self) -> f32 {
+     |            ^^^^^^
+
+warning: field `rotation` is never read
+    --> src/effects.rs:2659:5
+     |
+2652 | pub struct EmitterInstance {
+     |            --------------- field in this struct
+...
+2659 |     rotation: Vec3,
+     |     ^^^^^^^^
+     |
+     = note: `EmitterInstance` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `blend_type` is never read
+    --> src/effects.rs:2920:9
+     |
+2913 | pub struct SwordTrail {
+     |            ---------- field in this struct
+...
+2920 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `SwordTrail` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `test_print_samus_handles` is never used
+    --> src/effects.rs:5984:8
+     |
+5984 |     fn test_print_samus_handles() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_eff_handle_values` is never used
+    --> src/effects.rs:6010:8
+     |
+6010 |     fn test_eff_handle_values() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deswizzle_tegra` is never used
+  --> src/particle_renderer.rs:13:4
+   |
+13 | fn deswizzle_tegra(
+   |    ^^^^^^^^^^^^^^^
+
+warning: fields `blit_bind_group_for` and `trail_cam_bgl` are never read
+   --> src/particle_renderer.rs:260:5
+    |
+249 | pub struct ParticleRenderer {
+    |            ---------------- fields in this struct
+...
+260 |     blit_bind_group_for: bool, // unused sentinel, kept for future use
+    |     ^^^^^^^^^^^^^^^^^^^
+...
+267 |     trail_cam_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+
+warning: `hitbox_editor` (bin "hitbox_editor" test) generated 32 warnings (run `cargo fix --bin "hitbox_editor" -p hitbox_editor --tests` to apply 5 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.19s
+warning: the following packages contain code that will be rejected by a future version of Rust: quick-xml v0.18.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/main.rs (target/debug/deps/hitbox_editor-a6f911c62be0ffcf)
+
+running 2 tests
+
+thread 'particle_renderer::tests::test_bug_bgra_detection_stale_shift_bntx_cache_loop' (45690) panicked at src/particle_renderer.rs:2404:9:
+Bug condition (bntx_tex_cache loop): fmt_type=0x0B channel_swizzle=0x02010204 must yield is_bgra=true (R_src byte=4 at bits 0–7), but stale (cs >> 24) & 0xFF reads A_src=2 ≠ 4 → is_bgra=false. Counterexample: channel_swizzle=0x02010204, r_src_correct=4, a_src_stale=2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'particle_renderer::tests::test_bug_bgra_detection_stale_shift_emitter_loop' (45691) panicked at src/particle_renderer.rs:2326:9:
+Bug condition (emitter loop): fmt_type=0x0B channel_swizzle=0x02010204 must yield is_bgra=true (R_src byte=4 at bits 0–7), but stale (cs >> 24) & 0xFF reads A_src=2 ≠ 4 → is_bgra=false. Counterexample: channel_swizzle=0x02010204, r_src_correct=4, a_src_stale=2
+test particle_renderer::tests::test_bug_bgra_detection_stale_shift_emitter_loop ... FAILED
+test particle_renderer::tests::test_bug_bgra_detection_stale_shift_bntx_cache_loop ... FAILED
+
+failures:
+
+failures:
+    particle_renderer::tests::test_bug_bgra_detection_stale_shift_bntx_cache_loop
+    particle_renderer::tests::test_bug_bgra_detection_stale_shift_emitter_loop
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin hitbox_editor`
+EXIT:101

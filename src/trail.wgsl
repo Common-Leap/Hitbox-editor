@@ -12,6 +12,8 @@ struct CameraUniforms {
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var tex_sampler: sampler;
+@group(1) @binding(2) var alpha_tex: texture_2d<f32>;
+@group(1) @binding(3) var alpha_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -38,6 +40,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(tex, tex_sampler, in.uv);
-    return vec4<f32>(in.color.rgb * tex_color.rgb, in.color.a * tex_color.a);
+    let tex_color  = textureSample(tex, tex_sampler, in.uv);
+    let alpha_mask = textureSample(alpha_tex, alpha_sampler, in.uv).a;
+    let final_alpha = tex_color.a * alpha_mask;
+    let result = vec4<f32>(tex_color.rgb, final_alpha) * in.color;
+    if result.a < 0.001 { discard; }
+    // Premultiplied alpha output, consistent with particle.wgsl
+    return vec4<f32>(result.rgb * result.a, result.a);
 }

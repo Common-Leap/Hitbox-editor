@@ -1,0 +1,172 @@
+VFXB version=22 block_offset=0x40
+
+PRMA section at 0xaa3530: prim_count=38160
+
+ESET 'P_SamusAttackBomb' (13 emitters)
+  [0] 'flare1':
+    is_one_time=True timing=0 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [1] 'smokeBomb':
+    is_one_time=True timing=0 dur=1 rate=1.00
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [2] 'smokeLoop':
+    is_one_time=True timing=0 dur=1 rate=1.00
+    emit_type=5
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [3] 'AttackBombFlash1B':
+    is_one_time=True timing=60 dur=1 rate=2.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [4] 'fireBase':
+    is_one_time=True timing=0 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [5] 'fire':
+    is_one_time=True timing=0 dur=2 rate=3.00
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [6] 'debris1':
+    is_one_time=True timing=0 dur=14 rate=1.00
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x02', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [7] 'AttackBombRing':
+    is_one_time=True timing=60 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [8] 'flash1_2':
+    is_one_time=True timing=60 dur=2 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [9] 'impact':
+    is_one_time=True timing=0 dur=2 rate=2.00
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x02', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [10] 'spark1':
+    is_one_time=True timing=60 dur=15 rate=0.80
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [11] 'debris2':
+    is_one_time=True timing=0 dur=5 rate=1.00
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [12] 'flareAdd2_Copy1':
+    is_one_time=True timing=60 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+    CADP: idx=29
+
+ESET 'P_SamusChargeShotBulletBomb' (8 emitters)
+  [0] 'flare1_add':
+    is_one_time=True timing=0 dur=8 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [1] 'ring1_add':
+    is_one_time=True timing=0 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [2] 'ring2_Copy1':
+    is_one_time=True timing=60 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [3] 'impact':
+    is_one_time=True timing=0 dur=2 rate=2.00
+    emit_type=4
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x02', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [4] 'line1':
+    is_one_time=True timing=60 dur=1 rate=10.00
+    emit_type=7
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [5] 'line2':
+    is_one_time=True timing=60 dur=3 rate=3.00
+    emit_type=7
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [6] 'flash1_2':
+    is_one_time=True timing=60 dur=2 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [7] 'flare2':
+    is_one_time=True timing=60 dur=10 rate=1.00
+    emit_type=13
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x01', '0x00', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+    CADP: idx=29
+
+ESET 'P_SamusBombJump' (2 emitters)
+  [0] 'wind1':
+    is_one_time=True timing=60 dur=30 rate=1.00
+    emit_type=10
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x01', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0
+  [1] 'wind2':
+    is_one_time=True timing=60 dur=1 rate=1.00
+    emit_type=0
+    EmitterRenderState raw bytes: ['0x00', '0x00', '0x00', '0x00', '0x01', '0x01', '0x03', '0x00', '0x01', '0x04', '0x00', '0x01', '0x00', '0x00', '0x00', '0x00']
+    mesh_type(u32)=0 mesh_type(u8)=0
+    primitive_index(u16)=257 primitive_index(u32)=196865
+    blend_type=3 display_side=0

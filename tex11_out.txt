@@ -1,0 +1,9 @@
+image_dds not available, using manual BC5 decode
+BRTI[11]: 256x128 fmt=0x1e01 fmt_type=0x1e tile_mode=0 block_h_log2=2
+  data_size=46592 pixel_start=0x25f800 comp_sel=0x03020202
+  A_src=G (3)
+  First 32 bytes of raw pixel data: [255, 0, 73, 146, 36, 73, 146, 36, 255, 0, 73, 146, 36, 73, 146, 36, 255, 0, 73, 146, 36, 73, 146, 36, 255, 0, 73, 146, 36, 73, 146, 36]
+  First BC5 block: R0=255 R1=0 G0=255 G1=0
+  G channel range: [255, 0] -> alpha range [255, 0]
+  If G0=G1=0, alpha is 0 everywhere (transparent)
+  If G0=G1=255, alpha is 255 everywhere (opaque)

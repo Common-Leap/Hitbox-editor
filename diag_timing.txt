@@ -1,0 +1,19 @@
+[DIAG] after spawn: active_emitters=16
+[DIAG]   emitter[0]: set=98 emitter=0 bone='handl' name='flare1_add' one_time=true timing=60 dur=1 lifetime=9
+[DIAG]   emitter[1]: set=98 emitter=1 bone='handl' name='rainbow1_b' one_time=true timing=60 dur=1 lifetime=10
+[DIAG]   emitter[2]: set=98 emitter=2 bone='handl' name='rainbow2_b' one_time=true timing=60 dur=1 lifetime=8
+[DIAG]   emitter[3]: set=98 emitter=3 bone='handl' name='ring1' one_time=true timing=60 dur=1 lifetime=8
+[DIAG]   emitter[4]: set=98 emitter=4 bone='handl' name='flashline2' one_time=true timing=60 dur=1 lifetime=8
+[DIAG]   emitter[5]: set=98 emitter=5 bone='handl' name='flashline1a' one_time=true timing=60 dur=1 lifetime=10
+[DIAG]   emitter[6]: set=98 emitter=6 bone='handl' name='flashline1b' one_time=true timing=60 dur=1 lifetime=10
+[DIAG]   emitter[7]: set=98 emitter=7 bone='handl' name='flashline2_add' one_time=true timing=60 dur=1 lifetime=8
+[DIAG]   emitter[8]: set=98 emitter=8 bone='handl' name='ring1_add' one_time=true timing=60 dur=1 lifetime=8
+[DIAG]   emitter[9]: set=98 emitter=9 bone='handl' name='flare2_add' one_time=true timing=60 dur=1 lifetime=9
+[DIAG]   emitter[10]: set=98 emitter=10 bone='handl' name='rainbow1' one_time=true timing=60 dur=1 lifetime=10
+[DIAG]   emitter[11]: set=98 emitter=11 bone='handl' name='rainbow2' one_time=true timing=60 dur=1 lifetime=8
+[DIAG]   emitter[12]: set=90 emitter=0 bone='top' name='arccylinder1' one_time=true timing=60 dur=1 lifetime=1
+[DIAG]   emitter[13]: set=90 emitter=1 bone='top' name='arccylinder2' one_time=true timing=60 dur=1 lifetime=3
+[DIAG]   emitter[14]: set=90 emitter=2 bone='top' name='arc1' one_time=true timing=60 dur=1 lifetime=6
+[DIAG]   emitter[15]: set=90 emitter=3 bone='top' name='arc2_add' one_time=true timing=60 dur=1 lifetime=6
+[DIAG] after 30 frames: particles=0 active_emitters=16
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.27s

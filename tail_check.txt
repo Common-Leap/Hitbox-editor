@@ -1,0 +1,4 @@
+Last 3 lines:
+'    Finished `dev` profile [optimized + debuginfo] target(s) in 3.01s\n'
+'warning: the following packages contain code that will be rejected by a future version of Rust: quick-xml v0.18.1\n'
+'note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`\n'

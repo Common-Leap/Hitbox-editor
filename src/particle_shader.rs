@@ -71,6 +71,11 @@ pub mod bind_groups {
     pub struct BindGroupLayout1<'a> {
         pub tex: &'a wgpu::TextureView,
         pub tex_sampler: &'a wgpu::Sampler,
+        pub alpha_tex: &'a wgpu::TextureView,
+        pub alpha_sampler: &'a wgpu::Sampler,
+        pub indirect_tex: &'a wgpu::TextureView,
+        pub indirect_sampler: &'a wgpu::Sampler,
+        pub indirect_params: wgpu::BufferBinding<'a>,
     }
     const LAYOUT_DESCRIPTOR1: wgpu::BindGroupLayoutDescriptor = wgpu::BindGroupLayoutDescriptor {
         label: Some("LayoutDescriptor1"),
@@ -91,6 +96,52 @@ pub mod bind_groups {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float {
+                        filterable: true,
+                    },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float {
+                        filterable: true,
+                    },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             },
         ],
@@ -114,6 +165,36 @@ pub mod bind_groups {
                                 binding: 1,
                                 resource: wgpu::BindingResource::Sampler(
                                     bindings.tex_sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    bindings.alpha_tex,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(
+                                    bindings.alpha_sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(
+                                    bindings.indirect_tex,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::Sampler(
+                                    bindings.indirect_sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::Buffer(
+                                    bindings.indirect_params,
                                 ),
                             },
                         ],
@@ -191,12 +272,24 @@ pub const ENTRY_FS_MAIN: &str = "fs_main";
 pub const ENTRY_VS_MAIN: &str = "vs_main";
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, encase::ShaderType)]
+pub struct IndirectParams {
+    pub is_indirect: u32,
+    pub distortion_strength: f32,
+    pub indirect_scroll_u: f32,
+    pub indirect_scroll_v: f32,
+    pub indirect_scale_u: f32,
+    pub indirect_scale_v: f32,
+    pub indirect_offset_u: f32,
+    pub indirect_offset_v: f32,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, encase::ShaderType)]
 pub struct ParticleInstance {
     pub position: glam::Vec3,
     pub size: f32,
     pub color: glam::Vec4,
     pub rotation: f32,
-    pub _pad_rot: f32,
+    pub aspect_ratio: f32,
     pub tex_scale: glam::Vec2,
     pub tex_offset: glam::Vec2,
     pub _pad: f32,

@@ -1,0 +1,289 @@
+   Compiling hitbox_editor v0.1.0 (/home/leap/Workshop/Hitbox editor)
+warning: unused import: `crate::data::EffectScript`
+    --> src/acmd.rs:1145:9
+     |
+1145 |     use crate::data::EffectScript;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src/app.rs:218:15
+    |
+218 | ...   egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBeha...
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src/app.rs:216:33
+    |
+216 |             ui.memory_mut(|m| m.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:222:37
+    |
+222 |                 ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                     ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:227:41
+    |
+227 |                     ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `anim_dt`
+    --> src/app.rs:1773:13
+     |
+1773 |         let anim_dt = {
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anim_dt`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `canonical_bone`
+    --> src/app.rs:1849:33
+     |
+1849 | ...                 let canonical_bone = bone_name_map.get(&ec.bone_na...
+     |                         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_canonical_bone`
+
+warning: unused variable: `set_idx_opt`
+    --> src/app.rs:1862:33
+     |
+1862 | ...                   let set_idx_opt = eff_index.handles.get(&ec.effe...
+     |                           ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_set_idx_opt`
+
+warning: unused variable: `r64`
+   --> src/effects.rs:494:9
+    |
+494 |     let r64 = |off: usize| -> u64 {
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_r64`
+
+warning: unused variable: `scale_from_direct`
+    --> src/effects.rs:2234:25
+     |
+2234 |         let (raw_scale, scale_from_direct) =
+     |                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scale_from_direct`
+
+warning: unused variable: `g`
+    --> src/effects.rs:3422:21
+     |
+3422 |             let (r, g, b, blend, _, _) = name_hint_defaults(name);
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_g`
+
+warning: variable does not need to be mutable
+    --> src/effects.rs:5316:13
+     |
+5316 |         let mut data = vec![0u8; 4096];
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `p`
+    --> src/effects.rs:7622:13
+     |
+7622 |         let p = &ps.particles[0];
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: field `emitter_set_idx` is never read
+   --> src/app.rs:350:5
+    |
+343 | struct ActiveEffect {
+    |        ------------ field in this struct
+...
+350 |     emitter_set_idx: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `param_path` is never read
+   --> src/data.rs:352:9
+    |
+349 | pub struct FighterEntry {
+    |            ------------ field in this struct
+...
+352 |     pub param_path: PathBuf,
+    |         ^^^^^^^^^^
+    |
+    = note: `FighterEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `fetch_acmd_script` is never used
+  --> src/acmd.rs:19:8
+   |
+19 | pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Resu...
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `export_acmd_source` is never used
+    --> src/acmd.rs:1128:8
+     |
+1128 | pub fn export_acmd_source(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `render_settings`, `pending_particles`, and `pending_trails` are never read
+  --> src/renderer.rs:74:9
+   |
+70 | pub struct HitboxRenderState {
+   |            ----------------- fields in this struct
+...
+74 |     pub render_settings: RenderSettings,
+   |         ^^^^^^^^^^^^^^^
+...
+93 |     pub pending_particles: Vec<crate::effects::Particle>,
+   |         ^^^^^^^^^^^^^^^^^
+94 |     pub pending_trails: Vec<crate::effects::SwordTrail>,
+   |         ^^^^^^^^^^^^^^
+
+warning: methods `bone_names` and `bone_world_positions` are never used
+   --> src/renderer.rs:272:12
+    |
+101 | impl HitboxRenderState {
+    | ---------------------- methods in this implementation
+...
+272 |     pub fn bone_names(&self) -> Vec<String> {
+    |            ^^^^^^^^^^
+...
+375 |     pub fn bone_world_positions(&self) -> std::collections::HashMap<Str...
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `merge_from_file` is never used
+  --> src/effects.rs:99:12
+   |
+35 | impl EffIndex {
+   | ------------- method in this implementation
+...
+99 |     pub fn merge_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+   |            ^^^^^^^^^^^^^^^
+
+warning: fields `original_format`, `original_data_size`, and `mipmap_count` are never read
+   --> src/effects.rs:321:9
+    |
+315 | pub struct TextureRes {
+    |            ---------- fields in this struct
+...
+321 |     pub original_format: u32,
+    |         ^^^^^^^^^^^^^^^
+322 |     pub original_data_offset: u32,
+323 |     pub original_data_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+326 |     pub mipmap_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `TextureRes` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `name` is never read
+   --> src/effects.rs:361:9
+    |
+360 | pub struct BfresModel {
+    |            ---------- field in this struct
+361 |     pub name: String,
+    |         ^^^^
+    |
+    = note: `BfresModel` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `texture_section_offset` is never read
+   --> src/effects.rs:371:9
+    |
+367 | pub struct PtclFile {
+    |            -------- field in this struct
+...
+371 |     pub texture_section_offset: usize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PtclFile` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `bntx_surface_format_to_id` is never used
+   --> src/effects.rs:703:4
+    |
+703 | fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bntx_block_dim` is never used
+   --> src/effects.rs:729:4
+    |
+729 | fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::...
+    |    ^^^^^^^^^^^^^^
+
+warning: function `bntx_bytes_per_pixel` is never used
+   --> src/effects.rs:743:4
+    |
+743 | fn bntx_bytes_per_pixel(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `texture_idx` is never read
+    --> src/effects.rs:2677:9
+     |
+2666 | pub struct Particle {
+     |            -------- field in this struct
+...
+2677 |     pub texture_idx: usize,
+     |         ^^^^^^^^^^^
+     |
+     = note: `Particle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `life_t` is never used
+    --> src/effects.rs:2684:12
+     |
+2683 | impl Particle {
+     | ------------- method in this implementation
+2684 |     pub fn life_t(&self) -> f32 {
+     |            ^^^^^^
+
+warning: field `rotation` is never read
+    --> src/effects.rs:2699:5
+     |
+2692 | pub struct EmitterInstance {
+     |            --------------- field in this struct
+...
+2699 |     rotation: Vec3,
+     |     ^^^^^^^^
+     |
+     = note: `EmitterInstance` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `blend_type` is never read
+    --> src/effects.rs:3015:9
+     |
+3008 | pub struct SwordTrail {
+     |            ---------- field in this struct
+...
+3015 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `SwordTrail` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `test_print_samus_handles` is never used
+    --> src/effects.rs:6158:8
+     |
+6158 |     fn test_print_samus_handles() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_eff_handle_values` is never used
+    --> src/effects.rs:6184:8
+     |
+6184 |     fn test_eff_handle_values() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deswizzle_tegra` is never used
+  --> src/particle_renderer.rs:13:4
+   |
+13 | fn deswizzle_tegra(
+   |    ^^^^^^^^^^^^^^^
+
+warning: fields `blit_bind_group_for` and `trail_cam_bgl` are never read
+   --> src/particle_renderer.rs:259:5
+    |
+248 | pub struct ParticleRenderer {
+    |            ---------------- fields in this struct
+...
+259 |     blit_bind_group_for: bool, // unused sentinel, kept for future use
+    |     ^^^^^^^^^^^^^^^^^^^
+...
+266 |     trail_cam_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+
+warning: `hitbox_editor` (bin "hitbox_editor" test) generated 34 warnings (run `cargo fix --bin "hitbox_editor" -p hitbox_editor --tests` to apply 9 suggestions)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 3.38s
+warning: the following packages contain code that will be rejected by a future version of Rust: quick-xml v0.18.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

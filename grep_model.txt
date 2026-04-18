@@ -1,0 +1,30 @@
+/home/leap/Workshop/Hitbox editor/src/effects.rs:384:/// One sub-mesh extracted from a G3PR BFRES model.
+/home/leap/Workshop/Hitbox editor/src/effects.rs:394:/// Parsed G3PR BFRES model — one entry per FMDL in the embedded BFRES file.
+/home/leap/Workshop/Hitbox editor/src/effects.rs:412:    /// G3PR BFRES models (one per FMDL in the embedded BFRES)
+/home/leap/Workshop/Hitbox editor/src/effects.rs:413:    pub bfres_models: Vec<BfresModel>,
+/home/leap/Workshop/Hitbox editor/src/effects.rs:798:/// Parse a G3PR section's embedded BFRES binary into a list of BfresModel entries.
+/home/leap/Workshop/Hitbox editor/src/effects.rs:803:fn parse_g3pr(data: &[u8], bfres_start: usize, bfres_len: usize, bntx_str_names: &[String]) -> Vec<BfresModel> {
+/home/leap/Workshop/Hitbox editor/src/effects.rs:811:        eprintln!("[G3PR] BFRES magic mismatch at offset {:#x}", bfres_start);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:900:    eprintln!("[G3PR] BFRES len={} num_models={} model_arr={:#x}", bfres.len(), num_models, model_arr);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:909:    // SSBU effect BFRES files always have exactly 1 model.
+/home/leap/Workshop/Hitbox editor/src/effects.rs:929:        eprintln!("[G3PR] FMDL[{}]: num_vbufs={} num_shapes={} num_mats={} fvtx={:#x} fshp={:#x} fmat={:#x}",
+/home/leap/Workshop/Hitbox editor/src/effects.rs:961:            eprintln!("[G3PR] FVTX[{}]: num_attribs={} num_buffers={} num_vertices={}", vi, num_attribs, num_buffers, num_vertices);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:979:                    eprintln!("[G3PR]   attrib[{}]: '{}' buf={} off={:#x} fmt={:#06x}", ai, name, buf_idx, attr_off, format);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:992:                    eprintln!("[G3PR]   buf[{}]: data_off={:#x} stride={}", bi, data_off, stride);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1061:                eprintln!("[G3PR] FMAT[{}]: tex_name_arr={:#x} num_tex_refs={}", mat_idx, tex_name_arr, num_tex_refs);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1071:                    eprintln!("[G3PR] FMAT[{}] tex '{}' not found in BNTX names ({} names)", mat_idx, tex_name, bntx_str_names.len());
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1073:                    eprintln!("[G3PR] FMAT[{}] tex '{}' -> bntx_idx={}", mat_idx, tex_name, tex_idx);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1103:            eprintln!("[G3PR] FSHP[{}]: mesh_arr={:#x} ibuf_off={:#x} index_count={} index_fmt={}",
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1132:        eprintln!("[G3PR] parsed model '{}': {} meshes", name, meshes.len());
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1317:        Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1372:        Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1460:        // G3PR sections are also deferred until after all GRTF sections are
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1468:        let mut bfres_models: Vec<BfresModel> = Vec::new();
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1476:        // Deferred G3PR sections: (bin_start, bin_len) — processed after all GRTF
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1602:                b"G3PR" => {
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1607:                        // Defer G3PR parsing until after all GRTF sections are processed
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1611:                        eprintln!("[G3PR] section OOB or empty: bin_start={:#x} len={} file={}", bin_start, bin_len, data.len());
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1653:        // ── Process deferred G3PR sections with the now-complete bntx_map ──────
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1664:                let models = parse_g3pr(data, bin_start, bin_len, &bntx_names_ordered);
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1665:                eprintln!("[G3PR] parsed {} BFRES models", models.len());
+/home/leap/Workshop/Hitbox editor/src/effects.rs:1666:                bfres_models.extend(models);

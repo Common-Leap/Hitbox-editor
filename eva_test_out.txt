@@ -1,0 +1,14 @@
+
+running 8 tests
+test effects::tests::test_eva_bug1_scale_spawn ... ok
+test effects::tests::test_eva_bug1_scale_step ... ok
+test effects::tests::test_eva_bug2_point_emitter_hemisphere ... ok
+test effects::tests::test_eva_bug2_circle_emitter_ring ... ok
+test effects::tests::test_eva_bug3_aspect_ratio_in_shader ... ok
+test effects::tests::test_eva_preservation_square_billboard_shader ... ok
+test effects::tests::test_eva_preservation_non_size_fields_unchanged ... ok
+test effects::tests::test_eva_preservation_sphere_emitter_unchanged ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 108 filtered out; finished in 0.00s
+
+Exit code: 0

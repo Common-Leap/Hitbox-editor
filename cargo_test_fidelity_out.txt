@@ -1,0 +1,165 @@
+   Compiling hitbox_editor v0.1.0 (/home/leap/Workshop/Hitbox editor)
+error: there is no argument named `rate`
+    --> src/effects.rs:6284:13
+     |
+6284 | /             prop_assert_eq!(
+6285 | |                 sys.particles.len(), expected,
+6286 | |                 "rate={rate}: expected {expected} particles, got {}",
+6287 | |                 sys.particles.len()
+6288 | |             );
+     | |_____________^
+     |
+     = note: did you intend to capture a variable `rate` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+     = note: this error originates in the macro `concat` which comes from the expansion of the macro `prop_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: there is no argument named `expected`
+    --> src/effects.rs:6284:13
+     |
+6284 | /             prop_assert_eq!(
+6285 | |                 sys.particles.len(), expected,
+6286 | |                 "rate={rate}: expected {expected} particles, got {}",
+6287 | |                 sys.particles.len()
+6288 | |             );
+     | |_____________^
+     |
+     = note: did you intend to capture a variable `expected` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+     = note: this error originates in the macro `concat` which comes from the expansion of the macro `prop_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: there is no argument named `new_particles`
+    --> src/effects.rs:6352:13
+     |
+6352 | / ...   prop_assert_eq!(
+6353 | | ...       new_particles, 0,
+6354 | | ...       "second step should spawn 0 new particles, got {new_partic...
+6355 | | ...   );
+     | |_______^
+     |
+     = note: did you intend to capture a variable `new_particles` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+     = note: this error originates in the macro `concat` which comes from the expansion of the macro `prop_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: there is no argument named `rate`
+    --> src/effects.rs:6387:13
+     |
+6387 | / ...   prop_assert_eq!(
+6388 | | ...       sys.particles.len(), expected_total,
+6389 | | ...       "rate={rate} steps={steps}: expected {expected_total} part...
+6390 | | ...       sys.particles.len()
+6391 | | ...   );
+     | |_______^
+     |
+     = note: did you intend to capture a variable `rate` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+     = note: this error originates in the macro `concat` which comes from the expansion of the macro `prop_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: there is no argument named `steps`
+    --> src/effects.rs:6387:13
+     |
+6387 | / ...   prop_assert_eq!(
+6388 | | ...       sys.particles.len(), expected_total,
+6389 | | ...       "rate={rate} steps={steps}: expected {expected_total} part...
+6390 | | ...       sys.particles.len()
+6391 | | ...   );
+     | |_______^
+     |
+     = note: did you intend to capture a variable `steps` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+     = note: this error originates in the macro `concat` which comes from the expansion of the macro `prop_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: there is no argument named `expected_total`
+    --> src/effects.rs:6387:13
+     |
+6387 | / ...   prop_assert_eq!(
+6388 | | ...       sys.particles.len(), expected_total,
+6389 | | ...       "rate={rate} steps={steps}: expected {expected_total} part...
+6390 | | ...       sys.particles.len()
+6391 | | ...   );
+     | |_______^
+     |
+     = note: did you intend to capture a variable `expected_total` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+     = note: this error originates in the macro `concat` which comes from the expansion of the macro `prop_assert_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `crate::data::EffectScript`
+    --> src/acmd.rs:1145:9
+     |
+1145 |     use crate::data::EffectScript;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: duplicated attribute
+    --> src/effects.rs:5921:5
+     |
+5921 |     #[test]
+     |     ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+warning: duplicated attribute
+    --> src/effects.rs:5922:1
+     |
+5922 | #[test]
+     | ^^^^^^^
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src/app.rs:218:15
+    |
+218 | ...   egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBeha...
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src/app.rs:216:33
+    |
+216 |             ui.memory_mut(|m| m.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:222:37
+    |
+222 |                 ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                     ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:227:41
+    |
+227 |                     ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `r64`
+   --> src/effects.rs:489:9
+    |
+489 |     let r64 = |off: usize| -> u64 {
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_r64`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scale_from_direct`
+    --> src/effects.rs:2200:25
+     |
+2200 |         let (raw_scale, scale_from_direct) =
+     |                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scale_from_direct`
+
+warning: unused variable: `g`
+    --> src/effects.rs:3319:21
+     |
+3319 |             let (r, g, b, blend, _, _) = name_hint_defaults(name);
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_g`
+
+warning: variable does not need to be mutable
+    --> src/effects.rs:5132:13
+     |
+5132 |         let mut data = vec![0u8; 4096];
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `hitbox_editor` (bin "hitbox_editor" test) generated 11 warnings
+error: could not compile `hitbox_editor` (bin "hitbox_editor" test) due to 6 previous errors; 11 warnings emitted
+DONE:0

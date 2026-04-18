@@ -1,0 +1,700 @@
+   Compiling hitbox_editor v0.1.0 (/home/leap/Workshop/Hitbox editor)
+warning: unused import: `crate::data::EffectScript`
+    --> src/acmd.rs:1145:9
+     |
+1145 |     use crate::data::EffectScript;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: duplicated attribute
+    --> src/effects.rs:6032:1
+     |
+6032 | #[test]
+     | ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src/app.rs:218:15
+    |
+218 | ...   egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBeha...
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src/app.rs:216:33
+    |
+216 |             ui.memory_mut(|m| m.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:222:37
+    |
+222 |                 ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                     ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:227:41
+    |
+227 |                     ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `anim_dt`
+    --> src/app.rs:1768:13
+     |
+1768 |         let anim_dt = {
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anim_dt`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `canonical_bone`
+    --> src/app.rs:1844:33
+     |
+1844 | ...                 let canonical_bone = bone_name_map.get(&ec.bone_na...
+     |                         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_canonical_bone`
+
+warning: unused variable: `set_idx_opt`
+    --> src/app.rs:1857:33
+     |
+1857 | ...                   let set_idx_opt = eff_index.handles.get(&ec.effe...
+     |                           ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_set_idx_opt`
+
+warning: unused variable: `r64`
+   --> src/effects.rs:494:9
+    |
+494 |     let r64 = |off: usize| -> u64 {
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_r64`
+
+warning: unused variable: `scale_from_direct`
+    --> src/effects.rs:2233:25
+     |
+2233 |         let (raw_scale, scale_from_direct) =
+     |                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scale_from_direct`
+
+warning: unused variable: `g`
+    --> src/effects.rs:3430:21
+     |
+3430 |             let (r, g, b, blend, _, _) = name_hint_defaults(name);
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_g`
+
+warning: variable does not need to be mutable
+    --> src/effects.rs:5243:13
+     |
+5243 |         let mut data = vec![0u8; 4096];
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `p`
+    --> src/effects.rs:7550:13
+     |
+7550 |         let p = &ps.particles[0];
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: field `emitter_set_idx` is never read
+   --> src/app.rs:350:5
+    |
+343 | struct ActiveEffect {
+    |        ------------ field in this struct
+...
+350 |     emitter_set_idx: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `param_path` is never read
+   --> src/data.rs:352:9
+    |
+349 | pub struct FighterEntry {
+    |            ------------ field in this struct
+...
+352 |     pub param_path: PathBuf,
+    |         ^^^^^^^^^^
+    |
+    = note: `FighterEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `fetch_acmd_script` is never used
+  --> src/acmd.rs:19:8
+   |
+19 | pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Resu...
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `export_acmd_source` is never used
+    --> src/acmd.rs:1128:8
+     |
+1128 | pub fn export_acmd_source(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `render_settings`, `pending_particles`, and `pending_trails` are never read
+  --> src/renderer.rs:74:9
+   |
+70 | pub struct HitboxRenderState {
+   |            ----------------- fields in this struct
+...
+74 |     pub render_settings: RenderSettings,
+   |         ^^^^^^^^^^^^^^^
+...
+93 |     pub pending_particles: Vec<crate::effects::Particle>,
+   |         ^^^^^^^^^^^^^^^^^
+94 |     pub pending_trails: Vec<crate::effects::SwordTrail>,
+   |         ^^^^^^^^^^^^^^
+
+warning: methods `bone_names` and `bone_world_positions` are never used
+   --> src/renderer.rs:272:12
+    |
+101 | impl HitboxRenderState {
+    | ---------------------- methods in this implementation
+...
+272 |     pub fn bone_names(&self) -> Vec<String> {
+    |            ^^^^^^^^^^
+...
+375 |     pub fn bone_world_positions(&self) -> std::collections::HashMap<Str...
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `merge_from_file` is never used
+  --> src/effects.rs:99:12
+   |
+35 | impl EffIndex {
+   | ------------- method in this implementation
+...
+99 |     pub fn merge_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+   |            ^^^^^^^^^^^^^^^
+
+warning: fields `original_format`, `original_data_size`, and `mipmap_count` are never read
+   --> src/effects.rs:321:9
+    |
+315 | pub struct TextureRes {
+    |            ---------- fields in this struct
+...
+321 |     pub original_format: u32,
+    |         ^^^^^^^^^^^^^^^
+322 |     pub original_data_offset: u32,
+323 |     pub original_data_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+326 |     pub mipmap_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `TextureRes` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `name` is never read
+   --> src/effects.rs:361:9
+    |
+360 | pub struct BfresModel {
+    |            ---------- field in this struct
+361 |     pub name: String,
+    |         ^^^^
+    |
+    = note: `BfresModel` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `texture_section_offset` is never read
+   --> src/effects.rs:371:9
+    |
+367 | pub struct PtclFile {
+    |            -------- field in this struct
+...
+371 |     pub texture_section_offset: usize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PtclFile` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `bntx_surface_format_to_id` is never used
+   --> src/effects.rs:703:4
+    |
+703 | fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bntx_block_dim` is never used
+   --> src/effects.rs:729:4
+    |
+729 | fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::...
+    |    ^^^^^^^^^^^^^^
+
+warning: function `bntx_bytes_per_pixel` is never used
+   --> src/effects.rs:743:4
+    |
+743 | fn bntx_bytes_per_pixel(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `texture_idx` is never read
+    --> src/effects.rs:2676:9
+     |
+2665 | pub struct Particle {
+     |            -------- field in this struct
+...
+2676 |     pub texture_idx: usize,
+     |         ^^^^^^^^^^^
+     |
+     = note: `Particle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `life_t` is never used
+    --> src/effects.rs:2683:12
+     |
+2682 | impl Particle {
+     | ------------- method in this implementation
+2683 |     pub fn life_t(&self) -> f32 {
+     |            ^^^^^^
+
+warning: field `rotation` is never read
+    --> src/effects.rs:2698:5
+     |
+2691 | pub struct EmitterInstance {
+     |            --------------- field in this struct
+...
+2698 |     rotation: Vec3,
+     |     ^^^^^^^^
+     |
+     = note: `EmitterInstance` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `blend_type` is never read
+    --> src/effects.rs:3023:9
+     |
+3016 | pub struct SwordTrail {
+     |            ---------- field in this struct
+...
+3023 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `SwordTrail` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `test_print_samus_handles` is never used
+    --> src/effects.rs:6086:8
+     |
+6086 |     fn test_print_samus_handles() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_eff_handle_values` is never used
+    --> src/effects.rs:6112:8
+     |
+6112 |     fn test_eff_handle_values() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deswizzle_tegra` is never used
+  --> src/particle_renderer.rs:13:4
+   |
+13 | fn deswizzle_tegra(
+   |    ^^^^^^^^^^^^^^^
+
+warning: fields `blit_bind_group_for` and `trail_cam_bgl` are never read
+   --> src/particle_renderer.rs:259:5
+    |
+248 | pub struct ParticleRenderer {
+    |            ---------------- fields in this struct
+...
+259 |     blit_bind_group_for: bool, // unused sentinel, kept for future use
+    |     ^^^^^^^^^^^^^^^^^^^
+...
+266 |     trail_cam_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+
+warning: `hitbox_editor` (bin "hitbox_editor" test) generated 35 warnings (run `cargo fix --bin "hitbox_editor" -p hitbox_editor --tests` to apply 9 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.94s
+warning: the following packages contain code that will be rejected by a future version of Rust: quick-xml v0.18.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/main.rs (target/debug/deps/hitbox_editor-a6f911c62be0ffcf)
+
+running 44 tests
+test acmd::tests::test_preservation_frame_call_advances_counter ... ok
+test acmd::tests::test_preservation_for_loop_with_is_excute_unchanged ... ok
+test acmd::tests::test_preservation_is_excute_wrapped_effect_unchanged ... ok
+test acmd::tests::test_preservation_non_effect_bare_line_stays_raw ... ok
+test effects::tests::test_preservation_alpha_key_unchanged ... ok
+test effects::tests::test_preservation_bc_format_ids_unchanged ... ok
+test effects::tests::test_preservation_edc_identity_uv ... FAILED
+test effects::tests::test_preservation_color_key_identity ... ok
+test effects::tests::test_preservation_edc_zero_randomization ... ok
+test effects::preservation_tests::test_preservation_empty_color1 ... ok
+test effects::tests::test_preservation_edc_version_branches ... ok
+test effects::tests::test_preservation_edc_zero_rotation ... ok
+test effects::tests::test_preservation_eftf_magic_takes_eftf_path ... ok
+test effects::tests::test_preservation_empty_color1 ... ok
+test effects::tests::test_preservation_empty_color_slot ... ok
+test effects::tests::test_preservation_etmm_grtf_before_g3pr_correct_texture_index ... ok
+test effects::preservation_tests::test_preservation_zero_lifetime_random ... ok
+test effects::tests::test_preservation_etmm_single_sampler_a0_resolves_correctly ... ok
+test effects::tests::test_preservation_gtnt_direct_parse ... ok
+test effects::preservation_tests::test_preservation_zero_scale_random ... ok
+test effects::tests::test_preservation_identity_uv ... ok
+test effects::tests::test_preservation_sampler_offset_v22 ... ok
+test effects::tests::test_preservation_sampler_offset_v37 ... ok
+test effects::preservation_tests::test_preservation_zero_scale_random_strict ... ok
+test effects::tests::test_preservation_str_aligned_still_works ... ok
+test effects::tests::test_preservation_subsequent_field_offsets ... ok
+test effects::tests::test_preservation_synthetic_produces_valid_emitters ... ok
+test effects::preservation_tests::test_preservation_zero_emission_rate_random ... ok
+test effects::tests::test_preservation_v22_walk_scale_x ... ok
+test effects::tests::test_preservation_v22_walk_scale_y ... ok
+test effects::tests::test_preservation_zero_sentinel_stops_at_second_key ... ok
+test effects::tests::test_preservation_zero_scroll ... ok
+test particle_renderer::tests::test_preservation_bc1_bc7_formats_unchanged ... ok
+test particle_renderer::tests::test_preservation_etmm_billboard_only_ptcl_tex_cache_from_emitters ... ok
+test particle_renderer::tests::test_preservation_etmm_fallback_to_white_when_tex_idx_max ... ok
+test particle_renderer::tests::test_preservation_non_srgb_uses_unorm ... ok
+test particle_renderer::tests::test_preservation_tbs_both_bytes_4_is_bgra ... ok
+test particle_renderer::tests::test_preservation_tbs_fmt_type_0c_always_bgra ... ok
+test particle_renderer::tests::test_preservation_tbs_zero_swizzle_is_not_bgra ... ok
+test particle_renderer::tests::test_preservation_tbs_fmt_type_0c_pbt ... ok
+test particle_renderer::tests::test_preservation_tbs_r_src_not_4_pbt ... ok
+test effects::tests::test_preservation_default_fallback ... ok
+test effects::preservation_tests::test_preservation_burst_emitter ... ok
+test effects::tests::test_preservation_edc_downstream_fields_pbt ... FAILED
+
+failures:
+
+---- effects::tests::test_preservation_edc_identity_uv stdout ----
+[EMTR] '' v=35 one_time=false dur=0 life=20 scale=10.000 rate=8.00 speed=3.000 blend=Normal c0keys=0 a0keys=0 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=1.000 g=1.000 b=1.000 a=1.000
+
+thread 'effects::tests::test_preservation_edc_identity_uv' (178875) panicked at src/effects.rs:5804:9:
+assertion `left == right` failed: edc_identity_uv: tex_offset_uv should be [0.0, 0.0], got [1.0, 1.0]
+  left: [1.0, 1.0]
+ right: [0.0, 0.0]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- effects::tests::test_preservation_edc_downstream_fields_pbt stdout ----
+[EMTR] TextureID 0x57dcf39afdbbcd28 not found in GTNT map
+[EMTR] TextureID 0xcc2a28b80461ef09 not found in GTNT map
+[EMTR] TextureID 0x973be95e2fc898ed not found in GTNT map
+[EMTR] 'aX�J��m>g��h����;�տ�f�����6;S\Mrmä����]�����[�^-8�H4x�O��' v=35 one_time=true dur=941326077 life=295661860 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(7) c0keys=3218448699 a0keys=3905185468 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.007) walk_scale=(-186943122918995853953728512.000,-0.000)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0xfb3e9b446933bd60 not found in GTNT map
+[EMTR] TextureID 0xbdd72b84fb13f133 not found in GTNT map
+[EMTR] TextureID 0xd1b51c3b890ccc1e not found in GTNT map
+[EMTR] '�`��;�hi����`5��;y�r��=���>h)���,��'�����}G�>���h���;�%/�' v=35 one_time=true dur=3918976172 life=2402267000 scale=10.000 rate=0.00 speed=4326003227947514433960134311936.000 blend=Unknown(143) c0keys=1002158111 a0keys=3463641465 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,-20942254.000) walk_scale=(-6.091,130816844046008320.000)
+[EMTR]   color0[0]: r=3982976445532676238861696233373696.000 g=33020381757440.000 b=0.000 a=1.000
+[EMTR] TextureID 0x4e1b96dbb20e48f0 not found in GTNT map
+[EMTR] TextureID 0x7319b7fc01022403 not found in GTNT map
+[EMTR] TextureID 0xc3f9e0a69066daa7 not found in GTNT map
+[EMTR] '#��*��rl��qT��h=�d��>�]f� ��n�@�3�'��G�t8d�yʠ��D�9'�,��Z�^' v=35 one_time=true dur=2702092986 life=2743444200 scale=265.484 rate=8.00 speed=79.645 blend=Unknown(230) c0keys=1689337192 a0keys=71223494 tex_resolved=0 tex_idx=0 | direct_scale=(265.484,-176.858) walk_scale=(448413.750,0.000)
+[EMTR]   color0[0]: r=-348717856.000 g=-0.000 b=1.601 a=1.000
+[EMTR] TextureID 0x37e3dd247a2d2ce1 not found in GTNT map
+[EMTR] TextureID 0x31f2652358e5b82d not found in GTNT map
+[EMTR] TextureID 0xe60fe9c2b5ac7234 not found in GTNT map
+[EMTR] 'Es�Q}dR@�`}�;��)[�e���C�K�jp��4(Hw'=�̗�~��JcL���	�3�&5��Tn' v=35 one_time=true dur=1963910307 life=1622206800 scale=12655793152.000 rate=8.00 speed=3796738048.000 blend=Unknown(143) c0keys=39528872 a0keys=2443011535 tex_resolved=0 tex_idx=0 | direct_scale=(12655793152.000,0.000) walk_scale=(-5218892251136.000,-940323.438)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=1.000 a=1.000
+[EMTR] TextureID 0x73818cb551625b55 not found in GTNT map
+[EMTR] TextureID 0xb41fc4284f6e834f not found in GTNT map
+[EMTR] TextureID 0xd2b473ea52ef18fb not found in GTNT map
+[EMTR] 'XC��p߮h�E�
+8\��OV�Q$چڝ��W�HqJp%�23��#/�_O�:�;
+m�ys�zW' v=35 one_time=true dur=4061079234 life=1352270600 scale=10.000 rate=8.00 speed=3.000 blend=Unknown(155) c0keys=3768648540 a0keys=3545648907 tex_resolved=0 tex_idx=0 | direct_scale=(NaN,-0.000) walk_scale=(0.000,877533355548082176.000)
+[EMTR]   color0[0]: r=-0.000 g=-0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x1d4e103c4327f57d not found in GTNT map
+[EMTR] TextureID 0x1f3f4c4cb49949cb not found in GTNT map
+[EMTR] TextureID 0x6a6b4ce63273f3ba not found in GTNT map
+[EMTR] 'D�I��[K�Gʕa|�a`PoY�/���$�7��vH{�e�YXț��d���' v=35 one_time=true dur=3285960591 life=29015656 scale=778980545725932645562449920.000 rate=4766016201714524882464669696.00 speed=233694182164523867378286592.000 blend=Unknown(121) c0keys=1863077984 a0keys=3895446105 tex_resolved=0 tex_idx=0 | direct_scale=(-934425304788498773895112919351296.000,778980545725932645562449920.000) walk_scale=(-0.000,0.008)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=1.000 a=1.000
+[EMTR] TextureID 0xc0210a01109f3527 not found in GTNT map
+[EMTR] TextureID 0xebfe51c6051460e3 not found in GTNT map
+[EMTR] TextureID 0xb97005b5abded267 not found in GTNT map
+[EMTR] '����b���V5ඕ���΀s8��-�P�� LT$ܙ���ޮ#κ5����8'N����Ҵ�_��' v=35 one_time=true dur=4101817947 life=1530742300 scale=38205965467648.000 rate=8.00 speed=11461790269440.000 blend=Unknown(255) c0keys=494108878 a0keys=311212344 tex_resolved=0 tex_idx=0 | direct_scale=(38205965467648.000,0.000) walk_scale=(0.000,244757264529118894640600044273664.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0xc2e1fc348583371d not found in GTNT map
+[EMTR] TextureID 0x4c9d75e5e968de14 not found in GTNT map
+[EMTR] TextureID 0x658412b7b2631bf0 not found in GTNT map
+[EMTR] '(BPɏ�[�vn߇�|�ܮ큾�H���-�:ƈt&�7X�x�Y���ar$����K�i�h�o�' v=35 one_time=true dur=1397600680 life=924577500 scale=10.000 rate=0.00 speed=769705281004240896.000 blend=Unknown(73) c0keys=3987659999 a0keys=1218100865 tex_resolved=0 tex_idx=0 | direct_scale=(-0.073,-0.000) walk_scale=(1065939.500,NaN)
+[EMTR]   color0[0]: r=-0.000 g=-2193397741747437568.000 b=-92807888896.000 a=1.000
+[EMTR] TextureID 0xd4d4233087d52cbe not found in GTNT map
+[EMTR] TextureID 0x0452e424960513c8 not found in GTNT map
+[EMTR] TextureID 0xc7603d6a29c60026 not found in GTNT map
+[EMTR] '��"�3+.�z*_:' v=35 one_time=true dur=2095823032 life=423088670 scale=0.000 rate=903686272.00 speed=0.000 blend=Unknown(78) c0keys=2514534412 a0keys=750072787 tex_resolved=0 tex_idx=0 | direct_scale=(-19628034.000,0.000) walk_scale=(-0.000,0.000)
+[EMTR]   color0[0]: r=1.000 g=1.000 b=0.000 a=1.000
+[EMTR] TextureID 0x31aa0b1f42a91970 not found in GTNT map
+[EMTR] TextureID 0x86ed8eea87ef0401 not found in GTNT map
+[EMTR] TextureID 0x937454d0423c3117 not found in GTNT map
+[EMTR] '�̊
+C����	�K�UTp3�f�Z�} �B���u������S��r&������/�Z' v=35 one_time=true dur=385567997 life=3048046300 scale=10.000 rate=8.00 speed=3.000 blend=Unknown(211) c0keys=4097011796 a0keys=2861559570 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,-9880797305891939401557082917306368.000) walk_scale=(-3971003738288083855269167104.000,-0.007)
+[EMTR]   color0[0]: r=0.000 g=1.000 b=0.000 a=1.000
+[EMTR] TextureID 0x2fd570d37b6abb21 not found in GTNT map
+[EMTR] TextureID 0xfb7eed5eeb94e7da not found in GTNT map
+[EMTR] TextureID 0x991d45151b5256e2 not found in GTNT map
+[EMTR] '
+�q�k4؂�'�6}�JNk���X��q�uA�mi\' v=35 one_time=true dur=99577628 life=1386385500 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(24) c0keys=504254026 a0keys=3739068779 tex_resolved=0 tex_idx=0 | direct_scale=(-785410267545600.000,0.000) walk_scale=(70326297931320018170019840.000,-708377564231700830437102321664.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0xa969e06fd466effd not found in GTNT map
+[EMTR] TextureID 0xf9648e8e5573b860 not found in GTNT map
+[EMTR] TextureID 0x58c598361fc3dcf2 not found in GTNT map
+[EMTR] '�E.�9�V�%��=�r��e2�Z"' v=35 one_time=true dur=4015135573 life=191333420 scale=184096145408.000 rate=0.00 speed=55228846080.000 blend=Unknown(175) c0keys=335185778 a0keys=1518678629 tex_resolved=0 tex_idx=0 | direct_scale=(-112223837700921732884030554112.000,184096145408.000) walk_scale=(-0.000,0.000)
+[EMTR]   color0[0]: r=15908699.000 g=-179314540544.000 b=908524498452480.000 a=1.000
+[EMTR] TextureID 0xd6728ab6595d2b43 not found in GTNT map
+[EMTR] TextureID 0x2a6c22db038fb2d9 not found in GTNT map
+[EMTR] TextureID 0xfd85bf7b3a6e7959 not found in GTNT map
+[EMTR] '�>ELm�CWWMµ$Cl��>��@���ݓa���;��(	:�Z�i7X�����2Q<ʺX�5' v=35 one_time=true dur=2655154280 life=1567089200 scale=0.000 rate=8.00 speed=578.087 blend=Unknown(87) c0keys=4134290303 a0keys=3957014163 tex_resolved=0 tex_idx=0 | direct_scale=(-5610342014031820327223296.000,0.000) walk_scale=(29923.146,0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x6392292a919b153a not found in GTNT map
+[EMTR] TextureID 0x3d01d493997ad582 not found in GTNT map
+[EMTR] TextureID 0x13dda31e5c26cb20 not found in GTNT map
+[EMTR] 'Mz��	���XF�<�{��5�' v=35 one_time=true dur=82658391 life=3201107000 scale=6319.490 rate=8.00 speed=0.195 blend=Unknown(104) c0keys=3962941844 a0keys=2420038912 tex_resolved=0 tex_idx=0 | direct_scale=(6319.490,-0.000) walk_scale=(-0.000,-0.000)
+[EMTR]   color0[0]: r=-9509360508797452288.000 g=202640822510376765930602496.000 b=0.000 a=1.000
+[EMTR] TextureID 0x1f7eb7f5452bd3f5 not found in GTNT map
+[EMTR] TextureID 0x4f312ac9eba54403 not found in GTNT map
+[EMTR] TextureID 0xb0bdfffcdceff681 not found in GTNT map
+[EMTR] '*������fw?�K�j�p�^j��z~i��4�6s��p�+�ڢP	V>�_��鷺P�� �' v=35 one_time=true dur=3121634963 life=3065621500 scale=0.000 rate=12931258501225190923486363648.00 speed=343767.438 blend=Unknown(26) c0keys=4234849355 a0keys=1578215536 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=-0.008 b=-0.000 a=1.000
+[EMTR] TextureID 0x902ae05eafda2022 not found in GTNT map
+[EMTR] TextureID 0xb625aabae823563f not found in GTNT map
+[EMTR] TextureID 0x99eeb2a431c63079 not found in GTNT map
+[EMTR] 'F��1*Eْ�%�g�.��i��s-�
+󵞭�t�	.uz�<to��)��4m;�k��.�I��-��' v=35 one_time=true dur=2452570704 life=4244655900 scale=348588603520149618688.000 rate=0.00 speed=67738556426886710296576.000 blend=Unknown(253) c0keys=3639503301 a0keys=176237939 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,348588603520149618688.000) walk_scale=(945213.875,-2127920605381888490508640953013633024.000)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x86525f9cb5587622 not found in GTNT map
+[EMTR] TextureID 0xad37f07df7abdc5e not found in GTNT map
+[EMTR] TextureID 0xac2d7d25b372f357 not found in GTNT map
+[EMTR] 'FsW�)4���Rz���`U�g�Cs"��Mv/wlx6����M?/2��<�XYw�{iYZ' v=35 one_time=true dur=3396709923 life=113282060 scale=31537966.000 rate=588254412800.00 speed=0.000 blend=Unknown(237) c0keys=1739412832 a0keys=577979298 tex_resolved=0 tex_idx=0 | direct_scale=(31537966.000,-337537.375) walk_scale=(-15816666686637652476884590398957158400.000,175622725015841776318021632.000)
+[EMTR]   color0[0]: r=-12875712223505759352494632975672016896.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x7317aa91c9ed3e6a not found in GTNT map
+[EMTR] TextureID 0xa8b7220c1bed4bbe not found in GTNT map
+[EMTR] TextureID 0xa82137af1d1df17a not found in GTNT map
+[EMTR] '�l�ՏՅ#��L|]�0��D<k��b~�d�8���0~I���)�A{ZT2a�CM�|0��' v=35 one_time=true dur=2619723070 life=1219120400 scale=16.355 rate=0.00 speed=4.906 blend=Unknown(187) c0keys=818306311 a0keys=1156908933 tex_resolved=0 tex_idx=0 | direct_scale=(16.355,0.000) walk_scale=(2468045967723584987741552640.000,8244.629)
+[EMTR]   color0[0]: r=-0.000 g=-474020877172736.000 b=-0.000 a=1.000
+[EMTR] TextureID 0xb38c5ba6092542d8 not found in GTNT map
+[EMTR] TextureID 0xe58b8cb0ed3041bc not found in GTNT map
+[EMTR] TextureID 0x0123ab0ef405fb2f not found in GTNT map
+[EMTR] '�2�o6��نu�� 5+��P�R>���ҏ��_����`�U�6����zG�oI�%4�M�XM|dt' v=35 one_time=true dur=163562123 life=642614700 scale=0.000 rate=8.00 speed=951277414729731676997201844789837824.000 blend=Unknown(100) c0keys=2656090560 a0keys=3237232210 tex_resolved=0 tex_idx=0 | direct_scale=(-10175235154535770673040465118363648.000,-0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x81f2b6c26978d06d not found in GTNT map
+[EMTR] TextureID 0xf1396ce6f4bc873c not found in GTNT map
+[EMTR] TextureID 0x86eb9743ab3d50f8 not found in GTNT map
+[EMTR] 'M/�=#o���x�?<�u6-�X���<m�O�x*�2���yI�]M���E��oPϡ�80@' v=35 one_time=true dur=332777200 life=690994900 scale=0.000 rate=0.00 speed=0.000 blend=Unknown(194) c0keys=2636977206 a0keys=2981599576 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,-0.000) walk_scale=(-2069454208.000,-10.105)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x605614c907d8e998 not found in GTNT map
+[EMTR] TextureID 0x4a184c12b1a3e3a2 not found in GTNT map
+[EMTR] TextureID 0xcfe2701dd1b2e75c not found in GTNT map
+[EMTR] '<;��b�UvkҪ�' v=35 one_time=true dur=4110941898 life=652937150 scale=10.000 rate=8.00 speed=0.873 blend=Unknown(138) c0keys=479381936 a0keys=551141539 tex_resolved=0 tex_idx=0 | direct_scale=(-14141752530199117824.000,-27061819868952712687714918817857536.000) walk_scale=(-3691528323072.000,-0.000)
+[EMTR]   color0[0]: r=-415794017389341810803624378368.000 g=-4718564092407219611240497152.000 b=27660537189552694003867131257552896.000 a=1.000
+[EMTR] TextureID 0xa0fa37c49bedaa21 not found in GTNT map
+[EMTR] TextureID 0xcc259b351f155bd3 not found in GTNT map
+[EMTR] TextureID 0x1d9f59f39a17692f not found in GTNT map
+[EMTR] '+֚����p�T�YR������[jQr�T�����5��Ӄ�m���uvj:^�D���
+Ї�' v=35 one_time=true dur=934191746 life=4117308000 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(120) c0keys=2327449321 a0keys=3802864661 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=-0.033 g=29888536903680.000 b=3589957.500 a=1.000
+[EMTR] TextureID 0x5e1127ac194423e6 not found in GTNT map
+[EMTR] TextureID 0xc6f4341aa35b9c5b not found in GTNT map
+[EMTR] TextureID 0x402ca1da09be0347 not found in GTNT map
+[EMTR] '<�j/����!u�,kԆ��S��+��Ͼ' v=35 one_time=true dur=102745852 life=4232804400 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(150) c0keys=2324092011 a0keys=84104069 tex_resolved=0 tex_idx=0 | direct_scale=(-0.013,-28166883091546558317432143872.000) walk_scale=(0.000,-0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x212a4b37ef0a3164 not found in GTNT map
+[EMTR] TextureID 0xe1bd125573080c35 not found in GTNT map
+[EMTR] TextureID 0x36665e22386e5b2a not found in GTNT map
+[EMTR] '��s�F��2�ޢ}W�BL×�`l�ZA��T��gؕ,�78�qn�˺��%~��}g��JFOv' v=35 one_time=true dur=1094495317 life=946816100 scale=0.000 rate=0.00 speed=0.000 blend=Unknown(222) c0keys=2546158614 a0keys=1813471409 tex_resolved=0 tex_idx=0 | direct_scale=(-71455220221886969019367424.000,-1071328457092285998301184.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=-0.000 g=-1919061046963377004347392.000 b=23327341019136.000 a=1.000
+[EMTR] TextureID 0x465befda80bbe8ce not found in GTNT map
+[EMTR] TextureID 0x84f8ab3759a343c8 not found in GTNT map
+[EMTR] TextureID 0x8accc23cebc60c2c not found in GTNT map
+[EMTR] '��q���+�X��\�uUU�0<����⢀݄�'ϗ�a�-�z>�/���*N��I�70�' v=35 one_time=true dur=3640197110 life=188882560 scale=4035629182715544207360.000 rate=0.00 speed=1210688754814663262208.000 blend=Unknown(225) c0keys=91593446 a0keys=815813973 tex_resolved=0 tex_idx=0 | direct_scale=(4035629182715544207360.000,-0.000) walk_scale=(0.013,402499625280635286570808792361992192.000)
+[EMTR]   color0[0]: r=-143870618380058896296960443275018240.000 g=0.005 b=-0.000 a=1.000
+[EMTR] TextureID 0xb4a59fcf71748436 not found in GTNT map
+[EMTR] TextureID 0x40d2fb494e5a5717 not found in GTNT map
+[EMTR] TextureID 0x1290ed006dadf0bf not found in GTNT map
+[EMTR] 'J��K0'���;�ȿ�����"~��_�M�0�M,���HL2�[`�X�N�p��h�F�׏_E]!N��' v=35 one_time=true dur=1036067195 life=490994780 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(181) c0keys=586990358 a0keys=1609797246 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,-0.002) walk_scale=(-0.000,0.000)
+[EMTR]   color0[0]: r=-2097185400230582815372147691618304.000 g=-12519383215541588066304.000 b=485422632632582144.000 a=1.000
+[EMTR] TextureID 0xcc3aa1dc4fa67fa1 not found in GTNT map
+[EMTR] TextureID 0x42b524f539e5351c not found in GTNT map
+[EMTR] TextureID 0x0a5e17fee404bb60 not found in GTNT map
+[EMTR] '���D*U��d�h=\F�^|�;�!7��M_��G��@��J�ķ��J�)�S��+=�w���' v=35 one_time=true dur=718287488 life=4096573200 scale=37276160.000 rate=8.00 speed=11182848.000 blend=Unknown(238) c0keys=2086573382 a0keys=4080732390 tex_resolved=0 tex_idx=0 | direct_scale=(-96368.516,37276160.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=-0.000 g=-0.000 b=-0.007 a=1.000
+[EMTR] TextureID 0xf9ac1ae1446cac99 not found in GTNT map
+[EMTR] TextureID 0x44d56e36501efc97 not found in GTNT map
+[EMTR] TextureID 0x56d06a38790867ce not found in GTNT map
+[EMTR] '�l�l[0�"oU���v����Ժ��\}\S����h봦s�u40ZS;JD5?�[xЈ��' v=35 one_time=true dur=222403631 life=3530311400 scale=1.652 rate=8.00 speed=0.496 blend=Unknown(69) c0keys=1996152227 a0keys=3584067982 tex_resolved=0 tex_idx=0 | direct_scale=(-98793138390302720.000,-0.000) walk_scale=(1.652,-8547015247863187456917504.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x05de6f30e02d0f38 not found in GTNT map
+[EMTR] TextureID 0x406325beb5cca7fd not found in GTNT map
+[EMTR] TextureID 0xdab16c5cb9e79090 not found in GTNT map
+[EMTR] 'Ѣ�������������:��amDf~��
+*���1��QJ֡����S��Y�iMٴZ�' v=35 one_time=true dur=3527932815 life=439464100 scale=0.000 rate=0.00 speed=459562742185984.000 blend=Unknown(79) c0keys=3862612204 a0keys=1638662786 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(0.000,-0.000)
+[EMTR]   color0[0]: r=-0.000 g=197192040448.000 b=-54155.461 a=1.000
+[EMTR] TextureID 0x5fa47c00f0371d82 not found in GTNT map
+[EMTR] TextureID 0xd3ea95743f00b23a not found in GTNT map
+[EMTR] TextureID 0x75f2fde465bcbc89 not found in GTNT map
+[EMTR] '$��m���7�"�}������[I��C?�%Q�Mv\9n�=^Y��'	U��P��c�G�����B' v=35 one_time=true dur=1384091700 life=3665592800 scale=10.000 rate=8.00 speed=0.000 blend=Unknown(166) c0keys=3296983764 a0keys=122248143 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,-0.000) walk_scale=(-7135465153293378081676076957357309952.000,-0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x52c9ab9073f3da9f not found in GTNT map
+[EMTR] TextureID 0x7c2352cdd70f105b not found in GTNT map
+[EMTR] TextureID 0x136dfd5748f2d813 not found in GTNT map
+[EMTR] 'Y��Nd^ܝ��2��]�z	8:n���9fO�|;�w��6�Ԫ�ሗ�z�{G/��[��HA2�' v=35 one_time=true dur=3603918598 life=1857846900 scale=327156013989888.000 rate=8.00 speed=98146805874688.000 blend=Unknown(97) c0keys=940145380 a0keys=2375904826 tex_resolved=0 tex_idx=0 | direct_scale=(327156013989888.000,0.000) walk_scale=(9866264261361634639872.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x918a976c4bffe5fd not found in GTNT map
+[EMTR] TextureID 0x52c5ea2081e90442 not found in GTNT map
+[EMTR] TextureID 0x414d9b3ee84f9f7a not found in GTNT map
+[EMTR] '����ߋ��ɮ�_��l����59���c�;Hj'���$�޼0����'��Q����>^ġ' v=35 one_time=true dur=1983917557 life=2542381600 scale=10.000 rate=8.00 speed=3.000 blend=Unknown(219) c0keys=3305613932 a0keys=903739654 tex_resolved=0 tex_idx=0 | direct_scale=(-19608232410017009467758287830122496.000,-0.966) walk_scale=(-0.006,286115299328.000)
+[EMTR]   color0[0]: r=1165427414282150011088684245982380032.000 g=-0.000 b=-430033010145285953923445686272.000 a=1.000
+[EMTR] TextureID 0x04f74f820c75ea72 not found in GTNT map
+[EMTR] TextureID 0xbcf41d26b7213c0a not found in GTNT map
+[EMTR] TextureID 0x60825cda01272f1d not found in GTNT map
+[EMTR] 'A��ӊu������{])�V�5jr�H���H�]�}h��R]��!&Z<���$>�EO��	��' v=35 one_time=true dur=3295899927 life=3165285400 scale=1794280660688059185498592930430976.000 rate=8.00 speed=538284221417793492250458033487872.000 blend=Unknown(149) c0keys=903894767 a0keys=1219588714 tex_resolved=0 tex_idx=0 | direct_scale=(1794280660688059185498592930430976.000,-0.410) walk_scale=(41926482901073920.000,-0.000)
+[EMTR]   color0[0]: r=-43363015930439931690005507267140517888.000 g=0.000 b=26863045693066433190166528.000 a=1.000
+[EMTR] TextureID 0x2c7e2e83cc4009f6 not found in GTNT map
+[EMTR] TextureID 0xcd5367b89c41d43e not found in GTNT map
+[EMTR] TextureID 0x22ab99454d7bb2e7 not found in GTNT map
+[EMTR] '�ǹdPD�彙���{���]=' v=35 one_time=true dur=2719301923 life=1898020400 scale=0.000 rate=0.00 speed=0.004 blend=Unknown(13) c0keys=4021678 a0keys=2009571863 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(-0.000,-136655921049038393180160.000)
+[EMTR]   color0[0]: r=467.389 g=51244152456740864.000 b=-90913809713213655387996160.000 a=1.000
+[EMTR] TextureID 0x4ce2c1acdddc2afa not found in GTNT map
+[EMTR] TextureID 0xdf881c36c4050991 not found in GTNT map
+[EMTR] TextureID 0xba2fadc2cd8c7a98 not found in GTNT map
+[EMTR] '5d*���b=x�]S�/���R=M�E���(������������}'�y���Գ̺g1' v=35 one_time=true dur=3904055753 life=3500502500 scale=15.346 rate=0.00 speed=4.604 blend=Unknown(131) c0keys=3887635627 a0keys=3964484946 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,15.346) walk_scale=(-378004128.000,304563869488478474404750163968.000)
+[EMTR]   color0[0]: r=0.000 g=1.000 b=0.000 a=1.000
+[EMTR] TextureID 0xb1187a92033f5a7f not found in GTNT map
+[EMTR] TextureID 0x5e60693e9bd0f188 not found in GTNT map
+[EMTR] TextureID 0x77a7e5daedc8200a not found in GTNT map
+[EMTR] '$�&	,?�싺2��fwo���k��4"'�w{ص���*Rg�<њj�Hc7�g����4��p�{�o' v=35 one_time=true dur=1648270963 life=2680488400 scale=0.000 rate=8.00 speed=1144112815376769190912327680.000 blend=Unknown(254) c0keys=2725213974 a0keys=3060511654 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,-28040778068452419513090048.000) walk_scale=(0.000,295417633471198606919729152.000)
+[EMTR]   color0[0]: r=0.000 g=0.011 b=0.000 a=1.000
+[EMTR] TextureID 0xf7b1e565753ca525 not found in GTNT map
+[EMTR] TextureID 0x866d562b9b030c1d not found in GTNT map
+[EMTR] TextureID 0x08aea7f2e33f26ee not found in GTNT map
+[EMTR] 'r�m��t@X�����y	���u"3���l����LϪrO����ְ�l���������#�' v=35 one_time=true dur=1099499919 life=1108510200 scale=0.000 rate=32825.92 speed=0.000 blend=Unknown(103) c0keys=519092489 a0keys=857896339 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(-125291208226131023526544220008480768.000,1928793948160.000)
+[EMTR]   color0[0]: r=-0.000 g=-0.000 b=-238183326462069602730901504.000 a=1.000
+[EMTR] TextureID 0xfd15b1d31471c0a1 not found in GTNT map
+[EMTR] TextureID 0x307e8015633740de not found in GTNT map
+[EMTR] TextureID 0x71655ef69e2c2dfe not found in GTNT map
+[EMTR] '�1d��C��#!-�s�W3��)���$�;9�J�m9�=`�' v=35 one_time=true dur=1006213211 life=212365860 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(16) c0keys=700505395 a0keys=612539308 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(-0.000,684489900036194304.000)
+[EMTR]   color0[0]: r=0.000 g=78448030052474281568192455236160323584.000 b=0.000 a=1.000
+[EMTR] TextureID 0xc1250847c4bb89b1 not found in GTNT map
+[EMTR] TextureID 0xc91cfd2578ec3186 not found in GTNT map
+[EMTR] TextureID 0x27dd42a3d6c557a4 not found in GTNT map
+[EMTR] '���kL�%�p��J4;p��S�iY-	���~_�i@d.F��6o
+���Y�1���Y�St' v=35 one_time=true dur=2216643165 life=2022943100 scale=52649004750710529610939195457536.000 rate=8.00 speed=15794701666998322806207593578496.000 blend=Unknown(180) c0keys=2924730240 a0keys=153966953 tex_resolved=0 tex_idx=0 | direct_scale=(52649004750710529610939195457536.000,-1631337161162752.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x807466604348e202 not found in GTNT map
+[EMTR] TextureID 0x258ad5c4f152c95a not found in GTNT map
+[EMTR] TextureID 0x7e5a2a9c149ca7fb not found in GTNT map
+[EMTR] '�Æd�f�t�%0_+��,x�O�����?�B�U�a8��шt���g�L�/)' v=35 one_time=true dur=1275297705 life=4225732600 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(63) c0keys=2014055212 a0keys=4216261845 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,0.000) walk_scale=(19387141270760797692182403840212992.000,0.000)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x5345ed680a8cdcfb not found in GTNT map
+[EMTR] TextureID 0x9e156d0950fbe651 not found in GTNT map
+[EMTR] TextureID 0x6fc3281186336de1 not found in GTNT map
+[EMTR] 'Y�ں�`�.��\�a�O��ƕ{D�;+^��S�	#w���3�6����+�Z!��;��C���&' v=35 one_time=true dur=2382436805 life=3879543000 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(122) c0keys=3336704673 a0keys=373586837 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,1842011361423588032192895583227215872.000) walk_scale=(-140878256.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=1.000 a=1.000
+[EMTR] TextureID 0xc431ede7b5122634 not found in GTNT map
+[EMTR] TextureID 0x4c8085a51d945d7c not found in GTNT map
+[EMTR] TextureID 0x3916545cdac26a52 not found in GTNT map
+[EMTR] 'dx6�D��z�Ӌ����v��?v4�k�4@�P���2��f��N��₻��,���F�q2�2' v=35 one_time=true dur=1839773779 life=1287368400 scale=2739090688.000 rate=8.00 speed=89896780954218729017386688327823917056.000 blend=Unknown(87) c0keys=2876698329 a0keys=1983882504 tex_resolved=0 tex_idx=0 | direct_scale=(2739090688.000,-0.044) walk_scale=(-38626280.000,-0.000)
+[EMTR]   color0[0]: r=0.240 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0xd4e96616671bdf39 not found in GTNT map
+[EMTR] TextureID 0xb6983af91b6733c8 not found in GTNT map
+[EMTR] TextureID 0xbf6ba49ebf0b2bc8 not found in GTNT map
+[EMTR] '���"`1��)K��^*�v͞�/�e��X�D���׿Y�MZ ����]�N��YEe�\��$' v=35 one_time=true dur=1067135030 life=3291906300 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(113) c0keys=2664265405 a0keys=2332372953 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,-0.000) walk_scale=(344357175296.000,-55249065689472104869563262304256.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=1.000 a=1.000
+[EMTR] TextureID 0xf85e4268b0141d54 not found in GTNT map
+[EMTR] TextureID 0x35479386214d77d7 not found in GTNT map
+[EMTR] TextureID 0x3778b36673aa7bcf not found in GTNT map
+[EMTR] '/�^}�-�}O��9n\N���J)�};b�=�QL��݃�>��(\>������$. ݋�[c��_ ' v=35 one_time=true dur=2229241947 life=3483874000 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(186) c0keys=3121333756 a0keys=2349541706 tex_resolved=0 tex_idx=0 | direct_scale=(-445974823879652996628322218672128.000,0.000) walk_scale=(1269212880557807551403625900146688.000,1191554225572511710596562944.000)
+[EMTR]   color0[0]: r=-114306293170176.000 g=-0.000 b=-0.000 a=1.000
+[EMTR] TextureID 0x002e9181c5dc6ae7 not found in GTNT map
+[EMTR] TextureID 0x0f4f07dda88da445 not found in GTNT map
+[EMTR] TextureID 0x329e8525c881479d not found in GTNT map
+[EMTR] '��g��,��p����
+y�4)u�x����	�xP���<)�=?�>v�Уr�EL9S�"m���' v=35 one_time=true dur=405527826 life=222729340 scale=10.000 rate=3373717504.00 speed=3.000 blend=Unknown(56) c0keys=888174858 a0keys=2021946665 tex_resolved=0 tex_idx=0 | direct_scale=(-0.605,-0.000) walk_scale=(7236509.500,929636720602785556983001563267072.000)
+[EMTR]   color0[0]: r=-82825916919752905719808.000 g=0.000 b=-0.000 a=1.000
+[EMTR] TextureID 0x3e362b63428f956b not found in GTNT map
+[EMTR] TextureID 0xa4a48ed5ab197844 not found in GTNT map
+[EMTR] TextureID 0x0db4a6917d861227 not found in GTNT map
+[EMTR] '���z�8�I|k��Ճ���u��]����u\�@�����W�Q(�$�-TS�	*(4�S!���' v=35 one_time=true dur=3414085760 life=2561261600 scale=8849205168868421980132973762463137792.000 rate=8.00 speed=0.000 blend=Unknown(158) c0keys=1973623970 a0keys=3026048678 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,8849205168868421980132973762463137792.000) walk_scale=(-0.000,107401720768229277696.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x23883b1c8d6602ee not found in GTNT map
+[EMTR] TextureID 0xa5e64e13a04e8b74 not found in GTNT map
+[EMTR] TextureID 0x12bbf64c5a15a8fb not found in GTNT map
+[EMTR] '����p6���7�7�^��*!p@{ ��ft�@@�XE�9�y�(�4�\ǁa' v=35 one_time=true dur=1090524061 life=3317063200 scale=793465728.000 rate=8.00 speed=0.000 blend=Unknown(208) c0keys=2187202544 a0keys=1881221884 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,793465728.000) walk_scale=(-0.000,-3685189966985428992.000)
+[EMTR]   color0[0]: r=0.000 g=21892209573888.000 b=59.966 a=1.000
+[EMTR] TextureID 0xd57038d71c2166fd not found in GTNT map
+[EMTR] TextureID 0x136cd410ad6cdee6 not found in GTNT map
+[EMTR] TextureID 0xd3ca5e50e125fbb1 not found in GTNT map
+[EMTR] 's�>v��rO��M�3_,�' v=35 one_time=true dur=2220189068 life=2537446100 scale=10.000 rate=8.00 speed=0.838 blend=Unknown(143) c0keys=11868716 a0keys=521122796 tex_resolved=0 tex_idx=0 | direct_scale=(-134254389565960749056.000,-0.000) walk_scale=(-60454.750,-0.000)
+[EMTR]   color0[0]: r=1.000 g=1.000 b=0.000 a=1.000
+[EMTR] TextureID 0x0876cdbd6ffa907f not found in GTNT map
+[EMTR] TextureID 0x12c0c7820f568ca1 not found in GTNT map
+[EMTR] TextureID 0x906a7e628b3a72a6 not found in GTNT map
+[EMTR] '`P#���#h`��u��k�7s��;���{Hܷ,�X/�&)~|�%{�-�}B��9��u�Dr�' v=35 one_time=true dur=3984892919 life=386579260 scale=0.000 rate=375999201280.00 speed=0.000 blend=Unknown(49) c0keys=1933028459 a0keys=1003473928 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,0.000) walk_scale=(-0.000,-9128479503856219193344.000)
+[EMTR]   color0[0]: r=-0.030 g=-6792591018943646593159248674367209472.000 b=1872.334 a=1.000
+[EMTR] TextureID 0x1853aa7560017f4c not found in GTNT map
+[EMTR] TextureID 0xabd802d28a89bda5 not found in GTNT map
+[EMTR] TextureID 0x714c589b373a7d0a not found in GTNT map
+[EMTR] '�y�Ke�)' v=35 one_time=true dur=2570556225 life=2400326700 scale=10.000 rate=8.00 speed=3.000 blend=Unknown(138) c0keys=4151734103 a0keys=2988289085 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,-0.000) walk_scale=(122290293018098547494555754994597888.000,-0.000)
+[EMTR]   color0[0]: r=-37.411 g=-0.000 b=183638620149915652135592275952533504.000 a=1.000
+[EMTR] TextureID 0xdca5e0bced5314e8 not found in GTNT map
+[EMTR] TextureID 0xe35f07e3bd5042a2 not found in GTNT map
+[EMTR] TextureID 0xba75cac30a76a5a0 not found in GTNT map
+[EMTR] '�Ò��p���P<�da�g�>�
+�;o�$���B$X�t�O��-��M�����xG����B' v=35 one_time=true dur=587443779 life=3030521000 scale=110660365369701564416.000 rate=3.58 speed=33198110930324422656.000 blend=Unknown(169) c0keys=1728898657 a0keys=178929319 tex_resolved=0 tex_idx=0 | direct_scale=(110660365369701564416.000,-850350470972936552448.000) walk_scale=(-1901958660096.000,-0.000)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0x29bfa4d0a5332ff9 not found in GTNT map
+[EMTR] TextureID 0x0b4cb50fd49762f0 not found in GTNT map
+[EMTR] TextureID 0x3631266d81fb3d3b not found in GTNT map
+[EMTR] '�������' v=35 one_time=true dur=2395750835 life=4163432000 scale=0.923 rate=8.00 speed=0.000 blend=Normal c0keys=481914299 a0keys=2406948371 tex_resolved=0 tex_idx=0 | direct_scale=(0.923,-0.000) walk_scale=(-0.000,80766174730657988608.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=1.000 a=1.000
+[EMTR] TextureID 0x7db2ac154a6842ca not found in GTNT map
+[EMTR] TextureID 0xf7fa367e380f0fc6 not found in GTNT map
+[EMTR] TextureID 0xe5f17c4dedb15844 not found in GTNT map
+[EMTR] '�?�RP/�Ȑo-�ֆ�\�#�u�!��W���#��V�>��;��sYjACm+;�I�~��' v=35 one_time=true dur=2532816406 life=593585660 scale=15503947381455454208.000 rate=0.00 speed=4651184324387799040.000 blend=Unknown(133) c0keys=193385991 a0keys=595680386 tex_resolved=0 tex_idx=0 | direct_scale=(15503947381455454208.000,-0.000) walk_scale=(807725167137270005760.000,0.000)
+[EMTR]   color0[0]: r=-734191091712.000 g=-0.000 b=-5300040685056667408138240.000 a=1.000
+[EMTR] TextureID 0x8d83313e54761652 not found in GTNT map
+[EMTR] TextureID 0x91b4db9fdc995f1e not found in GTNT map
+[EMTR] TextureID 0x219836fb65596feb not found in GTNT map
+[EMTR] '63J�����b��Ѣ�J19_Or�
+�U�_�'�f��v�)��/�T��ܴ�Ь���~�%󱼼�' v=35 one_time=true dur=2183605682 life=1528807200 scale=0.000 rate=3081232564164285706568466432.00 speed=0.000 blend=Unknown(255) c0keys=959531649 a0keys=2507296607 tex_resolved=0 tex_idx=0 | direct_scale=(-4057649664.000,0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=-0.049 b=-669.398 a=1.000
+[EMTR] TextureID 0x870f09ad5bfdc676 not found in GTNT map
+[EMTR] TextureID 0x02a9e73c0848e4a1 not found in GTNT map
+[EMTR] TextureID 0x40935d9554bb18d6 not found in GTNT map
+[EMTR] 'o�Nj�����b���~'�+��4��Z��-p=/F"�gL�S�K�?�3�Dh1��!U��' v=35 one_time=true dur=1510673296 life=3423705900 scale=1243569641247211520.000 rate=8.00 speed=373070892374163456.000 blend=Unknown(242) c0keys=3156704959 a0keys=196327723 tex_resolved=0 tex_idx=0 | direct_scale=(-707057963885261750272.000,1243569641247211520.000) walk_scale=(-0.000,-12.761)
+[EMTR]   color0[0]: r=1.000 g=0.000 b=1.000 a=1.000
+[EMTR] TextureID 0xa4a6639e5ac78660 not found in GTNT map
+[EMTR] TextureID 0x01e63eb97c9434e8 not found in GTNT map
+[EMTR] TextureID 0x1f7440682056b08c not found in GTNT map
+[EMTR] '��q�z��L���)��Y|��]�:}��8>���D^}1Dn�[�\��Ty���'��Q"J' v=35 one_time=true dur=3500614256 life=3483953400 scale=288427301582464701235544637571072.000 rate=8.00 speed=0.000 blend=Unknown(41) c0keys=3934018020 a0keys=341698231 tex_resolved=0 tex_idx=0 | direct_scale=(288427301582464701235544637571072.000,131927534061376697966560018432.000) walk_scale=(-0.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=0.000 b=0.000 a=1.000
+[EMTR] TextureID 0xbc80c4f43c11a8a1 not found in GTNT map
+[EMTR] TextureID 0xcaf55b6db7bbc4a6 not found in GTNT map
+[EMTR] TextureID 0xc8e7e9df101b0259 not found in GTNT map
+[EMTR] '��D>�r��tDwB�;P���(���¨y s���g�9׼�p�{����Q�<]1������*�' v=35 one_time=true dur=3563171589 life=52278630 scale=0.000 rate=8.00 speed=0.000 blend=Unknown(178) c0keys=2505063369 a0keys=3341352396 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.000) walk_scale=(-148473872.000,-0.000)
+[EMTR]   color0[0]: r=-0.000 g=76069184413207460052992.000 b=-0.000 a=1.000
+[EMTR] TextureID 0xaa34a730b6eebdc0 not found in GTNT map
+[EMTR] TextureID 0x721c0c77a6a842ba not found in GTNT map
+[EMTR] TextureID 0xf03f1e8da4778f13 not found in GTNT map
+[EMTR] '�0�$���?��j�u=��G3��˗��j�e����"N�dL
+j��A�^C��q+�)�' v=35 one_time=true dur=2763112657 life=1205577200 scale=0.000 rate=0.00 speed=1638802289990828032.000 blend=Unknown(152) c0keys=3436330357 a0keys=2477732679 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,0.000) walk_scale=(0.000,0.000)
+[EMTR]   color0[0]: r=0.000 g=-0.000 b=-2269575359371288088243362684993536.000 a=1.000
+[EMTR] TextureID 0x46dc8a1e449e1caf not found in GTNT map
+[EMTR] TextureID 0x5896eb45e377f7b5 not found in GTNT map
+[EMTR] TextureID 0x87dda66125140763 not found in GTNT map
+[EMTR] 'WR�rhû.5<j�ʄ÷�T<�����[JrN�q`J��:���m�8-������5^�h�_' v=35 one_time=true dur=2197515729 life=1545301100 scale=5873947603637396045824.000 rate=8.00 speed=1762184365533711826944.000 blend=Unknown(164) c0keys=1012201655 a0keys=4009557134 tex_resolved=0 tex_idx=0 | direct_scale=(5873947603637396045824.000,904458640818176.000) walk_scale=(-0.000,-0.000)
+[EMTR]   color0[0]: r=0.000 g=1.000 b=0.000 a=1.000
+[EMTR] TextureID 0x4d2f6ae82f2316d8 not found in GTNT map
+[EMTR] TextureID 0xc5d21c3fdba67136 not found in GTNT map
+[EMTR] TextureID 0xdad780b8eb94e806 not found in GTNT map
+[EMTR] '��"�)S<K�c�"w�I��V�)�жu:턅�:���m�7��K�c��i�Ƙ��_A��?��' v=35 one_time=true dur=208933152 life=3895777000 scale=1480397986239348736.000 rate=970044066496512.00 speed=444119409615699968.000 blend=Unknown(178) c0keys=3343492069 a0keys=698046154 tex_resolved=0 tex_idx=0 | direct_scale=(1480397986239348736.000,-8149409464320.000) walk_scale=(-369649380229120.000,0.000)
+[EMTR]   color0[0]: r=4917746991104.000 g=-0.000 b=1102254568374272.000 a=1.000
+[EMTR] TextureID 0xb999774ea0b478d0 not found in GTNT map
+[EMTR] TextureID 0x281bc3d20e36e441 not found in GTNT map
+[EMTR] TextureID 0xa812f268e6ab28c2 not found in GTNT map
+[EMTR] '���8O�u!�����|I�$E����ɐ�k	`�S����	���t|!v��8䵥v�a��դ'' v=35 one_time=true dur=3707438585 life=1831616400 scale=0.000 rate=8.00 speed=0.002 blend=Unknown(222) c0keys=617549385 a0keys=3120317708 tex_resolved=0 tex_idx=0 | direct_scale=(-0.000,-0.000) walk_scale=(9734745202921192856685201326080.000,12146279182237696.000)
+[EMTR]   color0[0]: r=-2909482039688298496.000 g=5153.044 b=-26656504069226496.000 a=1.000
+[EMTR] TextureID 0x0928e762eab6dd37 not found in GTNT map
+[EMTR] TextureID 0xf6f7d293d91e66f4 not found in GTNT map
+[EMTR] TextureID 0xd01f239f2c69731f not found in GTNT map
+[EMTR] '�h��We���	��
+4%"��"�����������|����?��?I�~@f�{�C�au���' v=35 one_time=true dur=3476047757 life=1196265300 scale=0.000 rate=934715149589454659698265423872.00 speed=580672254655915820891242496.000 blend=Unknown(10) c0keys=624167655 a0keys=583435554 tex_resolved=0 tex_idx=0 | direct_scale=(0.000,0.006) walk_scale=(-104224828899714087120940302336.000,4298116674938486746027285213609984.000)
+[EMTR]   color0[0]: r=0.000 g=-7538760209518615953630240532594688.000 b=-0.000 a=1.000
+
+thread 'effects::tests::test_preservation_edc_downstream_fields_pbt' (178874) panicked at src/effects.rs:5951:5:
+Test failed: assertion failed: `(left == right)` 
+  left: `[1.0, 1.259303e-30]`, 
+ right: `[1.0, 1.0]`: PBT: tex_scale_uv should be [1.0, 1.0] for identity input, got [1.0, 1.259303e-30] at src/effects.rs:6002.
+minimal failing input: seed = 0
+	successes: 0
+	local rejects: 0
+	global rejects: 0
+
+
+
+failures:
+    effects::tests::test_preservation_edc_downstream_fields_pbt
+    effects::tests::test_preservation_edc_identity_uv
+
+test result: FAILED. 42 passed; 2 failed; 0 ignored; 0 measured; 79 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin hitbox_editor`

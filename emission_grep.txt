@@ -1,0 +1,20 @@
+203:    pub is_one_time: bool,
+205:    pub emission_timing: u32,
+207:    pub emission_duration: u32,
+1326:                is_one_time: false,
+1327:                emission_timing: 0,
+1328:                emission_duration: 9999,
+1380:                    is_one_time: true,
+1381:                    emission_timing: 0,
+1382:                    emission_duration: lifetime as u32,
+1929:                        is_one_time: true,
+1930:                        emission_timing: 0,
+1931:                        emission_duration: hint_lifetime as u32,
+2287:        let is_one_time       = r8(emission_base) != 0;
+2288:        // emission_timing and emission_duration are stored as u32 frame counts.
+2289:        let emission_timing   = r32(emission_base + 8);
+2290:        let emission_duration = r32(emission_base + 12);
+2357:            emission_duration as f32
+2362:        } else if emission_duration > 0 && emission_duration < 9999 {
+2363:            emission_duration as f32
+2483:        let rate = if !is_one_time && emission_rate_direct > 0.0 {

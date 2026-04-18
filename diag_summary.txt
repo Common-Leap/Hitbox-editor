@@ -1,0 +1,28 @@
+[DIAG] ef_mario.eff: 50 handles
+[DIAG] mario ptcl: 26 emitter sets, 59 bntx textures
+[DIAG] merged ef_common.eff: now 460 handles, 224 emitter sets
+[DIAG] handle 'sys_smash_flash' = Some(98)
+[DIAG] handle 'sys_attack_arc_b' = Some(90)
+[DIAG] handle 'SYS_SMASH_FLASH' = Some(98)
+[DIAG] handle 'SYS_ATTACK_ARC_B' = Some(90)
+[SPAWN] OK 'sys_smash_flash' -> set_idx=98 emitters=12
+[SPAWN] OK 'sys_attack_arc_b' -> set_idx=90 emitters=4
+[DIAG] after spawn: active_emitters=16
+[DIAG]   emitter[0]: set=98 emitter=0 bone='handl' name='flare1_add'
+[DIAG]   emitter[1]: set=98 emitter=1 bone='handl' name='rainbow1_b'
+[DIAG]   emitter[2]: set=98 emitter=2 bone='handl' name='rainbow2_b'
+[DIAG]   emitter[3]: set=98 emitter=3 bone='handl' name='ring1'
+[DIAG]   emitter[4]: set=98 emitter=4 bone='handl' name='flashline2'
+[DIAG]   emitter[5]: set=98 emitter=5 bone='handl' name='flashline1a'
+[DIAG]   emitter[6]: set=98 emitter=6 bone='handl' name='flashline1b'
+[DIAG]   emitter[7]: set=98 emitter=7 bone='handl' name='flashline2_add'
+[DIAG]   emitter[8]: set=98 emitter=8 bone='handl' name='ring1_add'
+[DIAG]   emitter[9]: set=98 emitter=9 bone='handl' name='flare2_add'
+[DIAG]   emitter[10]: set=98 emitter=10 bone='handl' name='rainbow1'
+[DIAG]   emitter[11]: set=98 emitter=11 bone='handl' name='rainbow2'
+[DIAG]   emitter[12]: set=90 emitter=0 bone='top' name='arccylinder1'
+[DIAG]   emitter[13]: set=90 emitter=1 bone='top' name='arccylinder2'
+[DIAG]   emitter[14]: set=90 emitter=2 bone='top' name='arc1'
+[DIAG]   emitter[15]: set=90 emitter=3 bone='top' name='arc2_add'
+[DIAG] after 30 frames: particles=0 active_emitters=16
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.56s

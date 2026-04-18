@@ -1,0 +1,5 @@
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/fighter/mario/motion/body/c00/motion_list.bin
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/fighter/mario/motion/body/c01/motion_list.bin
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/fighter/mario/motion/body/c06/motion_list.bin
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/fighter/mario/motion/body/c07/motion_list.bin
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/fighter/mario/motion/body/c04/motion_list.bin

@@ -1,0 +1,29 @@
+Found 104 BNTX textures
+  [24] 'ef_cmn_smoke00'
+  [25] 'ef_samus_finalbeam00'
+  [26] 'ef_samus_arc00'
+  [27] 'ef_samus_spinsonic00'
+  [28] 'ef_cmn_parts00'
+  [29] 'ef_item_parts00'
+  [30] 'ef_cmn_debris00'
+  [31] 'ef_cmn_ring00'
+  [32] 'ef_lucario_ring00'
+  [33] 'ef_cmn_lightning00'
+  [34] 'ef_samus_lightning00'
+
+BRTI[29]: 128x128 fmt=0x1e01 fmt_type=0x1e comp_sel=0x03020202
+  comp_sel: R=R G=R B=R A=G
+  format: BC5
+
+--- Checking SamplerInfo for P_SamusAttackBomb emitters ---
+
+  EMTR 'flare1' sampler_base=0x97f0:
+    slot 0: TextureID=0x00000000c6a6335c
+
+  EMTR 'smokeBomb' sampler_base=0xa2f0:
+    slot 0: TextureID=0x0000000081d59f24
+    slot 1: TextureID=0x00000000f23f06f8
+
+  EMTR 'smokeLoop' sampler_base=0xadf0:
+    slot 0: TextureID=0x00000000da3564c9
+    slot 1: TextureID=0x000000007cdcd964

@@ -1,0 +1,439 @@
+warning: unused import: `crate::data::EffectScript`
+    --> src/acmd.rs:1145:9
+     |
+1145 |     use crate::data::EffectScript;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src/app.rs:218:15
+    |
+218 | ...   egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBeha...
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src/app.rs:216:33
+    |
+216 |             ui.memory_mut(|m| m.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:222:37
+    |
+222 |                 ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                     ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src/app.rs:227:41
+    |
+227 |                     ui.memory_mut(|m| m.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `anim_dt`
+    --> src/app.rs:1823:13
+     |
+1823 |         let anim_dt = {
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_anim_dt`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `canonical_bone`
+    --> src/app.rs:1914:33
+     |
+1914 | ...                 let canonical_bone = bone_name_map.get(&ec.bone_na...
+     |                         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_canonical_bone`
+
+warning: unused variable: `set_idx_opt`
+    --> src/app.rs:1927:33
+     |
+1927 | ...                   let set_idx_opt = eff_index.handles.get(&ec.effe...
+     |                           ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_set_idx_opt`
+
+warning: unused variable: `r64`
+   --> src/effects.rs:536:9
+    |
+536 |     let r64 = |off: usize| -> u64 {
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_r64`
+
+warning: unused variable: `scale_from_direct`
+    --> src/effects.rs:2450:25
+     |
+2450 |         let (raw_scale, scale_from_direct) =
+     |                         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scale_from_direct`
+
+warning: unused variable: `g`
+    --> src/effects.rs:3727:21
+     |
+3727 |             let (r, g, b, blend, _, _) = name_hint_defaults(name);
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_g`
+
+warning: variable does not need to be mutable
+    --> src/effects.rs:5920:13
+     |
+5920 |         let mut data = vec![0u8; 4096];
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `p`
+    --> src/effects.rs:8290:13
+     |
+8290 |         let p = &ps.particles[0];
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: field `emitter_set_idx` is never read
+   --> src/app.rs:350:5
+    |
+343 | struct ActiveEffect {
+    |        ------------ field in this struct
+...
+350 |     emitter_set_idx: usize,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `param_path` is never read
+   --> src/data.rs:352:9
+    |
+349 | pub struct FighterEntry {
+    |            ------------ field in this struct
+...
+352 |     pub param_path: PathBuf,
+    |         ^^^^^^^^^^
+    |
+    = note: `FighterEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `fetch_acmd_script` is never used
+  --> src/acmd.rs:19:8
+   |
+19 | pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Resu...
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `export_acmd_source` is never used
+    --> src/acmd.rs:1128:8
+     |
+1128 | pub fn export_acmd_source(
+     |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `render_settings`, `pending_particles`, and `pending_trails` are never read
+  --> src/renderer.rs:74:9
+   |
+70 | pub struct HitboxRenderState {
+   |            ----------------- fields in this struct
+...
+74 |     pub render_settings: RenderSettings,
+   |         ^^^^^^^^^^^^^^^
+...
+93 |     pub pending_particles: Vec<crate::effects::Particle>,
+   |         ^^^^^^^^^^^^^^^^^
+94 |     pub pending_trails: Vec<crate::effects::SwordTrail>,
+   |         ^^^^^^^^^^^^^^
+
+warning: methods `bone_names` and `bone_world_positions` are never used
+   --> src/renderer.rs:275:12
+    |
+103 | impl HitboxRenderState {
+    | ---------------------- methods in this implementation
+...
+275 |     pub fn bone_names(&self) -> Vec<String> {
+    |            ^^^^^^^^^^
+...
+378 |     pub fn bone_world_positions(&self) -> std::collections::HashMap<Str...
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `merge_from_file` is never used
+   --> src/effects.rs:120:12
+    |
+ 35 | impl EffIndex {
+    | ------------- method in this implementation
+...
+120 |     pub fn merge_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+    |            ^^^^^^^^^^^^^^^
+
+warning: fields `original_format`, `original_data_size`, and `mipmap_count` are never read
+   --> src/effects.rs:357:9
+    |
+348 | pub struct TextureRes {
+    |            ---------- fields in this struct
+...
+357 |     pub original_format: u32,
+    |         ^^^^^^^^^^^^^^^
+358 |     pub original_data_offset: u32,
+359 |     pub original_data_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+362 |     pub mipmap_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `TextureRes` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `prm_tex_index` is never read
+   --> src/effects.rs:397:9
+    |
+386 | pub struct BfresMesh {
+    |            --------- field in this struct
+...
+397 |     pub prm_tex_index: u32,
+    |         ^^^^^^^^^^^^^
+    |
+    = note: `BfresMesh` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `name` is never read
+   --> src/effects.rs:403:9
+    |
+402 | pub struct BfresModel {
+    |            ---------- field in this struct
+403 |     pub name: String,
+    |         ^^^^
+    |
+    = note: `BfresModel` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `texture_section_offset` is never read
+   --> src/effects.rs:413:9
+    |
+409 | pub struct PtclFile {
+    |            -------- field in this struct
+...
+413 |     pub texture_section_offset: usize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PtclFile` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `bntx_surface_format_to_id` is never used
+   --> src/effects.rs:746:4
+    |
+746 | fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bntx_block_dim` is never used
+   --> src/effects.rs:772:4
+    |
+772 | fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::...
+    |    ^^^^^^^^^^^^^^
+
+warning: function `bntx_bytes_per_pixel` is never used
+   --> src/effects.rs:786:4
+    |
+786 | fn bntx_bytes_per_pixel(fmt: bntx::SurfaceFormat) -> u32 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `texture_idx` is never read
+    --> src/effects.rs:2933:9
+     |
+2922 | pub struct Particle {
+     |            -------- field in this struct
+...
+2933 |     pub texture_idx: usize,
+     |         ^^^^^^^^^^^
+     |
+     = note: `Particle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `life_t` is never used
+    --> src/effects.rs:2940:12
+     |
+2939 | impl Particle {
+     | ------------- method in this implementation
+2940 |     pub fn life_t(&self) -> f32 {
+     |            ^^^^^^
+
+warning: field `rotation` is never read
+    --> src/effects.rs:2955:5
+     |
+2948 | pub struct EmitterInstance {
+     |            --------------- field in this struct
+...
+2955 |     rotation: Vec3,
+     |     ^^^^^^^^
+     |
+     = note: `EmitterInstance` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `blend_type` is never read
+    --> src/effects.rs:3320:9
+     |
+3313 | pub struct SwordTrail {
+     |            ---------- field in this struct
+...
+3320 |     pub blend_type: BlendType,
+     |         ^^^^^^^^^^
+     |
+     = note: `SwordTrail` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `test_print_samus_handles` is never used
+    --> src/effects.rs:6771:8
+     |
+6771 |     fn test_print_samus_handles() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `test_eff_handle_values` is never used
+    --> src/effects.rs:6797:8
+     |
+6797 |     fn test_eff_handle_values() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deswizzle_tegra` is never used
+  --> src/particle_renderer.rs:13:4
+   |
+13 | fn deswizzle_tegra(
+   |    ^^^^^^^^^^^^^^^
+
+warning: fields `blit_bind_group_for`, `trail_cam_bgl`, and `prepared_indirect_params` are never read
+   --> src/particle_renderer.rs:292:5
+    |
+281 | pub struct ParticleRenderer {
+    |            ---------------- fields in this struct
+...
+292 |     blit_bind_group_for: bool, // unused sentinel, kept for future use
+    |     ^^^^^^^^^^^^^^^^^^^
+...
+299 |     trail_cam_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+...
+333 |     prepared_indirect_params: Vec<IndirectParams>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `hitbox_editor` (bin "hitbox_editor" test) generated 35 warnings (run `cargo fix --bin "hitbox_editor" -p hitbox_editor --tests` to apply 9 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.20s
+warning: the following packages contain code that will be rejected by a future version of Rust: quick-xml v0.18.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/main.rs (target/debug/deps/hitbox_editor-a6f911c62be0ffcf)
+
+running 131 tests
+test acmd::tests::test_bug_condition_bare_after_image_produces_effect_call ... ok
+test acmd::tests::test_bug_condition_bare_effect_follow_follows_bone ... ok
+test acmd::tests::test_preservation_for_loop_with_is_excute_unchanged ... ok
+test acmd::tests::test_bug_condition_bare_effect_produces_effect_call ... ok
+test acmd::tests::test_preservation_is_excute_wrapped_effect_unchanged ... ok
+test acmd::tests::test_preservation_non_effect_bare_line_stays_raw ... ok
+test acmd::tests::test_preservation_frame_call_advances_counter ... ok
+test effects::test_bug_condition_simulation_fields ... ok
+test effects::test_effect_position_bug_condition ... ok
+test effects::test_effect_position_preservation ... ok
+test effects::preservation_tests::test_preservation_empty_color1 ... ok
+test effects::preservation_tests::test_preservation_zero_lifetime_random ... ok
+test effects::preservation_tests::test_preservation_zero_scale_random_strict ... ok
+test effects::preservation_tests::test_preservation_zero_scale_random ... ok
+test effects::preservation_tests::test_preservation_zero_emission_rate_random ... ok
+test effects::tests::test_bntx_magic_absent_returns_empty ... ok
+test effects::tests::test_bntx_zero_dimension_brti_skipped ... ok
+test effects::tests::test_bntx_zero_dimension_skipped ... ok
+test effects::tests::prop_sampler_offset ... ok
+test effects::tests::test_bug_1_1_gtnt_grtf_child_walk_multi_child ... ok
+test effects::tests::test_bug_1_3_str_scan_ceiling_truncated ... ok
+test effects::tests::test_bug_1_2_str_block_unaligned ... ok
+test effects::tests::test_bug_condition_color1_multiply ... ok
+test effects::tests::test_bug_condition_color_key_field_order ... ok
+test effects::preservation_tests::test_preservation_burst_emitter ... ok
+test effects::tests::test_bug_condition_edc_emission_rate_random_not_read ... ok
+test effects::tests::prop_burst_count ... ok
+test effects::tests::test_bug_condition_edc_rotation_speed_not_read ... ok
+test effects::tests::prop_burst_fired ... ok
+test effects::tests::test_bug_condition_edc_tex_offset_uv_not_read ... ok
+test effects::tests::test_bug_condition_edc_tex_scale_uv_not_read ... ok
+test effects::tests::test_bug_condition_scale ... ok
+test effects::tests::test_bug_condition_tex_pat_anim_scale_read ... ok
+test effects::tests::test_bug_condition_tex_scroll_anim_read ... ok
+test effects::tests::test_bug_condition_edc_scale_random_not_read ... ok
+test effects::tests::test_bug_condition_zeros_returns_some_with_defaults ... ok
+test effects::tests::prop_shader_verbatim ... ok
+test effects::tests::test_bug_etmm_a_ordering_hazard_g3pr_before_grtf ... ok
+test effects::tests::test_bug_etmm_c_wrong_sampler_slot_n0_before_a0 ... ok
+test effects::tests::test_effect_position_bug_condition ... ok
+test effects::tests::prop_burst_origin ... ok
+test effects::tests::test_eftf_dispatch ... ok
+test effects::tests::test_eftf_parse_eftf_unchanged ... ok
+test effects::tests::test_eva_bug1_scale_spawn ... ok
+test effects::tests::test_eva_bug1_scale_step ... ok
+test effects::tests::test_eva_bug2_circle_emitter_ring ... ok
+test effects::tests::test_eva_bug2_point_emitter_hemisphere ... ok
+test effects::tests::test_eva_bug3_aspect_ratio_in_shader ... ok
+test effects::tests::test_eva_preservation_non_size_fields_unchanged ... ok
+test effects::tests::test_eva_preservation_sphere_emitter_unchanged ... ok
+test effects::tests::test_eva_preservation_square_billboard_shader ... ok
+test effects::tests::test_gtnt_empty_name_skipped ... ok
+test effects::tests::test_gtnt_null_offset_terminates ... ok
+test effects::tests::test_p10_name_aware_color_defaults ... ok
+test effects::tests::test_p11_eftf_parse_produces_valid_emitter_sets ... ok
+test effects::tests::test_p1_parse_vfxb_emitter_never_panics ... ok
+test effects::tests::test_p2_parse_vfxb_emitter_valid_defaults ... ok
+test effects::tests::test_p3_parse_vfxb_emitter_deterministic ... ok
+test effects::tests::test_p4_parse_vfxb_emitter_correct_offsets ... ok
+test effects::tests::test_p5_bntx_round_trip ... ok
+test effects::tests::test_p6_prima_triangle_invariant ... ok
+test effects::tests::test_parse_vfxb_short_input_returns_err ... ok
+test effects::tests::test_particle_system_step_unchanged ... ok
+test effects::tests::test_preservation_alpha_key_unchanged ... ok
+test effects::tests::test_preservation_bc_format_ids_unchanged ... ok
+test effects::tests::test_preservation_color_key_identity ... ok
+test effects::tests::test_preservation_compositing_bc4_alpha_always_from_r ... ok
+test effects::tests::test_preservation_compositing_bc5_r_source_alpha_unchanged ... ok
+test effects::tests::test_preservation_compositing_empty_color1_uses_color0_alone ... ok
+test effects::tests::test_preservation_compositing_mesh_identity_uv_transform ... ok
+test effects::tests::test_preservation_compositing_single_texture_slot_unchanged ... ok
+test effects::tests::test_preservation_default_fallback ... ok
+test effects::tests::test_preservation_edc_identity_uv ... ok
+test effects::tests::test_preservation_edc_version_branches ... ok
+test effects::tests::test_preservation_edc_zero_randomization ... ok
+test effects::tests::test_preservation_edc_zero_rotation ... ok
+test effects::tests::test_preservation_eftf_magic_takes_eftf_path ... ok
+test effects::tests::test_preservation_empty_color1 ... ok
+test effects::tests::test_preservation_empty_color_slot ... ok
+test effects::tests::test_preservation_etmm_grtf_before_g3pr_correct_texture_index ... ok
+test effects::tests::test_preservation_etmm_single_sampler_a0_resolves_correctly ... ok
+test effects::tests::prop_sampler_lookup_chain ... ok
+test effects::tests::test_preservation_gtnt_direct_parse ... ok
+test effects::tests::test_bug_condition_compositing_color1_not_multiplied ... ok
+test effects::tests::test_preservation_identity_uv ... ok
+test effects::tests::test_preservation_sampler_offset_v22 ... ok
+test effects::tests::test_preservation_sampler_offset_v37 ... ok
+test effects::tests::test_preservation_str_aligned_still_works ... ok
+test effects::tests::test_preservation_subsequent_field_offsets ... ok
+test effects::tests::test_preservation_synthetic_produces_valid_emitters ... ok
+test effects::tests::test_preservation_v22_walk_scale_y ... ok
+test effects::tests::test_preservation_v22_walk_scale_x ... ok
+test effects::tests::test_preservation_zero_sentinel_stops_at_second_key ... ok
+test effects::tests::test_prima_absent_returns_empty ... ok
+test effects::tests::test_preservation_zero_scroll ... ok
+test effects::tests::test_prma_magic_dispatched ... ok
+test effects::tests::test_sampler_zero_textureid_skipped ... ok
+test effects::tests::test_section_oob_binary_skipped ... ok
+test effects::tests::test_trail_system_unchanged ... ok
+test effects::tests::test_vfxb_bad_magic_returns_err ... ok
+test effects::tests::test_vfxb_no_bntx_continues_parse ... ok
+test effects::tests::test_vfxb_short_data_returns_err ... ok
+test particle_renderer::tests::test_arbitrary_comp_sel_extraction ... ok
+test particle_renderer::tests::test_bc4_bc5_override_preservation ... ok
+test particle_renderer::tests::test_bug_1_4_bc6h_format_missing ... ok
+test particle_renderer::tests::test_bug_bgra_detection_stale_shift_bntx_cache_loop ... ok
+test particle_renderer::tests::test_bug_1_5_srgb_format_selection ... ok
+test particle_renderer::tests::test_bug_condition_compositing_mesh_uv_transform_missing ... ok
+test particle_renderer::tests::test_bug_condition_compositing_bc5_g_channel_alpha_ignored ... ok
+test particle_renderer::tests::test_bug_condition_compositing_second_texture_slot_not_uploaded ... ok
+test particle_renderer::tests::test_bug_etmm_b_upload_gap_submesh_index_not_covered ... ok
+test particle_renderer::tests::test_bug_bgra_detection_stale_shift_emitter_loop ... ok
+test particle_renderer::tests::test_preservation_etmm_billboard_only_ptcl_tex_cache_from_emitters ... ok
+test particle_renderer::tests::test_preservation_etmm_fallback_to_white_when_tex_idx_max ... ok
+test particle_renderer::tests::test_preservation_non_srgb_uses_unorm ... ok
+test particle_renderer::tests::test_preservation_tbs_fmt_type_0c_always_bgra ... ok
+test particle_renderer::tests::test_preservation_tbs_both_bytes_4_is_bgra ... ok
+test particle_renderer::tests::test_preservation_tbs_fmt_type_0c_pbt ... ok
+test particle_renderer::tests::test_preservation_tbs_zero_swizzle_is_not_bgra ... ok
+test particle_renderer::tests::test_preservation_tbs_r_src_not_4_pbt ... ok
+test particle_renderer::tests::test_zero_comp_sel_no_swizzle ... ok
+test effects::tests::prop_continuous_accum ... ok
+test particle_renderer::tests::test_comp_sel_byte_order_bug_condition ... ok
+test particle_renderer::tests::test_preservation_bc1_bc7_formats_unchanged ... ok
+test effects::tests::prop_gtnt_deterministic ... ok
+test effects::tests::prop_gtnt_round_trip ... ok
+test effects::tests::prop_parse_vfxb_no_panic ... ok
+test effects::tests::test_real_eff_texture_resolution ... ok
+test effects::tests::test_preservation_edc_downstream_fields_pbt ... ok
+test effects::tests::test_deswizzle_grade00 ... ok
+test particle_renderer::tests::test_bc_decode_pipeline_real_data ... ok
+
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

@@ -1,0 +1,8 @@
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.nusktb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.xmb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.numatb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.numdlb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.nuanmb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.nusrcmdlb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/model/m_mariofinalbullet/c00/model.nuhlpb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/ef_mario.eff

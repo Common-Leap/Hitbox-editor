@@ -1,0 +1,573 @@
+[DIAG] ef_mario.eff: 50 handles
+[DIAG] mario ptcl: 26 emitter sets, 59 bntx textures
+[DIAG] merged ef_common.eff: now 460 handles, 224 emitter sets
+[DIAG] handle 'sys_smash_flash' = Some(98)
+[DIAG] handle 'sys_attack_arc_b' = Some(90)
+[DIAG] handle 'SYS_SMASH_FLASH' = Some(98)
+[DIAG] handle 'SYS_ATTACK_ARC_B' = Some(90)
+[SPAWN] OK 'sys_smash_flash' -> set_idx=98 emitters=12
+[SPAWN] OK 'sys_attack_arc_b' -> set_idx=90 emitters=4
+[DIAG] after spawn: active_emitters=16
+[DIAG]   emitter[0]: set=98 emitter=0 bone='handl' name='flare1_add'
+[DIAG]   emitter[1]: set=98 emitter=1 bone='handl' name='rainbow1_b'
+[DIAG]   emitter[2]: set=98 emitter=2 bone='handl' name='rainbow2_b'
+[DIAG]   emitter[3]: set=98 emitter=3 bone='handl' name='ring1'
+[DIAG]   emitter[4]: set=98 emitter=4 bone='handl' name='flashline2'
+[DIAG]   emitter[5]: set=98 emitter=5 bone='handl' name='flashline1a'
+[DIAG]   emitter[6]: set=98 emitter=6 bone='handl' name='flashline1b'
+[DIAG]   emitter[7]: set=98 emitter=7 bone='handl' name='flashline2_add'
+[DIAG]   emitter[8]: set=98 emitter=8 bone='handl' name='ring1_add'
+[DIAG]   emitter[9]: set=98 emitter=9 bone='handl' name='flare2_add'
+[DIAG]   emitter[10]: set=98 emitter=10 bone='handl' name='rainbow1'
+[DIAG]   emitter[11]: set=98 emitter=11 bone='handl' name='rainbow2'
+[DIAG]   emitter[12]: set=90 emitter=0 bone='top' name='arccylinder1'
+[DIAG]   emitter[13]: set=90 emitter=1 bone='top' name='arccylinder2'
+[DIAG]   emitter[14]: set=90 emitter=2 bone='top' name='arc1'
+[DIAG]   emitter[15]: set=90 emitter=3 bone='top' name='arc2_add'
+[STEP] frame=1 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=1 particles_after_retain=0 active_emitters=16
+[DIAG] frame=1: particles=0 active_emitters=16
+[STEP] frame=2 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=2 particles_after_retain=0 active_emitters=16
+[DIAG] frame=2: particles=0 active_emitters=16
+[STEP] frame=3 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=3 particles_after_retain=0 active_emitters=16
+[DIAG] frame=3: particles=0 active_emitters=16
+[STEP] frame=4 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=4 particles_after_retain=0 active_emitters=16
+[DIAG] frame=4: particles=0 active_emitters=16
+[STEP] frame=5 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=5 particles_after_retain=0 active_emitters=16
+[DIAG] frame=5: particles=0 active_emitters=16
+[STEP] frame=6 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=6 particles_after_retain=0 active_emitters=16
+[STEP] frame=7 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=7 particles_after_retain=0 active_emitters=16
+[STEP] frame=8 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=8 particles_after_retain=0 active_emitters=16
+[STEP] frame=9 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=9 particles_after_retain=0 active_emitters=16
+[STEP] frame=10 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=10 particles_after_retain=0 active_emitters=16
+[STEP] frame=11 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=11 particles_after_retain=0 active_emitters=16
+[STEP] frame=12 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=12 particles_after_retain=0 active_emitters=16
+[STEP] frame=13 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=13 particles_after_retain=0 active_emitters=16
+[STEP] frame=14 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=14 particles_after_retain=0 active_emitters=16
+[STEP] frame=15 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=15 particles_after_retain=0 active_emitters=16
+[STEP] frame=16 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=16 particles_after_retain=0 active_emitters=16
+[STEP] frame=17 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=17 particles_after_retain=0 active_emitters=16
+[STEP] frame=18 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=18 particles_after_retain=0 active_emitters=16
+[STEP] frame=19 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=19 particles_after_retain=0 active_emitters=16
+[STEP] frame=20 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=20 particles_after_retain=0 active_emitters=16
+[STEP] frame=21 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=21 particles_after_retain=0 active_emitters=16
+[STEP] frame=22 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=22 particles_after_retain=0 active_emitters=16
+[STEP] frame=23 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=23 particles_after_retain=0 active_emitters=16
+[STEP] frame=24 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=24 particles_after_retain=0 active_emitters=16
+[STEP] frame=25 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=25 particles_after_retain=0 active_emitters=16
+[STEP] frame=26 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=26 particles_after_retain=0 active_emitters=16
+[STEP] frame=27 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=27 particles_after_retain=0 active_emitters=16
+[STEP] frame=28 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=28 particles_after_retain=0 active_emitters=16
+[STEP] frame=29 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=29 particles_after_retain=0 active_emitters=16
+[STEP] frame=30 dt=1 active_emitters=16 particles=0
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=9
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=10
+[EMIT] bone='handl' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=8
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=1
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=3
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[EMIT] bone='top' origin=Vec3(0.0, 0.0, 0.0) scale=1 lifetime=6
+[STEP_END] frame=30 particles_after_retain=0 active_emitters=16
+[DIAG] after 30 frames: particles=0 active_emitters=16
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.26s

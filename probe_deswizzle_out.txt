@@ -1,0 +1,56 @@
+
+running 3 tests
+test effects::tests::test_deswizzle_grade00 ... FAILED
+test effects::tests::test_deswizzle_grade00 ... FAILED
+test effects::tests::test_deswizzle_grade00 ... FAILED
+
+failures:
+
+failures:
+    effects::tests::test_deswizzle_grade00
+    effects::tests::test_deswizzle_grade00
+    effects::tests::test_deswizzle_grade00
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 94 filtered out; finished in 0.05s
+
+ tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R_fire' v=22 one_time=true dur=200 life=12 scale=9.000 rate=1.00 speed=2.700 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,9.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=120 life=8 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=120 life=8 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner1_L' v=22 one_time=true dur=40 life=12 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R' v=22 one_time=true dur=40 life=12 scale=5.000 rate=1.00 speed=1.500 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=8 | direct_scale=(0.000,0.000) walk_scale=(1.000,5.000)
+[EMTR]   tex[0]: 256x768 fmt=0x1e01 wrap=0 blk_h=4 swizzle=0x03020202
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'fire1_ptc' v=22 one_time=true dur=28 life=16 scale=8.000 rate=1.00 speed=2.400 blend=Screen c0keys=2 a0keys=4 tex_resolved=3 tex_idx=6 | direct_scale=(0.000,0.000) walk_scale=(1.000,8.000)
+[EMTR]   tex[0]: 512x512 fmt=0x1d01 wrap=0 blk_h=4 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.344 g=0.829 b=1.000 a=1.000
+[EMTR] 'burner1_L_fire' v=22 one_time=true dur=20 life=12 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner1_R_fire' v=22 one_time=true dur=20 life=12 scale=10.000 rate=1.00 speed=3.000 blend=Screen c0keys=3 a0keys=4 tex_resolved=1 tex_idx=70 | direct_scale=(0.000,0.000) walk_scale=(1.000,10.000)
+[EMTR]   tex[0]: 512x256 fmt=0x2006 wrap=0 blk_h=3 swizzle=0x05040302
+[EMTR]   color0[0]: r=0.690 g=0.855 b=1.000 a=1.000
+[EMTR] 'burner2_L' v=22 one_time=true dur=40 life=8 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[EMTR] 'burner2_R' v=22 one_time=true dur=40 life=8 scale=3.000 rate=1.00 speed=0.900 blend=Screen c0keys=2 a0keys=3 tex_resolved=1 tex_idx=67 | direct_scale=(0.000,0.000) walk_scale=(1.000,3.000)
+[EMTR]   tex[0]: 640x256 fmt=0x1d01 wrap=0 blk_h=3 swizzle=0x02020202
+[EMTR]   color0[0]: r=0.000 g=0.787 b=1.000 a=1.000
+[VFXB] parsed 48 emitter sets, 7314496 texture bytes, 0 primitives, 1 bfres_models
+[GRADE00] 256x128 fmt=0x1e01 data_offset=1093632 data_size=32768
+[GRADE00] first 32 bytes of deswizzled: [255, 0, 73, 146, 36, 73, 146, 36, 255, 0, 73, 146, 36, 73, 146, 36, 255, 0, 73, 146, 36, 73, 146, 36, 255, 0, 73, 146, 36, 73, 146, 36]
+[GRADE00] first block: R0=255 R1=0 G0=255 G1=0
+
+thread 'effects::tests::test_deswizzle_grade00' (42023) panicked at src/effects.rs:5970:22:
+range end index 33536 out of range for slice of length 32768
+error: test failed, to rerun pass `--bin hitbox_editor`

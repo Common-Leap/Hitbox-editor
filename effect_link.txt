@@ -1,0 +1,8 @@
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/texlinkarrowtrace.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/tex_link_sword2.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/texlinkswordturntraceadd.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/texlinkswordtrace.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/texlinkswordturntrace.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/texlinkswordtraceadd.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/trail/tex_link_sword1.nutexb
+/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/link/ef_link.eff

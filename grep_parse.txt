@@ -1,0 +1,7 @@
+1377:    pub fn parse_vfxb_emitter_test_shim(data: &[u8], base: usize, version: u32) -> Option<EmitterDef> {
+1397:    pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
+1399:            anyhow::bail!("PTCL data too short: {} bytes", data.len());
+1409:        anyhow::bail!("Invalid PTCL magic: {:?}", &data[0..4]);
+1417:            anyhow::bail!("VFXB data too short: {} bytes", data.len());
+3603:        assert!(PtclFile::parse(&data).is_err(), "short data should return Err");
+3610:        assert!(PtclFile::parse(&data).is_err(), "bad magic should return Err");

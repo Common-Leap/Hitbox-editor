@@ -1,0 +1,38 @@
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[EMIT] one_time burst: f=1 timing=1 rate=1 spawning=1
+[STEP_END] frame=1 particles_after_retain=16 active_emitters=16
+[STEP_END] frame=2 particles_after_retain=16 active_emitters=16
+[STEP_END] frame=10 particles_after_retain=9 active_emitters=16
+[STEP_END] frame=11 particles_after_retain=7 active_emitters=16
+[STEP_END] frame=12 particles_after_retain=7 active_emitters=16
+[STEP_END] frame=13 particles_after_retain=6 active_emitters=16
+[STEP_END] frame=14 particles_after_retain=5 active_emitters=16
+[STEP_END] frame=15 particles_after_retain=5 active_emitters=16
+[STEP_END] frame=16 particles_after_retain=2 active_emitters=16
+[STEP_END] frame=17 particles_after_retain=1 active_emitters=16
+[STEP_END] frame=18 particles_after_retain=1 active_emitters=16
+[STEP_END] frame=19 particles_after_retain=1 active_emitters=16
+[STEP_END] frame=20 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=21 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=22 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=23 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=24 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=25 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=26 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=27 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=28 particles_after_retain=0 active_emitters=16
+[STEP_END] frame=29 particles_after_retain=0 active_emitters=16

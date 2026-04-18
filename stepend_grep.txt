@@ -1,0 +1,1 @@
+3303:        eprintln!("[STEP_END] frame={target_frame} particles_after_retain={} active_emitters={}", self.particles.len(), self.active_emitters.len());
