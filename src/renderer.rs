@@ -96,6 +96,8 @@ pub struct HitboxRenderState {
     particle_target: Option<(wgpu::Texture, wgpu::TextureView)>,
     particle_target_size: (u32, u32),
     pub surface_format: wgpu::TextureFormat,
+    /// Cached queue for use in paint() (needed for per-draw uniform writes)
+    pub wgpu_queue: Option<wgpu::Queue>,
 }
 
 impl HitboxRenderState {
@@ -142,6 +144,7 @@ impl HitboxRenderState {
             particle_target: None,
             particle_target_size: (0, 0),
             surface_format,
+            wgpu_queue: Some(queue.clone()),
         }
     }
 
@@ -452,6 +455,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
 
             state.resize(device, w, h);
             state.update_camera(queue, self.width, self.height);
+            // Cache queue for use in paint()
+            state.wgpu_queue = Some(queue.clone());
 
             // Re-skin when frame, animation, or skeleton changes
             if frame_changed || anim_changed || skel_changed {
@@ -474,47 +479,34 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 &state.model_render_options,
             );
 
-            // Render particles and trails into the particle target texture
+            // Upload particle instance data for direct rendering in paint().
+            // Particles are drawn directly into the scene render pass so each emitter
+            // uses its correct blend mode against the actual scene content.
             if !self.particles.is_empty() || !self.trails.is_empty() {
-                eprintln!("[RENDER] {} particles, {} trails, target={}", self.particles.len(), self.trails.len(), state.particle_target.is_some());
-                if state.particle_target.is_none() {
-                    eprintln!("[RENDER] WARNING: particle_target is None! viewport size={}x{}", w, h);
-                }
-                if let Some((_, ref target_view)) = state.particle_target {
-                    let (view_proj, cam_right, cam_up) = state.camera_vectors();
-                    if let Some(pr) = state.particle_renderer.as_mut() {
-                        // Clear the particle target first, then render into it
-                        {
-                            let _ = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("particle_target_clear"),
+                let (view_proj, cam_right, cam_up) = state.camera_vectors();
+                if let Some(pr) = state.particle_renderer.as_mut() {
+                    pr.prepare_draw(
+                        device, queue,
+                        view_proj, cam_right, cam_up,
+                        &self.particles, &self.emitter_sets,
+                    );
+                    // Trails still use the offscreen target (additive, blit is fine)
+                    if !self.trails.is_empty() {
+                        if let Some((_, ref target_view)) = state.particle_target {
+                            { let _ = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("trail_target_clear"),
                                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: target_view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                        store: wgpu::StoreOp::Store,
-                                    },
+                                    view: target_view, resolve_target: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                                     depth_slice: None,
                                 })],
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            });
+                                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
+                            }); }
+                            pr.render(device, queue, egui_encoder, target_view,
+                                view_proj, cam_right, cam_up,
+                                &[], &self.trails, &self.emitter_sets, &self.bfres_models);
+                            pr.prepare_composite(device, target_view);
                         }
-                        pr.render(
-                            device,
-                            queue,
-                            egui_encoder,
-                            target_view,
-                            view_proj,
-                            cam_right,
-                            cam_up,
-                            &self.particles,
-                            &self.trails,
-                            &self.emitter_sets,
-                            &self.bfres_models,
-                        );
-                        pr.prepare_composite(device, target_view);
                     }
                 }
             }
@@ -531,8 +523,16 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         // Composite the rendered scene onto the egui surface via the overlay pass.
         if let Some(state) = resources.get::<HitboxRenderState>() {
             state.renderer.end_render_models(render_pass);
-            // Composite the particle/trail offscreen texture on top.
-            if !self.particles.is_empty() || !self.trails.is_empty() {
+            // Draw particles directly into the scene render pass (correct blend modes).
+            if !self.particles.is_empty() {
+                if let Some(pr) = state.particle_renderer.as_ref() {
+                    if let Some(q) = state.wgpu_queue.as_ref() {
+                        pr.draw_into_pass(render_pass, q, &self.emitter_sets);
+                    }
+                }
+            }
+            // Composite trails (offscreen additive blit).
+            if !self.trails.is_empty() {
                 if let Some(pr) = state.particle_renderer.as_ref() {
                     pr.composite(render_pass);
                 }
