@@ -1,0 +1,6 @@
+[submodule "third_party/bnsh-decoder"]
+	path = third_party/bnsh-decoder
+	url = https://github.com/maierfelix/bnsh-decoder.git
+[submodule "extern/bnsh-decoder"]
+	path = extern/bnsh-decoder
+	url = https://github.com/maierfelix/bnsh-decoder
