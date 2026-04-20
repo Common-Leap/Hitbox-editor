@@ -278,6 +278,23 @@ impl HitboxRenderState {
             .unwrap_or_default()
     }
 
+    /// Update particle renderer with BNSH-decoded shaders
+    pub fn update_particle_renderer_with_shaders(
+        &mut self, 
+        device: &wgpu::Device, 
+        queue: &wgpu::Queue, 
+        bnsh_shaders: &crate::particle_renderer_bnsh::BnshShaderSet,
+    ) {
+        eprintln!("[ParticleRenderer] Updating with BNSH shaders: {}", bnsh_shaders.summary());
+        // Recreate the particle renderer with the new shaders
+        self.particle_renderer = Some(crate::particle_renderer::ParticleRenderer::new_with_shaders(
+            device, 
+            queue, 
+            self.surface_format,
+            Some(bnsh_shaders),
+        ));
+    }
+
     pub fn weapon_skel_count(&self) -> usize {
         self.weapon_skels.len()
     }

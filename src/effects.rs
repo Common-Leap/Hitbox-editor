@@ -479,6 +479,7 @@ fn parse_gtnt(data: &[u8], payload_start: usize, payload_len: usize) -> HashMap<
     // +0x0C: u32 name length (bytes, not including null terminator)
     // +0x10: name bytes (null-padded to entry_size - 16)
     let mut off = payload_start;
+    let mut entry_count = 0usize;
     loop {
         if off + 16 > payload_end { break; }
         let tex_id_lo  = r32(off) as u64;
@@ -500,6 +501,7 @@ fn parse_gtnt(data: &[u8], payload_start: usize, payload_len: usize) -> HashMap<
                 // Store under the full 64-bit key.
                 // Real VFXB files use 32-bit CRC32 IDs (hi=0), so tex_id == tex_id_lo.
                 map.insert(tex_id, name);
+                entry_count += 1;
             }
         }
 
@@ -717,6 +719,12 @@ fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec<u8>)>, Vec
 
         let ftx_data_offset = texture_section.len() as u32;
         let pixel_len = pixel_bytes.len() as u32;
+        eprintln!("[BNTX_TEX] '{}': {}x{} fmt={:#06x} offset={} size={} (first_bytes: {:02x} {:02x} {:02x} {:02x})",
+            tex_name, width, height, format_id, ftx_data_offset, pixel_len,
+            pixel_bytes.get(0).copied().unwrap_or(0),
+            pixel_bytes.get(1).copied().unwrap_or(0),
+            pixel_bytes.get(2).copied().unwrap_or(0),
+            pixel_bytes.get(3).copied().unwrap_or(0));
         texture_section.extend_from_slice(&pixel_bytes);
 
         let tex_res = TextureRes {
@@ -1655,7 +1663,6 @@ impl PtclFile {
                                     let gtnt_bin_off = sec_bin_off(child);
                                     let gtnt_bin_start = child + gtnt_bin_off;
                                     let gtnt_bin_len = sec_size(child).saturating_sub(gtnt_bin_off);
-                                    eprintln!("[GTNT] found as GRTF child at {:#x}, bin_start={:#x} len={}", child, gtnt_bin_start, gtnt_bin_len);
                                     if gtnt_bin_start + gtnt_bin_len <= data.len() {
                                         gtnt_map = parse_gtnt(data, gtnt_bin_start, gtnt_bin_len);
                                         eprintln!("[GTNT] parsed {} entries from GRTF child GTNT", gtnt_map.len());
@@ -1746,29 +1753,31 @@ impl PtclFile {
         }
 
         // ── Resolve deferred emitters with the now-complete maps ─────────────
-        // If no GTNT section was found, build a hash40-based GTNT map from BNTX texture names.
-        // SSBU v22 TextureIDs may be CRC32 or hash40 of the texture name strings.
-        if gtnt_map.is_empty() && !bntx_map.is_empty() {
+        // Always build a hash40-based GTNT map from BNTX texture names as a fallback.
+        // SSBU TextureID values in EMTR sections are hash40 or CRC32 hashes of texture names.
+        // The parsed GTNT section may contain corrupted/garbage names (e.g., in composite effect files),
+        // so we must ALWAYS have the hash40/CRC32 fallback available, not just when GTNT is missing.
+        if !bntx_map.is_empty() {
             for name in bntx_map.keys() {
                 // hash40 (used in later SSBU versions)
                 let h = hash40::hash40(name);
                 let h32 = (h.0 & 0xFFFF_FFFF) as u64;
-                gtnt_map.insert(h.0, name.clone());
-                gtnt_map.insert(h32, name.clone());
+                // Only insert if not already in gtnt_map (prefer parsed GTNT over computed)
+                gtnt_map.entry(h.0).or_insert_with(|| name.clone());
+                gtnt_map.entry(h32).or_insert_with(|| name.clone());
                 // CRC32 (used in v22 / older SSBU VFXB files)
                 let crc = crc32_of(name.as_bytes()) as u64;
-                gtnt_map.insert(crc, name.clone());
+                gtnt_map.entry(crc).or_insert_with(|| name.clone());
                 // Also try without "ef_" prefix
                 if let Some(stripped) = name.strip_prefix("ef_") {
                     let h2 = hash40::hash40(stripped);
                     let h2_32 = (h2.0 & 0xFFFF_FFFF) as u64;
-                    gtnt_map.insert(h2.0, name.clone());
-                    gtnt_map.insert(h2_32, name.clone());
+                    gtnt_map.entry(h2.0).or_insert_with(|| name.clone());
+                    gtnt_map.entry(h2_32).or_insert_with(|| name.clone());
                     let crc2 = crc32_of(stripped.as_bytes()) as u64;
-                    gtnt_map.insert(crc2, name.clone());
+                    gtnt_map.entry(crc2).or_insert_with(|| name.clone());
                 }
             }
-            eprintln!("[GTNT] built {} hash40+crc32 entries from BNTX names", gtnt_map.len());
         }
         let mut emitter_sets: Vec<EmitterSet> = Vec::new();
         for (set_name, deferred_emtrs) in deferred_sets {

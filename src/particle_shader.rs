@@ -285,15 +285,14 @@ pub struct IndirectParams {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, encase::ShaderType)]
 pub struct ParticleInstance {
-    pub position: glam::Vec3,
-    pub size: f32,
+    pub position: glam::Vec4,
     pub color: glam::Vec4,
     pub rotation: f32,
     pub aspect_ratio: f32,
+    pub size: f32,
+    pub _pad: f32,
     pub tex_scale: glam::Vec2,
     pub tex_offset: glam::Vec2,
-    pub _pad: f32,
-    pub _pad2: f32,
 }
 #[derive(Debug)]
 pub struct VertexEntry<const N: usize> {
