@@ -11,15 +11,14 @@ struct CameraUniforms {
 }
 
 struct ParticleInstance {
-    position: vec3<f32>,
-    size: f32,
+    position: vec4<f32>,         // position.xyz, w unused (set to 1.0)
     color: vec4<f32>,
     rotation: f32,
-    aspect_ratio: f32,  // texture width / height, for non-square billboard stretching
+    aspect_ratio: f32,           // texture width / height, for non-square billboard stretching
+    size: f32,
+    _pad: f32,                   // Padding to align tex_scale to 8 bytes (std430)
     tex_scale: vec2<f32>,
     tex_offset: vec2<f32>,
-    _pad: f32,
-    _pad2: f32,
 }
 
 struct IndirectParams {
@@ -76,6 +75,11 @@ fn vs_main(
     let p = particles[instance_idx];
     let corner = QUAD_POS[vertex_idx];
 
+    // DEBUG: log what we're reading for first particle
+    if instance_idx == 0u && vertex_idx == 0u {
+        // Can't print from shader, but we can verify via render results
+    }
+
     // Rotate corner in billboard plane
     let s = sin(p.rotation);
     let c = cos(p.rotation);
@@ -85,13 +89,21 @@ fn vs_main(
     );
 
     // Expand billboard in camera space (aspect_ratio applied to horizontal axis for non-square textures)
-    let world_pos = p.position
+    let world_pos = p.position.xyz
         + camera.cam_right * rotated.x * p.size * p.aspect_ratio
         + camera.cam_up    * rotated.y * p.size;
 
     var out: VertexOutput;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    out.uv = QUAD_UV[vertex_idx] * p.tex_scale + p.tex_offset;
+    
+    // UV calculation: each corner of QUAD_UV should get different coordinates
+    // QUAD_UV[0] = (0,1), [1] = (1,1), [2] = (1,0), [3] = (0,1), [4] = (1,0), [5] = (0,0)
+    let base_uv = QUAD_UV[vertex_idx];
+    // Standard texture atlas coordinate transformation: scale then offset
+    out.uv = base_uv * p.tex_scale + p.tex_offset;
+    
+    // DEBUG: verify UVs span the full texture
+    // If this is wrong, we'll see colored bands in particles indicating sampling from edge
     out.color = p.color;
     return out;
 }

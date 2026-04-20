@@ -915,6 +915,28 @@ impl HitboxEditorApp {
                                 }
                             }
                             eprintln!("[EFF] ptcl ok: {} emitter sets", ptcl.emitter_sets.len());
+                            
+                            // Try to decode BNSH shaders from the effect
+                            match crate::bnsh_shader_integration::decode_effect_shaders(&ptcl) {
+                                Ok(shader_pair) => {
+                                    let stats = crate::bnsh_shader_integration::get_shader_stats(&shader_pair);
+                                    let bnsh_set = crate::particle_renderer_bnsh::BnshShaderSet {
+                                        shader_pair,
+                                        stats,
+                                        source_name: path.file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("effect.eff")
+                                            .to_string(),
+                                    };
+                                    eprintln!("[BNSH] Loaded shaders: {}", bnsh_set.summary());
+                                    self.state.bnsh_shaders = Some(bnsh_set);
+                                }
+                                Err(e) => {
+                                    eprintln!("[BNSH] Failed to decode shaders: {}", e);
+                                    self.state.bnsh_shaders = None;
+                                }
+                            }
+                            
                             self.state.status = format!(
                                 "Loaded {} effects ({} emitter sets)",
                                 eff.handles.len(), ptcl.emitter_sets.len()
@@ -1816,6 +1838,19 @@ impl eframe::App for HitboxEditorApp {
                 // else: no wgpu state yet, retry next frame
             } else {
                 self.state.pending_texture_upload = false; // no ptcl, nothing to upload
+            }
+        }
+
+        // Update particle renderer with BNSH shaders when they become available
+        if let Some(bnsh_set) = &self.state.bnsh_shaders {
+            if let Some(wgpu_state) = frame.wgpu_render_state() {
+                let mut renderer = wgpu_state.renderer.write();
+                if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
+                    rs.update_particle_renderer_with_shaders(&wgpu_state.device, &wgpu_state.queue, bnsh_set);
+                    eprintln!("[BNSH] Applied BNSH shaders to particle renderer");
+                    // Clear it so we don't re-apply every frame
+                    self.state.bnsh_shaders = None;
+                }
             }
         }
 

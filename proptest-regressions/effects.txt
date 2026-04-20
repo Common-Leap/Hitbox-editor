@@ -5,3 +5,41 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 494631e1f45037a470851e85c6cc9e505e1dbeaee266c3f03b8ba9ce4bf5a089 # shrinks to payload = [0], use_grsn = false
+cc e8feb5e480aba0017a55401e256492e99dc36ad08eb67281921a8380da07a453 # shrinks to scale = 0.001
+cc d342e80779dbec57042c6eef19e0e4293a4822dffee4f93ee1ac263cd278ecd1 # shrinks to rate = 0.1
+cc 66219e35aebed23763ce3ba9307c65915e884923da9912da0c6acebbf84a200e # shrinks to rate = 0.1
+cc 936fb49e6732c492f6391179866590be86e26c1a6923b0de7671334c8de376aa # shrinks to rate = 2.0
+cc d44125669b77ebde7285009034c04b14530236c129728d7dc96f4d351437e23f # shrinks to rate = 0.1
+cc 267c7aed9af66a9a5b92ca51a35f9b480f646ed7be774abdf3a30f07a3d1aee1 # shrinks to rate = 0.0
+cc f9db6c1b2549cdab6002df08419a5d3303724026c24c50853bbeb85d5d2372f0 # shrinks to lifetime = 1.0
+cc 7ae0e3864734f4095978856bd93e4eeefafba33800853419d04b890bbf3d7f54 # shrinks to r = 0.0, g = 0.0, b = 0.0
+cc 3aa3ca9122066cd20bba02ce49da45e26ec156f219df5c2444b461ab4afff02d # shrinks to rate = 0.1, steps = 1
+cc 6f7792fac163eaf4d701f7454584d3154b253f70c9b8e2f9548e7d0fbd658d9c # shrinks to rate = 0.1
+cc 507cdb180afb39cf6b4bac29a08a5997ac03f2315a9488efb46539719fb6598f # shrinks to rate = 0.1, steps = 1
+cc bd33779d21aa954fd214c673145e71557c264f2cf36abaad44b850ed5cbd73b4 # shrinks to rate = 0.1
+cc 11f329d86ea8e710bc7cf23f8c4475136e455c09999ee0b591f9ea04448188e9 # shrinks to rate = 0.1
+cc ab73466c258627129b9723beab1bd41e3b008604effc2f16f58222db9cf74a6a # shrinks to scale = 0.001, start_value = 0.01
+cc feb66c24efeedb4c69aa461a629f9209fc181e6b2e8fa7bd5df48221772621a3 # shrinks to rate = 0.1
+cc e3a8d9ef9540530fe10e6b6e539fa06b589379ab2ffcad6cb318be3a25c0d205 # shrinks to rate = 0.1
+cc 7105f409e1574ba9eb589ae8b9b273950339b4c76b88ed6feb9d8d77291eb53b # shrinks to rate = 0.1, steps = 1
+cc f80ab137d12421346cca3e530d73d6c3cf1da2ebe8bea0b95705d8c1617c284b # shrinks to rate = 2.0
+cc 546624a8734f4d223583a18987f2e85e284d38ea3da1f2e36d31cb82b4b608fd # shrinks to tex_id = 1, name = "AA"
+cc 3b64f0d129d4a6b1dcd5ecf9f4d84e9f548e7d0a0a40954b13dd20f59c2fa5ab # shrinks to rate = 0.1
+cc c40054727548cbadeee242322eb6c7edc5bf31a12ca710548b06e66b464ab849 # shrinks to rate = 0.0
+cc 67fc0c5bdecdd9372caa50e9b5e2e1a6991227b89fbc55e864363497e4369b9e # shrinks to scale = 0.001
+cc 66cbce8ecb018319eff586354c36abf12a0c99768976c5fc03e78ecc2cf054ea # shrinks to rate = 0.1
+cc 5143af24f06b4c2d6cb44f45f5a834e466c74ae71ce8c891cb7629cd79d320d9 # shrinks to rate = 0.1
+cc aff7f834b9597fa2033d8c5fe475800e71b33613eb16e1622f44f111be32e0a9 # shrinks to rate = 2.0
+cc 6523d7c15ffb26fef767ee2ab6bb31842a98e7eb8c5b93703e7c69b13bcb9bab # shrinks to lifetime = 1.0
+cc 1f16ae5befd89b19790cca2784adc461d3af1786a8d6012496064236026cdba8 # shrinks to scale = 0.001, start_value = 0.01
+cc ad79d4f4d06188d80794477c4e0f5b747174fd4751f9207a5a15023f6e01e51a # shrinks to rate = 0.1
+cc 2a8dd90e28afe9b8e30d62aa89590e87f1db3b3910028d94fb57c567b302d5bb # shrinks to rate = 0.1
+cc b5dbdf70743e79be0a899923c622380b80adf54f52a34edd8167f1a87a6a0ac1 # shrinks to rate = 0.1, steps = 1
+cc b51796559c39e9f7eda896cbf7c4513158444c546bd93271115e8d15a0221e83 # shrinks to rate = 2.0
+cc 9f7214f03de090ae53c986b171676f6e6db2f71f2a4e5ee4cfb5b5317f1eec78 # shrinks to scale = 0.001
+cc 61ae1fa84256cc693e824ab44eca23cd0feb66193ad5eb349aa13428b5494fc8 # shrinks to scale = 0.001, start_value = 0.01
+cc edf481aad0aba3d63b890ffa0d80e134ff48f0a91ef38ec917a2b4ce7c117cf2 # shrinks to lifetime = 1.0
+cc 8bdaf3cfa213f3e2aee9e29d774e4a73e9ab044e9f0474c4a37e4f5ec853489c # shrinks to rate = 0.1
+cc d28e72405a27865696e70c1559c5a9b7e6b0eeb4db6585d886ef5e0364becbd9 # shrinks to rate = 0.1
+cc 4418a681a90615b5ba7cc2ce883066b17a6a16e5f3057eb9e35a570bcafc98db # shrinks to rate = 0.0
+cc e7aef8ad92a69bf91a208143f5e7c8cd6ed57760a4e5464988a92a6784f4b3b5 # shrinks to rate = 0.1

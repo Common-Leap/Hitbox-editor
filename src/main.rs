@@ -4,6 +4,20 @@ mod acmd;
 mod renderer;
 mod effects;
 mod particle_renderer;
+mod particle_renderer_bnsh;
+mod shader_cache;
+mod batch_loader;
+mod bnsh_ffi;
+mod effect_browser;
+mod shader_integration;
+mod bnsh_shader_integration;
+mod spirv_to_wgsl;
+
+#[cfg(test)]
+mod integration_tests;
+
+#[cfg(test)]
+mod end_to_end_integration_test;
 
 use ssbh_wgpu;
 
