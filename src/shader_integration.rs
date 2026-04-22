@@ -4,11 +4,13 @@
 use std::path::PathBuf;
 use crate::batch_loader::BatchEffectLoader;
 use crate::shader_cache::{ShaderCache, ShaderMetadata, ShaderCacheEntry, ShaderStage};
-use crate::effects::PtclFile;
 use std::collections::HashMap;
+
+#[allow(dead_code)]
 
 /// Statistics for shader integration across a batch
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ShaderBatchStats {
     pub total_effects: usize,
     pub effects_with_shaders: usize,
@@ -131,7 +133,7 @@ impl ShaderIntegration {
         self.batch_stats.unique_shader_hashes = shader_hashes.len();
         self.batch_stats.total_shader_bytes = total_bytes;
 
-        let (hits, _misses, hit_rate) = self.cache.stats();
+        let (_hits, _misses, hit_rate) = self.cache.stats();
         let estimated_deduped = if hit_rate > 0.0 {
             (total_bytes as f32 * (1.0 - hit_rate / 100.0)) as usize
         } else {

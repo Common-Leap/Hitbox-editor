@@ -213,13 +213,17 @@ fn angle_picker(ui: &mut egui::Ui, angle: &mut i32) {
         let popup_id = ui.make_persistent_id("angle_popup");
         let btn = ui.button(format!("▾ {special_label}"));
         if btn.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
+            #[allow(deprecated)]
+            {
+                ui.memory_mut(|m| { let _ = m.toggle_popup(popup_id); });
+            }
         }
+        #[allow(deprecated)]
         egui::popup_below_widget(ui, popup_id, &btn, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
             ui.set_min_width(160.0);
             if ui.selectable_label(special_label == "Custom", "Custom (0°)").clicked() {
                 *angle = 0;
-                ui.memory_mut(|m| m.close_popup(popup_id));
+                ui.memory_mut(|m| { let _ = m.close_popup(popup_id); });
             }
             for &(name, val) in SPECIAL_ANGLES {
                 if ui.selectable_label(*angle == val, name).clicked() {
@@ -347,6 +351,7 @@ struct ActiveEffect {
     /// Clock stops advancing once `anim_clock >= max_lifetime`.
     max_lifetime: f32,
     /// Index into `ptcl.emitter_sets` for this effect.
+    #[allow(dead_code)]
     emitter_set_idx: usize,
 }
 
@@ -920,8 +925,10 @@ impl HitboxEditorApp {
                             match crate::bnsh_shader_integration::decode_effect_shaders(&ptcl) {
                                 Ok(shader_pair) => {
                                     let stats = crate::bnsh_shader_integration::get_shader_stats(&shader_pair);
+                                    let material_bindings = crate::bnsh_shader_integration::MaterialTextureBindings::from_ptcl_file(&ptcl);
                                     let bnsh_set = crate::particle_renderer_bnsh::BnshShaderSet {
                                         shader_pair,
+                                        material_bindings,
                                         stats,
                                         source_name: path.file_name()
                                             .and_then(|n| n.to_str())
@@ -1829,7 +1836,13 @@ impl eframe::App for HitboxEditorApp {
                         if let Some(pr) = rs.particle_renderer.as_mut() {
                             pr.upload_textures(&wgpu_state.device, &wgpu_state.queue, ptcl);
                             pr.upload_meshes(&wgpu_state.device, &wgpu_state.queue, ptcl);
-                            eprintln!("[TEX] texture upload complete");
+                            // Extract shader reflection for material texture binding resolution
+                            let shader_reflection = self.state.bnsh_shaders.as_ref()
+                                .and_then(|bnsh_set| bnsh_set.shader_pair.fragment.as_ref())
+                                .and_then(|frag_shader| frag_shader.reflection.as_ref());
+                            // Create material texture bind groups from BFRES models with shader-resolved slots
+                            pr.create_material_texture_bind_groups(&wgpu_state.device, &wgpu_state.queue, ptcl, shader_reflection);
+                            eprintln!("[TEX] texture upload and material texture bind group creation complete");
                             self.state.pending_texture_upload = false;
                         }
                         // else: particle_renderer not yet initialized, retry next frame
@@ -1855,7 +1868,7 @@ impl eframe::App for HitboxEditorApp {
         }
 
         // Compute wall-clock dt for animation clocks (clamped to avoid huge jumps)
-        let anim_dt = {
+        let _anim_dt = {
             let elapsed = self.last_frame_time.elapsed().as_secs_f32();
             elapsed.clamp(0.0, 0.1)
         };
@@ -1946,7 +1959,7 @@ impl eframe::App for HitboxEditorApp {
                             if !crossed { continue; }
 
                             let name_lower = ec.effect_name.to_lowercase();
-                            let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
+                            let _canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                                 .cloned()
                                 .unwrap_or_else(|| ec.bone_name.clone());
                             let is_trail = ec.follows_bone && (
@@ -1959,7 +1972,7 @@ impl eframe::App for HitboxEditorApp {
                             );
                             if is_trail { continue; } // trails handled separately
 
-                            let set_idx_opt = eff_index.handles.get(&ec.effect_name)
+                            let _set_idx_opt = eff_index.handles.get(&ec.effect_name)
                                 .or_else(|| eff_index.handles.get(&name_lower))
                                 .copied()
                                 .filter(|&idx| idx >= 0)

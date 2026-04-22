@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::effects::{EffIndex, PtclFile};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EffectMetadata {
     pub name: String,
     pub path: PathBuf,
@@ -16,6 +17,7 @@ pub struct EffectMetadata {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CachedEffect {
     pub metadata: EffectMetadata,
     pub ptcl: Option<PtclFile>,
@@ -24,6 +26,7 @@ pub struct CachedEffect {
 
 /// Batch loader for SSBU effects
 /// Manages ~500+ .eff files from the dumped game data
+#[allow(dead_code)]
 pub struct BatchEffectLoader {
     effects: HashMap<String, CachedEffect>,
     base_dir: PathBuf,

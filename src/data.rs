@@ -349,6 +349,7 @@ impl EditLog {
 pub struct FighterEntry {
     pub name: String,
     pub display_name: String,
+    #[allow(dead_code)]
     pub param_path: PathBuf,
     pub motion_dir: PathBuf,
     pub model_dir: PathBuf,

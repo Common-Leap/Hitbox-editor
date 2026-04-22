@@ -16,6 +16,7 @@ pub fn move_name_to_pascal(name: &str) -> String {
 }
 
 /// Fetch and parse hitboxes for a fighter+move from GitHub.
+#[allow(dead_code)]
 pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Result<AcmdScript> {
     let body = fetch_script_body(fighter, move_name)?;
     Ok(parse_acmd_script(&body))
@@ -1125,6 +1126,7 @@ pause
 
 /// Convenience: export a single move as a standalone project.
 /// Returns the `src/{fighter}/acmd.rs` content only — use `build_mod_project` for a full project.
+#[allow(dead_code)]
 pub fn export_acmd_source(
     script: &crate::data::AcmdScript,
     fighter: &str,

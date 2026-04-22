@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use sha2::{Sha256, Digest};
 use anyhow::Result;
 
+#[allow(dead_code)]
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct ShaderCacheEntry {
     pub bnsh_hash: String,
     pub spirv_module: Vec<u32>, // SPIR-V as u32 words
@@ -23,6 +26,7 @@ pub struct ShaderMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub enum ShaderStage {
     Vertex,
     Fragment,
@@ -34,6 +38,7 @@ impl Default for ShaderStage {
     fn default() -> Self { Self::Unknown }
 }
 
+#[allow(dead_code)]
 pub struct ShaderCache {
     /// SHA256(BNSH binary) -> ShaderCacheEntry
     cache: HashMap<String, ShaderCacheEntry>,
@@ -174,7 +179,7 @@ mod tests {
         
         let _ = cache.get(b"miss1");
         let _ = cache.get(b"miss2");
-        let (hits, misses, _) = cache.stats();
+        let (_hits, misses, _) = cache.stats();
         assert_eq!(hits, 0);
         assert_eq!(misses, 2);
     }
