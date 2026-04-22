@@ -18,7 +18,6 @@ egui = { version = "0.33.0" }
 egui-wgpu = "0.33.0"
 egui_extras = { version = "0.33.0", features = ["all_loaders"] }
 wgpu = { version = "27.0.0", features = ["spirv"] }
-naga = { version = "0.20", features = ["spv-in", "wgsl-out"] }
 glam = { version = "0.28.0", features = ["bytemuck"] }
 
 # SSBU file formats

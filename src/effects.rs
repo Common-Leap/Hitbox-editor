@@ -117,6 +117,7 @@ impl EffIndex {
 
     /// Merge handles from another eff file (e.g. ef_sys.eff) into this index.
     /// Existing handles are not overwritten.
+    #[allow(dead_code)]
     pub fn merge_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
         let eff = eff_lib::EffFile::from_file(path)
             .map_err(|e| anyhow::anyhow!("Failed to parse .eff: {e}"))?;
@@ -410,6 +411,7 @@ pub struct PtclFile {
     pub emitter_sets: Vec<EmitterSet>,
     /// Raw texture section bytes (for GPU upload)
     pub texture_section: Vec<u8>,
+    #[allow(dead_code)]
     pub texture_section_offset: usize,
     /// BNTX textures extracted from the VFXB file
     pub bntx_textures: Vec<TextureRes>,
@@ -479,7 +481,7 @@ fn parse_gtnt(data: &[u8], payload_start: usize, payload_len: usize) -> HashMap<
     // +0x0C: u32 name length (bytes, not including null terminator)
     // +0x10: name bytes (null-padded to entry_size - 16)
     let mut off = payload_start;
-    let mut entry_count = 0usize;
+    let mut _entry_count = 0usize;
     loop {
         if off + 16 > payload_end { break; }
         let tex_id_lo  = r32(off) as u64;
@@ -501,7 +503,7 @@ fn parse_gtnt(data: &[u8], payload_start: usize, payload_len: usize) -> HashMap<
                 // Store under the full 64-bit key.
                 // Real VFXB files use 32-bit CRC32 IDs (hi=0), so tex_id == tex_id_lo.
                 map.insert(tex_id, name);
-                entry_count += 1;
+                _entry_count += 1;
             }
         }
 
@@ -519,6 +521,7 @@ fn parse_gtnt(data: &[u8], payload_start: usize, payload_len: usize) -> HashMap<
 // embedded BNTX inside VFXB/GRTF sections have absolute pointer offsets that
 // don't survive slicing). We use tegra_swizzle directly for deswizzle.
 
+#[allow(dead_code)]
 fn parse_bntx(data: &[u8]) -> (Vec<TextureRes>, Vec<u8>) {
     let (map, section, ordered) = parse_bntx_named(data);
     let _ = map;
@@ -535,7 +538,7 @@ fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec<u8>)>, Vec
         if off + 4 > data.len() { return 0; }
         u32::from_le_bytes(data[off..off+4].try_into().unwrap_or([0;4]))
     };
-    let r64 = |off: usize| -> u64 {
+    let _r64 = |off: usize| -> u64 {
         if off + 8 > data.len() { return 0; }
         u64::from_le_bytes(data[off..off+8].try_into().unwrap_or([0;8]))
     };
@@ -751,6 +754,7 @@ fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec<u8>)>, Vec
 }
 
 /// Convert a bntx::SurfaceFormat to the 16-bit format ID used by TextureRes.
+#[allow(dead_code)]
 fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
     match fmt {
         bntx::SurfaceFormat::R8Unorm        => 0x0201,
@@ -777,6 +781,7 @@ fn bntx_surface_format_to_id(fmt: bntx::SurfaceFormat) -> u32 {
     }
 }
 
+#[allow(dead_code)]
 fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::BlockDim {
     use tegra_swizzle::surface::BlockDim;
     match fmt {
@@ -791,6 +796,7 @@ fn bntx_block_dim(fmt: bntx::SurfaceFormat) -> tegra_swizzle::surface::BlockDim 
     }
 }
 
+#[allow(dead_code)]
 fn bntx_bytes_per_pixel(fmt: bntx::SurfaceFormat) -> u32 {
     match fmt {
         bntx::SurfaceFormat::R8Unorm => 1,
@@ -2462,7 +2468,7 @@ impl PtclFile {
         // VFXB v22 scale values are in the same world units as bone positions.
         // The sequential walk gives (scaleX, scaleY) from ParticleScale.
         // For v22, scaleY tends to be the actual rendered size; take the larger of the two.
-        let (raw_scale, scale_from_direct) =
+        let (raw_scale, _scale_from_direct) =
             if scale_x_direct.is_normal() && scale_x_direct > 0.0 {
                 (scale_x_direct, true)
             } else if scale_y_direct.is_normal() && scale_y_direct > 0.0 {
@@ -2945,13 +2951,16 @@ pub struct Particle {
     pub rotation_speed: f32,
     pub emitter_set_idx: usize,
     pub emitter_idx: usize,
+    #[allow(dead_code)]
     pub texture_idx: usize,
+    #[allow(dead_code)]
     pub blend_type: BlendType,
     /// Per-particle UV offset (initialized to emitter.tex_offset_uv, advanced by tex_scroll_uv each frame)
     pub tex_offset: [f32; 2],
 }
 
 impl Particle {
+    #[allow(dead_code)]
     pub fn life_t(&self) -> f32 {
         if self.lifetime <= 0.0 { 1.0 } else { (self.age / self.lifetime).clamp(0.0, 1.0) }
     }
@@ -2961,12 +2970,15 @@ impl Particle {
 /// Tracks fractional emission accumulator per active emitter instance.
 #[derive(Debug, Clone)]
 pub struct EmitterInstance {
+    #[allow(dead_code)]
     emitter_set_idx: usize,
+    #[allow(dead_code)]
     emitter_idx: usize,
     bone_name: String,
     /// Local offset from the bone origin (in bone-local space, applied as world translation)
     offset: Vec3,
     /// ACMD-specified rotation (Euler angles in radians, ZYX order) applied at spawn time.
+    #[allow(dead_code)]
     rotation: Vec3,
     start_frame: f32,
     end_frame: f32,

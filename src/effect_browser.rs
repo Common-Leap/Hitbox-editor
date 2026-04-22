@@ -6,7 +6,10 @@ use crate::batch_loader::{BatchEffectLoader, EffectMetadata, BatchLoaderStats};
 use crate::shader_cache::ShaderCache;
 use crate::effects::PtclFile;
 
+#[allow(dead_code)]
+
 /// Effect browser state for UI integration
+#[allow(dead_code)]
 pub struct EffectBrowser {
     loader: BatchEffectLoader,
     cache: ShaderCache,

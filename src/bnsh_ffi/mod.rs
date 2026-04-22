@@ -221,27 +221,25 @@ impl BnshDecoder {
     fn get_cli_path() -> Result<String> {
         eprintln!("[BNSH_FFI] Searching for bnsh-decoder CLI tool...");
         
-        // First, check the environment variable set by build.rs
+        // First, check the environment variable set by build.rs (embedded binary)
         if let Ok(cli_path) = std::env::var("BNSH_DECODER_CLI") {
-            eprintln!("[BNSH_FFI] Found BNSH_DECODER_CLI env var: {}", cli_path);
+            eprintln!("[BNSH_FFI] ✓ Found BNSH_DECODER_CLI from build: {}", cli_path);
             if std::path::Path::new(&cli_path).exists() {
-                eprintln!("[BNSH_FFI] ✓ BNSH_DECODER_CLI path exists: {}", cli_path);
+                eprintln!("[BNSH_FFI] ✓ Embedded bnsh-decoder CLI ready: {}", cli_path);
                 return Ok(cli_path);
+            } else {
+                eprintln!("[BNSH_FFI] ✗ BNSH_DECODER_CLI path does not exist: {}", cli_path);
+                eprintln!("[BNSH_FFI]   (This may indicate a build issue - was CMake available?)");
             }
-            eprintln!("[BNSH_FFI] ✗ BNSH_DECODER_CLI path does not exist: {}", cli_path);
         }
         
-        // Try common locations
-        let candidates = vec![
-            "bnsh-decoder",
-            "./bnsh-decoder",
-            "/usr/local/bin/bnsh-decoder",
-            "/usr/bin/bnsh-decoder",
-            "bnsh-decoder.exe",
-            "./bnsh-decoder.exe",
-        ];
-        
-        eprintln!("[BNSH_FFI] Trying {} candidate paths...", candidates.len());
+        // Fallback: Try to find bnsh-decoder in common PATH locations
+        eprintln!("[BNSH_FFI] Fallback: Searching for bnsh-decoder in PATH...");
+        let candidates = if cfg!(windows) {
+            vec!["bnsh-decoder.exe", "bnsh-decoder", "CLI.exe", "CLI"]
+        } else {
+            vec!["bnsh-decoder", "./bnsh-decoder", "CLI"]
+        };
         
         for candidate in candidates {
             eprintln!("[BNSH_FFI] Trying: {}", candidate);
@@ -250,13 +248,18 @@ impl BnshDecoder {
                 .output()
                 .is_ok()
             {
-                eprintln!("[BNSH_FFI] ✓ Found bnsh-decoder: {}", candidate);
+                eprintln!("[BNSH_FFI] ✓ Found bnsh-decoder in PATH: {}", candidate);
                 return Ok(candidate.to_string());
             }
         }
         
-        eprintln!("[BNSH_FFI] ✗ bnsh-decoder CLI tool not found in any location");
-        Err(anyhow!("bnsh-decoder CLI tool not found. Please ensure bnsh-decoder is built and in PATH"))
+        eprintln!("[BNSH_FFI] ✗ bnsh-decoder CLI tool not found anywhere");
+        eprintln!("[BNSH_FFI]   Embedded binary should have been built and linked");
+        eprintln!("[BNSH_FFI]   If building from source, ensure CMake is installed:");
+        eprintln!("[BNSH_FFI]     - Ubuntu: apt install cmake");
+        eprintln!("[BNSH_FFI]     - macOS: brew install cmake");
+        eprintln!("[BNSH_FFI]     - Windows: Download from https://cmake.org/download/");
+        Err(anyhow!("bnsh-decoder CLI not found. Rebuild the project with CMake available."))
     }
     
     /// Parse shader metadata from JSON

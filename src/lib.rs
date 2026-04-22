@@ -5,6 +5,7 @@ pub mod effects;
 pub mod particle_renderer;
 pub mod particle_renderer_bnsh;
 pub mod bnsh_shader_integration;
+pub mod bnsh_reflection;
 pub mod batch_loader;
 pub mod shader_cache;
 pub mod bnsh_ffi;

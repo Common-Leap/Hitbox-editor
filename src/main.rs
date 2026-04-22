@@ -8,6 +8,7 @@ mod particle_renderer_bnsh;
 mod shader_cache;
 mod batch_loader;
 mod bnsh_ffi;
+mod bnsh_reflection;
 mod effect_browser;
 mod shader_integration;
 mod bnsh_shader_integration;

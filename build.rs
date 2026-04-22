@@ -32,6 +32,9 @@ fn main() {
 
     // Build the bnsh-decoder CLI tool from git submodule
     build_bnsh_decoder_cli();
+    
+    // Build the spirv-cross library from git submodule
+    build_spirv_cross_library();
 }
 
 fn build_bnsh_decoder_cli() {
@@ -42,24 +45,53 @@ fn build_bnsh_decoder_cli() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let build_dir = out_dir.join("bnsh-decoder-build");
     
+    println!("cargo:warning=Building bnsh-decoder CLI from {}", bnsh_dir.display());
+    println!("cargo:warning=Build output directory: {}", build_dir.display());
+    
+    // Check if bnsh-decoder source exists
+    if !bnsh_dir.exists() {
+        println!("cargo:warning=ERROR: bnsh-decoder source not found at {}", bnsh_dir.display());
+        println!("cargo:warning=Did you forget to run: git submodule update --init --recursive");
+        std::process::exit(1);
+    }
+    
+    // Check if CMake is available
+    match Command::new("cmake").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("cargo:warning=Using CMake: {}", version.lines().next().unwrap_or("unknown"));
+        }
+        _ => {
+            println!("cargo:warning=ERROR: CMake not found in PATH");
+            println!("cargo:warning=Install CMake to build bnsh-decoder");
+            println!("cargo:warning=Ubuntu: sudo apt install cmake");
+            println!("cargo:warning=macOS: brew install cmake");
+            println!("cargo:warning=Windows: https://cmake.org/download/");
+            std::process::exit(1);
+        }
+    }
+    
     // Create build directory
     std::fs::create_dir_all(&build_dir).expect("Failed to create bnsh-decoder build directory");
     
     // Run CMake to configure bnsh-decoder
+    println!("cargo:warning=Configuring bnsh-decoder with CMake...");
     let cmake_status = Command::new("cmake")
         .arg("-B").arg(&build_dir)
         .arg("-S").arg(&bnsh_dir)
         .arg("-DCMAKE_BUILD_TYPE=Release")
-        .arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.24")
+        .arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5")
         .status()
         .expect("Failed to run cmake for bnsh-decoder");
     
     if !cmake_status.success() {
-        eprintln!("cargo:warning=CMake configuration failed for bnsh-decoder");
+        println!("cargo:warning=ERROR: CMake configuration failed for bnsh-decoder");
+        println!("cargo:warning=Try running manually: cmake -B {}", build_dir.display());
         std::process::exit(1);
     }
     
     // Build bnsh-decoder CLI
+    println!("cargo:warning=Building bnsh-decoder CLI...");
     let build_status = Command::new("cmake")
         .arg("--build").arg(&build_dir)
         .arg("--config").arg("Release")
@@ -67,33 +99,151 @@ fn build_bnsh_decoder_cli() {
         .expect("Failed to build bnsh-decoder");
     
     if !build_status.success() {
-        eprintln!("cargo:warning=CMake build failed for bnsh-decoder");
+        println!("cargo:warning=ERROR: CMake build failed for bnsh-decoder");
+        println!("cargo:warning=Try running manually: cmake --build {}", build_dir.display());
         std::process::exit(1);
     }
     
-    // Find and export the CLI binary path
-    let cli_binary_paths = vec![
-        build_dir.join("src/bnsh_cli/CLI"),
-        build_dir.join("src/bnsh_cli/Release/CLI.exe"),
-        build_dir.join("src/bnsh_cli/Debug/CLI.exe"),
-        build_dir.join("src/bnsh_cli/CLI.exe"),
-    ];
+    // Find the CLI binary (platform-specific)
+    let cli_candidates = if cfg!(windows) {
+        vec![
+            build_dir.join("src/bnsh_cli/Release/CLI.exe"),
+            build_dir.join("src/bnsh_cli/Debug/CLI.exe"),
+            build_dir.join("src/bnsh_cli/CLI.exe"),
+            build_dir.join("Release/CLI.exe"),
+        ]
+    } else {
+        vec![
+            build_dir.join("src/bnsh_cli/CLI"),
+            build_dir.join("Release/CLI"),
+            build_dir.join("CLI"),
+        ]
+    };
     
     let mut found = false;
-    for path in &cli_binary_paths {
+    for path in &cli_candidates {
         if path.exists() {
             println!("cargo:rustc-env=BNSH_DECODER_CLI={}", path.display());
-            eprintln!("cargo:warning=bnsh-decoder CLI built at: {}", path.display());
+            println!("cargo:warning=✓ bnsh-decoder CLI built successfully: {}", path.display());
             found = true;
             break;
         }
     }
     
     if !found {
-        eprintln!("cargo:warning=Warning: bnsh-decoder CLI binary not found, will use placeholder");
-        // Still set a path in case it's found at runtime
-        println!("cargo:rustc-env=BNSH_DECODER_CLI_SEARCHED=true");
+        println!("cargo:warning=ERROR: bnsh-decoder CLI binary not found after successful build");
+        println!("cargo:warning=Searched locations:");
+        for path in &cli_candidates {
+            println!("cargo:warning=  - {}", path.display());
+        }
+        std::process::exit(1);
     }
     
     println!("cargo:rerun-if-changed=extern/bnsh-decoder");
+}
+
+fn build_spirv_cross_library() {
+    use std::path::PathBuf;
+    use std::process::Command;
+    
+    let spirv_cross_dir = PathBuf::from("extern/spirv-cross");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let build_dir = out_dir.join("spirv-cross-build");
+    
+    println!("cargo:warning=Building spirv-cross CLI from {}", spirv_cross_dir.display());
+    println!("cargo:warning=Build output directory: {}", build_dir.display());
+    
+    // Check if spirv-cross source exists
+    if !spirv_cross_dir.exists() {
+        println!("cargo:warning=ERROR: spirv-cross source not found at {}", spirv_cross_dir.display());
+        println!("cargo:warning=Did you forget to run: git submodule update --init --recursive");
+        std::process::exit(1);
+    }
+    
+    // Check if CMake is available
+    match Command::new("cmake").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("cargo:warning=Using CMake: {}", version.lines().next().unwrap_or("unknown"));
+        }
+        _ => {
+            println!("cargo:warning=ERROR: CMake not found in PATH");
+            println!("cargo:warning=Install CMake to build spirv-cross");
+            println!("cargo:warning=Ubuntu: sudo apt install cmake");
+            println!("cargo:warning=macOS: brew install cmake");
+            println!("cargo:warning=Windows: https://cmake.org/download/");
+            std::process::exit(1);
+        }
+    }
+    
+    // Create build directory
+    std::fs::create_dir_all(&build_dir).expect("Failed to create spirv-cross build directory");
+    
+    // Run CMake to configure spirv-cross
+    // Note: CLI requires static libraries to be built
+    println!("cargo:warning=Configuring spirv-cross with CMake...");
+    let cmake_status = Command::new("cmake")
+        .arg("-B").arg(&build_dir)
+        .arg("-S").arg(&spirv_cross_dir)
+        .arg("-DCMAKE_BUILD_TYPE=Release")
+        .arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5")
+        .arg("-DSPIRV_CROSS_STATIC=ON")
+        .arg("-DSPIRV_CROSS_SHARED=OFF")
+        .arg("-DSPIRV_CROSS_CLI=ON")
+        .status()
+        .expect("Failed to run cmake for spirv-cross");
+    
+    if !cmake_status.success() {
+        println!("cargo:warning=ERROR: CMake configuration failed for spirv-cross");
+        println!("cargo:warning=Try running manually: cmake -B {}", build_dir.display());
+        std::process::exit(1);
+    }
+    
+    // Build spirv-cross
+    println!("cargo:warning=Building spirv-cross CLI...");
+    let build_status = Command::new("cmake")
+        .arg("--build").arg(&build_dir)
+        .arg("--config").arg("Release")
+        .status()
+        .expect("Failed to build spirv-cross");
+    
+    if !build_status.success() {
+        println!("cargo:warning=ERROR: CMake build failed for spirv-cross");
+        println!("cargo:warning=Try running manually: cmake --build {}", build_dir.display());
+        std::process::exit(1);
+    }
+    
+    // Find the spirv-cross CLI binary
+    let cli_candidates = if cfg!(windows) {
+        vec![
+            build_dir.join("Release/spirv-cross.exe"),
+            build_dir.join("spirv-cross.exe"),
+        ]
+    } else {
+        vec![
+            build_dir.join("spirv-cross"),
+            build_dir.join("Release/spirv-cross"),
+        ]
+    };
+    
+    let mut found = false;
+    for path in &cli_candidates {
+        if path.exists() {
+            println!("cargo:rustc-env=SPIRV_CROSS_CLI={}", path.display());
+            println!("cargo:warning=✓ spirv-cross CLI built successfully: {}", path.display());
+            found = true;
+            break;
+        }
+    }
+    
+    if !found {
+        println!("cargo:warning=ERROR: spirv-cross CLI binary not found after successful build");
+        println!("cargo:warning=Searched locations:");
+        for path in &cli_candidates {
+            println!("cargo:warning=  - {}", path.display());
+        }
+        std::process::exit(1);
+    }
+    
+    println!("cargo:rerun-if-changed=extern/spirv-cross");
 }

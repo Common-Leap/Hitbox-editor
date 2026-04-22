@@ -8,6 +8,7 @@ use ssbh_wgpu::{
     SharedRenderData, SsbhRenderer,
 };
 
+#[allow(dead_code)]
 pub struct Camera {
     pub translation: Vec3,
     pub rotation: Vec3,
@@ -71,6 +72,7 @@ pub struct HitboxRenderState {
     pub renderer: SsbhRenderer,
     pub shared_data: SharedRenderData,
     pub render_models: Vec<RenderModel>,
+    #[allow(dead_code)]
     pub render_settings: RenderSettings,
     pub model_render_options: ModelRenderOptions,
     pub camera: Camera,
@@ -272,6 +274,7 @@ impl HitboxRenderState {
     }
 
     /// Returns all bone names from the cached skeleton.
+    #[allow(dead_code)]
     pub fn bone_names(&self) -> Vec<String> {
         self.cached_skel.as_ref()
             .map(|(_, s)| s.bones.iter().map(|b| b.name.clone()).collect())
@@ -293,6 +296,16 @@ impl HitboxRenderState {
             self.surface_format,
             Some(bnsh_shaders),
         ));
+        
+        // Set material texture bindings from shader reflection
+        if let Some(pr) = self.particle_renderer.as_mut() {
+            let bindings = bnsh_shaders.material_bindings.as_gpu_slots();
+            pr.set_material_texture_bindings(bindings);
+            eprintln!("[ParticleRenderer] Applied {} material texture bindings", 
+                bnsh_shaders.material_bindings.sampler_bindings.len() + 
+                bnsh_shaders.material_bindings.emissive_bindings.len() + 
+                bnsh_shaders.material_bindings.pbr_bindings.len());
+        }
     }
 
     pub fn weapon_skel_count(&self) -> usize {
@@ -392,6 +405,7 @@ impl HitboxRenderState {
         }
 
     /// Returns a map of bone name -> world position (convenience wrapper).
+    #[allow(dead_code)]
     pub fn bone_world_positions(&self) -> std::collections::HashMap<String, glam::Vec3> {
         self.bone_world_matrices()
             .into_iter()
