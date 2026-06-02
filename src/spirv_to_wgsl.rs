@@ -95,8 +95,11 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8], shader_name: &str) -> Result<String> {
 fn get_spirv_cross_cli_path() -> Result<String> {
     eprintln!("[SPIRV] Searching for spirv-cross CLI tool...");
     
-    // First, check the environment variable set by build.rs (embedded binary)
-    if let Ok(cli_path) = std::env::var("SPIRV_CROSS_CLI") {
+    // Check the compile-time embedded path from build.rs (cargo:rustc-env).
+    // NOTE: must use option_env!(), NOT std::env::var() — cargo:rustc-env only
+    // makes the variable available at compile time via env!()/option_env!().
+    if let Some(cli_path) = option_env!("SPIRV_CROSS_CLI") {
+        let cli_path = cli_path.to_owned();
         eprintln!("[SPIRV] ✓ Found SPIRV_CROSS_CLI from build: {}", cli_path);
         if std::path::Path::new(&cli_path).exists() {
             eprintln!("[SPIRV] ✓ Embedded spirv-cross CLI ready: {}", cli_path);

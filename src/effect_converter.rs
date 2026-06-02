@@ -17,12 +17,13 @@ use crate::effects::{
 // ── CLI discovery ─────────────────────────────────────────────────────────────
 
 fn get_cli_path() -> anyhow::Result<PathBuf> {
-    if let Ok(cli) = std::env::var("EFFECT_CONVERTER_CLI") {
-        let p = PathBuf::from(&cli);
+    // Use compile-time embedded path from build.rs
+    if let Some(p) = option_env!("EFFECT_CONVERTER_CLI") {
+        let p = PathBuf::from(p);
         if p.exists() {
             return Ok(p);
         }
-        eprintln!("[EC] EFFECT_CONVERTER_CLI set but not found: {}", cli);
+        eprintln!("[EC] EFFECT_CONVERTER_CLI path does not exist: {}", p.display());
     }
     // Fallback: search PATH
     if let Ok(output) = Command::new("EffectConverter").arg("--help").output() {
@@ -49,6 +50,7 @@ pub fn load_ptcl_from_eff(path: &Path) -> anyhow::Result<PtclFile> {
 
     let status = Command::new(&cli)
         .arg(&tmp_input)
+        .current_dir(tmp.path())
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to run EffectConverter: {e}"))?;
 
@@ -56,8 +58,8 @@ pub fn load_ptcl_from_eff(path: &Path) -> anyhow::Result<PtclFile> {
         anyhow::bail!("EffectConverter CLI exited with non-zero status");
     }
 
-    // The CLI creates {input}_dump/ next to the input file
-    let dump_dir = tmp.path().join("input_dump");
+    // The CLI creates ./input/ (stem of the filename, relative to CWD)
+    let dump_dir = tmp.path().join("input");
     if !dump_dir.is_dir() {
         anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
     }
@@ -76,6 +78,7 @@ pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
 
     let status = Command::new(&cli)
         .arg(&tmp_input)
+        .current_dir(tmp.path())
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to run EffectConverter: {e}"))?;
 
@@ -83,7 +86,7 @@ pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
         anyhow::bail!("EffectConverter CLI exited with non-zero status");
     }
 
-    let dump_dir = tmp.path().join("input_dump");
+    let dump_dir = tmp.path().join("input");
     if !dump_dir.is_dir() {
         anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
     }
@@ -95,12 +98,19 @@ pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
 // ── Dump directory reader ─────────────────────────────────────────────────────
 
 pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
-    // Read EmitterSetInfo.txt for the ordered list of emitter set folder names
+    eprintln!("[EC] load_dump: {:?}", dump_dir);
+
     let eset_info_path = dump_dir.join("EmitterSetInfo.txt");
     let eset_info: EmitterSetInfo = if eset_info_path.exists() {
         let text = std::fs::read_to_string(&eset_info_path)?;
-        serde_json::from_str(&text)?
+        let info: EmitterSetInfo = serde_json::from_str(&text)?;
+        eprintln!("[EC] EmitterSetInfo: {} sets", info.order.len());
+        for (i, name) in info.order.iter().enumerate().take(5) {
+            eprintln!("[EC]   set[{}]: {}", i, name);
+        }
+        info
     } else {
+        eprintln!("[EC] No EmitterSetInfo.txt found");
         EmitterSetInfo { order: vec![] }
     };
 
@@ -112,14 +122,13 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
     let mut shader_binary_1: Vec<u8> = Vec::new();
     let mut shader_binary_2: Vec<u8> = Vec::new();
 
-    for set_name in &eset_info.order {
+    for (set_idx, set_name) in eset_info.order.iter().enumerate() {
         let set_dir = dump_dir.join(set_name);
         if !set_dir.is_dir() {
             eprintln!("[EC] emitter set dir not found: {:?}", set_dir);
             continue;
         }
 
-        // Read emitter order
         let order_path = set_dir.join("EmitterOrder.txt");
         let emitter_order: EmitterOrder = if order_path.exists() {
             match std::fs::read_to_string(&order_path) {
@@ -129,13 +138,16 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
         } else {
             EmitterOrder::default()
         };
+        if emitter_order.order.is_empty() {
+            eprintln!("[EC]   set[{}] '{}' has NO emitter order", set_idx, set_name);
+        }
 
         let mut emitters: Vec<EmitterDef> = Vec::new();
 
-        for emtr_name in &emitter_order.order {
+        for (emtr_idx, emtr_name) in emitter_order.order.iter().enumerate() {
             let emtr_dir = set_dir.join(emtr_name);
             if !emtr_dir.is_dir() {
-                eprintln!("[EC] emitter dir not found: {:?}", emtr_dir);
+                eprintln!("[EC]   emitter dir not found: {:?}", emtr_dir);
                 continue;
             }
 
@@ -143,17 +155,22 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
             let data_path = emtr_dir.join("EmitterData.json");
             let emitter_data: EmitterDataJson = if data_path.exists() {
                 match std::fs::read_to_string(&data_path) {
-                    Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+                    Ok(text) => {
+                        let ed: EmitterDataJson = serde_json::from_str(&text).unwrap_or_default();
+                        if ed.particle_data.as_ref().map(|p| p.life).unwrap_or(0) == 0 {
+                            eprintln!("[EC]   emitter[{}] '{}' WARNING: life=0 (all fields default?)", emtr_idx, emtr_name);
+                        }
+                        ed
+                    }
                     Err(e) => {
                         eprintln!("[EC] failed to read {}: {e}", data_path.display());
                         EmitterDataJson::default()
                     }
                 }
             } else {
+                eprintln!("[EC]   emitter[{}] '{}' has NO EmitterData.json", emtr_idx, emtr_name);
                 EmitterDataJson::default()
             };
-
-            // Read shader binaries
             let shader_path = emtr_dir.join("Shader.bnsh");
             if shader_path.exists() {
                 let bytes = std::fs::read(&shader_path).unwrap_or_default();
@@ -186,13 +203,12 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
             // Build texture_section / bntx_textures from the collected textures
             for tex in &tex_list {
                 let tex_clone = tex.clone();
-                // Read texture pixels from the original bntx file
                 if let Ok(entries) = std::fs::read_dir(&emtr_dir) {
                     for entry in entries.flatten() {
                         let p = entry.path();
                         if p.extension().and_then(|e| e.to_str()) == Some("bntx") {
                             if let Ok(bntx_bytes) = std::fs::read(&p) {
-                                let (tex_map2, section2, _ordered2) =
+                                let (tex_map2, _section2, _ordered2) =
                                     crate::effects::parse_bntx_named(&bntx_bytes);
                                 for (name, (_tex_res, pixels)) in &tex_map2 {
                                     if *name == tex_clone.tex_name {
@@ -203,18 +219,22 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
                                         tx.ftx_data_size = pixels.len() as u32;
                                         tx.original_data_offset = offset;
                                         tx.original_data_size = pixels.len() as u32;
+                                        if bntx_textures.len() <= 5 {
+                                            eprintln!("[EC]   tex: {} {}x{} offset={} size={}",
+                                                tx.tex_name, tx.width, tx.height, offset, pixels.len());
+                                        }
                                         bntx_textures.push(tx);
                                         break;
                                     }
                                 }
-                                let _ = section2;
                             }
                         }
                     }
                 }
             }
 
-            // Read primitive models (.bfres files)
+            // Read primitive models (.bfres files) — track where this emitter's models start
+            let model_start_idx = bfres_models.len();
             if let Ok(entries) = std::fs::read_dir(&emtr_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -228,7 +248,17 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
                 }
             }
 
-            let emitter = convert_emitter_data(&emitter_data, emtr_name, &bntx_textures, &tex_list);
+            let mut emitter = convert_emitter_data(&emitter_data, emtr_name, &bntx_textures, &tex_list);
+
+            // If this emitter has BFRES models, use mesh_type=2 (BFRES model rendering)
+            // The converter always exports models as .bfres files, not as raw PRMA primitives.
+            let model_end_idx = bfres_models.len();
+            if model_end_idx > model_start_idx {
+                emitter.mesh_type = 2;
+                emitter.primitive_index = model_start_idx as u32;
+                eprintln!("[EC]   emitter[{}] '{}' mesh_type=2 model_idx={} models={}",
+                    emtr_idx, emtr_name, model_start_idx, model_end_idx - model_start_idx);
+            }
 
             emitters.push(emitter);
         }
@@ -239,33 +269,13 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
         });
     }
 
-    // Also read Base.ptcl for texture section / shaders if available
-    let base_ptcl = dump_dir.join("Base.ptcl");
-    if base_ptcl.exists() {
-        if let Ok(base_bytes) = std::fs::read(&base_ptcl) {
-            // Use our existing parser for the base file to get additional data
-            if let Ok(base_ptcl_file) = crate::effects::PtclFile::parse(&base_bytes) {
-                if texture_section.is_empty() {
-                    texture_section = base_ptcl_file.texture_section;
-                }
-                if bntx_textures.is_empty() {
-                    bntx_textures = base_ptcl_file.bntx_textures;
-                }
-                if primitives.is_empty() {
-                    primitives = base_ptcl_file.primitives;
-                }
-                if bfres_models.is_empty() {
-                    bfres_models = base_ptcl_file.bfres_models;
-                }
-                if shader_binary_1.is_empty() {
-                    shader_binary_1 = base_ptcl_file.shader_binary_1;
-                }
-                if shader_binary_2.is_empty() {
-                    shader_binary_2 = base_ptcl_file.shader_binary_2;
-                }
-            }
-        }
-    }
+    // Note: Base.ptcl is a copy of the original .ptcl binary placed in the
+    // dump directory by the converter.  We intentionally do NOT parse it here
+    // because calling PtclFile::parse → parse_via_converter → load_dump would
+    // recurse infinitely (Base.ptcl always exists in every dump).
+    //
+    // The per-emitter dump folders already contain the extracted textures
+    // (.bntx), shaders (.bnsh), and models (.bfres) we need.
 
     Ok(PtclFile {
         emitter_sets,
@@ -372,9 +382,10 @@ struct EmitterInfoJson {
     color1_a: f32,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct EmissionJson {
+    #[serde(rename = "isOneTime")]
     is_one_time: bool,
     start: u32,
     timing: u32,
@@ -397,13 +408,15 @@ struct RenderStateJson {
     display_side: u32,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ParticleDataJson {
     life: u32,
     life_random: u32,
     #[serde(rename = "PrimitiveID")]
     primitive_id: u64,
+    #[serde(rename = "PrimitiveExID", default)]
+    primitive_ex_id: u64,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -613,19 +626,11 @@ fn convert_emitter_data(
     // ── Textures ───────────────────────────────────────────────────────────
     let textures: Vec<TextureRes> = tex_list.to_vec();
 
-    // ── mesh_type & primitive_index from shape_info ────────────────────────
-    let mesh_type = json
-        .shape_info
-        .as_ref()
-        .map(|s| {
-            if s.volume_type == 15 { 1 } else { 0 } // Primitive = 15
-        })
-        .unwrap_or(0);
-    let primitive_index = json
-        .shape_info
-        .as_ref()
-        .map(|s| s.primitive_index as u32)
-        .unwrap_or(0);
+    // mesh_type & primitive_index are set in load_dump after BFRES model loading.
+    // mesh_type 0 = billboard (default), 1 = PRMA primitive (not used with converter),
+    // 2 = BFRES model (set in the loading loop when .bfres files are found).
+    let mesh_type = 0;
+    let primitive_index = 0;
 
     // ── Indirect texture fields (from sampler1 / texture_anim1) ────────────
     let is_indirect_slot1 = tex_list

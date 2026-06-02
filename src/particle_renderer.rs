@@ -532,9 +532,22 @@ fn spirv_to_wgsl(spirv_bytes: &[u8]) -> anyhow::Result<String> {
     std::fs::write(&spirv_path, spirv_bytes)?;
     eprintln!("[ParticleRenderer] Wrote {} bytes to {}", spirv_bytes.len(), spirv_path.display());
     
+    // Find spirv-cross CLI: check embedded path first (from build.rs), then PATH
+    let spirv_cross_cli: String = if let Some(p) = option_env!("SPIRV_CROSS_CLI") {
+        if std::path::Path::new(p).exists() {
+            eprintln!("[ParticleRenderer] ✓ Using embedded spirv-cross from build: {}", p);
+            p.to_owned()
+        } else {
+            eprintln!("[ParticleRenderer] Embedded SPIRV_CROSS_CLI path missing: {}, falling back to PATH", p);
+            "spirv-cross".to_owned()
+        }
+    } else {
+        "spirv-cross".to_owned()
+    };
+    
     // Check if spirv-cross is available
     let which_check = Command::new("which")
-        .arg("spirv-cross")
+        .arg(&spirv_cross_cli)
         .output();
     
     match which_check {
@@ -543,9 +556,9 @@ fn spirv_to_wgsl(spirv_bytes: &[u8]) -> anyhow::Result<String> {
                 let path = String::from_utf8_lossy(&output.stdout);
                 eprintln!("[ParticleRenderer] ✓ spirv-cross found at: {}", path.trim());
             } else {
-                eprintln!("[ParticleRenderer] ✗ spirv-cross not found in PATH");
+                eprintln!("[ParticleRenderer] ✗ spirv-cross not found at {}", spirv_cross_cli);
                 eprintln!("[ParticleRenderer] Install it with: apt install spirv-cross (or similar)");
-                return Err(anyhow::anyhow!("spirv-cross not found in PATH"));
+                return Err(anyhow::anyhow!("spirv-cross not found"));
             }
         }
         Err(e) => {
@@ -554,10 +567,10 @@ fn spirv_to_wgsl(spirv_bytes: &[u8]) -> anyhow::Result<String> {
     }
     
     // Run spirv-cross to convert SPIR-V to WGSL
-    eprintln!("[ParticleRenderer] Running: spirv-cross --language wgsl {} --output {}", 
-        spirv_path.display(), wgsl_path.display());
+    eprintln!("[ParticleRenderer] Running: {} --language wgsl {} --output {}", 
+        spirv_cross_cli, spirv_path.display(), wgsl_path.display());
     
-    let output = Command::new("spirv-cross")
+    let output = Command::new(&spirv_cross_cli)
         .arg("--language")
         .arg("wgsl")
         .arg(&spirv_path)
@@ -647,34 +660,26 @@ fn load_particle_shader(
             eprintln!("[ParticleRenderer] ✗ NO fragment shader");
         }
         
-        // Try to use vertex shader if available
+        // Try to use vertex shader if available — SPIR-V directly (wgpu spirv feature)
         if let Some(vertex_shader) = &shader_set.shader_pair.vertex {
-            eprintln!("[ParticleRenderer] Attempting to convert vertex SPIR-V to WGSL...");
-            match spirv_to_wgsl(&vertex_shader.spirv) {
-                Ok(wgsl_source) => {
-                    eprintln!("[ParticleRenderer] ✓ Converted SPIR-V to WGSL ({} lines)", 
-                        wgsl_source.lines().count());
-                    eprintln!("[ParticleRenderer] Shader entry point: '{}'", vertex_shader.entry_point);
-                    
-                    let shader_source = wgpu::ShaderSource::Wgsl(
-                        wgsl_source.into()
-                    );
-                    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some("particle_shader_bnsh_vertex"),
-                        source: shader_source,
-                    });
-                    eprintln!("[ParticleRenderer] ✓ Loaded BNSH vertex shader from WGSL");
-                    return shader_module;
-                }
-                Err(e) => {
-                    eprintln!("[ParticleRenderer] ✗ SPIR-V → WGSL conversion failed: {}", e);
-                    eprintln!("[ParticleRenderer] This likely means spirv-cross is not installed or SPIR-V is corrupted");
-                    eprintln!("[ParticleRenderer] Falling back to default shader");
-                }
-            }
+            eprintln!("[ParticleRenderer] Loading vertex SPIR-V directly ({} bytes, entry='{}')",
+                vertex_shader.spirv.len(), vertex_shader.entry_point);
+
+            // Convert SPIR-V bytes to u32 words
+            let spirv_words: Vec<u32> = vertex_shader.spirv.chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+
+            let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("particle_shader_bnsh_vertex"),
+                source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spirv_words)),
+            });
+            eprintln!("[ParticleRenderer] ✓ Loaded BNSH vertex shader from SPIR-V");
+            return shader_module;
         } else {
             eprintln!("[ParticleRenderer] ✗ BNSH shader set has NO vertex shader, falling back");
         }
+
     } else {
         eprintln!("[ParticleRenderer] ✗ No BNSH shader set provided");
     }

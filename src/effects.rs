@@ -1315,42 +1315,58 @@ impl PtclFile {
         use std::path::PathBuf;
         use std::process::Command;
 
-        // Locate the CLI (same env var set by build.rs)
-        let cli = match std::env::var("EFFECT_CONVERTER_CLI") {
-            Ok(p) => PathBuf::from(p),
-            Err(_) => {
-                // Fallback: try finding it in PATH
+        eprintln!("[EC] parse_via_converter: data={} bytes", data.len());
+
+        let cli = match option_env!("EFFECT_CONVERTER_CLI") {
+            Some(p) => {
+                let p = PathBuf::from(p);
+                if p.exists() {
+                    eprintln!("[EC] Using embedded CLI path: {}", p.display());
+                    p
+                } else {
+                    anyhow::bail!("EffectConverter CLI not found at built path: {}", p.display());
+                }
+            }
+            None => {
                 if Command::new("EffectConverter").arg("--help").output().is_ok() {
+                    eprintln!("[EC] Using EffectConverter from PATH");
                     PathBuf::from("EffectConverter")
                 } else {
-                    anyhow::bail!("EffectConverter CLI not available");
+                    anyhow::bail!("EffectConverter CLI not available (rebuild with .NET 6.0+ SDK)");
                 }
             }
         };
-        if !cli.exists() && cli != PathBuf::from("EffectConverter") {
-            anyhow::bail!("EffectConverter CLI not found at {}", cli.display());
-        }
 
-        // Write bytes to a temp file
         let dir = tempfile::tempdir()?;
         let input_path = dir.path().join("input.ptcl");
         std::fs::write(&input_path, data)?;
+        eprintln!("[EC] Written {} bytes to {:?}", data.len(), input_path);
 
         let status = Command::new(&cli)
             .arg(&input_path)
+            .current_dir(dir.path())
             .status()
             .map_err(|e| anyhow::anyhow!("EffectConverter execution failed: {e}"))?;
+        eprintln!("[EC] Converter exit status: {:?}", status.code());
 
         if !status.success() {
             anyhow::bail!("EffectConverter CLI exited with status {:?}", status.code());
         }
 
-        let dump_dir = dir.path().join("input_dump");
+        // Converter creates ./input/ (just the stem of the filename, relative to CWD)
+        let dump_dir = dir.path().join("input");
         if !dump_dir.is_dir() {
-            anyhow::bail!("EffectConverter did not produce dump directory");
+            anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
         }
+        eprintln!("[EC] Dump dir: {:?}", dump_dir);
 
-        crate::effect_converter::load_dump(&dump_dir)
+        let ptcl = crate::effect_converter::load_dump(&dump_dir)?;
+        eprintln!("[EC] Loaded PtclFile with {} emitter sets", ptcl.emitter_sets.len());
+        if !ptcl.emitter_sets.is_empty() {
+            let set = &ptcl.emitter_sets[0];
+            eprintln!("[EC]   first set: {} with {} emitters", set.name, set.emitters.len());
+        }
+        Ok(ptcl)
     }
 }
 
