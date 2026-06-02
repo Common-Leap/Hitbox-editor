@@ -7,3 +7,6 @@
 [submodule "extern/EffectLibrary"]
 	path = extern/EffectLibrary
 	url = https://github.com/KillzXGaming/EffectLibrary
+[submodule "extern/effect-library"]
+	path = extern/effect-library
+	url = https://github.com/joobert/EffectLibrary.git
