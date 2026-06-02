@@ -35,6 +35,77 @@ fn main() {
     
     // Build the spirv-cross library from git submodule
     build_spirv_cross_library();
+
+    // Build the EffectConverter CLI from git submodule
+    build_effect_converter();
+}
+
+fn build_effect_converter() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let effect_lib_dir = PathBuf::from("extern/effect-library");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let build_dir = out_dir.join("effect-converter-build");
+
+    println!("cargo:warning=Building EffectConverter CLI from {}", effect_lib_dir.display());
+    println!("cargo:warning=Build output directory: {}", build_dir.display());
+
+    if !effect_lib_dir.exists() {
+        println!("cargo:warning=ERROR: EffectLibrary source not found at {}", effect_lib_dir.display());
+        println!("cargo:warning=Did you forget to run: git submodule update --init --recursive");
+        std::process::exit(1);
+    }
+
+    match Command::new("dotnet").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("cargo:warning=Using .NET: {}", version.lines().next().unwrap_or("unknown"));
+        }
+        _ => {
+            println!("cargo:warning=ERROR: dotnet not found in PATH");
+            println!("cargo:warning=Install .NET 6.0+ SDK to build EffectConverter");
+            std::process::exit(1);
+        }
+    }
+
+    let csproj = effect_lib_dir.join("EffectConverter").join("EffectConverter.csproj");
+    if !csproj.exists() {
+        println!("cargo:warning=ERROR: EffectConverter.csproj not found at {}", csproj.display());
+        std::process::exit(1);
+    }
+
+    println!("cargo:warning=Publishing EffectConverter...");
+    let publish_status = Command::new("dotnet")
+        .arg("publish")
+        .arg(&csproj)
+        .arg("-c").arg("Release")
+        .arg("-o").arg(&build_dir)
+        .arg("--self-contained").arg("false")
+        .status()
+        .expect("Failed to publish EffectConverter");
+
+    if !publish_status.success() {
+        println!("cargo:warning=ERROR: dotnet publish failed for EffectConverter");
+        std::process::exit(1);
+    }
+
+    let cli_path = if cfg!(windows) {
+        build_dir.join("EffectConverter.exe")
+    } else {
+        build_dir.join("EffectConverter")
+    };
+
+    if cli_path.exists() {
+        println!("cargo:rustc-env=EFFECT_CONVERTER_CLI={}", cli_path.display());
+        println!("cargo:warning=✓ EffectConverter CLI built successfully: {}", cli_path.display());
+    } else {
+        println!("cargo:warning=ERROR: EffectConverter CLI binary not found at {}", cli_path.display());
+        println!("cargo:warning=Searched: {}", cli_path.display());
+        std::process::exit(1);
+    }
+
+    println!("cargo:rerun-if-changed=extern/effect-library");
 }
 
 fn build_bnsh_decoder_cli() {

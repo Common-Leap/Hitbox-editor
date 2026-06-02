@@ -227,7 +227,7 @@ fn create_texture_from_res(
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
         ..Default::default()
     });
     
@@ -358,7 +358,7 @@ fn build_pipeline(
         },
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }
@@ -961,14 +961,14 @@ impl ParticleRenderer {
         // ── Pipeline layout ───────────────────────────────────────────────
         let particle_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle_pipeline_layout"),
-            bind_group_layouts: &[&camera_bg_layout, &tex_bg_layout, &mat_tex_bg_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bg_layout), Some(&tex_bg_layout), Some(&mat_tex_bg_layout)],
+            immediate_size: 0,
         });
 
         let trail_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("trail_pipeline_layout"),
-            bind_group_layouts: &[&trail_camera_bgl, &tex_bg_layout, &mat_tex_bg_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&trail_camera_bgl), Some(&tex_bg_layout), Some(&mat_tex_bg_layout)],
+            immediate_size: 0,
         });
 
         // ── Blend states ──────────────────────────────────────────────────
@@ -1054,8 +1054,8 @@ impl ParticleRenderer {
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh_pipeline_layout"),
-            bind_group_layouts: &[&mesh_camera_bg_layout, &tex_bg_layout, &emissive_bg_layout_for_pipeline, &mat_tex_bg_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&mesh_camera_bg_layout), Some(&tex_bg_layout), Some(&emissive_bg_layout_for_pipeline), Some(&mat_tex_bg_layout)],
+            immediate_size: 0,
         });
 
         // ── Pipeline cache: all 30 (BlendType × DisplaySide × is_mesh) combos ──
@@ -1112,7 +1112,7 @@ impl ParticleRenderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1206,8 +1206,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
         let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blit_pipeline_layout"),
-            bind_group_layouts: &[&blit_bg_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&blit_bg_layout)],
+            immediate_size: 0,
         });
 
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1250,7 +1250,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1651,7 +1651,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     address_mode_v: address_mode_for(tex_res.wrap_mode),
                     mag_filter: wgpu::FilterMode::Linear,
                     min_filter: wgpu::FilterMode::Linear,
-                    mipmap_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
                     ..Default::default()
                 });
                 // Create second view for combined bind group building before storing texture
@@ -1662,7 +1662,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     address_mode_v: address_mode_for(tex_res.wrap_mode),
                     mag_filter: wgpu::FilterMode::Linear,
                     min_filter: wgpu::FilterMode::Linear,
-                    mipmap_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
                     ..Default::default()
                 });
                 // CRITICAL: Store the texture object so it doesn't get dropped and deallocated!
@@ -1826,7 +1826,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                                     address_mode_v: address_mode_for(alpha_res.wrap_mode),
                                     mag_filter: wgpu::FilterMode::Linear,
                                     min_filter: wgpu::FilterMode::Linear,
-                                    mipmap_filter: wgpu::FilterMode::Linear,
+                                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
                                     ..Default::default()
                                 });
                                 eprintln!("[TEX] alpha slot {set_idx}/{emitter_idx}: {}x{} fmt={:#06x} uploaded", a_w, a_h, alpha_res.ftx_format);
@@ -1978,7 +1978,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 address_mode_v: address_mode_for(tex_res.wrap_mode),
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             });
             // CRITICAL: Store the texture object so it doesn't get dropped and deallocated!
@@ -2376,7 +2376,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                                         address_mode_v: address_mode_for(tex_res.wrap_mode),
                                         mag_filter: wgpu::FilterMode::Linear,
                                         min_filter: wgpu::FilterMode::Linear,
-                                        mipmap_filter: wgpu::FilterMode::Linear,
+                                        mipmap_filter: wgpu::MipmapFilterMode::Linear,
                                         ..Default::default()
                                     });
                                     self.emissive_view_cache.insert(mesh.emissive_tex_index, (emi_view, emi_sampler));
@@ -2664,6 +2664,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
+                multiview_mask: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
@@ -2778,6 +2779,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         depth_slice: None,
                     })],
                     depth_stencil_attachment: None,
+                    multiview_mask: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
@@ -2901,6 +2903,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                             depth_slice: None,
                         })],
                         depth_stencil_attachment: None,
+                        multiview_mask: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
@@ -3054,6 +3057,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                                     depth_slice: None,
                                 })],
                                 depth_stencil_attachment: None,
+                                multiview_mask: None,
                                 timestamp_writes: None,
                                 occlusion_query_set: None,
                             });
@@ -3286,7 +3290,7 @@ fn build_trail_vertices(trails: &[SwordTrail]) -> Vec<TrailVertex> {
         let base_color = trail.color;
         for (i, sample) in trail.samples.iter().enumerate() {
             let t = i as f32 / (trail.samples.len() - 1).max(1) as f32;
-            let alpha = (1.0 - sample.age / max_age).clamp(0.0, 1.0);
+            let alpha = (1.0_f32 - sample.age / max_age).clamp(0.0, 1.0);
             let color = [base_color[0], base_color[1], base_color[2], base_color[3] * alpha];
             verts.push(TrailVertex {
                 position: sample.tip.to_array(),

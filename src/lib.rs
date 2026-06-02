@@ -9,4 +9,5 @@ pub mod bnsh_reflection;
 pub mod batch_loader;
 pub mod shader_cache;
 pub mod bnsh_ffi;
+pub mod effect_converter;
 pub mod spirv_to_wgsl;

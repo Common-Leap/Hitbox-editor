@@ -13,11 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 # GUI + rendering
-eframe = { version = "0.33.0", default-features = false, features = ["wayland", "x11", "wgpu"] }
-egui = { version = "0.33.0" }
-egui-wgpu = "0.33.0"
-egui_extras = { version = "0.33.0", features = ["all_loaders"] }
-wgpu = { version = "27.0.0", features = ["spirv"] }
+eframe = { version = "0.34.3", default-features = false, features = ["wayland", "x11", "wgpu"] }
+egui = { version = "0.34.3" }
+egui-wgpu = "0.34.3"
+egui_extras = { version = "0.34.3", features = ["all_loaders"] }
+wgpu = { version = "29.0.0", features = ["spirv"] }
 glam = { version = "0.28.0", features = ["bytemuck"] }
 
 # SSBU file formats
@@ -49,6 +49,7 @@ rfd = "0.15"
 dirs = "5"
 sha2 = "0.10"
 bincode = "1"
+tempfile = "3"
 
 [dev-dependencies]
 proptest = "1"

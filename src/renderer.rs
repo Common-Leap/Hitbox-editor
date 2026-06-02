@@ -531,7 +531,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                                     depth_slice: None,
                                 })],
-                                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
+                                depth_stencil_attachment: None, multiview_mask: None, timestamp_writes: None, occlusion_query_set: None,
                             }); }
                             pr.render(device, queue, egui_encoder, target_view,
                                 view_proj, cam_right, cam_up,

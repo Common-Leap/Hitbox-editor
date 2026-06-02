@@ -1784,7 +1784,8 @@ impl HitboxEditorApp {
 }
 
 impl eframe::App for HitboxEditorApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
         // Poll background move list loader
         if let Some(rx) = &self.move_list_receiver {
             if let Ok(moves) = rx.try_recv() {

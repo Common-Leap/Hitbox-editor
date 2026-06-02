@@ -12,6 +12,7 @@ mod bnsh_reflection;
 mod effect_browser;
 mod shader_integration;
 mod bnsh_shader_integration;
+mod effect_converter;
 mod spirv_to_wgsl;
 
 #[cfg(test)]
@@ -34,6 +35,10 @@ fn main() -> anyhow::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: egui_wgpu::WgpuConfiguration {
             wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                instance_descriptor: wgpu::InstanceDescriptor::new_without_display_handle(),
+                display_handle: None,
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                native_adapter_selector: None,
                 device_descriptor: std::sync::Arc::new(|adapter| {
                     // Only request ssbh_wgpu features if the adapter supports them.
                     // This prevents a blank window on GPUs/drivers that lack BC compression etc.
@@ -52,12 +57,15 @@ fn main() -> anyhow::Result<()> {
                     wgpu::DeviceDescriptor {
                         label: Some("hitbox_editor"),
                         required_features: features,
-                        required_limits: wgpu::Limits::default(),
+                        required_limits: {
+                            let mut limits = wgpu::Limits::default();
+                            limits.max_sampled_textures_per_shader_stage = 32;
+                            limits
+                        },
                         memory_hints: wgpu::MemoryHints::default(),
                         ..Default::default()
                     }
                 }),
-                ..Default::default()
             }),
             ..Default::default()
         },
