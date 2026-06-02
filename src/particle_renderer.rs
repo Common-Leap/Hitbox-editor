@@ -670,12 +670,31 @@ fn load_particle_shader(
                 .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                 .collect();
 
-            let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("particle_shader_bnsh_vertex"),
-                source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spirv_words)),
-            });
-            eprintln!("[ParticleRenderer] ✓ Loaded BNSH vertex shader from SPIR-V");
-            return shader_module;
+            // wgpu may reject SPIR-V with unsupported capabilities (e.g. StorageImageReadWithoutFormat)
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("particle_shader_bnsh_vertex"),
+                    source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spirv_words)),
+                })
+            }));
+
+            match result {
+                Ok(shader_module) => {
+                    eprintln!("[ParticleRenderer] ✓ Loaded BNSH vertex shader from SPIR-V");
+                    return shader_module;
+                }
+                Err(e) => {
+                    let msg = if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown error".to_string()
+                    };
+                    eprintln!("[ParticleRenderer] ✗ SPIR-V shader rejected: {}", msg);
+                    eprintln!("[ParticleRenderer] Falling back to default shader");
+                }
+            }
         } else {
             eprintln!("[ParticleRenderer] ✗ BNSH shader set has NO vertex shader, falling back");
         }
@@ -1516,23 +1535,37 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     // should be white (1,1,1) with alpha from the appropriate channel.
                     // BC5 has two channels (R and G); use the swizzle's alpha source (ch_a)
                     // to pick the right one. BC4 only has R, so alpha = R.
+                    let is_bc5_indirect = fmt_type == 0x1E && tex_res.tex_name.to_lowercase().contains("indirect");
                     let (ch_r, ch_g, ch_b, ch_a) = if fmt_type == 0x1D {
                         // BC4: single channel, white RGB, alpha from R
                         (1u8, 1u8, 1u8, 2u8)
                     } else if fmt_type == 0x1E {
-                        // BC5: two channels decoded to (R, G, 0, 1) by image_dds.
-                        // Use the channel_swizzle's A_src byte to pick the alpha channel.
-                        // If A_src is 3 (G), use G as alpha; otherwise default to R (2).
-                        let a_src = ((cs >> 24) & 0xFF) as u8;
-                        let alpha_ch = if a_src == 3 { 3u8 } else { 2u8 }; // 3=G, 2=R
-                        (1u8, 1u8, 1u8, alpha_ch)
+                        if is_bc5_indirect {
+                            // Indirect: preserve R→R, G→G for UV offset sampling
+                            (2u8, 3u8, 0u8, 1u8)
+                        } else {
+                            // BC5 non-indirect is handled separately below (G→brightness, R→alpha)
+                            (1u8, 1u8, 1u8, 2u8)
+                        }
                     } else {
                         (ch_r, ch_g, ch_b, ch_a)
                     };
 
                     // Identity swizzle for RGBA = (2,3,4,5); skip if trivial or unset
                     let needs_swizzle = cs != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-                    decoded_buf = if needs_swizzle || fmt_type == 0x1D || fmt_type == 0x1E {
+                    decoded_buf = if fmt_type == 0x1E {
+                        // BC5 (any) non-indirect or indirect: use G channel as brightness (inverted), R as alpha
+                        let orig_min_r = rgba.chunks_exact(4).map(|p| p[0]).min().unwrap_or(0);
+                        let orig_max_r = rgba.chunks_exact(4).map(|p| p[0]).max().unwrap_or(0);
+                        let orig_min_g = rgba.chunks_exact(4).map(|p| p[1]).min().unwrap_or(0);
+                        let orig_max_g = rgba.chunks_exact(4).map(|p| p[1]).max().unwrap_or(0);
+                        eprintln!("[BC5_DBG] set={} emit={} name='{}': raw BC5 R=[{},{}] G=[{},{}]",
+                            set_idx, emitter_idx, tex_res.tex_name, orig_min_r, orig_max_r, orig_min_g, orig_max_g);
+                        rgba.chunks_exact(4).flat_map(|p| {
+                            let influence = 255u8.saturating_sub(p[1]); // invert G
+                            [influence, influence, influence, p[0]]       // R→alpha
+                        }).collect()
+                    } else if needs_swizzle || fmt_type == 0x1D {
                         let pick = |p: &[u8], ch: u8| -> u8 {
                             match ch { 0 => 0, 1 => 255, 2 => p[0], 3 => p[1], 4 => p[2], 5 => p[3], _ => p[0] }
                         };
@@ -1922,19 +1955,31 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 let ch_g = ((cs >>  8) & 0xFF) as u8;
                 let ch_b = ((cs >> 16) & 0xFF) as u8;
                 let ch_a = ((cs >> 24) & 0xFF) as u8;
+                let is_bc5_indirect = fmt_type == 0x1E && tex_res.tex_name.to_lowercase().contains("indirect");
                 let (ch_r, ch_g, ch_b, ch_a) = if fmt_type == 0x1D {
                     (1u8, 1u8, 1u8, 2u8)
                 } else if fmt_type == 0x1E {
-                    // BC5: check if this is an indirect texture (name contains "indirect").
-                    // Indirect textures need RG channels preserved; alpha-mask textures use R→A.
-                    if tex_res.tex_name.to_lowercase().contains("indirect") {
+                    if is_bc5_indirect {
                         (2u8, 3u8, 0u8, 1u8) // preserve R→R, G→G for UV offset sampling
                     } else {
-                        (1u8, 1u8, 1u8, 2u8) // alpha mask: white RGB, R→A
+                        // BC5 non-indirect handled separately below
+                        (1u8, 1u8, 1u8, 2u8)
                     }
                 } else { (ch_r, ch_g, ch_b, ch_a) };
                 let needs_swizzle = cs != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-                decoded_buf = if needs_swizzle || fmt_type == 0x1D || fmt_type == 0x1E {
+                        decoded_buf = if fmt_type == 0x1E {
+                            // BC5 (any) non-indirect or indirect: G→grayscale brightness (inverted), R→alpha
+                            let orig_min_r = rgba.chunks_exact(4).map(|p| p[0]).min().unwrap_or(0);
+                            let orig_max_r = rgba.chunks_exact(4).map(|p| p[0]).max().unwrap_or(0);
+                            let orig_min_g = rgba.chunks_exact(4).map(|p| p[1]).min().unwrap_or(0);
+                            let orig_max_g = rgba.chunks_exact(4).map(|p| p[1]).max().unwrap_or(0);
+                        eprintln!("[BC5_BNTX_DBG] idx={} name='{}': raw BC5 R=[{},{}] G=[{},{}]",
+                            bntx_idx, tex_res.tex_name, orig_min_r, orig_max_r, orig_min_g, orig_max_g);
+                            rgba.chunks_exact(4).flat_map(|p| {
+                                let influence = 255u8.saturating_sub(p[1]); // invert G
+                                [influence, influence, influence, p[0]]
+                            }).collect()
+                        } else if needs_swizzle || fmt_type == 0x1D {
                     let pick = |p: &[u8], ch: u8| -> u8 { match ch { 0 => 0, 1 => 255, 2 => p[0], 3 => p[1], 4 => p[2], 5 => p[3], _ => p[0] } };
                     rgba.chunks_exact(4).flat_map(|p| [pick(p, ch_r), pick(p, ch_g), pick(p, ch_b), pick(p, ch_a)]).collect()
                 } else { rgba };
@@ -2475,27 +2520,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         emitter_sets: &[EmitterSet],
         bfres_models: &[crate::effects::BfresModel],
     ) {
-        eprintln!("\n[RENDER_START] Frame! particles={} tex_cache_size={} bntx_cache_size={} color_tex_cache={} alpha_tex_cache={}", 
-            particles.len(), self.tex_cache.len(), self.bntx_tex_cache.len(), 
-            self.color_texture_cache.len(), self.alpha_texture_cache.len());
-        eprintln!("[RENDER_DEBUG] cam_right: {:?}, magnitude: {}", cam_right, cam_right.length());
-        eprintln!("[RENDER_DEBUG] cam_up: {:?}, magnitude: {}", cam_up, cam_up.length());
-        if cam_right.length() < 0.5 || cam_up.length() < 0.5 {
-            eprintln!("[RENDER_DEBUG] ⚠️  WARNING: Camera vectors are too small!");
-        }
-        eprintln!("[RENDER_DEBUG] particles count: {}", particles.len());
-        if !particles.is_empty() {
-            let p = &particles[0];
-            eprintln!("[RENDER_DEBUG] First particle: pos={:?}, size={}, rotation={}, aspect={}", 
-                p.position, p.size, p.rotation, 
-                emitter_sets.get(p.emitter_set_idx)
-                    .and_then(|s| s.emitters.get(p.emitter_idx))
-                    .map(|_e| format!("{:.2}", 
-                        self.tex_aspect_cache
-                            .get(&(p.emitter_set_idx, p.emitter_idx))
-                            .copied()
-                            .unwrap_or(1.0)))
-                    .unwrap_or_else(|| "?".to_string()));
+        if !particles.is_empty() || !trails.is_empty() || !bfres_models.is_empty() {
+            eprintln!(">>> Frame: {} particles, {} tex in cache", particles.len(), self.bntx_tex_cache.len());
         }
         
         // Upload camera uniforms
@@ -2579,7 +2605,6 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             // Group billboard particles by (emitter_set_idx, emitter_idx), preserving
             // encounter order so each group is a contiguous slice in the upload buffer.
             let mut groups: Vec<((usize, usize), Vec<&Particle>)> = Vec::new();
-            eprintln!("[RENDER] grouping {} particles, emitter_sets={}", particles.len(), emitter_sets.len());
             for p in particles.iter().filter(|p| {
                 // Only billboard particles (mesh_type == 0); mesh particles are handled below
                 let is_billboard = emitter_sets
@@ -2587,9 +2612,6 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     .and_then(|s| s.emitters.get(p.emitter_idx))
                     .map(|e| e.mesh_type == 0)
                     .unwrap_or(true); // treat unknown emitters as billboard
-                if !is_billboard {
-                    eprintln!("[RENDER] particle set={} emitter={} is mesh_type!=0, skipping billboard", p.emitter_set_idx, p.emitter_idx);
-                }
                 is_billboard
             }) {
                 let key = (p.emitter_set_idx, p.emitter_idx);
@@ -2640,21 +2662,16 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 // 3. tex_cache[(set_idx, emitter_idx)] — fallback
                 // 4. white_tex_bg
                 let result = if self.alpha_view_cache.contains_key(&key) || self.indirect_view_cache.contains_key(&key) {
-                    eprintln!("[RENDER] group={} set={}/{}: using combined_bg_cache (has alpha/indirect)", group_idx, set_idx, emitter_idx);
                     self.get_combined_tex_bg(device, key) as *const wgpu::BindGroup
                 } else if bntx_idx != u32::MAX {
                     if self.bntx_tex_cache.contains_key(&bntx_idx) {
-                        eprintln!("[RENDER] group={} set={}/{}: using bntx_tex_cache[{}]", group_idx, set_idx, emitter_idx, bntx_idx);
                         self.bntx_tex_cache.get(&bntx_idx).unwrap() as *const wgpu::BindGroup
                     } else {
-                        eprintln!("[RENDER] group={} set={}/{}: bntx_idx={} NOT in bntx_tex_cache, using white_tex_bg", group_idx, set_idx, emitter_idx, bntx_idx);
                         &self.white_tex_bg as *const wgpu::BindGroup
                     }
                 } else if let Some(bg) = self.tex_cache.get(&key) {
-                    eprintln!("[RENDER] group={} set={}/{}: using tex_cache[({}. {})]", group_idx, set_idx, emitter_idx, set_idx, emitter_idx);
                     bg as *const wgpu::BindGroup
                 } else {
-                    eprintln!("[RENDER] group={} set={}/{}: NOT in any cache, using white_tex_bg", group_idx, set_idx, emitter_idx);
                     &self.white_tex_bg as *const wgpu::BindGroup
                 };
                 result
@@ -2678,19 +2695,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
             // Draw each group with its own pipeline looked up from pipeline_cache
             let mut cursor = 0u32;
-            if !groups.is_empty() {
-                eprintln!("[RENDER_PARTICLES] Drawing {} billboard groups, {} total particles", groups.len(), particles.len());
-            }
             for (group_idx, ((set_idx, emitter_idx), group)) in groups.iter().enumerate() {
                 let count = group.len() as u32;
-                // Req 9.3: skip draw calls when instance_count == 0
                 if count == 0 {
                     cursor += count;
                     continue;
-                }
-
-                if group_idx < 3 {
-                    eprintln!("[RENDER_PARTICLES]   group {}: emitter {}/{} has {} particles", group_idx, set_idx, emitter_idx, count);
                 }
 
                 // Look up the emitter's actual blend_type and display_side
@@ -3094,10 +3103,12 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         particles: &[Particle],
         emitter_sets: &[EmitterSet],
     ) {
-        // Log cache state at draw preparation
-        eprintln!("\n[PREPARE_DRAW] particles={} tex_cache={} bntx_tex_cache={} color_texture_cache={} bntx_texture_cache={}", 
-            particles.len(), self.tex_cache.len(), self.bntx_tex_cache.len(), 
-            self.color_texture_cache.len(), self.bntx_texture_cache.len());
+        // Log cache state at draw preparation (one-liner)
+        let n_fallback = particles.len().saturating_sub(self.bntx_tex_cache.len().min(particles.len()));
+        if n_fallback > 0 || self.bntx_tex_cache.is_empty() {
+            eprintln!("  >> draw: {} particles, {} tex cached ({} fallback)",
+                particles.len(), self.bntx_tex_cache.len(), n_fallback);
+        }
         
         // Upload camera uniforms
         let cam_uniforms = CameraUniforms {
@@ -3191,7 +3202,6 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     /// Must call prepare_draw() first in prepare().
     pub fn draw_into_pass(&self, render_pass: &mut wgpu::RenderPass<'static>, queue: &wgpu::Queue, emitter_sets: &[EmitterSet]) {
         if self.prepared_groups.is_empty() { return; }
-        eprintln!("[DRAW] draw_into_pass: {} groups", self.prepared_groups.len());
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         let mut cursor = 0u32;
         for ((set_idx, emitter_idx), count) in &self.prepared_groups {
@@ -3227,22 +3237,17 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             queue.write_buffer(&self.indirect_uniform_buf, 0, bytemuck::bytes_of(&params));
 
             let tex_bg = if self.combined_bg_cache.contains_key(&key) {
-                eprintln!("[DRAW_BG] group {}/{}: using combined_bg_cache", set_idx, emitter_idx);
                 self.combined_bg_cache.get(&key).unwrap()
             } else if bntx_idx != u32::MAX {
                 if self.bntx_tex_cache.contains_key(&bntx_idx) {
-                    eprintln!("[DRAW_BG] group {}/{}: using bntx_tex_cache[{}]", set_idx, emitter_idx, bntx_idx);
                     self.bntx_tex_cache.get(&bntx_idx).unwrap()
                 } else {
-                    eprintln!("[DRAW_BG] group {}/{}: bntx_idx={} NOT in bntx_tex_cache, using white fallback", set_idx, emitter_idx, bntx_idx);
                     &self.white_tex_bg
                 }
             } else {
                 if self.tex_cache.contains_key(&key) {
-                    eprintln!("[DRAW_BG] group {}/{}: using tex_cache", set_idx, emitter_idx);
                     self.tex_cache.get(&key).unwrap()
                 } else {
-                    eprintln!("[DRAW_BG] group {}/{}: NOT in any cache, using white fallback", set_idx, emitter_idx);
                     &self.white_tex_bg
                 }
             };

@@ -516,20 +516,29 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
     while str_pos + 4 <= data.len() {
         if &data[str_pos..str_pos+4] == b"_STR" {
             let str_count = r32(str_pos + 16) as usize;
-            let mut soff = str_pos + 20;
-            for _ in 0..str_count.min(512) {
-                if soff + 2 > data.len() { break; }
-                let slen = r16(soff) as usize;
-                soff += 2;
-                if soff + slen > data.len() { break; }
-                let s = String::from_utf8_lossy(&data[soff..soff+slen]).to_string();
-                soff += slen + 1;
-                if soff % 2 != 0 { soff += 1; }
-                if !s.is_empty() { str_names.push(s); }
+            // BNTX _STR block format (Switch/NX):
+            //   +0x00: "_STR" magic
+            //   +0x04: u32 total_block_size
+            //   +0x08: u32 block_size_2 (often same)
+            //   +0x0C: u32 padding
+            //   +0x10: u32 string_count
+            //   +0x14: u32 offsets[string_count]  (each offset is relative to BNTX base)
+            //   ... : string data: each = u16 length_prefix + content + padding
+            for i in 0..str_count.min(512) {
+                let off_pos = str_pos + 20 + i * 4;
+                if off_pos + 4 > data.len() { break; }
+                let str_off = r32(off_pos) as usize;
+                if str_off + 2 > data.len() { break; }
+                let slen = r16(str_off) as usize;
+                if str_off + 2 + slen > data.len() { break; }
+                let s = String::from_utf8_lossy(&data[str_off + 2..str_off + 2 + slen]).to_string();
+                if !s.is_empty() {
+                    str_names.push(s);
+                }
             }
             break;
         }
-        str_pos += 1; // was += 8; stride-1 finds _STR at any byte alignment
+        str_pos += 1;
         if str_pos > data.len() { break; }
     }
     eprintln!("[BNTX] _STR names: {:?}", &str_names[..str_names.len().min(5)]);
@@ -607,6 +616,7 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
 
         let format_id = (fmt_raw & 0xFFFF) as u32;
         let fmt_type  = (format_id >> 8) as u8;
+        eprintln!("[FMT_INFO] '{}' fmt_type={:#04x}", tex_name, fmt_type);
 
         // Deswizzle using tegra_swizzle (replaces the old hand-rolled gob_addr loop).
         let raw = &data[pixel_start..pixel_end];
@@ -650,12 +660,7 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
 
         let ftx_data_offset = texture_section.len() as u32;
         let pixel_len = pixel_bytes.len() as u32;
-        eprintln!("[BNTX_TEX] '{}': {}x{} fmt={:#06x} offset={} size={} (first_bytes: {:02x} {:02x} {:02x} {:02x})",
-            tex_name, width, height, format_id, ftx_data_offset, pixel_len,
-            pixel_bytes.get(0).copied().unwrap_or(0),
-            pixel_bytes.get(1).copied().unwrap_or(0),
-            pixel_bytes.get(2).copied().unwrap_or(0),
-            pixel_bytes.get(3).copied().unwrap_or(0));
+        eprintln!("[TEX_INFO] {} fmt_type={:#04x} name='{}'", tex_name, fmt_type, tex_name);
         texture_section.extend_from_slice(&pixel_bytes);
 
         let tex_res = TextureRes {
@@ -1315,13 +1320,12 @@ impl PtclFile {
         use std::path::PathBuf;
         use std::process::Command;
 
-        eprintln!("[EC] parse_via_converter: data={} bytes", data.len());
+        eprintln!(">>> Loading effect ({})", byte_unit_str(data.len() as u64));
 
         let cli = match option_env!("EFFECT_CONVERTER_CLI") {
             Some(p) => {
                 let p = PathBuf::from(p);
                 if p.exists() {
-                    eprintln!("[EC] Using embedded CLI path: {}", p.display());
                     p
                 } else {
                     anyhow::bail!("EffectConverter CLI not found at built path: {}", p.display());
@@ -1329,7 +1333,6 @@ impl PtclFile {
             }
             None => {
                 if Command::new("EffectConverter").arg("--help").output().is_ok() {
-                    eprintln!("[EC] Using EffectConverter from PATH");
                     PathBuf::from("EffectConverter")
                 } else {
                     anyhow::bail!("EffectConverter CLI not available (rebuild with .NET 6.0+ SDK)");
@@ -1340,14 +1343,39 @@ impl PtclFile {
         let dir = tempfile::tempdir()?;
         let input_path = dir.path().join("input.ptcl");
         std::fs::write(&input_path, data)?;
-        eprintln!("[EC] Written {} bytes to {:?}", data.len(), input_path);
 
-        let status = Command::new(&cli)
+        eprint!("  >> Converting effect");
+        use std::io::Read;
+        let mut child = Command::new(&cli)
             .arg(&input_path)
             .current_dir(dir.path())
-            .status()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
             .map_err(|e| anyhow::anyhow!("EffectConverter execution failed: {e}"))?;
-        eprintln!("[EC] Converter exit status: {:?}", status.code());
+        let stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let mut count = 0usize;
+            let mut reader = std::io::BufReader::new(stdout);
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 { break; }
+                for &b in &buf[..n] {
+                    if b == b'\n' { count += 1; }
+                }
+            }
+            count
+        });
+        let spinner = ['|', '/', '-', '\\'];
+        let mut frame = 0usize;
+        while !reader.is_finished() {
+            eprint!("\r  >> {} Converting effect", spinner[frame % 4]);
+            frame += 1;
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+        let line_count = reader.join().unwrap();
+        let status = child.wait().map_err(|e| anyhow::anyhow!("EffectConverter wait failed: {e}"))?;
+        eprintln!("\r  >> Converted effect ({line_count} sections)                ");
 
         if !status.success() {
             anyhow::bail!("EffectConverter CLI exited with status {:?}", status.code());
@@ -1361,12 +1389,17 @@ impl PtclFile {
         eprintln!("[EC] Dump dir: {:?}", dump_dir);
 
         let ptcl = crate::effect_converter::load_dump(&dump_dir)?;
-        eprintln!("[EC] Loaded PtclFile with {} emitter sets", ptcl.emitter_sets.len());
-        if !ptcl.emitter_sets.is_empty() {
-            let set = &ptcl.emitter_sets[0];
-            eprintln!("[EC]   first set: {} with {} emitters", set.name, set.emitters.len());
-        }
         Ok(ptcl)
+    }
+}
+
+fn byte_unit_str(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1} MB", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1} KB", n as f64 / 1_000.0)
+    } else {
+        format!("{n} B")
     }
 }
 

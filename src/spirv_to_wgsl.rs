@@ -165,14 +165,16 @@ mod tests {
 
     #[test]
     fn test_spirv_conversion_not_implemented() {
-        // All SPIR-V conversion returns an error (not yet implemented)
+        // Empty SPIR-V returns an error (data too small)
         let result = spirv_to_wgsl(&[], "test");
         assert!(result.is_err());
         
-        // Even valid magic number fails (feature not yet implemented)
-        let mut valid_header = [0x03u8, 0x02, 0x23, 0x07]; // SPIR-V magic
+        // Valid magic returns error about spirv-cross CLI not being available
+        let valid_header = [0x03u8, 0x02, 0x23, 0x07]; // SPIR-V magic
         let result = spirv_to_wgsl(&valid_header, "test");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not yet implemented"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found") || err.contains("not available") || err.contains("spirv-cross failed"),
+            "expected CLI error, got: {err}");
     }
 }

@@ -104,3 +104,4 @@ fn test_shader_stats_aggregation() {
 fn test_placeholder() {
     // Placeholder test to allow compilation
     assert!(true);
+}

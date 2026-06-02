@@ -179,7 +179,7 @@ mod tests {
         
         let _ = cache.get(b"miss1");
         let _ = cache.get(b"miss2");
-        let (_hits, misses, _) = cache.stats();
+        let (hits, misses, _) = cache.stats();
         assert_eq!(hits, 0);
         assert_eq!(misses, 2);
     }

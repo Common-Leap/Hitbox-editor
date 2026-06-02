@@ -340,6 +340,10 @@ impl BnshDecoder {
             decode_result.stage = ShaderStage::Vertex;
         }
         
+        // Strip capabilities that wgpu/naga rejects (e.g. StorageImageReadWithoutFormat)
+        // This patches the SPIR-V words in-place before converting to bytes.
+        Self::strip_unsupported_spirv_caps(&mut decode_result.spirv);
+
         // Convert SPIR-V u32 words to u8 bytes for wgpu (little-endian)
         let spirv_bytes: Vec<u8> = decode_result.spirv.iter()
             .flat_map(|&w| w.to_le_bytes())
@@ -363,6 +367,44 @@ impl BnshDecoder {
         Self::decode_wgsl_with_index(bnsh_data, 0)
     }
 
+    /// Strip SPIR-V capabilities that wgpu/naga rejects (e.g. StorageImageReadWithoutFormat).
+    /// Patches the SPIR-V word stream in-place.
+    ///
+    /// Unsupported capability values (by ID):
+    ///   - StorageImageReadWithoutFormat = 55
+    ///
+    /// Each OpCapability instruction is 2 words: (word_count=2 | opcode=17) + capability_value.
+    /// We zero out both words to safely skip the instruction while keeping word alignment.
+    fn strip_unsupported_spirv_caps(spirv: &mut Vec<u32>) {
+        const UNSUPPORTED_CAPS: &[u32] = &[55]; // StorageImageReadWithoutFormat
+        const OP_CAPABILITY: u32 = 17;
+
+        let mut i = 5; // skip SPIR-V header (5 words: magic, version, generator, bound, schema)
+        let mut stripped = 0;
+
+        while i < spirv.len() {
+            let word = spirv[i];
+            let word_count = (word >> 16) as usize;
+            let opcode = (word & 0xFFFF) as u32;
+            if word_count == 0 {
+                break; // malformed
+            }
+            if opcode == OP_CAPABILITY && word_count == 2 && i + 1 < spirv.len() {
+                let cap_value = spirv[i + 1];
+                if UNSUPPORTED_CAPS.contains(&cap_value) {
+                    // Replace with valid OpNop instructions (word_count=1, opcode=0).
+                    // Zeroing would create word_count=0 which Naga rejects.
+                    spirv[i] = 0x00010000;     // OpNop
+                    spirv[i + 1] = 0x00010000; // OpNop
+                    stripped += 1;
+                }
+            }
+            i += word_count;
+        }
+        if stripped > 0 {
+            eprintln!("[BNSH] Stripped {} unsupported SPIR-V capabilities", stripped);
+        }
+    }
 
 }
 

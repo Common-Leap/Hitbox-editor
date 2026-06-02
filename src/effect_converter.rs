@@ -98,19 +98,11 @@ pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
 // ── Dump directory reader ─────────────────────────────────────────────────────
 
 pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
-    eprintln!("[EC] load_dump: {:?}", dump_dir);
-
     let eset_info_path = dump_dir.join("EmitterSetInfo.txt");
     let eset_info: EmitterSetInfo = if eset_info_path.exists() {
         let text = std::fs::read_to_string(&eset_info_path)?;
-        let info: EmitterSetInfo = serde_json::from_str(&text)?;
-        eprintln!("[EC] EmitterSetInfo: {} sets", info.order.len());
-        for (i, name) in info.order.iter().enumerate().take(5) {
-            eprintln!("[EC]   set[{}]: {}", i, name);
-        }
-        info
+        serde_json::from_str(&text).unwrap_or_default()
     } else {
-        eprintln!("[EC] No EmitterSetInfo.txt found");
         EmitterSetInfo { order: vec![] }
     };
 
@@ -138,37 +130,21 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
         } else {
             EmitterOrder::default()
         };
-        if emitter_order.order.is_empty() {
-            eprintln!("[EC]   set[{}] '{}' has NO emitter order", set_idx, set_name);
-        }
-
         let mut emitters: Vec<EmitterDef> = Vec::new();
 
         for (emtr_idx, emtr_name) in emitter_order.order.iter().enumerate() {
             let emtr_dir = set_dir.join(emtr_name);
             if !emtr_dir.is_dir() {
-                eprintln!("[EC]   emitter dir not found: {:?}", emtr_dir);
                 continue;
             }
 
-            // Read EmitterData.json
             let data_path = emtr_dir.join("EmitterData.json");
             let emitter_data: EmitterDataJson = if data_path.exists() {
                 match std::fs::read_to_string(&data_path) {
-                    Ok(text) => {
-                        let ed: EmitterDataJson = serde_json::from_str(&text).unwrap_or_default();
-                        if ed.particle_data.as_ref().map(|p| p.life).unwrap_or(0) == 0 {
-                            eprintln!("[EC]   emitter[{}] '{}' WARNING: life=0 (all fields default?)", emtr_idx, emtr_name);
-                        }
-                        ed
-                    }
-                    Err(e) => {
-                        eprintln!("[EC] failed to read {}: {e}", data_path.display());
-                        EmitterDataJson::default()
-                    }
+                    Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+                    Err(_) => EmitterDataJson::default(),
                 }
             } else {
-                eprintln!("[EC]   emitter[{}] '{}' has NO EmitterData.json", emtr_idx, emtr_name);
                 EmitterDataJson::default()
             };
             let shader_path = emtr_dir.join("Shader.bnsh");
@@ -219,10 +195,6 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
                                         tx.ftx_data_size = pixels.len() as u32;
                                         tx.original_data_offset = offset;
                                         tx.original_data_size = pixels.len() as u32;
-                                        if bntx_textures.len() <= 5 {
-                                            eprintln!("[EC]   tex: {} {}x{} offset={} size={}",
-                                                tx.tex_name, tx.width, tx.height, offset, pixels.len());
-                                        }
                                         bntx_textures.push(tx);
                                         break;
                                     }
@@ -256,8 +228,6 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
             if model_end_idx > model_start_idx {
                 emitter.mesh_type = 2;
                 emitter.primitive_index = model_start_idx as u32;
-                eprintln!("[EC]   emitter[{}] '{}' mesh_type=2 model_idx={} models={}",
-                    emtr_idx, emtr_name, model_start_idx, model_end_idx - model_start_idx);
             }
 
             emitters.push(emitter);
@@ -595,12 +565,13 @@ fn convert_emitter_data(
         .unwrap_or(glam::Vec3::ONE);
 
     // ── Texture UV data ────────────────────────────────────────────────────
-    let tex_scale_uv = json
-        .emitter_static
-        .as_ref()
-        .and_then(|s| s.tex_pattern_anim0.as_ref())
-        .map(|t| [t.scale_x, t.scale_y])
-        .unwrap_or([1.0, 1.0]);
+    let tex_scale_uv = {
+        let s = json.emitter_static.as_ref()
+            .and_then(|s| s.tex_pattern_anim0.as_ref())
+            .map(|t| [t.scale_x, t.scale_y])
+            .unwrap_or([1.0, 1.0]);
+        [if s[0] > 0.0 { s[0] } else { 1.0 }, if s[1] > 0.0 { s[1] } else { 1.0 }]
+    };
     let tex_offset_uv = json
         .emitter_static
         .as_ref()
@@ -827,11 +798,69 @@ fn raw_scroll(anim: Option<&TexScrollAnimJson>) -> [f32; 2] {
 }
 
 fn raw_uv_scale(anim: Option<&TexPatAnimJson>) -> [f32; 2] {
-    anim.map(|t| [t.scale_x, t.scale_y])
-        .unwrap_or([1.0, 1.0])
+    let s = anim.map(|t| [t.scale_x, t.scale_y])
+        .unwrap_or([1.0, 1.0]);
+    [if s[0] > 0.0 { s[0] } else { 1.0 }, if s[1] > 0.0 { s[1] } else { 1.0 }]
 }
 
 fn raw_uv_offset(anim: Option<&TexPatAnimJson>) -> [f32; 2] {
     anim.map(|t| [t.scroll_x, t.scroll_y])
         .unwrap_or([0.0, 0.0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_load_dump_textures() {
+        // Load the fox_test dump directory and inspect texture data
+        let dump_dir = std::path::Path::new(
+            &std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string())
+        ).join("fox_test");
+
+        eprintln!("\n[DIAG] fox_test dir: {:?}", dump_dir);
+        assert!(dump_dir.is_dir(), "fox_test/ dir not found");
+
+        let ptcl = match load_dump(&dump_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[DIAG] load_dump failed: {e}");
+                panic!("load_dump failed: {e}");
+            }
+        };
+
+        eprintln!("[DIAG] emitter_sets: {}", ptcl.emitter_sets.len());
+        eprintln!("[DIAG] bntx_textures: {}", ptcl.bntx_textures.len());
+        eprintln!("[DIAG] texture_section: {} bytes", ptcl.texture_section.len());
+        eprintln!("[DIAG] bfres_models: {}", ptcl.bfres_models.len());
+        eprintln!("[DIAG] shader_binary_1: {} bytes", ptcl.shader_binary_1.len());
+
+        // Dump each emitter's texture_index and the corresponding bntx_textures entry
+        for (set_idx, set) in ptcl.emitter_sets.iter().enumerate() {
+            for (emtr_idx, emitter) in set.emitters.iter().enumerate() {
+                let idx = emitter.texture_index as usize;
+                let tex_info = ptcl.bntx_textures.get(idx).map(|t| {
+                    format!("{}x{} name='{}' offset={} size={} fmt={:#06x}",
+                        t.width, t.height, t.tex_name, t.ftx_data_offset, t.ftx_data_size, t.ftx_format)
+                }).unwrap_or_else(|| "NOT FOUND".to_string());
+                eprintln!("[DIAG]   set[{}]/emtr[{}] '{}' tex_idx={} mesh_type={} -> {}",
+                    set_idx, emtr_idx, emitter.name, idx, emitter.mesh_type, tex_info);
+            }
+        }
+
+        // Verify at least some textures exist
+        assert!(!ptcl.bntx_textures.is_empty(),
+            "bntx_textures should not be empty");
+        assert!(ptcl.texture_section.len() > 0,
+            "texture_section should have data");
+
+        // Count how many emitters have valid texture_index
+        let valid = ptcl.emitter_sets.iter().flat_map(|s| &s.emitters)
+            .filter(|e| (e.texture_index as usize) < ptcl.bntx_textures.len())
+            .count();
+        let total: usize = ptcl.emitter_sets.iter().map(|s| s.emitters.len()).sum();
+        eprintln!("[DIAG] valid texture_index: {valid}/{total}");
+        assert!(valid > 0, "at least some emitters must have valid texture_index");
+    }
 }
