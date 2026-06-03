@@ -724,6 +724,7 @@ impl HitboxEditorApp {
                                         tex_offset_uv: [0.0, 0.0],
                                         tex_scroll_uv: [0.0, 0.0],
                                         tex_pat_frame_count: 1,
+                                        tex_pat_frame_table: Vec::new(),
                                         is_one_time: true,
                                         emission_timing: 0,
                                         emission_duration: 1,
@@ -1828,34 +1829,14 @@ impl eframe::App for HitboxEditorApp {
             }
         }
 
-        // Upload particle textures to GPU when a new ptcl file has been loaded
-        if self.state.pending_texture_upload {
-            if let Some(ptcl) = &self.state.ptcl {
-                if let Some(wgpu_state) = frame.wgpu_render_state() {
-                    let mut renderer = wgpu_state.renderer.write();
-                    if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
-                        if let Some(pr) = rs.particle_renderer.as_mut() {
-                            pr.upload_textures(&wgpu_state.device, &wgpu_state.queue, ptcl);
-                            pr.upload_meshes(&wgpu_state.device, &wgpu_state.queue, ptcl);
-                            // Extract shader reflection for material texture binding resolution
-                            let shader_reflection = self.state.bnsh_shaders.as_ref()
-                                .and_then(|bnsh_set| bnsh_set.shader_pair.fragment.as_ref())
-                                .and_then(|frag_shader| frag_shader.reflection.as_ref());
-                            // Create material texture bind groups from BFRES models with shader-resolved slots
-                            pr.create_material_texture_bind_groups(&wgpu_state.device, &wgpu_state.queue, ptcl, shader_reflection);
-                            eprintln!("[TEX] texture upload and material texture bind group creation complete");
-                            self.state.pending_texture_upload = false;
-                        }
-                        // else: particle_renderer not yet initialized, retry next frame
-                    }
-                }
-                // else: no wgpu state yet, retry next frame
-            } else {
-                self.state.pending_texture_upload = false; // no ptcl, nothing to upload
-            }
-        }
+        // Extract shader reflection BEFORE consuming bnsh_shaders
+        let saved_shader_reflection = self.state.bnsh_shaders.as_ref()
+            .and_then(|bnsh_set| bnsh_set.shader_pair.fragment.as_ref())
+            .and_then(|frag_shader| frag_shader.reflection.as_ref())
+            .cloned();
 
-        // Update particle renderer with BNSH shaders when they become available
+        // Update particle renderer with BNSH shaders FIRST (before texture upload)
+        // so the renderer recreation with new shaders doesn't lose uploaded textures.
         if let Some(bnsh_set) = &self.state.bnsh_shaders {
             if let Some(wgpu_state) = frame.wgpu_render_state() {
                 let mut renderer = wgpu_state.renderer.write();
@@ -1865,6 +1846,30 @@ impl eframe::App for HitboxEditorApp {
                     // Clear it so we don't re-apply every frame
                     self.state.bnsh_shaders = None;
                 }
+            }
+        }
+
+        // Upload particle textures to GPU when a new ptcl file has been loaded
+        // Must come AFTER BNSH shader application so textures go to the final renderer.
+        if self.state.pending_texture_upload {
+            if let Some(ptcl) = &self.state.ptcl {
+                if let Some(wgpu_state) = frame.wgpu_render_state() {
+                    let mut renderer = wgpu_state.renderer.write();
+                    if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
+                        if let Some(pr) = rs.particle_renderer.as_mut() {
+                            pr.upload_textures(&wgpu_state.device, &wgpu_state.queue, ptcl);
+                            pr.upload_meshes(&wgpu_state.device, &wgpu_state.queue, ptcl);
+                            // Create material texture bind groups from BFRES models with shader-resolved slots
+                            pr.create_material_texture_bind_groups(&wgpu_state.device, &wgpu_state.queue, ptcl, saved_shader_reflection.as_ref());
+                            eprintln!("[TEX] texture upload and material texture bind group creation complete");
+                            self.state.pending_texture_upload = false;
+                        }
+                        // else: particle_renderer not yet initialized, retry next frame
+                    }
+                }
+                // else: no wgpu state yet, retry next frame
+            } else {
+                self.state.pending_texture_upload = false; // no ptcl, nothing to upload
             }
         }
 
@@ -2209,6 +2214,8 @@ impl eframe::App for HitboxEditorApp {
                 let n_trails = self.state.trail_system.trails.len();
                 if n_particles > 0 || n_trails > 0 {
                 }
+                let n_part = self.state.particle_system.particles.len();
+                eprintln!("[VIEWPORT] Creating ViewportCallback with {n_part} particles");
                 let callback = egui_wgpu::Callback::new_paint_callback(
                     rect,
                     ViewportCallback {

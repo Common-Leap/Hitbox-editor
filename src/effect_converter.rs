@@ -411,6 +411,8 @@ struct TexPatAnimJson {
     num: f32,
     frequency: f32,
     num_random: f32,
+    #[serde(default)]
+    table: Vec<u32>,
     /// UV scale (X component)
     #[serde(default)]
     scale_x: f32,
@@ -436,6 +438,16 @@ struct TexScrollAnimJson {
     scale_add_y: f32,
     scale_x: f32,
     scale_y: f32,
+    /// UV scale per frame (set when sprite-sheet layout is defined)
+    #[serde(default)]
+    uv_scale_x: f32,
+    #[serde(default)]
+    uv_scale_y: f32,
+    /// Number of UV divisions (columns/rows in the sprite sheet grid)
+    #[serde(default)]
+    uv_div_x: f32,
+    #[serde(default)]
+    uv_div_y: f32,
 }
 
 // ── Converter: JSON → EmitterDef ──────────────────────────────────────────────
@@ -565,13 +577,71 @@ fn convert_emitter_data(
         .unwrap_or(glam::Vec3::ONE);
 
     // ── Texture UV data ────────────────────────────────────────────────────
+    let tex_pat_anim0 = json
+        .emitter_static
+        .as_ref()
+        .and_then(|s| s.tex_pattern_anim0.as_ref());
+
+    let tex_pat_frame_table: Vec<usize> = tex_pat_anim0
+        .map(|t| {
+            t.table
+                .iter()
+                .take(t.num.max(0.0) as usize)
+                .map(|&frame| frame as usize)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let inferred_frame_count = tex_pat_frame_table
+        .iter()
+        .copied()
+        .max()
+        .map(|max_frame| max_frame + 1)
+        .unwrap_or_else(|| {
+            tex_pat_anim0
+                .map(|t| t.num.max(1.0) as usize)
+                .unwrap_or(1)
+        })
+        .max(1);
+
+    let scroll0 = json
+        .emitter_static
+        .as_ref()
+        .and_then(|s| s.tex_scroll_anim0.as_ref());
     let tex_scale_uv = {
-        let s = json.emitter_static.as_ref()
-            .and_then(|s| s.tex_pattern_anim0.as_ref())
-            .map(|t| [t.scale_x, t.scale_y])
-            .unwrap_or([1.0, 1.0]);
-        [if s[0] > 0.0 { s[0] } else { 1.0 }, if s[1] > 0.0 { s[1] } else { 1.0 }]
+        // Prefer UVScale/UVDiv from TexScrollAnim (describes frame layout in atlas)
+        let (su, sv) = if let Some(s) = scroll0 {
+            let u = if s.uv_scale_x > 0.0 { s.uv_scale_x } else if s.uv_div_x > 1.0 { 1.0 / s.uv_div_x } else { 0.0 };
+            let v = if s.uv_scale_y > 0.0 { s.uv_scale_y } else if s.uv_div_y > 1.0 { 1.0 / s.uv_div_y } else { 0.0 };
+            (u, v)
+        } else {
+            (0.0, 0.0)
+        };
+        if su > 0.0 && sv > 0.0 {
+            [su, sv]
+        } else {
+            // Fallback: use scale from TexPatAnim or infer from frame count (vertical strip)
+            let s = tex_pat_anim0
+                .map(|t| [t.scale_x, t.scale_y])
+                .unwrap_or([1.0, 1.0]);
+            let scale_x = if s[0] > 0.0 { s[0] } else { 1.0 };
+            let scale_y = if s[1] > 0.0 {
+                s[1]
+            } else if inferred_frame_count > 1 {
+                1.0 / inferred_frame_count as f32
+            } else {
+                1.0
+            };
+            [scale_x, scale_y]
+        }
     };
+    eprintln!("[UV] tex_scale_uv={:?} frame_count={} scroll0.uv_scale={},{} uv_div={},{}",
+        [tex_scale_uv[0], tex_scale_uv[1]], inferred_frame_count,
+        scroll0.map(|s| s.uv_scale_x).unwrap_or(0.0),
+        scroll0.map(|s| s.uv_scale_y).unwrap_or(0.0),
+        scroll0.map(|s| s.uv_div_x).unwrap_or(0.0),
+        scroll0.map(|s| s.uv_div_y).unwrap_or(0.0),
+    );
     let tex_offset_uv = json
         .emitter_static
         .as_ref()
@@ -579,13 +649,7 @@ fn convert_emitter_data(
         .map(|t| [t.scroll_x, t.scroll_y])
         .unwrap_or([0.0, 0.0]);
 
-    // tex_pat_frame_count: from tex_pattern_anim0.num as frame count
-    let tex_pat_frame_count = json
-        .emitter_static
-        .as_ref()
-        .and_then(|s| s.tex_pattern_anim0.as_ref())
-        .map(|t| t.num as usize)
-        .unwrap_or(1);
+    let tex_pat_frame_count = inferred_frame_count;
 
     let tex_scroll_uv = json
         .emitter_static
@@ -666,6 +730,7 @@ fn convert_emitter_data(
         tex_offset_uv,
         tex_scroll_uv,
         tex_pat_frame_count,
+        tex_pat_frame_table,
         emitter_offset,
         emitter_rotation,
         emitter_scale,
@@ -687,6 +752,7 @@ fn extract_color_keys(table: Option<&AnimKeyTableJson>) -> (Vec<ColorKey>, Vec<C
     let keys: Vec<ColorKey> = table
         .keys
         .iter()
+        .filter(|k| k.time != 0.0 || k.x != 0.0 || k.y != 0.0 || k.z != 0.0)
         .map(|k| ColorKey {
             frame: k.time,
             r: k.x,
@@ -705,6 +771,7 @@ fn extract_alpha_keys(table: Option<&AnimKeyTableJson>) -> (AnimKey3v4k, Vec<Col
     let pairs: Vec<(f32, f32)> = table
         .keys
         .iter()
+        .filter(|k| k.time != 0.0 || k.x != 0.0)
         .map(|k| (k.time, k.x))
         .collect();
     let anim = build_anim_key_3v4k(&pairs);
@@ -813,6 +880,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn converts_tex_pattern_table_to_sprite_atlas_uvs() {
+        let json = EmitterDataJson {
+            name: Some("atlas".to_string()),
+            emitter_static: Some(EmitterStaticJson {
+                tex_pattern_anim0: Some(TexPatAnimJson {
+                    num: 5.0,
+                    frequency: 1.0,
+                    num_random: 0.0,
+                    table: vec![1, 0, 1, 2, 2, 0, 0, 0],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let tex = TextureRes {
+            tex_name: "atlas_tex".to_string(),
+            width: 64,
+            height: 320,
+            ftx_format: 0x0b01,
+            ftx_data_offset: 0,
+            ftx_data_size: 64 * 320 * 4,
+            original_format: 0x0b01,
+            original_data_offset: 0,
+            original_data_size: 64 * 320 * 4,
+            wrap_mode: 1,
+            filter_mode: 0,
+            mipmap_count: 1,
+            channel_swizzle: 0,
+        };
+
+        let emitter = convert_emitter_data(&json, "atlas", &[tex.clone()], &[tex]);
+
+        assert_eq!(emitter.tex_pat_frame_table, vec![1, 0, 1, 2, 2]);
+        assert_eq!(emitter.tex_pat_frame_count, 3);
+        assert_eq!(emitter.tex_scale_uv, [1.0, 1.0 / 3.0]);
+    }
+
+    #[test]
+    #[ignore = "requires local fox_test dump fixture"]
     fn diagnostic_load_dump_textures() {
         // Load the fox_test dump directory and inspect texture data
         let dump_dir = std::path::Path::new(

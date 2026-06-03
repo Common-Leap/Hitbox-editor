@@ -194,6 +194,8 @@ pub struct EmitterDef {
     pub tex_scroll_uv: [f32; 2],
     /// Number of animation frames in the sprite sheet (from TexPatAnim PatternCount)
     pub tex_pat_frame_count: usize,
+    /// Per-frame sprite-sheet indices from TexPatAnim[0].Table.
+    pub tex_pat_frame_table: Vec<usize>,
     /// Emitter local position offset (Trans from EmitterInfo)
     pub emitter_offset: Vec3,
     /// Emitter local rotation (Euler angles XYZ in radians, from EmitterInfo Rotate)
@@ -1176,6 +1178,7 @@ impl PtclFile {
                 tex_offset_uv: [0.0, 0.0],
                 tex_scroll_uv: [0.0, 0.0],
                 tex_pat_frame_count: 1,
+                tex_pat_frame_table: Vec::new(),
                 emitter_offset: Vec3::ZERO,
                 emitter_rotation: Vec3::ZERO,
                 emitter_scale: Vec3::ONE,
@@ -1230,6 +1233,7 @@ impl PtclFile {
                     tex_offset_uv: [0.0, 0.0],
                     tex_scroll_uv: [0.0, 0.0],
                     tex_pat_frame_count: 1,
+                    tex_pat_frame_table: Vec::new(),
                     emitter_offset: Vec3::ZERO,
                     emitter_rotation: Vec3::ZERO,
                     emitter_scale: Vec3::ONE,
@@ -1418,23 +1422,32 @@ fn sample_color(keys: &[ColorKey], t: f32) -> Vec4 {
         let k = &keys[0];
         return Vec4::new(k.r, k.g, k.b, k.a);
     }
-    // At or before the first key's frame → return first key's color
-    let first = &keys[0];
-    if t <= first.frame {
+    // Find the first and last valid keys by max/min frame.
+    // Keys may contain zero-initialized padding entries (frame=0, r=g=b=a=0)
+    // at the end of the array, so we use actual extreme frame values instead
+    // of assuming positional first/last.
+    let first = keys.iter().min_by(|a, b| a.frame.partial_cmp(&b.frame).unwrap()).unwrap();
+    let last = keys.iter().max_by(|a, b| a.frame.partial_cmp(&b.frame).unwrap()).unwrap();
+    let first_frame = first.frame;
+    let last_frame = last.frame;
+    // At or before min frame → return the corresponding key's color
+    if t <= first_frame {
         return Vec4::new(first.r, first.g, first.b, first.a);
     }
-    // At or after the last key's frame → return last key's color
-    let last = &keys[keys.len() - 1];
-    if t >= last.frame {
+    // At or after max frame → return the corresponding key's color
+    if t >= last_frame {
         return Vec4::new(last.r, last.g, last.b, last.a);
     }
+    // Sort keys by frame for correct bracketing
+    let mut sorted: Vec<&ColorKey> = keys.iter().collect();
+    sorted.sort_by(|a, b| a.frame.partial_cmp(&b.frame).unwrap());
     // Find the two bracketing keys and linearly interpolate
-    for i in 0..keys.len() - 1 {
-        let a = &keys[i];
-        let b = &keys[i + 1];
+    for i in 0..sorted.len() - 1 {
+        let a = sorted[i];
+        let b = sorted[i + 1];
         if t >= a.frame && t <= b.frame {
             let range = (b.frame - a.frame).max(0.0001);
-            let s = (t - a.frame) / range;
+            let s = if range <= 0.0 { 0.0 } else { (t - a.frame) / range };
             return Vec4::new(
                 a.r + (b.r - a.r) * s,
                 a.g + (b.g - a.g) * s,
@@ -1492,7 +1505,20 @@ fn build_anim_key(akeys: &[(f32, f32)]) -> AnimKey3v4k {
 /// - Multi-entry table → linearly interpolate between bracketing ColorKey entries
 pub fn sample_color_or_white(keys: &[ColorKey], t: f32) -> Vec4 {
     let t_clamped = t.clamp(0.0, 1.0);
-    sample_color(keys, t_clamped)
+    let v = sample_color(keys, t_clamped);
+    // If the entire key table samples to black, return white so this table
+    // acts as a multiplicative identity in the color combiner (c0 × c1).
+    // This handles the case where the last valid key has value 0 at t=1,
+    // preventing the particle from turning black at end-of-life.
+    if v == Vec4::ZERO { Vec4::ONE } else { v }
+}
+
+/// Sample a color key table for alpha at normalized time `t`.
+/// Same as sample_color_or_white but WITHOUT the zero→white fallback:
+/// for alpha, zero is a legitimate value (transparent).
+pub fn sample_alpha(keys: &[ColorKey], t: f32) -> f32 {
+    let t_clamped = t.clamp(0.0, 1.0);
+    sample_color(keys, t_clamped).x
 }
 
 /// CPU particle simulation ───────────────────────────────────────────────────
@@ -1657,7 +1683,7 @@ impl ParticleSystem {
         // Integrate existing particles first, so newly spawned particles this frame
         // start at age=0 and survive until the next frame (fixes lifetime=1 particles
         // being born and killed in the same step).
-        for p in &mut self.particles {
+        for (pi, p) in self.particles.iter_mut().enumerate() {
             let Some(set) = ptcl.emitter_sets.get(p.emitter_set_idx) else { p.age = p.lifetime; continue };
             let Some(emitter) = set.emitters.get(p.emitter_idx) else { p.age = p.lifetime; continue };
 
@@ -1674,6 +1700,7 @@ impl ParticleSystem {
             p.rotation += p.rotation_speed * dt;
 
             let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
+
             let c0 = sample_color_or_white(&emitter.color0, t);
             // NintendoWare color combiner: Color0 × Color1 (multiplicative).
             // Color1 modulates Color0 — when absent, use white (multiplicative identity).
@@ -1685,12 +1712,12 @@ impl ParticleSystem {
             // Use full key tables for accurate alpha interpolation when available.
             // Alpha combiner: Alpha0 × Alpha1 (multiplicative).
             let a0 = if !emitter.alpha0_keys.is_empty() {
-                sample_color_or_white(&emitter.alpha0_keys, t).x
+                sample_alpha(&emitter.alpha0_keys, t)
             } else {
                 emitter.alpha0.sample(t)
             };
             let a1 = if !emitter.alpha1_keys.is_empty() {
-                sample_color_or_white(&emitter.alpha1_keys, t).x
+                sample_alpha(&emitter.alpha1_keys, t)
             } else {
                 emitter.alpha1.sample(t)
             };
@@ -1703,11 +1730,34 @@ impl ParticleSystem {
             let alpha = (a0 * a1).clamp(0.0, 1.0);
             p.color = Vec4::new(rgb.x, rgb.y, rgb.z, alpha);
             p.size = (emitter.scale * emitter.scale_anim.sample(t)).max(0.01);
+            // Log first 2 particles each step to verify animation
+            if pi < 2 {
+                let has_a0k = !emitter.alpha0_keys.is_empty();
+                let has_a1k = !emitter.alpha1_keys.is_empty();
+                let has_c0k = !emitter.color0.is_empty();
+                let has_c1k = !emitter.color1.is_empty();
+                let n_c0 = emitter.color0.len();
+                let n_c1 = emitter.color1.len();
+                let n_a0 = emitter.alpha0_keys.len();
+                let n_a1 = emitter.alpha1_keys.len();
+                let sa0 = emitter.scale_anim.start_value;
+                eprintln!("[SIM] pi={} a={:.1}/{:.0} t={:.4} p=({:.1},{:.1},{:.1}) sz={:.4} c=({:.3},{:.3},{:.3}) al={:.4} a0k={} a1k={} c0k={} c1k={} sa0={:.4} a0={:.4} a1={:.4}",
+                    pi, p.age, emitter.lifetime, t,
+                    p.position.x, p.position.y, p.position.z,
+                    p.size, p.color.x, p.color.y, p.color.z, p.color.w,
+                    n_a0, n_a1, n_c0, n_c1,
+                    sa0, a0, a1);
+            }
             // For sprite-sheet animations: cycle through frames based on normalized age.
             // Only scroll tex_offset[0] for non-sprite-sheet emitters.
             if emitter.tex_pat_frame_count > 1 {
-                // Sprite sheet: frame index drives tex_offset[1]; tex_offset[0] stays at authored value
-                let frame = (t * emitter.tex_pat_frame_count as f32).floor() as usize;
+                // Sprite sheet: TexPatternAnim table values drive the atlas row.
+                let frame = if emitter.tex_pat_frame_table.is_empty() {
+                    (t * emitter.tex_pat_frame_count as f32).floor() as usize
+                } else {
+                    let table_idx = (t * emitter.tex_pat_frame_table.len() as f32).floor() as usize;
+                    emitter.tex_pat_frame_table[table_idx.min(emitter.tex_pat_frame_table.len() - 1)]
+                };
                 let frame = frame.min(emitter.tex_pat_frame_count - 1);
                 p.tex_offset[0] = emitter.tex_offset_uv[0]; // fixed at authored offset
                 p.tex_offset[1] = frame as f32 * emitter.tex_scale_uv[1];
@@ -1970,4 +2020,3 @@ impl TrailSystem {
         self.trails.retain(|t| t.active || !t.samples.is_empty());
     }
 }
-

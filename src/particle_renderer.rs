@@ -142,14 +142,16 @@ fn create_white_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Te
     (texture, view, sampler)
 }
 
-/// Create a GPU texture from a TextureRes structure and ptcl texture section
+/// Create a GPU texture from a TextureRes structure using actual texture data
 /// 
 /// Uploads texture data to GPU and returns (Texture, TextureView, Sampler).
-/// Handles format conversion and alignment as needed for wgpu.
+/// Decodes BC formats and handles format conversion as needed for wgpu.
+/// Falls back to a white 1x1 texture if decoding fails.
 fn create_texture_from_res(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     tex_res: &crate::effects::TextureRes,
+    texture_section: &[u8],
     label: &str,
 ) -> anyhow::Result<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler)> {
     let w = tex_res.width as u32;
@@ -158,38 +160,116 @@ fn create_texture_from_res(
     if w == 0 || h == 0 {
         anyhow::bail!("Texture dimensions must be non-zero: {}x{}", w, h);
     }
+
+    let data_offset = tex_res.ftx_data_offset as usize;
+    let data_size   = tex_res.ftx_data_size as usize;
+    if data_size == 0 || data_offset + data_size > texture_section.len() {
+        anyhow::bail!("Texture section OOB (offset={} size={} section={})", data_offset, data_size, texture_section.len());
+    }
+    let raw = &texture_section[data_offset..data_offset + data_size];
+
+    // Map format from TextureRes (same logic as upload_textures)
+    let fmt_type    = (tex_res.ftx_format >> 8) as u8;
+    let fmt_variant = (tex_res.ftx_format & 0xFF) as u8;
+    let is_srgb     = fmt_variant == 0x06;
+
+    let image_dds_format: Option<image_dds::ImageFormat> = match fmt_type {
+        0x1A => Some(if is_srgb { image_dds::ImageFormat::BC1RgbaUnormSrgb } else { image_dds::ImageFormat::BC1RgbaUnorm }),
+        0x1B => Some(if is_srgb { image_dds::ImageFormat::BC2RgbaUnormSrgb } else { image_dds::ImageFormat::BC2RgbaUnorm }),
+        0x1C => Some(if is_srgb { image_dds::ImageFormat::BC3RgbaUnormSrgb } else { image_dds::ImageFormat::BC3RgbaUnorm }),
+        0x1D => Some(if fmt_variant == 0x02 { image_dds::ImageFormat::BC4RSnorm } else { image_dds::ImageFormat::BC4RUnorm }),
+        0x1E => Some(if fmt_variant == 0x02 { image_dds::ImageFormat::BC5RgSnorm } else { image_dds::ImageFormat::BC5RgUnorm }),
+        0x1F => Some(if fmt_variant == 0x05 { image_dds::ImageFormat::BC6hRgbUfloat } else { image_dds::ImageFormat::BC6hRgbSfloat }),
+        0x20 => Some(if is_srgb { image_dds::ImageFormat::BC7RgbaUnormSrgb } else { image_dds::ImageFormat::BC7RgbaUnorm }),
+        _ => None,
+    };
+
+    let wgpu_format = if image_dds_format.is_some() {
+        if is_srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm }
+    } else {
+        match fmt_type {
+            0x02 => wgpu::TextureFormat::R8Unorm,
+            0x07 => wgpu::TextureFormat::Rgba8Unorm,
+            0x09 => wgpu::TextureFormat::Rg8Unorm,
+            0x0A => wgpu::TextureFormat::R16Unorm,
+            0x0B | 0x0C => if is_srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
+            _ => wgpu::TextureFormat::Rgba8Unorm,
+        }
+    };
+
+    let is_bc = image_dds_format.is_some();
+    let bc_blocks_x = (w + 3) / 4;
+    let bc_blocks_y = (h + 3) / 4;
+    let raw_tight_bpr = if is_bc {
+        match fmt_type { 0x1A | 0x1D => bc_blocks_x * 8, _ => bc_blocks_x * 16 }
+    } else {
+        match fmt_type { 0x02 => w, 0x09 | 0x0A => w * 2, _ => if fmt_type == 0x07 { w * 2 } else { w * 4 } }
+    };
+    let raw_block_rows = if is_bc { bc_blocks_y } else { h };
+    let mip0_size = (raw_tight_bpr * raw_block_rows) as usize;
+    if raw.len() < mip0_size {
+        anyhow::bail!("Not enough data for mip0 ({} < {})", raw.len(), mip0_size);
+    }
+    let upload_data = &raw[..mip0_size];
+
+    // Decode to RGBA8
+    let decoded_buf: Vec<u8>;
+    let final_bpr: u32;
+    let decoded_data: &[u8];
+
+    if let Some(dds_fmt) = image_dds_format {
+        let surface = image_dds::Surface {
+            width: w, height: h, depth: 1, layers: 1, mipmaps: 1,
+            image_format: dds_fmt, data: upload_data,
+        };
+        let rgba = match surface.decode_rgba8() {
+            Ok(s) => s.data,
+            Err(e) => anyhow::bail!("image_dds decode error: {}", e),
+        };
+        decoded_buf = rgba;
+        final_bpr = w * 4;
+        decoded_data = &decoded_buf;
+    } else {
+        let is_bgra = fmt_type == 0x0C;
+        decoded_buf = if is_bgra {
+            upload_data.chunks_exact(4).flat_map(|c| [c[2], c[1], c[0], c[3]]).collect()
+        } else if fmt_type == 0x07 {
+            // B5G6R5 expand
+            upload_data.chunks_exact(2).flat_map(|c| {
+                let v = u16::from_le_bytes([c[0], c[1]]);
+                let r = ((v & 0x001F) << 3) as u8;
+                let g = (((v >> 5) & 0x003F) << 2) as u8;
+                let b = (((v >> 11) & 0x001F) << 3) as u8;
+                [r, g, b, 255u8]
+            }).collect()
+        } else {
+            upload_data.to_vec()
+        };
+        final_bpr = raw_tight_bpr;
+        decoded_data = &decoded_buf;
+    }
     
-    // Use RGBA8 format for material textures
-    // (actual format handling can be expanded later if needed)
-    let wgpu_format = wgpu::TextureFormat::Rgba8Unorm;
-    let bytes_per_row = w * 4; // RGBA8 = 4 bytes per pixel
-    
-    // Create a default white texture as fallback
-    // In a full implementation, would decode ftx_format and extract actual texture data
-    let white_texels = vec![255u8; (w * h * 4) as usize];
-    
-    // wgpu requires bytes_per_row to be a multiple of 256
+    // wgpu alignment
     const ALIGN: u32 = 256;
-    let aligned_bpr = (bytes_per_row + ALIGN - 1) & !(ALIGN - 1);
-    let tex_data = if aligned_bpr != bytes_per_row {
+    let aligned_bpr = (final_bpr + ALIGN - 1) & !(ALIGN - 1);
+    let tex_data = if aligned_bpr != final_bpr {
         let rows = h as usize;
         let mut padded = Vec::with_capacity(rows * aligned_bpr as usize);
         for row in 0..rows {
-            let src_start = row * bytes_per_row as usize;
-            let src_end = (src_start + bytes_per_row as usize).min(white_texels.len());
-            if src_end > src_start {
-                padded.extend_from_slice(&white_texels[src_start..src_end]);
+            let s = row * final_bpr as usize;
+            let e = s + final_bpr as usize;
+            if e <= decoded_data.len() {
+                padded.extend_from_slice(&decoded_data[s..e]);
             } else {
-                padded.extend(std::iter::repeat(255u8).take(bytes_per_row as usize));
+                padded.extend(std::iter::repeat(0u8).take(final_bpr as usize));
             }
-            let pad = (aligned_bpr - bytes_per_row) as usize;
-            padded.extend(std::iter::repeat(0u8).take(pad));
+            padded.extend(std::iter::repeat(0u8).take((aligned_bpr - final_bpr) as usize));
         }
         padded
     } else {
-        white_texels
+        decoded_data.to_vec()
     };
-    
+
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -1745,9 +1825,21 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     self.bntx_tex_cache.insert(bntx_idx, bg2);
                 }
                 self.tex_cache.insert((set_idx, emitter_idx), bg);
-                // Store aspect ratio for billboard stretching
-                let aspect = if h > 0 { tex_w as f32 / h as f32 } else { 1.0 };
+                // Store aspect ratio for billboard stretching.
+                // Use the visible frame UV size: tex_w*su / h*sv.
+                // This handles vertical-strip, horizontal-strip, and grid sprite-sheet layouts.
+                let su = emitter.tex_scale_uv[0].max(0.001);
+                let sv = emitter.tex_scale_uv[1].max(0.001);
+                let aspect = (tex_w as f32 * su) / (h as f32 * sv);
                 self.tex_aspect_cache.insert((set_idx, emitter_idx), aspect);
+                if emitter.tex_pat_frame_count > 1 {
+                    eprintln!("[ANIM] {set_idx}/{emitter_idx}: tex_pat_frame_count={} tex_scale_uv={:?} off={:?} tex={}x{} vis={:.1}x{:.1} aspect={:.3}",
+                        emitter.tex_pat_frame_count, emitter.tex_scale_uv, emitter.tex_offset_uv,
+                        w, h, w as f32 * su, h as f32 * sv, aspect);
+                    if !emitter.tex_pat_frame_table.is_empty() {
+                        eprintln!("[ANIM]   table={:?}", emitter.tex_pat_frame_table);
+                    }
+                }
 
                 // ── Slot-1 alpha/gradient texture upload ──────────────────
                 // If the emitter has a second texture slot, decode and upload it.
@@ -2096,21 +2188,15 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             for (emitter_idx, _emitter) in set.emitters.iter().enumerate() {
                 let key = (set_idx, emitter_idx);
                 
-                // Extract material textures from BFRES models
-                // Standard material texture slots:
-                // - _col (color/albedo): resolved slot
-                // - _emi (emissive): resolved slot
-                // - _prm (PBR parameters): resolved slot
-                
-                let mut color_view = None;
-                let mut color_sampler = None;
-                let mut color_tex = None;
-                let mut emissive_view = None;
-                let mut emissive_sampler = None;
-                let mut emissive_tex = None;
-                let mut pbr_view = None;
-                let mut pbr_sampler = None;
-                let mut pbr_tex = None;
+                let mut color_view: Option<wgpu::TextureView> = None;
+                let mut color_sampler: Option<wgpu::Sampler> = None;
+                let mut color_tex: Option<wgpu::Texture> = None;
+                let mut emissive_view: Option<wgpu::TextureView> = None;
+                let mut emissive_sampler: Option<wgpu::Sampler> = None;
+                let mut emissive_tex: Option<wgpu::Texture> = None;
+                let mut pbr_view: Option<wgpu::TextureView> = None;
+                let mut pbr_sampler: Option<wgpu::Sampler> = None;
+                let mut pbr_tex: Option<wgpu::Texture> = None;
                 let mut flags = 0u32;
                 
                 // Try to extract material textures from BFRES models
@@ -2120,7 +2206,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         if color_view.is_none() && mesh.texture_index != u32::MAX {
                             if let Some(tex_res) = ptcl.bntx_textures.get(mesh.texture_index as usize) {
                                 if let Ok((tex, view, sampler)) = create_texture_from_res(
-                                    device, queue, tex_res, "mat_tex_col"
+                                    device, queue, tex_res, &ptcl.texture_section, "mat_tex_col"
                                 ) {
                                     color_view = Some(view);
                                     color_sampler = Some(sampler);
@@ -2135,7 +2221,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         if emissive_view.is_none() && mesh.emissive_tex_index != u32::MAX {
                             if let Some(tex_res) = ptcl.bntx_textures.get(mesh.emissive_tex_index as usize) {
                                 if let Ok((tex, view, sampler)) = create_texture_from_res(
-                                    device, queue, tex_res, "mat_tex_emi"
+                                    device, queue, tex_res, &ptcl.texture_section, "mat_tex_emi"
                                 ) {
                                     emissive_view = Some(view);
                                     emissive_sampler = Some(sampler);
@@ -2150,7 +2236,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         if pbr_view.is_none() && mesh.prm_tex_index != u32::MAX {
                             if let Some(tex_res) = ptcl.bntx_textures.get(mesh.prm_tex_index as usize) {
                                 if let Ok((tex, view, sampler)) = create_texture_from_res(
-                                    device, queue, tex_res, "mat_tex_prm"
+                                    device, queue, tex_res, &ptcl.texture_section, "mat_tex_prm"
                                 ) {
                                     pbr_view = Some(view);
                                     pbr_sampler = Some(sampler);
@@ -2163,92 +2249,85 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     }
                 }
                 
-                // If we found any material textures, create a bind group
-                if flags != 0 {
-                    if let (
-                        Some(color_view), Some(color_sampler),
-                        Some(emissive_view), Some(emissive_sampler),
-                        Some(pbr_view), Some(pbr_sampler),
-                        Some(color_tex), Some(emissive_tex), Some(pbr_tex),
-                    ) = (
-                        color_view.clone(), color_sampler.clone(),
-                        emissive_view.clone(), emissive_sampler.clone(),
-                        pbr_view.clone(), pbr_sampler.clone(),
-                        color_tex.clone(), emissive_tex.clone(), pbr_tex.clone(),
-                    ) {
-                        // Update material texture flags buffer for this emitter
-                        let flags_data = [flags, 0u32, 0u32, 0u32];
-                        queue.write_buffer(&self.mat_tex_flags_buffer, 0, &bytemuck::cast::<[u32; 4], [u8; 16]>(flags_data));
-                        
-                        // Build bind group entries ordered by shader-resolved GPU slots
-                        let mut entries: Vec<(u32, wgpu::BindGroupEntry)> = Vec::new();
-                        
-                        // Color texture entries at col_slot and col_slot+1
-                        entries.push((col_slot, wgpu::BindGroupEntry {
-                            binding: col_slot as u32,
-                            resource: wgpu::BindingResource::TextureView(&color_view),
-                        }));
-                        entries.push((col_slot + 1, wgpu::BindGroupEntry {
-                            binding: (col_slot + 1) as u32,
-                            resource: wgpu::BindingResource::Sampler(&color_sampler),
-                        }));
-                        
-                        // Emissive texture entries at emi_slot and emi_slot+1
-                        entries.push((emi_slot, wgpu::BindGroupEntry {
-                            binding: emi_slot as u32,
-                            resource: wgpu::BindingResource::TextureView(&emissive_view),
-                        }));
-                        entries.push((emi_slot + 1, wgpu::BindGroupEntry {
-                            binding: (emi_slot + 1) as u32,
-                            resource: wgpu::BindingResource::Sampler(&emissive_sampler),
-                        }));
-                        
-                        // PBR texture entries at prm_slot and prm_slot+1
-                        entries.push((prm_slot, wgpu::BindGroupEntry {
-                            binding: prm_slot as u32,
-                            resource: wgpu::BindingResource::TextureView(&pbr_view),
-                        }));
-                        entries.push((prm_slot + 1, wgpu::BindGroupEntry {
-                            binding: (prm_slot + 1) as u32,
-                            resource: wgpu::BindingResource::Sampler(&pbr_sampler),
-                        }));
-                        
-                        // Flags buffer at slot 6
-                        entries.push((6, wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: self.mat_tex_flags_buffer.as_entire_binding(),
-                        }));
-                        
-                        // Sort entries by binding slot for proper ordering
-                        entries.sort_by_key(|(slot, _)| *slot);
-                        let sorted_entries: Vec<_> = entries.into_iter().map(|(_, e)| e).collect();
-                        
-                        // Create bind group for this emitter's material textures
-                        let mat_tex_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some(&format!("mat_tex_bg_{}_{}", set_idx, emitter_idx)),
-                            layout: &self.mat_tex_bg_layout,
-                            entries: &sorted_entries,
-                        });
-                        
-                        // Cache the bind group and textures
-                        self.mat_tex_bg_cache.insert(key, mat_tex_bg);
-                        self.mat_tex_views_cache.insert(
-                            key,
-                            (
-                                (color_view, color_sampler),
-                                (emissive_view, emissive_sampler),
-                                (pbr_view, pbr_sampler),
-                            ),
-                        );
-                        self.mat_tex_objects_cache.insert(
-                            key,
-                            (color_tex, emissive_tex, pbr_tex),
-                        );
-                        self.mat_tex_flags_cache.insert(key, flags);
-                        
-                        eprintln!("[MAT_TEX] {}/{}: Created material texture bind group (flags={}, slots: col={}, emi={}, prm={})", set_idx, emitter_idx, flags, col_slot, emi_slot, prm_slot);
-                    }
+                // Create bind group with whatever textures are available (no longer requires all three)
+                // Missing textures use the white fallback for color slots and white/black for emissive/PBR.
+                let color_v = color_view.unwrap_or_else(|| self.white_view.clone());
+                let color_s = color_sampler.unwrap_or_else(|| self.white_sampler.clone());
+                let emissive_v = emissive_view.unwrap_or_else(|| self.white_view.clone());
+                let emissive_s = emissive_sampler.unwrap_or_else(|| self.white_sampler.clone());
+                let pbr_v = pbr_view.unwrap_or_else(|| self.white_view.clone());
+                let pbr_s = pbr_sampler.unwrap_or_else(|| self.white_sampler.clone());
+                
+                // Update material texture flags buffer for this emitter
+                let flags_data = [flags, 0u32, 0u32, 0u32];
+                queue.write_buffer(&self.mat_tex_flags_buffer, 0, &bytemuck::cast::<[u32; 4], [u8; 16]>(flags_data));
+                
+                // Build bind group entries ordered by shader-resolved GPU slots
+                let mut entries: Vec<(u32, wgpu::BindGroupEntry)> = Vec::new();
+                
+                // Color texture entries at col_slot and col_slot+1
+                entries.push((col_slot, wgpu::BindGroupEntry {
+                    binding: col_slot as u32,
+                    resource: wgpu::BindingResource::TextureView(&color_v),
+                }));
+                entries.push((col_slot + 1, wgpu::BindGroupEntry {
+                    binding: (col_slot + 1) as u32,
+                    resource: wgpu::BindingResource::Sampler(&color_s),
+                }));
+                
+                // Emissive texture entries at emi_slot and emi_slot+1
+                entries.push((emi_slot, wgpu::BindGroupEntry {
+                    binding: emi_slot as u32,
+                    resource: wgpu::BindingResource::TextureView(&emissive_v),
+                }));
+                entries.push((emi_slot + 1, wgpu::BindGroupEntry {
+                    binding: (emi_slot + 1) as u32,
+                    resource: wgpu::BindingResource::Sampler(&emissive_s),
+                }));
+                
+                // PBR texture entries at prm_slot and prm_slot+1
+                entries.push((prm_slot, wgpu::BindGroupEntry {
+                    binding: prm_slot as u32,
+                    resource: wgpu::BindingResource::TextureView(&pbr_v),
+                }));
+                entries.push((prm_slot + 1, wgpu::BindGroupEntry {
+                    binding: (prm_slot + 1) as u32,
+                    resource: wgpu::BindingResource::Sampler(&pbr_s),
+                }));
+                
+                // Flags buffer at slot 6
+                entries.push((6, wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.mat_tex_flags_buffer.as_entire_binding(),
+                }));
+                
+                // Sort entries by binding slot for proper ordering
+                entries.sort_by_key(|(slot, _)| *slot);
+                let sorted_entries: Vec<_> = entries.into_iter().map(|(_, e)| e).collect();
+                
+                // Create bind group for this emitter's material textures
+                let mat_tex_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("mat_tex_bg_{}_{}", set_idx, emitter_idx)),
+                    layout: &self.mat_tex_bg_layout,
+                    entries: &sorted_entries,
+                });
+                
+                // Cache the bind group and textures
+                self.mat_tex_bg_cache.insert(key, mat_tex_bg);
+                self.mat_tex_views_cache.insert(
+                    key,
+                    (
+                        (color_v, color_s),
+                        (emissive_v, emissive_s),
+                        (pbr_v, pbr_s),
+                    ),
+                );
+                if let (Some(ct), Some(et), Some(pt)) = (color_tex, emissive_tex, pbr_tex) {
+                    self.mat_tex_objects_cache.insert(key, (ct, et, pt));
                 }
+                self.mat_tex_flags_cache.insert(key, flags);
+                
+                eprintln!("[MAT_TEX] {}/{}: Created material texture bind group (flags={}, slots: col={}, emi={}, prm={})", set_idx, emitter_idx, flags, col_slot, emi_slot, prm_slot);
             }
         }
         
@@ -3584,6 +3663,7 @@ mod tests {
             tex_offset_uv: [0.0, 0.0],
             tex_scroll_uv: [0.0, 0.0],
             tex_pat_frame_count: 1,
+            tex_pat_frame_table: Vec::new(),
             emitter_offset: glam::Vec3::ZERO,
             emitter_rotation: glam::Vec3::ZERO,
             emitter_scale: glam::Vec3::ONE,
@@ -3712,6 +3792,7 @@ mod tests {
             tex_offset_uv: [0.0, 0.0],
             tex_scroll_uv: [0.0, 0.0],
             tex_pat_frame_count: 1,
+            tex_pat_frame_table: Vec::new(),
             emitter_offset: glam::Vec3::ZERO,
             emitter_rotation: glam::Vec3::ZERO,
             emitter_scale: glam::Vec3::ONE,
@@ -4586,6 +4667,7 @@ mod tests {
             tex_offset_uv: [0.0, 0.0],
             tex_scroll_uv: [0.0, 0.0],
             tex_pat_frame_count: 1,
+            tex_pat_frame_table: Vec::new(),
             emitter_offset: glam::Vec3::ZERO,
             emitter_rotation: glam::Vec3::ZERO,
             emitter_scale: glam::Vec3::ONE,
