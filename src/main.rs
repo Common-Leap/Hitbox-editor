@@ -14,6 +14,7 @@ mod shader_integration;
 mod bnsh_shader_integration;
 mod effect_converter;
 mod spirv_to_wgsl;
+mod spirv_patch;
 
 #[cfg(test)]
 mod integration_tests;

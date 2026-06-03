@@ -313,6 +313,24 @@ struct EmitterStaticJson {
     tex_scroll_anim0: Option<TexScrollAnimJson>,
     tex_scroll_anim1: Option<TexScrollAnimJson>,
     tex_scroll_anim2: Option<TexScrollAnimJson>,
+    // Rotation
+    rotate_add_x: f32,
+    rotate_add_y: f32,
+    rotate_add_z: f32,
+    rotate_add_rand_x: f32,
+    rotate_add_rand_y: f32,
+    rotate_add_rand_z: f32,
+    rotate_init_x: f32,
+    rotate_init_y: f32,
+    rotate_init_z: f32,
+    rotate_init_rand_x: f32,
+    rotate_init_rand_y: f32,
+    rotate_init_rand_z: f32,
+    // Gravity
+    gravity_dir_x: f32,
+    gravity_dir_y: f32,
+    gravity_dir_z: f32,
+    gravity_scale: f32,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -528,12 +546,19 @@ fn convert_emitter_data(
         .unwrap_or(0.0);
 
     // ── Rotation speed (use RotateAddX from EmitterStatic if available) ────
-    // In our JSON schema we don't extract RotateAdd directly yet.
-    let rotation_speed = 0.05;
+    let rotation_speed = json.emitter_static.as_ref().map(|s| s.rotate_add_x).unwrap_or(0.0);
+    let rotation_init = json.emitter_static.as_ref().map(|s| s.rotate_init_x).unwrap_or(0.0);
+    let rotation_init_random = json.emitter_static.as_ref().map(|s| s.rotate_init_rand_x).unwrap_or(0.0);
 
     // ── Accel (from gravity direction + scale in EmitterStatic) ────────────
-    // Use a default for now since gravity fields aren't in our minimal schema.
-    let accel = glam::Vec3::new(0.0, 0.05, 0.0);
+    let accel = json.emitter_static.as_ref().map(|s| {
+        let dir = glam::Vec3::new(s.gravity_dir_x, s.gravity_dir_y, s.gravity_dir_z);
+        if dir.length_squared() > 0.0 {
+            dir.normalize() * s.gravity_scale
+        } else {
+            glam::Vec3::ZERO
+        }
+    }).unwrap_or(glam::Vec3::ZERO);
 
     // ── Color / alpha / scale animation keys ───────────────────────────────
     let (color0, _color0_keys) = extract_color_keys(json.emitter_static.as_ref().and_then(|s| s.color0.as_ref()));
@@ -689,6 +714,47 @@ fn convert_emitter_data(
             .and_then(|s| s.tex_pattern_anim1.as_ref()),
     );
 
+    // ── Slot-2 texture UV data (from TexPatternAnim2 / TexScrollAnim2) ────
+    let tex2_scale_uv = raw_uv_scale(
+        json.emitter_static
+            .as_ref()
+            .and_then(|s| s.tex_pattern_anim2.as_ref()),
+    );
+    let tex2_offset_uv = raw_uv_offset(
+        json.emitter_static
+            .as_ref()
+            .and_then(|s| s.tex_pattern_anim2.as_ref()),
+    );
+    let tex2_scroll_uv = raw_scroll(
+        json.emitter_static
+            .as_ref()
+            .and_then(|s| s.tex_scroll_anim2.as_ref()),
+    );
+    let tex2_pat_anim2 = json
+        .emitter_static
+        .as_ref()
+        .and_then(|s| s.tex_pattern_anim2.as_ref());
+    let tex2_pat_frame_table: Vec<usize> = tex2_pat_anim2
+        .map(|t| {
+            t.table
+                .iter()
+                .take(t.num.max(0.0) as usize)
+                .map(|&frame| frame as usize)
+                .collect()
+        })
+        .unwrap_or_default();
+    let tex2_pat_frame_count = tex2_pat_frame_table
+        .iter()
+        .copied()
+        .max()
+        .map(|max_frame| max_frame + 1)
+        .unwrap_or_else(|| {
+            tex2_pat_anim2
+                .map(|t| t.num.max(1.0) as usize)
+                .unwrap_or(1)
+        })
+        .max(1);
+
     // ── texture_index ──────────────────────────────────────────────────────
     let texture_index = if !bntx_textures.is_empty() && !tex_list.is_empty() {
         // Find the first matching entry in bntx_textures
@@ -715,6 +781,8 @@ fn convert_emitter_data(
         scale,
         scale_random,
         rotation_speed,
+        rotation_init,
+        rotation_init_random,
         color0,
         color1,
         alpha0: alpha0_anim,
@@ -742,6 +810,11 @@ fn convert_emitter_data(
         indirect_scroll_uv,
         indirect_tex_scale_uv,
         indirect_tex_offset_uv,
+        tex2_scale_uv,
+        tex2_offset_uv,
+        tex2_scroll_uv,
+        tex2_pat_frame_count,
+        tex2_pat_frame_table,
     }
 }
 

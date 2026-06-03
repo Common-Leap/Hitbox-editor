@@ -690,6 +690,8 @@ impl HitboxEditorApp {
                                         scale: *scale,
                                         scale_random: 0.3,
                                         rotation_speed: 0.0,
+                                        rotation_init: 0.0,
+                                        rotation_init_random: 0.0,
                                         color0: vec![crate::effects::ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 }],
                                         color1: Vec::new(),
                                         alpha0: crate::effects::AnimKey3v4k {
@@ -733,6 +735,11 @@ impl HitboxEditorApp {
                                         indirect_scroll_uv: [0.0, 0.0],
                                         indirect_tex_scale_uv: [1.0, 1.0],
                                         indirect_tex_offset_uv: [0.0, 0.0],
+                                        tex2_scale_uv: [1.0, 1.0],
+                                        tex2_offset_uv: [0.0, 0.0],
+                                        tex2_scroll_uv: [0.0, 0.0],
+                                        tex2_pat_frame_count: 1,
+                                        tex2_pat_frame_table: Vec::new(),
                                     }],
                                 });
                             }
@@ -2068,6 +2075,10 @@ impl eframe::App for HitboxEditorApp {
                 let has_particles = !self.state.particle_system.particles.is_empty();
                 if has_emitters || has_particles {
                     // Advance the shared clock — always step while there's anything to simulate
+                    // Always advance particle_clock so the simulation keeps running
+                    // even after all effects' anim_clock reaches max_lifetime.
+                    // Otherwise existing particles freeze mid-air (dt=0).
+                    self.particle_clock += anim_dt_frames;
                     let max_clock = if !self.active_effects.is_empty() {
                         let mut max = 0.0f32;
                         for effect in &mut self.active_effects {
@@ -2079,9 +2090,8 @@ impl eframe::App for HitboxEditorApp {
                             }
                             max = max.max(effect.anim_clock);
                         }
-                        max
+                        max.max(self.particle_clock)
                     } else {
-                        self.particle_clock += anim_dt_frames;
                         self.particle_clock
                     };
 

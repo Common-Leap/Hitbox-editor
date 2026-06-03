@@ -406,7 +406,7 @@ fn build_pipeline(
     device: &wgpu::Device,
     key: PipelineKey,
     layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
+    shaders: &LoadedShaders,
     surface_format: wgpu::TextureFormat,
     vertex_buffers: &[wgpu::VertexBufferLayout],
 ) -> wgpu::RenderPipeline {
@@ -416,14 +416,14 @@ fn build_pipeline(
         label: Some("particle_pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main"),
+            module: &shaders.vs_module,
+            entry_point: Some(&shaders.vs_entry),
             buffers: vertex_buffers,
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_main"),
+            module: &shaders.fs_module,
+            entry_point: Some(&shaders.fs_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
                 blend: Some(blend),
@@ -527,6 +527,10 @@ pub struct ParticleRenderer {
     color_view_cache: HashMap<(usize, usize), (wgpu::TextureView, wgpu::Sampler)>,
     // Per-emitter color TEXTURE objects (must be kept alive)
     color_texture_cache: HashMap<(usize, usize), wgpu::Texture>,
+    // Per-emitter slot-2 texture views and samplers
+    slot2_view_cache: HashMap<(usize, usize), (wgpu::TextureView, wgpu::Sampler)>,
+    // Per-emitter slot-2 TEXTURE objects (must be kept alive)
+    slot2_texture_cache: HashMap<(usize, usize), wgpu::Texture>,
     // Combined 4-entry bind groups for emitters that have both color + alpha textures
     combined_bg_cache: HashMap<(usize, usize), wgpu::BindGroup>,
     // White texture view and sampler (kept for building combined bind groups)
@@ -573,6 +577,13 @@ pub struct ParticleRenderer {
     )>,
     // Material texture availability flags per emitter
     mat_tex_flags_cache: HashMap<(usize, usize), u32>,
+
+    // BNSH bindless descriptor state (set when BNSH shader uses storage-buffer-only bindings)
+    bnsh_active: bool,
+    bnsh_bgl: Option<wgpu::BindGroupLayout>,
+    bnsh_bg: Option<wgpu::BindGroup>,
+    bnsh_storage_bufs: Vec<wgpu::Buffer>,
+    empty_bgl: wgpu::BindGroupLayout,
 }
 
 // ── Shader loading helpers ────────────────────────────────────────────────
@@ -686,17 +697,62 @@ fn spirv_to_wgsl(spirv_bytes: &[u8]) -> anyhow::Result<String> {
 }
 
 /// Load default WGSL particle shader (fallback when BNSH is unavailable)
-fn load_default_particle_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
+fn load_default_particle_shader(device: &wgpu::Device) -> LoadedShaders {
     let shader_source = include_str!("particle.wgsl");
     eprintln!("[ParticleRenderer] Loading DEFAULT particle shader (particle.wgsl):");
     eprintln!("[ParticleRenderer]   {} lines, {} bytes", shader_source.lines().count(), shader_source.len());
-    eprintln!("[ParticleRenderer]   First 300 chars:\n{}", 
-        shader_source.chars().take(300).collect::<String>());
     
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("particle_shader_wgsl"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    })
+    LoadedShaders::from_wgsl(device, "particle_shader_wgsl", shader_source)
+}
+
+/// Attempt to create a shader module from SPIR-V bytes, catching panics from wgpu.
+fn try_create_spirv_module(device: &wgpu::Device, label: &str, spirv_bytes: &[u8]) -> Option<wgpu::ShaderModule> {
+    if spirv_bytes.len() < 16 {
+        eprintln!("[ParticleRenderer] ✗ SPIR-V too short ({} bytes)", spirv_bytes.len());
+        return None;
+    }
+    // Convert SPIR-V → WGSL via naga (wgpu no longer accepts SPIR-V directly)
+    match crate::spirv_to_wgsl::create_shader_module_from_spirv(device, spirv_bytes, label) {
+        Ok(module) => {
+            eprintln!("[ParticleRenderer] ✓ Converted SPIR-V → WGSL: {}", label);
+            Some(module)
+        }
+        Err(e) => {
+            eprintln!("[ParticleRenderer] ✗ SPIR-V → WGSL failed ({}): {}", label, e);
+            None
+        }
+    }
+}
+
+/// A pair of vertex/fragment shader modules loaded for rendering.
+///
+/// When BNSH shaders are available, each stage gets its own SPIR-V module
+/// with the decoded entry point. Otherwise both stages use the fallback WGSL
+/// with the hardcoded "vs_main" / "fs_main" entry points.
+struct LoadedShaders {
+    vs_module: wgpu::ShaderModule,
+    fs_module: wgpu::ShaderModule,
+    vs_entry: String,
+    fs_entry: String,
+    /// Number of bindless storage buffer bindings if using BNSH bindless,
+    /// or None if using the standard WGSL fixed-binding layout.
+    bnsh_binding_count: Option<usize>,
+}
+
+impl LoadedShaders {
+    fn from_wgsl(device: &wgpu::Device, label: &str, source: &str) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        LoadedShaders {
+            fs_module: module.clone(),
+            vs_module: module,
+            vs_entry: "vs_main".to_string(),
+            fs_entry: "fs_main".to_string(),
+            bnsh_binding_count: None,
+        }
+    }
 }
 
 /// Load default WGSL trail shader
@@ -708,81 +764,172 @@ fn load_default_trail_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
 }
 
 /// Load default WGSL mesh shader
-fn load_default_mesh_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("mesh_shader_wgsl"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
-    })
+fn load_default_mesh_shader(device: &wgpu::Device) -> LoadedShaders {
+    LoadedShaders::from_wgsl(device, "mesh_shader_wgsl", include_str!("mesh.wgsl"))
 }
 
-/// Try to load particle shader from BNSH data, falling back to WGSL
+/// Try to load particle shaders from BNSH data, falling back to WGSL.
+///
+/// Returns separate vertex and fragment modules with their correct entry points.
+/// When BNSH shaders are available, each stage is loaded from its own SPIR-V.
+/// Otherwise both stages share the fallback WGSL module.
 fn load_particle_shader(
     device: &wgpu::Device,
     bnsh_shaders: Option<&BnshShaderSet>,
-) -> wgpu::ShaderModule {
+) -> LoadedShaders {
     // Try to use BNSH shaders if available
     if let Some(shader_set) = bnsh_shaders {
-        eprintln!("[ParticleRenderer] BNSH shader set provided, checking shaders...");
-        eprintln!("[ParticleRenderer] BNSH summary: {}", shader_set.summary());
-        
-        // Check what shaders we have
-        if let Some(vs) = &shader_set.shader_pair.vertex {
-            eprintln!("[ParticleRenderer] ✓ Vertex shader available: {} bytes SPIR-V, entry_point='{}'",
+        eprintln!("[ParticleRenderer] BNSH shader set provided: {}", shader_set.summary());
+
+        let vs_info = shader_set.shader_pair.vertex.as_ref();
+        let fs_info = shader_set.shader_pair.fragment.as_ref();
+
+        let vs_bytes = vs_info.map(|vs| &vs.spirv);
+        let fs_bytes = fs_info.map(|fs| &fs.spirv);
+
+        // Log shader info
+        if let Some(vs) = vs_info {
+            eprintln!("[ParticleRenderer] ✓ Vertex shader: {} bytes, entry='{}'",
                 vs.spirv.len(), vs.entry_point);
         } else {
             eprintln!("[ParticleRenderer] ✗ NO vertex shader");
         }
-        
-        if let Some(fs) = &shader_set.shader_pair.fragment {
-            eprintln!("[ParticleRenderer] ✓ Fragment shader available: {} bytes SPIR-V, entry_point='{}'",
+        if let Some(fs) = fs_info {
+            eprintln!("[ParticleRenderer] ✓ Fragment shader: {} bytes, entry='{}'",
                 fs.spirv.len(), fs.entry_point);
         } else {
             eprintln!("[ParticleRenderer] ✗ NO fragment shader");
         }
-        
-        // Try to use vertex shader if available — SPIR-V directly (wgpu spirv feature)
-        if let Some(vertex_shader) = &shader_set.shader_pair.vertex {
-            eprintln!("[ParticleRenderer] Loading vertex SPIR-V directly ({} bytes, entry='{}')",
-                vertex_shader.spirv.len(), vertex_shader.entry_point);
 
-            // Convert SPIR-V bytes to u32 words
-            let spirv_words: Vec<u32> = vertex_shader.spirv.chunks_exact(4)
-                .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
+        // 1. Convert SPIR-V bytes to words for patching/remapping.
+        let vs_words = vs_bytes.and_then(|b| crate::spirv_to_wgsl::bytes_to_words(b).ok());
+        let fs_words = fs_bytes.and_then(|b| crate::spirv_to_wgsl::bytes_to_words(b).ok());
 
-            // wgpu may reject SPIR-V with unsupported capabilities (e.g. StorageImageReadWithoutFormat)
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("particle_shader_bnsh_vertex"),
-                    source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spirv_words)),
-                })
-            }));
+        if let (Some(mut vs_w), Some(mut fs_w)) = (vs_words, fs_words) {
+            // 2. NVN execution mode patches (OriginLowerLeft → OriginUpperLeft, etc.)
+            let vs_patches = crate::spirv_patch::nvn_to_vulkan_patch(&mut vs_w);
+            let fs_patches = crate::spirv_patch::nvn_to_vulkan_patch(&mut fs_w);
+            if !vs_patches.is_empty() || !fs_patches.is_empty() {
+                eprintln!("[ParticleRenderer] NVN patches: VS[{}] FS[{}]",
+                    vs_patches.join(", "), fs_patches.join(", "));
+            }
 
-            match result {
-                Ok(shader_module) => {
-                    eprintln!("[ParticleRenderer] ✓ Loaded BNSH vertex shader from SPIR-V");
-                    return shader_module;
-                }
-                Err(e) => {
-                    let msg = if let Some(s) = e.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = e.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown error".to_string()
-                    };
-                    eprintln!("[ParticleRenderer] ✗ SPIR-V shader rejected: {}", msg);
-                    eprintln!("[ParticleRenderer] Falling back to default shader");
+            // Log original bindings for debugging
+            for (label, words) in [("vs", &vs_w[..]), ("fs", &fs_w[..])] {
+                if let Ok(bindings) = crate::spirv_patch::parse_spirv_bindings(words) {
+                    let summary = crate::spirv_patch::format_bindings_summary(&bindings);
+                    eprintln!("[ParticleRenderer]   {} original bindings: {}", label, summary);
                 }
             }
+
+            // 3. Build binding remap from NVN → our layout (using both VS and FS bindings)
+            let remap = crate::spirv_patch::build_nvn_to_our_layout_remap(&vs_w, &fs_w);
+
+            if let Some(ref remap) = remap {
+                // Detect bindless (empty remap = keep original bindings as-is)
+                let is_bindless = remap.is_empty();
+
+                if !is_bindless {
+                    // Log the remap table
+                    for ((old_set, old_b), (new_set, new_b)) in remap.iter() {
+                        eprintln!("[ParticleRenderer]   remap: set={} bind={:2} → group={} bind={}",
+                            old_set, old_b, new_set, new_b);
+                    }
+
+                    // 4. Apply binding remap to both shaders
+                    let vs_n = crate::spirv_patch::remap_spirv_bindings(&mut vs_w, remap);
+                    let fs_n = crate::spirv_patch::remap_spirv_bindings(&mut fs_w, remap);
+                    eprintln!("[ParticleRenderer] Binding remap applied: VS[{}] FS[{}]",
+                        vs_n, fs_n);
+                } else {
+                    eprintln!("[ParticleRenderer]   Bindless storage-buffer shader — keeping original bindings unchanged");
+                }
+
+                // 5. Convert SPIR-V to WGSL via naga
+                let vs_wgsl = crate::spirv_to_wgsl::spirv_words_to_wgsl(&vs_w, "particle_bnsh_vs").map(|(s, _)| s);
+                let fs_wgsl = crate::spirv_to_wgsl::spirv_words_to_wgsl(&fs_w, "particle_bnsh_fs").map(|(s, _)| s);
+
+                if let (Ok(ref vs_wgsl), Ok(ref fs_wgsl)) = (vs_wgsl, fs_wgsl) {
+                    let vs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("particle_bnsh_vs"),
+                        source: wgpu::ShaderSource::Wgsl(vs_wgsl.clone().into()),
+                    });
+                    let fs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("particle_bnsh_fs"),
+                        source: wgpu::ShaderSource::Wgsl(fs_wgsl.clone().into()),
+                    });
+
+                    let vs_entry = vs_info.map(|vs| vs.entry_point.clone()).unwrap_or_default();
+                    let fs_entry = fs_info.map(|fs| fs.entry_point.clone()).unwrap_or_default();
+                    eprintln!("[ParticleRenderer] ✓ Using BNSH shaders: vs='{}' fs='{}'",
+                        vs_entry, fs_entry);
+
+                    // Log WGSL source for debugging
+                    if is_bindless {
+                        eprintln!("[ParticleRenderer] === VS WGSL ({}) ===", vs_wgsl.lines().count());
+                        for line in vs_wgsl.lines().take(30) {
+                            eprintln!("[ParticleRenderer] VS: {}", line);
+                        }
+                        eprintln!("[ParticleRenderer] === FS WGSL ({}) ===", fs_wgsl.lines().count());
+                        for line in fs_wgsl.lines().take(30) {
+                            eprintln!("[ParticleRenderer] FS: {}", line);
+                        }
+
+                        // Log reflection data
+                        if let Some(ref refl) = vs_info.and_then(|vs| vs.reflection.as_ref()) {
+                            eprintln!("[ParticleRenderer] VS reflection: {} slots, {} samplers, {} cbuffers, idx_smp={} idx_cb={}",
+                                refl.shader_slots.len(), refl.sampler_names.len(), refl.constant_buffer_names.len(),
+                                refl.index_sampler, refl.index_constant_buffer);
+                            for (i, name) in refl.sampler_names.iter().enumerate() {
+                                let slot_idx = refl.index_sampler as usize + i;
+                                let gpu_slot = refl.shader_slots.get(slot_idx).copied().unwrap_or(u32::MAX);
+                                eprintln!("[ParticleRenderer]   sampler[{}] '{}' → slot_idx={} gpu_slot={}",
+                                    i, name, slot_idx, gpu_slot);
+                            }
+                        }
+                        if let Some(ref refl) = fs_info.and_then(|fs| fs.reflection.as_ref()) {
+                            eprintln!("[ParticleRenderer] FS reflection: {} slots, {} samplers, {} cbuffers, idx_smp={} idx_cb={}",
+                                refl.shader_slots.len(), refl.sampler_names.len(), refl.constant_buffer_names.len(),
+                                refl.index_sampler, refl.index_constant_buffer);
+                            for (i, name) in refl.sampler_names.iter().enumerate() {
+                                let slot_idx = refl.index_sampler as usize + i;
+                                let gpu_slot = refl.shader_slots.get(slot_idx).copied().unwrap_or(u32::MAX);
+                                eprintln!("[ParticleRenderer]   sampler[{}] '{}' → slot_idx={} gpu_slot={}",
+                                    i, name, slot_idx, gpu_slot);
+                            }
+                        }
+                    }
+
+                    // Count bindless storage buffer bindings for pipeline layout creation
+                    let bnsh_count = if is_bindless {
+                        let vs_b = crate::spirv_patch::parse_spirv_bindings(&vs_w).ok();
+                        Some(vs_b.map(|b| b.len()).unwrap_or(0))
+                    } else {
+                        None
+                    };
+
+                    return LoadedShaders {
+                        vs_module: vs_mod.clone(),
+                        fs_module: fs_mod.clone(),
+                        vs_entry,
+                        fs_entry,
+                        bnsh_binding_count: bnsh_count,
+                    };
+                } else {
+                    eprintln!("[ParticleRenderer] ✗ SPIR-V → WGSL conversion failed");
+                }
+            } else {
+                eprintln!("[ParticleRenderer] ✗ Binding remap failed (unsupported bindings)");
+            }
         } else {
-            eprintln!("[ParticleRenderer] ✗ BNSH shader set has NO vertex shader, falling back");
+            eprintln!("[ParticleRenderer] ✗ SPIR-V bytes_to_words failed");
         }
 
+        eprintln!("[ParticleRenderer] BNSH loading failed, falling back to WGSL");
     } else {
-        eprintln!("[ParticleRenderer] ✗ No BNSH shader set provided");
+        eprintln!("[ParticleRenderer] No BNSH shader set provided");
     }
-    
+
     eprintln!("[ParticleRenderer] Using fallback particle shader");
     load_default_particle_shader(device)
 }
@@ -892,6 +1039,23 @@ impl ParticleRenderer {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                // Slot 2: tertiary texture (binding 7 = texture, binding 8 = sampler)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -1030,6 +1194,8 @@ impl ParticleRenderer {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&white_view) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&white_sampler) },
                 wgpu::BindGroupEntry { binding: 6, resource: indirect_uniform_buf_init.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&white_view) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&white_sampler) },
             ],
         });
 
@@ -1074,6 +1240,105 @@ impl ParticleRenderer {
             bind_group_layouts: &[Some(&trail_camera_bgl), Some(&tex_bg_layout), Some(&mat_tex_bg_layout)],
             immediate_size: 0,
         });
+
+        // ── Empty bind group layout (placeholder for unused groups) ───────
+        let empty_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("empty_bgl"),
+            entries: &[],
+        });
+
+        // ── BNSH bindless descriptor pipeline state ───────────────────────
+        let bnsh_binding_count = particle_shader.bnsh_binding_count;
+        let (bnsh_active, bnsh_bgl, bnsh_bg, bnsh_storage_bufs, bnsh_pipeline_layout) =
+            if let Some(sbuf_count) = bnsh_binding_count {
+                let mut bgl_entries = Vec::with_capacity(sbuf_count);
+                for i in 0..sbuf_count {
+                    bgl_entries.push(wgpu::BindGroupLayoutEntry {
+                        binding: i as u32,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    });
+                }
+                let bnsh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("bnsh_bindless_bgl"),
+                    entries: &bgl_entries,
+                });
+
+                // Compute per-binding buffer sizes from BNSH reflection
+                let sbuf_sizes: Vec<u64> = 'sizing: {
+                    let mut sizes = vec![4096u64; sbuf_count]; // default: 4KB each
+                    if let Some(shaders) = bnsh_shaders {
+                        let vs_refl = shaders.shader_pair.vertex.as_ref()
+                            .and_then(|s| s.reflection.as_ref());
+                        let fs_refl = shaders.shader_pair.fragment.as_ref()
+                            .and_then(|s| s.reflection.as_ref());
+                        // Use fragment reflection if available (more likely to have texture data),
+                        // otherwise vertex reflection.
+                        let refl = fs_refl.or(vs_refl);
+                        if let Some(r) = refl {
+                            let total_slots = r.index_unordered_access_buffer as usize;
+                            let so = r.index_shader_output as usize;
+                            let sm = r.index_sampler as usize;
+                            let cb = r.index_constant_buffer as usize;
+                            let slot_counts = [
+                                so,              // binding 0: shader input
+                                sm.saturating_sub(so), // binding 1: shader output
+                                cb.saturating_sub(sm), // binding 2: samplers
+                                total_slots.saturating_sub(cb), // binding 3: constant buffers
+                                0,               // binding 4: UAVs
+                            ];
+                            eprintln!("[ParticleRenderer] BNSH slot counts per binding: {:?}", slot_counts);
+                            // Each NVN descriptor is 16 bytes; allocate 64 bytes per slot for safety.
+                            for (i, count) in slot_counts.iter().enumerate() {
+                                if i < sbuf_count && *count > 0 {
+                                    sizes[i] = (*count as u64) * 64;
+                                }
+                            }
+                            eprintln!("[ParticleRenderer] BNSH buffer sizes: {:?}", sizes);
+                        }
+                    }
+                    sizes
+                };
+
+                let mut bufs = Vec::with_capacity(sbuf_count);
+                for i in 0..sbuf_count {
+                    let size = sbuf_sizes.get(i).copied().unwrap_or(4096).max(256);
+                    bufs.push(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("bnsh_sbuf_{}", i)),
+                        size,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                }
+                let bg_entries: Vec<wgpu::BindGroupEntry> = bufs.iter()
+                    .enumerate()
+                    .map(|(b, buf)| wgpu::BindGroupEntry {
+                        binding: b as u32,
+                        resource: buf.as_entire_binding(),
+                    })
+                    .collect();
+                let bnsh_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("bnsh_bindless_bg"),
+                    layout: &bnsh_bgl,
+                    entries: &bg_entries,
+                });
+
+                let bnsh_ppl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("bnsh_pipeline_layout"),
+                    bind_group_layouts: &[Some(&bnsh_bgl), Some(&empty_bgl), Some(&empty_bgl)],
+                    immediate_size: 0,
+                });
+
+                eprintln!("[ParticleRenderer] Created BNSH bindless layout: {} storage buffers", sbuf_count);
+                (true, Some(bnsh_bgl), Some(bnsh_bg), bufs, Some(bnsh_ppl))
+            } else {
+                (false, None, None, Vec::new(), None)
+            };
 
         // ── Blend states ──────────────────────────────────────────────────
         // (kept for trail pipeline which is not in the cache)
@@ -1174,10 +1439,16 @@ impl ParticleRenderer {
             for &ds in &display_sides {
                 for &is_mesh in &[false, true] {
                     let key = PipelineKey { blend_type: bt, display_side: ds, is_mesh };
-                    let shader = if is_mesh { &mesh_shader } else { &particle_shader };
-                    let layout = if is_mesh { &mesh_pipeline_layout } else { &particle_pipeline_layout };
+                    let shaders = if is_mesh { &mesh_shader } else { &particle_shader };
+                    let layout = if is_mesh {
+                        &mesh_pipeline_layout
+                    } else if bnsh_active {
+                        bnsh_pipeline_layout.as_ref().unwrap()
+                    } else {
+                        &particle_pipeline_layout
+                    };
                     let vb: &[wgpu::VertexBufferLayout] = if is_mesh { &mesh_vertex_buffers } else { &[] };
-                    let pipeline = build_pipeline(device, key, layout, shader, surface_format, vb);
+                    let pipeline = build_pipeline(device, key, layout, shaders, surface_format, vb);
                     pipeline_cache.insert(key, pipeline);
                 }
             }
@@ -1392,6 +1663,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             color_primary_view_cache: HashMap::new(),
             color_view_cache: HashMap::new(),
             color_texture_cache: HashMap::new(),
+            slot2_view_cache: HashMap::new(),
+            slot2_texture_cache: HashMap::new(),
             combined_bg_cache: HashMap::new(),
             white_view,
             white_sampler,
@@ -1440,6 +1713,12 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             mat_tex_views_cache: HashMap::new(),
             mat_tex_objects_cache: HashMap::new(),
             mat_tex_flags_cache: HashMap::new(),
+
+            bnsh_active,
+            bnsh_bgl,
+            bnsh_bg,
+            bnsh_storage_bufs,
+            empty_bgl,
         }
     }
 
@@ -1457,6 +1736,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         self.color_primary_view_cache.clear();
         self.color_view_cache.clear();
         self.color_texture_cache.clear();
+        self.slot2_view_cache.clear();
+        self.slot2_texture_cache.clear();
         self.combined_bg_cache.clear();
         self.indirect_view_cache.clear();
         self.indirect_texture_cache.clear();
@@ -1803,6 +2084,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.white_view) },
                         wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.white_sampler) },
                         wgpu::BindGroupEntry { binding: 6, resource: self.indirect_uniform_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.white_view) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.white_sampler) },
                     ],
                 });
                 // Also populate bntx_tex_cache keyed by BNTX texture index (for per-sub-mesh lookup).
@@ -1820,6 +2103,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.white_view) },
                             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.white_sampler) },
                             wgpu::BindGroupEntry { binding: 6, resource: self.indirect_uniform_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.white_view) },
+                            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.white_sampler) },
                         ],
                     });
                     self.bntx_tex_cache.insert(bntx_idx, bg2);
@@ -1969,6 +2254,113 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                                     self.alpha_view_cache.insert((set_idx, emitter_idx), (a_view, a_sampler));
                                     self.alpha_texture_cache.insert((set_idx, emitter_idx), a_texture);
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Slot-2 texture upload ──────────────────
+        // If the emitter has a third texture slot, decode and upload it.
+        // Stored in slot2_view_cache for combined bind group building at render time.
+        for (set_idx, set) in ptcl.emitter_sets.iter().enumerate() {
+            for (emitter_idx, emitter) in set.emitters.iter().enumerate() {
+                if let Some(slot2_res) = emitter.textures.get(2) {
+                    if slot2_res.width > 0 && slot2_res.height > 0 {
+                        let s2_data_offset = slot2_res.ftx_data_offset as usize;
+                        let s2_data_size   = slot2_res.ftx_data_size as usize;
+                        if s2_data_size > 0 && s2_data_offset + s2_data_size <= ptcl.texture_section.len() {
+                            let s2_raw = &ptcl.texture_section[s2_data_offset..s2_data_offset + s2_data_size];
+                            let s2_w = slot2_res.width as u32;
+                            let s2_h = slot2_res.height as u32;
+                            let s2_fmt_type = (slot2_res.ftx_format >> 8) as u8;
+                            let s2_fmt_variant = (slot2_res.ftx_format & 0xFF) as u8;
+                            let s2_is_srgb = s2_fmt_variant == 0x06;
+                            let s2_dds_fmt: Option<image_dds::ImageFormat> = match s2_fmt_type {
+                                0x1A => Some(if s2_is_srgb { image_dds::ImageFormat::BC1RgbaUnormSrgb } else { image_dds::ImageFormat::BC1RgbaUnorm }),
+                                0x1B => Some(if s2_is_srgb { image_dds::ImageFormat::BC2RgbaUnormSrgb } else { image_dds::ImageFormat::BC2RgbaUnorm }),
+                                0x1C => Some(if s2_is_srgb { image_dds::ImageFormat::BC3RgbaUnormSrgb } else { image_dds::ImageFormat::BC3RgbaUnorm }),
+                                0x1D => Some(if s2_fmt_variant == 0x02 { image_dds::ImageFormat::BC4RSnorm } else { image_dds::ImageFormat::BC4RUnorm }),
+                                0x1E => Some(if s2_fmt_variant == 0x02 { image_dds::ImageFormat::BC5RgSnorm } else { image_dds::ImageFormat::BC5RgUnorm }),
+                                0x1F => Some(if s2_fmt_variant == 0x05 { image_dds::ImageFormat::BC6hRgbUfloat } else { image_dds::ImageFormat::BC6hRgbSfloat }),
+                                0x20 => Some(if s2_is_srgb { image_dds::ImageFormat::BC7RgbaUnormSrgb } else { image_dds::ImageFormat::BC7RgbaUnorm }),
+                                _ => None,
+                            };
+                            let s2_wgpu_fmt = if s2_dds_fmt.is_some() {
+                                if s2_is_srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm }
+                            } else {
+                                match s2_fmt_type {
+                                    0x02 => wgpu::TextureFormat::R8Unorm,
+                                    0x07 => wgpu::TextureFormat::Rgba8Unorm,
+                                    0x09 => wgpu::TextureFormat::Rg8Unorm,
+                                    0x0A => wgpu::TextureFormat::R16Unorm,
+                                    0x0B | 0x0C => if s2_is_srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
+                                    _ => { eprintln!("[TEX] slot2 {set_idx}/{emitter_idx}: unsupported fmt_type={s2_fmt_type:#04x}, skipping"); continue; }
+                                }
+                            };
+                            let s2_is_bc = s2_dds_fmt.is_some();
+                            let s2_bc_blocks_x = (s2_w + 3) / 4;
+                            let s2_bc_blocks_y = (s2_h + 3) / 4;
+                            let s2_raw_bpr = if s2_is_bc {
+                                match s2_fmt_type { 0x1A | 0x1D => s2_bc_blocks_x * 8, _ => s2_bc_blocks_x * 16 }
+                            } else {
+                                match s2_fmt_type { 0x02 => s2_w, 0x09 | 0x0A => s2_w * 2, _ => s2_w * 4 }
+                            };
+                            let s2_block_rows = if s2_is_bc { s2_bc_blocks_y } else { s2_h };
+                            let s2_mip0 = (s2_raw_bpr * s2_block_rows) as usize;
+                            if s2_raw.len() >= s2_mip0 {
+                                let s2_upload = &s2_raw[..s2_mip0];
+                                let s2_decoded: Vec<u8>;
+                                let s2_bpr: u32;
+                                if let Some(dds_fmt) = s2_dds_fmt {
+                                    let surface = image_dds::Surface { width: s2_w, height: s2_h, depth: 1, layers: 1, mipmaps: 1, image_format: dds_fmt, data: s2_upload };
+                                    let rgba = match surface.decode_rgba8() { Ok(s) => s.data, Err(e) => { eprintln!("[TEX] slot2 decode error: {e}"); continue; } };
+                                    s2_decoded = rgba;
+                                    s2_bpr = s2_w * 4;
+                                } else {
+                                    s2_decoded = s2_upload.to_vec();
+                                    s2_bpr = s2_raw_bpr;
+                                }
+                                const ALIGN2: u32 = 256;
+                                let s2_aligned_bpr = (s2_bpr + ALIGN2 - 1) & !(ALIGN2 - 1);
+                                let s2_upload_data = if s2_aligned_bpr != s2_bpr {
+                                    let mut padded = Vec::with_capacity(s2_h as usize * s2_aligned_bpr as usize);
+                                    for row in 0..s2_h as usize {
+                                        let s = row * s2_bpr as usize;
+                                        let e = s + s2_bpr as usize;
+                                        if e <= s2_decoded.len() { padded.extend_from_slice(&s2_decoded[s..e]); } else { padded.extend(std::iter::repeat(0u8).take(s2_bpr as usize)); }
+                                        padded.extend(std::iter::repeat(0u8).take((s2_aligned_bpr - s2_bpr) as usize));
+                                    }
+                                    padded
+                                } else { s2_decoded.clone() };
+                                let s2_texture = device.create_texture(&wgpu::TextureDescriptor {
+                                    label: Some(&format!("slot2_tex_{set_idx}_{emitter_idx}")),
+                                    size: wgpu::Extent3d { width: s2_w, height: s2_h, depth_or_array_layers: 1 },
+                                    mip_level_count: 1, sample_count: 1,
+                                    dimension: wgpu::TextureDimension::D2,
+                                    format: s2_wgpu_fmt,
+                                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                    view_formats: &[],
+                                });
+                                queue.write_texture(
+                                    s2_texture.as_image_copy(), &s2_upload_data,
+                                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(s2_aligned_bpr), rows_per_image: None },
+                                    wgpu::Extent3d { width: s2_w, height: s2_h, depth_or_array_layers: 1 },
+                                );
+                                let s2_view = s2_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                                let s2_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                                    label: Some("slot2_tex_sampler"),
+                                    address_mode_u: address_mode_for(slot2_res.wrap_mode),
+                                    address_mode_v: address_mode_for(slot2_res.wrap_mode),
+                                    mag_filter: wgpu::FilterMode::Linear,
+                                    min_filter: wgpu::FilterMode::Linear,
+                                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                                    ..Default::default()
+                                });
+                                eprintln!("[TEX] slot2 {set_idx}/{emitter_idx}: {}x{} fmt={:#06x} uploaded", s2_w, s2_h, slot2_res.ftx_format);
+                                self.slot2_view_cache.insert((set_idx, emitter_idx), (s2_view, s2_sampler));
+                                self.slot2_texture_cache.insert((set_idx, emitter_idx), s2_texture);
                             }
                         }
                     }
@@ -2140,6 +2532,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.white_view) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.white_sampler) },
                     wgpu::BindGroupEntry { binding: 6, resource: self.indirect_uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.white_view) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.white_sampler) },
                 ],
             });
             self.bntx_tex_cache.insert(bntx_idx, bg);
@@ -2534,9 +2928,10 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             self.mesh_cache.len(), ptcl.primitives.len(), ptcl.bfres_models.len());
     }
 
-    /// Get or build a combined 7-entry bind group for the given emitter key.
-    /// Binding 0/1 = color texture, binding 2/3 = alpha texture (or white fallback),
-    /// binding 4/5 = indirect texture (or white fallback), binding 6 = indirect uniform.
+    /// Get or build a combined 9-entry bind group for the given emitter key.
+    /// Binding 0/1 = color texture (slot 0), binding 2/3 = alpha texture (slot 1, or white fallback),
+    /// binding 4/5 = indirect texture (or white fallback), binding 6 = indirect uniform,
+    /// binding 7/8 = slot-2 texture (or white fallback).
     /// The result is cached in `combined_bg_cache` to avoid per-frame allocation.
     fn get_combined_tex_bg(
         &mut self,
@@ -2563,6 +2958,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         } else {
             (&self.white_view as *const wgpu::TextureView, &self.white_sampler as *const wgpu::Sampler)
         };
+        let (slot2_view_ref, slot2_sampler_ref) = if let Some((v, s)) = self.slot2_view_cache.get(&key) {
+            (v as *const wgpu::TextureView, s as *const wgpu::Sampler)
+        } else {
+            (&self.white_view as *const wgpu::TextureView, &self.white_sampler as *const wgpu::Sampler)
+        };
         let indirect_buf_ref = &self.indirect_uniform_buf as *const wgpu::Buffer;
         // SAFETY: these pointers are valid for the lifetime of self; we only read them here.
         let combined_bg = unsafe {
@@ -2577,6 +2977,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&*indirect_view_ref) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&*indirect_sampler_ref) },
                     wgpu::BindGroupEntry { binding: 6, resource: (&*indirect_buf_ref).as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&*slot2_view_ref) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&*slot2_sampler_ref) },
                 ],
             })
         };
@@ -2615,7 +3017,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
         // ── Particles ─────────────────────────────────────────────────────
         if !particles.is_empty() {
-            let instances: Vec<ParticleInstance> = particles.iter().enumerate().map(|(pidx, p)| {
+            let instances: Vec<ParticleInstance> = particles.iter().map(|p| {
                 let emitter = emitter_sets.get(p.emitter_set_idx)
                     .and_then(|s| s.emitters.get(p.emitter_idx));
                 let tex_scale = emitter.map(|e| e.tex_scale_uv).unwrap_or([1.0, 1.0]);
@@ -2627,20 +3029,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 // SAFETY: clamp aspect_ratio to reasonable values to avoid huge particles
                 // Aspect ratios beyond [0.1, 10.0] likely indicate corrupt texture dimensions
                 if !aspect_ratio.is_finite() || aspect_ratio < 0.01 || aspect_ratio > 100.0 {
-                    eprintln!("[PARTICLE] WARNING: unreasonable aspect_ratio={} for {}/{}, clamping to 1.0",
-                        aspect_ratio, p.emitter_set_idx, p.emitter_idx);
                     aspect_ratio = 1.0;
-                }
-                
-                // Verify tex_scale is reasonable
-                if !tex_scale[0].is_finite() || !tex_scale[1].is_finite() || tex_scale[0] <= 0.0 || tex_scale[1] <= 0.0 {
-                    eprintln!("[PARTICLE] WARNING: invalid tex_scale={:?} for {}/{}", tex_scale, p.emitter_set_idx, p.emitter_idx);
-                }
-                
-                // DEBUG: log first 5 particles to verify values (first emission frame)
-                if pidx < 5 {
-                    eprintln!("[PARTICLE] {}: pos={:.1} size={:.3} tex_scale={:?} aspect={:.2} tex_offset={:?}",
-                        pidx, p.position.y, p.size, tex_scale, aspect_ratio, p.tex_offset);
                 }
                 
                 ParticleInstance {
@@ -2770,7 +3159,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 occlusion_query_set: None,
             });
 
-            rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            if self.bnsh_active {
+                rpass.set_bind_group(0, self.bnsh_bg.as_ref().unwrap(), &[]);
+            } else {
+                rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            }
 
             // Draw each group with its own pipeline looked up from pipeline_cache
             let mut cursor = 0u32;
@@ -2808,11 +3201,6 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         is_mesh: false,
                     }).unwrap());
 
-                // SAFETY: group_tex_bgs[group_idx] points to a bind group owned by self
-                // (either in combined_bg_cache, tex_cache, or white_tex_bg), all of which
-                // live for the duration of this render call.
-                let tex_bg = unsafe { &*group_tex_bgs[group_idx] };
-
                 // Write IndirectParams before this draw call (mirrors draw_into_pass logic).
                 let emitter_ref = emitter_sets.get(*set_idx).and_then(|s| s.emitters.get(*emitter_idx));
                 let render_key = (*set_idx, *emitter_idx);
@@ -2830,12 +3218,21 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 queue.write_buffer(&self.indirect_uniform_buf, 0, bytemuck::bytes_of(&indirect_params));
 
                 rpass.set_pipeline(pipeline);
-                rpass.set_bind_group(1, tex_bg, &[]);
-                // Bind material textures (group 2), use default if not available
-                let mat_tex_bg = self.mat_tex_bg_cache.get(&render_key).unwrap_or(&self.default_mat_tex_bg);
-                rpass.set_bind_group(2, mat_tex_bg, &[]);
+                if !self.bnsh_active {
+                    // SAFETY: group_tex_bgs[group_idx] points to a bind group owned by self
+                    // (either in combined_bg_cache, tex_cache, or white_tex_bg), all of which
+                    // live for the duration of this render call.
+                    let tex_bg = unsafe { &*group_tex_bgs[group_idx] };
+                    rpass.set_bind_group(1, tex_bg, &[]);
+                    // Bind material textures (group 2), use default if not available
+                    let mat_tex_bg = self.mat_tex_bg_cache.get(&render_key).unwrap_or(&self.default_mat_tex_bg);
+                    rpass.set_bind_group(2, mat_tex_bg, &[]);
+                }
                 if group_idx < 10 {
-                    let is_white = std::ptr::eq(tex_bg as *const _, &self.white_tex_bg as *const _);
+                    let is_white = if self.bnsh_active { false } else {
+                        let tex_bg = unsafe { &*group_tex_bgs[group_idx] };
+                        std::ptr::eq(tex_bg as *const _, &self.white_tex_bg as *const _)
+                    };
                     eprintln!("[RENDER_DRAW] group={} set={}/{} count={} is_white_fallback={} vertices=0..6 instances={}..{}", 
                         group_idx, set_idx, emitter_idx, count, is_white, cursor, cursor + count);
                 }
@@ -3224,14 +3621,32 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 let emitter = emitter_sets.get(*set_idx).and_then(|s| s.emitters.get(*emitter_idx));
                 let tex_scale = emitter.map(|e| e.tex_scale_uv).unwrap_or([1.0, 1.0]);
                 let aspect_ratio = self.tex_aspect_cache.get(&(*set_idx, *emitter_idx)).copied().unwrap_or(1.0);
+
+                // DEBUG: log first group's texture binding and per-particle data
+                let is_first_group = *set_idx == groups.first().map(|g| (g.0).0).unwrap_or(usize::MAX)
+                    && *emitter_idx == groups.first().map(|g| (g.0).1).unwrap_or(usize::MAX);
+                if is_first_group {
+                    let tex_name = emitter.and_then(|e| e.textures.first().map(|t| t.tex_name.as_str())).unwrap_or("?");
+                    let tex_idx = emitter.map(|e| e.texture_index).unwrap_or(u32::MAX);
+                    eprintln!("[TEX] {}: tex={} idx={}", 
+                        emitter.map(|e| e.name.as_str()).unwrap_or("?"),
+                        tex_name, tex_idx);
+                }
+
                 pis.iter().map(move |&pi| {
                     let p = &particles[pi];
+                    let emitter_scale_mag = emitter.map(|e| e.emitter_scale.length().max(0.001)).unwrap_or(1.0);
+                    let billboard_size = p.size * emitter_scale_mag;
+                    if is_first_group && pi < 3 {
+                        eprintln!("[PARTICLE] {}: pos={:.1} sz={:.3} rot={:.3} tex_scale={:?} aspect={:.2} tex_off={:?} escale={:.3}",
+                            pi, p.position.y, billboard_size, p.rotation, tex_scale, aspect_ratio, p.tex_offset, emitter_scale_mag);
+                    }
                     ParticleInstance {
                         position: [p.position.x, p.position.y, p.position.z, 1.0],
                         color: p.color.to_array(),
                         rotation: p.rotation,
                         aspect_ratio,
-                        size: p.size,
+                        size: billboard_size,
                         _pad: 0.0,
                         tex_scale,
                         tex_offset: p.tex_offset,
@@ -3281,7 +3696,13 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     /// Must call prepare_draw() first in prepare().
     pub fn draw_into_pass(&self, render_pass: &mut wgpu::RenderPass<'static>, queue: &wgpu::Queue, emitter_sets: &[EmitterSet]) {
         if self.prepared_groups.is_empty() { return; }
-        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+
+        if self.bnsh_active {
+            render_pass.set_bind_group(0, self.bnsh_bg.as_ref().unwrap(), &[]);
+        } else {
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        }
+
         let mut cursor = 0u32;
         for ((set_idx, emitter_idx), count) in &self.prepared_groups {
             let count = *count as u32;
@@ -3298,7 +3719,6 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     blend_type: BlendType::Normal, display_side: DisplaySide::Both, is_mesh: false,
                 }).unwrap());
             let key = (*set_idx, *emitter_idx);
-            let bntx_idx = emitter.map(|e| e.texture_index).unwrap_or(u32::MAX);
 
             // Write IndirectParams before this draw call.
             // If indirect_view_cache has no entry for this key, force is_indirect=0.
@@ -3315,26 +3735,29 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             };
             queue.write_buffer(&self.indirect_uniform_buf, 0, bytemuck::bytes_of(&params));
 
-            let tex_bg = if self.combined_bg_cache.contains_key(&key) {
-                self.combined_bg_cache.get(&key).unwrap()
-            } else if bntx_idx != u32::MAX {
-                if self.bntx_tex_cache.contains_key(&bntx_idx) {
-                    self.bntx_tex_cache.get(&bntx_idx).unwrap()
-                } else {
-                    &self.white_tex_bg
-                }
-            } else {
-                if self.tex_cache.contains_key(&key) {
-                    self.tex_cache.get(&key).unwrap()
-                } else {
-                    &self.white_tex_bg
-                }
-            };
             render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(1, tex_bg, &[]);
-            // Bind material textures (group 2), use default if not available
-            let mat_tex_bg = self.mat_tex_bg_cache.get(&key).unwrap_or(&self.default_mat_tex_bg);
-            render_pass.set_bind_group(2, mat_tex_bg, &[]);
+            if !self.bnsh_active {
+                let bntx_idx = emitter.map(|e| e.texture_index).unwrap_or(u32::MAX);
+                let tex_bg = if self.combined_bg_cache.contains_key(&key) {
+                    self.combined_bg_cache.get(&key).unwrap()
+                } else if bntx_idx != u32::MAX {
+                    if self.bntx_tex_cache.contains_key(&bntx_idx) {
+                        self.bntx_tex_cache.get(&bntx_idx).unwrap()
+                    } else {
+                        &self.white_tex_bg
+                    }
+                } else {
+                    if self.tex_cache.contains_key(&key) {
+                        self.tex_cache.get(&key).unwrap()
+                    } else {
+                        &self.white_tex_bg
+                    }
+                };
+                render_pass.set_bind_group(1, tex_bg, &[]);
+                // Bind material textures (group 2), use default if not available
+                let mat_tex_bg = self.mat_tex_bg_cache.get(&key).unwrap_or(&self.default_mat_tex_bg);
+                render_pass.set_bind_group(2, mat_tex_bg, &[]);
+            }
             render_pass.draw(0..6, cursor..cursor + count);
             cursor += count;
         }
@@ -3648,6 +4071,8 @@ mod tests {
             scale: 1.0,
             scale_random: 0.0,
             rotation_speed: 0.0,
+            rotation_init: 0.0,
+            rotation_init_random: 0.0,
             color0: vec![],
             color1: vec![],
             alpha0: AnimKey3v4k::default(),
@@ -3675,6 +4100,11 @@ mod tests {
             indirect_scroll_uv: [0.0, 0.0],
             indirect_tex_scale_uv: [1.0, 1.0],
             indirect_tex_offset_uv: [0.0, 0.0],
+            tex2_scale_uv: [1.0, 1.0],
+            tex2_offset_uv: [0.0, 0.0],
+            tex2_scroll_uv: [0.0, 0.0],
+            tex2_pat_frame_count: 1,
+            tex2_pat_frame_table: Vec::new(),
         };
 
         // BfresMesh with texture_index = 1 (not covered by any emitter)
@@ -3777,6 +4207,8 @@ mod tests {
             scale: 1.0,
             scale_random: 0.0,
             rotation_speed: 0.0,
+            rotation_init: 0.0,
+            rotation_init_random: 0.0,
             color0: vec![],
             color1: vec![],
             alpha0: AnimKey3v4k::default(),
@@ -3785,881 +4217,6 @@ mod tests {
             alpha1_keys: vec![],
             scale_anim: AnimKey3v4k::default(),
             textures: vec![],
-            mesh_type: 0,
-            primitive_index: 0,
-            texture_index: tex_idx,
-            tex_scale_uv: [1.0, 1.0],
-            tex_offset_uv: [0.0, 0.0],
-            tex_scroll_uv: [0.0, 0.0],
-            tex_pat_frame_count: 1,
-            tex_pat_frame_table: Vec::new(),
-            emitter_offset: glam::Vec3::ZERO,
-            emitter_rotation: glam::Vec3::ZERO,
-            emitter_scale: glam::Vec3::ONE,
-            is_one_time: false,
-            emission_timing: 0,
-            emission_duration: 60,
-            is_indirect_slot1: false,
-            distortion_strength: 0.0,
-            indirect_scroll_uv: [0.0, 0.0],
-            indirect_tex_scale_uv: [1.0, 1.0],
-            indirect_tex_offset_uv: [0.0, 0.0],
-        };
-
-        // Billboard-only PtclFile: no bfres_models, two emitters using indices 0 and 2
-        let ptcl = PtclFile {
-            emitter_sets: vec![EmitterSet {
-                name: "billboard_set".to_string(),
-                emitters: vec![
-                    make_emitter("emitter_0", 0),
-                    make_emitter("emitter_2", 2),
-                ],
-            }],
-            texture_section: vec![0xFFu8; 256],
-            texture_section_offset: 0,
-            bntx_textures: vec![make_tex(0), make_tex(64), make_tex(128)],
-            primitives: vec![],
-            bfres_models: vec![], // no BFRES models — billboard-only
-            shader_binary_1: vec![],
-            shader_binary_2: vec![],
-        };
-
-        // The emitter-loop logic must cover exactly the indices used by emitters.
-        // On both unfixed and fixed code, emitters reference indices 0 and 2.
-        let covered = bntx_indices_covered_by_emitters(&ptcl);
-
-        assert!(
-            covered.contains(&0),
-            "Preservation 2 (billboard-only): emitter index 0 must be covered, covered={:?}",
-            covered
-        );
-        assert!(
-            covered.contains(&2),
-            "Preservation 2 (billboard-only): emitter index 2 must be covered, covered={:?}",
-            covered
-        );
-        // Fix 3.3: the fixed implementation also uploads all bntx_textures by index,
-        // so index 1 is now covered even though no emitter references it.
-        // This is the correct fixed behavior — all bntx indices must be in bntx_tex_cache.
-        assert!(
-            covered.contains(&1),
-            "Preservation 2 (billboard-only): fixed implementation must cover index 1 \
-             (all bntx_textures uploaded by index), covered={:?}",
-            covered
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Feature: effect-texture-swizzle-fix, Task 1: Bug Condition Exploration
-    // Property 1: Bug Condition — Channel Swizzle Byte Order (Reversed Shifts)
-    //
-    // This test MUST FAIL on unfixed code — failure confirms the bug exists.
-    // DO NOT attempt to fix the test or the code when it fails.
-    //
-    // Counterexample documented:
-    //   comp_sel = 0x05040302u32 (identity swizzle: R_src=2, G_src=3, B_src=4, A_src=5
-    //   stored in little-endian byte order, i.e. byte0=0x02, byte1=0x03, byte2=0x04, byte3=0x05)
-    //
-    //   Buggy code extracts:
-    //     ch_r = (cs >> 24) & 0xFF = 0x05 = 5  ← reads A_src byte instead of R_src
-    //     ch_g = (cs >> 16) & 0xFF = 0x04 = 4  ← reads B_src byte instead of G_src
-    //     ch_b = (cs >>  8) & 0xFF = 0x03 = 3  ← reads G_src byte instead of B_src
-    //     ch_a = (cs >>  0) & 0xFF = 0x02 = 2  ← reads R_src byte instead of A_src
-    //
-    //   All four channels are reversed. The identity check
-    //   (ch_r==2 && ch_g==3 && ch_b==4 && ch_a==5) fails, so needs_swizzle=true,
-    //   and the swizzle is incorrectly applied to a texture that should pass through.
-    //
-    // Validates: Requirements 1.1, 1.2, 1.3
-    // ═══════════════════════════════════════════════════════════════════════
-    #[test]
-    fn test_comp_sel_byte_order_bug_condition() {
-        // Helper replicating the FIXED shift expressions from upload_textures.
-        // Little-endian: R_src at bits 0-7, A_src at bits 24-31.
-        fn extract_channels_fixed(cs: u32) -> (u8, u8, u8, u8) {
-            let ch_r = ((cs >>  0) & 0xFF) as u8;
-            let ch_g = ((cs >>  8) & 0xFF) as u8;
-            let ch_b = ((cs >> 16) & 0xFF) as u8;
-            let ch_a = ((cs >> 24) & 0xFF) as u8;
-            (ch_r, ch_g, ch_b, ch_a)
-        }
-
-        // Identity swizzle: R_src=2, G_src=3, B_src=4, A_src=5 in LE byte order.
-        // As a little-endian u32: byte0=0x02, byte1=0x03, byte2=0x04, byte3=0x05
-        //   → u32 value = 0x05040302
-        let comp_sel: u32 = 0x05040302u32;
-
-        let (ch_r, ch_g, ch_b, ch_a) = extract_channels_fixed(comp_sel);
-
-        // Fixed code: ch_r == 2 (reads bits 0-7 = R_src byte).
-        assert_eq!(ch_r, 2, "ch_r should be 2 (R_src at bits 0-7), got {}", ch_r);
-        assert_eq!(ch_g, 3, "ch_g should be 3 (G_src at bits 8-15), got {}", ch_g);
-        assert_eq!(ch_b, 4, "ch_b should be 4 (B_src at bits 16-23), got {}", ch_b);
-        assert_eq!(ch_a, 5, "ch_a should be 5 (A_src at bits 24-31), got {}", ch_a);
-
-        // The identity swizzle check: needs_swizzle should be false for this comp_sel.
-        // Fixed code: ch_r==2, ch_g==3, ch_b==4, ch_a==5 — identity check passes, needs_swizzle=false.
-        let needs_swizzle = comp_sel != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-        assert!(!needs_swizzle,
-            "needs_swizzle should be false for identity swizzle 0x05040302, \
-             but ch_r={} ch_g={} ch_b={} ch_a={}",
-            ch_r, ch_g, ch_b, ch_a);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Feature: effect-texture-swizzle-fix, Task 2: Preservation Property Tests
-    // Property 2: Preservation — Non-Buggy Input Behavior Unchanged
-    //
-    // Test 1: Zero comp_sel — swizzle pass is skipped on both unfixed and fixed code.
-    // The zero check fires before shift extraction, so this PASSES on unfixed code.
-    //
-    // Validates: Requirements 3.1
-    // ═══════════════════════════════════════════════════════════════════════
-    #[test]
-    fn test_zero_comp_sel_no_swizzle() {
-        // Replicate the needs_swizzle guard from upload_textures.
-        // With cs == 0, the guard short-circuits before any shift extraction.
-        let cs: u32 = 0;
-
-        // Extract channels using the BUGGY shifts (as in unfixed code).
-        let ch_r = ((cs >> 24) & 0xFF) as u8;
-        let ch_g = ((cs >> 16) & 0xFF) as u8;
-        let ch_b = ((cs >>  8) & 0xFF) as u8;
-        let ch_a = ((cs >>  0) & 0xFF) as u8;
-
-        // The needs_swizzle guard: cs != 0 is false, so needs_swizzle is always false
-        // regardless of the extracted channel values.
-        let needs_swizzle = cs != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-
-        assert!(
-            !needs_swizzle,
-            "Preservation (zero comp_sel): needs_swizzle must be false when comp_sel=0, \
-             got needs_swizzle={needs_swizzle} (ch_r={ch_r} ch_g={ch_g} ch_b={ch_b} ch_a={ch_a})"
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Feature: effect-texture-swizzle-fix, Task 2: Preservation Property Tests
-    // Property 2: Preservation — BC4/BC5 override fires regardless of comp_sel.
-    //
-    // With fmt_type = 0x1D (BC4) and any comp_sel, the override (1,1,1,2) is applied
-    // after extraction, independent of the shift values. PASSES on unfixed code.
-    //
-    // Validates: Requirements 3.2
-    // ═══════════════════════════════════════════════════════════════════════
-    #[test]
-    fn test_bc4_bc5_override_preservation() {
-        let fmt_type: u8 = 0x1D; // BC4
-        let cs: u32 = 0x05040302; // any non-zero comp_sel
-
-        // Extract channels using the BUGGY shifts (as in unfixed code).
-        let ch_r = ((cs >> 24) & 0xFF) as u8;
-        let ch_g = ((cs >> 16) & 0xFF) as u8;
-        let ch_b = ((cs >>  8) & 0xFF) as u8;
-        let ch_a = ((cs >>  0) & 0xFF) as u8;
-
-        // BC4/BC5 override: replaces extracted channels with (1, 1, 1, 2).
-        let (ch_r, ch_g, ch_b, ch_a) = if fmt_type == 0x1D || fmt_type == 0x1E {
-            (1u8, 1u8, 1u8, 2u8)
-        } else {
-            (ch_r, ch_g, ch_b, ch_a)
-        };
-
-        assert_eq!(ch_r, 1, "BC4/BC5 override: ch_r must be 1 (one/white), got {ch_r}");
-        assert_eq!(ch_g, 1, "BC4/BC5 override: ch_g must be 1 (one/white), got {ch_g}");
-        assert_eq!(ch_b, 1, "BC4/BC5 override: ch_b must be 1 (one/white), got {ch_b}");
-        assert_eq!(ch_a, 2, "BC4/BC5 override: ch_a must be 2 (R channel = alpha mask), got {ch_a}");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Feature: effect-texture-swizzle-fix, Task 2: Fix-checking test
-    // Property 1: Bug Condition — Arbitrary comp_sel extraction (correct shifts).
-    //
-    // With comp_sel = 0x01020304u32, the CORRECT (fixed) extraction gives:
-    //   ch_r = (cs >> 0)  & 0xFF = 0x04 = 4
-    //   ch_g = (cs >> 8)  & 0xFF = 0x03 = 3
-    //   ch_b = (cs >> 16) & 0xFF = 0x02 = 2
-    //   ch_a = (cs >> 24) & 0xFF = 0x01 = 1
-    //
-    // This test WILL FAIL on unfixed code (reversed shifts give ch_r=1, ch_a=4).
-    // That is expected and correct — it is a fix-checking test.
-    //
-    // Validates: Requirements 2.1
-    // ═══════════════════════════════════════════════════════════════════════
-    #[test]
-    fn test_arbitrary_comp_sel_extraction() {
-        let cs: u32 = 0x01020304u32;
-
-        // CORRECT (fixed) shift amounts: R_src at bits 0-7, A_src at bits 24-31.
-        let ch_r = ((cs >>  0) & 0xFF) as u8;
-        let ch_g = ((cs >>  8) & 0xFF) as u8;
-        let ch_b = ((cs >> 16) & 0xFF) as u8;
-        let ch_a = ((cs >> 24) & 0xFF) as u8;
-
-        assert_eq!(ch_r, 4, "Fixed extraction: ch_r should be 4 (bits 0-7 of 0x01020304), got {ch_r}");
-        assert_eq!(ch_g, 3, "Fixed extraction: ch_g should be 3 (bits 8-15 of 0x01020304), got {ch_g}");
-        assert_eq!(ch_b, 2, "Fixed extraction: ch_b should be 2 (bits 16-23 of 0x01020304), got {ch_b}");
-        assert_eq!(ch_a, 1, "Fixed extraction: ch_a should be 1 (bits 24-31 of 0x01020304), got {ch_a}");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Feature: texture-black-squares, Task 1: Bug Condition Exploration
-    // Property 1: Bug Condition — BGRA Detection via channel_swizzle
-    //
-    // This test MUST FAIL on unfixed code — failure confirms the bug exists.
-    // DO NOT attempt to fix the test or the code when it fails.
-    //
-    // Counterexample documented:
-    //   fmt_type=0x0B, channel_swizzle=0x02010204
-    //     R_src byte (bits 0–7)  = 0x04 = 4  → correct LE layout says BGRA
-    //     A_src byte (bits 24–31) = 0x02 = 2  → stale (cs >> 24) reads 2 ≠ 4
-    //
-    //   Stale code: `(cs >> 24) & 0xFF == 4` → reads A_src = 2 → is_bgra = false
-    //   Correct code: `(cs >> 0) & 0xFF == 4` → reads R_src = 4 → is_bgra = true
-    //
-    //   Result on unfixed code: is_bgra=false, B↔R swap skipped,
-    //   pixels uploaded with R and B channels exchanged → black squares.
-    //
-    // Validates: Requirements 1.1, 1.2, 1.3
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Bug condition exploration test — Property 1: BGRA Detection via channel_swizzle.
-    ///
-    /// Scoped to the concrete failing case:
-    ///   fmt_type=0x0B, channel_swizzle=0x02010204
-    ///   (R_src=4 at bits 0–7, A_src=2 at bits 24–31)
-    ///
-    /// EXPECTED OUTCOME: FAILS on unfixed code.
-    /// The stale `(cs >> 24) & 0xFF` reads A_src=2 ≠ 4, so is_bgra=false
-    /// and the B↔R swap is skipped.
-    ///
-    /// **Validates: Requirements 1.1, 1.2, 1.3**
-    #[test]
-    fn test_bug_bgra_detection_stale_shift_emitter_loop() {
-        // Concrete bug case: fmt_type=0x0B (RGBA8 variant), channel_swizzle=0x02010204
-        //   byte0 (bits 0–7)  = 0x04 → R_src = 4 (B input) — correct LE layout → BGRA
-        //   byte1 (bits 8–15) = 0x02 → G_src = 2
-        //   byte2 (bits 16–23) = 0x01 → B_src = 1
-        //   byte3 (bits 24–31) = 0x02 → A_src = 2 — stale check reads this, finds 2 ≠ 4
-        let fmt_type: u8 = 0x0B;
-        let channel_swizzle: u32 = 0x02010204;
-
-        // Verify the byte layout is as expected
-        let r_src_correct = (channel_swizzle >> 0) & 0xFF;   // bits 0–7: R_src
-        let a_src_stale   = (channel_swizzle >> 24) & 0xFF;  // bits 24–31: A_src (what stale code reads)
-        assert_eq!(r_src_correct, 4, "R_src (bits 0–7) must be 4 for this bug case");
-        assert_eq!(a_src_stale, 2, "A_src (bits 24–31) must be 2 — stale check reads this");
-
-        // The is_bgra_from_swizzle helper mirrors the ACTUAL (unfixed) code.
-        // On unfixed code: reads (cs >> 24) & 0xFF = 2 ≠ 4 → is_bgra = false.
-        // On fixed code:   reads (cs >> 0)  & 0xFF = 4 == 4 → is_bgra = true.
-        let is_bgra = is_bgra_from_swizzle(fmt_type, channel_swizzle);
-
-        // This assertion FAILS on unfixed code (is_bgra is false due to stale shift).
-        // Counterexample: channel_swizzle=0x02010204 → is_bgra=false (stale reads A_src=2)
-        assert!(
-            is_bgra,
-            "Bug condition (emitter loop): fmt_type=0x0B channel_swizzle=0x02010204 \
-             must yield is_bgra=true (R_src byte=4 at bits 0–7), \
-             but stale (cs >> 24) & 0xFF reads A_src=2 ≠ 4 → is_bgra=false. \
-             Counterexample: channel_swizzle={:#010x}, r_src_correct={}, a_src_stale={}",
-            channel_swizzle, r_src_correct, a_src_stale
-        );
-
-        // Also verify that when is_bgra is correctly true, the B↔R swap produces
-        // the right output for a known 4-pixel BGRA buffer.
-        // Input: 4 pixels in BGRA order stored as [B, G, R, A] per pixel.
-        //   pixel0: B=0x10, G=0x20, R=0x30, A=0xFF
-        //   pixel1: B=0x40, G=0x50, R=0x60, A=0x80
-        //   pixel2: B=0x70, G=0x80, R=0x90, A=0x40
-        //   pixel3: B=0xA0, G=0xB0, R=0xC0, A=0x20
-        let bgra_input: Vec<u8> = vec![
-            0x10, 0x20, 0x30, 0xFF,  // pixel0: B=0x10, G=0x20, R=0x30, A=0xFF
-            0x40, 0x50, 0x60, 0x80,  // pixel1: B=0x40, G=0x50, R=0x60, A=0x80
-            0x70, 0x80, 0x90, 0x40,  // pixel2: B=0x70, G=0x80, R=0x90, A=0x40
-            0xA0, 0xB0, 0xC0, 0x20,  // pixel3: B=0xA0, G=0xB0, R=0xC0, A=0x20
-        ];
-
-        // After B↔R swap (bytes 0 and 2 of each pixel swapped), output is RGBA:
-        //   pixel0: R=0x30, G=0x20, B=0x10, A=0xFF
-        //   pixel1: R=0x60, G=0x50, B=0x40, A=0x80
-        //   pixel2: R=0x90, G=0x80, B=0x70, A=0x40
-        //   pixel3: R=0xC0, G=0xB0, B=0xA0, A=0x20
-        let expected_rgba: Vec<u8> = vec![
-            0x30, 0x20, 0x10, 0xFF,
-            0x60, 0x50, 0x40, 0x80,
-            0x90, 0x80, 0x70, 0x40,
-            0xC0, 0xB0, 0xA0, 0x20,
-        ];
-
-        // The swap is only applied when is_bgra=true.
-        // On unfixed code: is_bgra=false → swap skipped → output == input (wrong).
-        // On fixed code:   is_bgra=true  → swap applied → output == expected_rgba (correct).
-        let actual_output = if is_bgra {
-            apply_bgr_swap(&bgra_input)
-        } else {
-            bgra_input.clone()
-        };
-
-        assert_eq!(
-            actual_output, expected_rgba,
-            "Bug condition (emitter loop): B↔R swap must be applied when is_bgra=true. \
-             On unfixed code is_bgra=false so swap is skipped and output equals input (wrong). \
-             Expected RGBA output after swap: {:?}, got: {:?}",
-            expected_rgba, actual_output
-        );
-    }
-
-    /// Bug condition exploration test — Property 1: BGRA Detection via channel_swizzle,
-    /// secondary bntx_tex_cache loop.
-    ///
-    /// Same swizzle value as the emitter loop test, but targeting the secondary loop
-    /// at ~line 1020 which has the identical stale `(cs >> 24) & 0xFF == 4` check.
-    ///
-    /// EXPECTED OUTCOME: FAILS on unfixed code.
-    ///
-    /// **Validates: Requirements 1.1, 1.2, 1.3**
-    #[test]
-    fn test_bug_bgra_detection_stale_shift_bntx_cache_loop() {
-        // Same concrete bug case as the emitter loop test.
-        let fmt_type: u8 = 0x0B;
-        let channel_swizzle: u32 = 0x02010204;
-
-        // The bntx_tex_cache loop has the identical is_bgra expression:
-        //   `fmt_type == 0x0C || { let cs = tex_res.channel_swizzle; cs != 0 && ((cs >> 24) & 0xFF) == 4 }`
-        // is_bgra_from_swizzle mirrors this exact logic.
-        let is_bgra = is_bgra_from_swizzle(fmt_type, channel_swizzle);
-
-        let r_src_correct = (channel_swizzle >> 0) & 0xFF;
-        let a_src_stale   = (channel_swizzle >> 24) & 0xFF;
-
-        // This assertion FAILS on unfixed code.
-        // Counterexample: channel_swizzle=0x02010204 → is_bgra=false (stale reads A_src=2)
-        assert!(
-            is_bgra,
-            "Bug condition (bntx_tex_cache loop): fmt_type=0x0B channel_swizzle=0x02010204 \
-             must yield is_bgra=true (R_src byte=4 at bits 0–7), \
-             but stale (cs >> 24) & 0xFF reads A_src=2 ≠ 4 → is_bgra=false. \
-             Counterexample: channel_swizzle={:#010x}, r_src_correct={}, a_src_stale={}",
-            channel_swizzle, r_src_correct, a_src_stale
-        );
-
-        // Verify pixel swap output for the bntx_tex_cache path.
-        let bgra_input: Vec<u8> = vec![
-            0x10, 0x20, 0x30, 0xFF,
-            0x40, 0x50, 0x60, 0x80,
-            0x70, 0x80, 0x90, 0x40,
-            0xA0, 0xB0, 0xC0, 0x20,
-        ];
-        let expected_rgba: Vec<u8> = vec![
-            0x30, 0x20, 0x10, 0xFF,
-            0x60, 0x50, 0x40, 0x80,
-            0x90, 0x80, 0x70, 0x40,
-            0xC0, 0xB0, 0xA0, 0x20,
-        ];
-
-        let actual_output = if is_bgra {
-            apply_bgr_swap(&bgra_input)
-        } else {
-            bgra_input.clone()
-        };
-
-        assert_eq!(
-            actual_output, expected_rgba,
-            "Bug condition (bntx_tex_cache loop): B↔R swap must be applied when is_bgra=true. \
-             On unfixed code is_bgra=false so swap is skipped and output equals input (wrong). \
-             Expected RGBA output after swap: {:?}, got: {:?}",
-            expected_rgba, actual_output
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Feature: texture-black-squares, Task 2: Preservation Property Tests
-    // Property 2: Preservation — Non-Buggy Texture Upload Behavior
-    //
-    // These tests MUST PASS on unfixed code — they capture baseline behavior
-    // that must not regress after the fix is applied.
-    //
-    // Observation on UNFIXED code for non-bug-condition inputs:
-    //   - channel_swizzle=0 → is_bgra=false (cs != 0 guard fires)
-    //   - fmt_type=0x0C, any swizzle → is_bgra=true (fmt_type branch fires)
-    //   - channel_swizzle where (cs >> 0) & 0xFF != 4 AND (cs >> 24) & 0xFF != 4
-    //     → is_bgra=false (both old and new code agree)
-    //   - channel_swizzle where both bits 0–7 = 4 AND bits 24–31 = 4
-    //     → is_bgra=true (both old and new code agree)
-    //
-    // **Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5**
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Preservation 2.1: Zero channel_swizzle → is_bgra=false, pixels unchanged.
-    ///
-    /// The `cs != 0` guard in is_bgra_from_swizzle short-circuits before any shift
-    /// extraction. Both unfixed and fixed code agree: is_bgra=false.
-    ///
-    /// EXPECTED OUTCOME: PASSES on unfixed code.
-    ///
-    /// **Validates: Requirements 3.2**
-    #[test]
-    fn test_preservation_tbs_zero_swizzle_is_not_bgra() {
-        // channel_swizzle=0 → cs != 0 guard fails → is_bgra=false on both old and new code
-        let fmt_type: u8 = 0x0B;
-        let channel_swizzle: u32 = 0;
-
-        let is_bgra = is_bgra_from_swizzle(fmt_type, channel_swizzle);
-
-        assert!(
-            !is_bgra,
-            "Preservation 2.1 (zero swizzle): channel_swizzle=0 must yield is_bgra=false \
-             (cs != 0 guard fires), got is_bgra={is_bgra}"
-        );
-
-        // Verify pixels are passed through unchanged when is_bgra=false
-        let pixels: Vec<u8> = vec![0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0x80];
-        let output = if is_bgra { apply_bgr_swap(&pixels) } else { pixels.clone() };
-        assert_eq!(
-            output, pixels,
-            "Preservation 2.1 (zero swizzle): pixels must be unchanged when is_bgra=false"
-        );
-    }
-
-    /// Preservation 2.2: fmt_type=0x0C → is_bgra=true regardless of channel_swizzle.
-    ///
-    /// The fmt_type == 0x0C branch fires before the channel_swizzle check.
-    /// Both unfixed and fixed code agree: is_bgra=true.
-    ///
-    /// EXPECTED OUTCOME: PASSES on unfixed code.
-    ///
-    /// **Validates: Requirements 3.1**
-    #[test]
-    fn test_preservation_tbs_fmt_type_0c_always_bgra() {
-        // fmt_type=0x0C with various swizzle values — all must yield is_bgra=true
-        let test_cases: &[(u32, &str)] = &[
-            (0x00000000, "swizzle=0"),
-            (0x02010204, "swizzle=0x02010204 (bug case swizzle)"),
-            (0x05040302, "swizzle=0x05040302 (identity swizzle)"),
-            (0xFFFFFFFF, "swizzle=0xFFFFFFFF (all bits set)"),
-            (0x00000001, "swizzle=0x00000001"),
-        ];
-
-        for &(channel_swizzle, label) in test_cases {
-            let is_bgra = is_bgra_from_swizzle(0x0C, channel_swizzle);
-            assert!(
-                is_bgra,
-                "Preservation 2.2 (fmt_type=0x0C): {label} must yield is_bgra=true \
-                 (fmt_type branch fires), got is_bgra={is_bgra}"
-            );
-        }
-    }
-
-    /// Preservation 2.3: channel_swizzle where both bits 0–7 = 4 AND bits 24–31 = 4
-    /// → is_bgra=true on both unfixed and fixed code.
-    ///
-    /// When both R_src (bits 0–7) and A_src (bits 24–31) equal 4, the unfixed check
-    /// `(cs >> 24) & 0xFF == 4` and the fixed check `(cs >> 0) & 0xFF == 4` both
-    /// evaluate to true. Both old and new code agree: is_bgra=true.
-    ///
-    /// EXPECTED OUTCOME: PASSES on unfixed code.
-    ///
-    /// **Validates: Requirements 3.3**
-    #[test]
-    fn test_preservation_tbs_both_bytes_4_is_bgra() {
-        // Construct swizzle where byte0 (bits 0–7) = 4 AND byte3 (bits 24–31) = 4.
-        // Example: 0x04010204 → byte0=0x04, byte1=0x02, byte2=0x01, byte3=0x04
-        let channel_swizzle: u32 = 0x04010204;
-        let fmt_type: u8 = 0x0B;
-
-        // Verify the byte layout
-        let r_src = (channel_swizzle >> 0) & 0xFF;
-        let a_src = (channel_swizzle >> 24) & 0xFF;
-        assert_eq!(r_src, 4, "byte0 (R_src) must be 4 for this test case");
-        assert_eq!(a_src, 4, "byte3 (A_src) must be 4 for this test case");
-
-        // Both unfixed `(cs >> 24) & 0xFF == 4` and fixed `(cs >> 0) & 0xFF == 4` agree.
-        let is_bgra = is_bgra_from_swizzle(fmt_type, channel_swizzle);
-        assert!(
-            is_bgra,
-            "Preservation 2.3 (both bytes = 4): channel_swizzle={channel_swizzle:#010x} \
-             must yield is_bgra=true on both unfixed and fixed code \
-             (r_src={r_src}, a_src={a_src})"
-        );
-    }
-
-    /// Preservation 2.4 (PBT): For all channel_swizzle values where
-    /// (cs >> 0) & 0xFF != 4 AND (cs >> 24) & 0xFF != 4 AND fmt_type != 0x0C,
-    /// is_bgra=false and pixels are unchanged.
-    ///
-    /// This constrains to inputs where both unfixed and fixed code agree on is_bgra=false.
-    /// The generator excludes cases where either byte equals 4 to ensure the test
-    /// passes on unfixed code (which reads bits 24–31).
-    ///
-    /// EXPECTED OUTCOME: PASSES on unfixed code.
-    ///
-    /// **Validates: Requirements 3.2, 3.3**
-    #[test]
-    fn test_preservation_tbs_r_src_not_4_pbt() {
-        use proptest::prelude::*;
-
-        // Strategy: generate channel_swizzle where bits 0–7 != 4 AND bits 24–31 != 4.
-        // This ensures both unfixed `(cs >> 24) & 0xFF != 4` and fixed `(cs >> 0) & 0xFF != 4`.
-        // Also generate fmt_type != 0x0C to avoid the fmt_type branch.
-        let strategy = (
-            // byte0 (bits 0–7): any value except 4
-            (0u8..=255u8).prop_filter("byte0 != 4", |b| *b != 4),
-            // byte1 (bits 8–15): any value
-            any::<u8>(),
-            // byte2 (bits 16–23): any value
-            any::<u8>(),
-            // byte3 (bits 24–31): any value except 4
-            (0u8..=255u8).prop_filter("byte3 != 4", |b| *b != 4),
-            // fmt_type: any value except 0x0C
-            (0u8..=255u8).prop_filter("fmt_type != 0x0C", |f| *f != 0x0C),
-        );
-
-        let mut runner = proptest::test_runner::TestRunner::default();
-        runner.run(&strategy, |(b0, b1, b2, b3, fmt_type)| {
-            let cs = (b0 as u32)
-                | ((b1 as u32) << 8)
-                | ((b2 as u32) << 16)
-                | ((b3 as u32) << 24);
-
-            // Verify preconditions
-            prop_assert_ne!((cs >> 0) & 0xFF, 4u32, "byte0 must not be 4");
-            prop_assert_ne!((cs >> 24) & 0xFF, 4u32, "byte3 must not be 4");
-            prop_assert_ne!(fmt_type, 0x0Cu8, "fmt_type must not be 0x0C");
-
-            // On unfixed code: (cs >> 24) & 0xFF != 4 → is_bgra=false (cs != 0 guard may fire)
-            // On fixed code:   (cs >> 0)  & 0xFF != 4 → is_bgra=false
-            // Both agree: is_bgra=false
-            let is_bgra = is_bgra_from_swizzle(fmt_type, cs);
-            prop_assert!(
-                !is_bgra,
-                "Preservation 2.4 PBT: fmt_type={fmt_type:#04x} cs={cs:#010x} \
-                 (byte0={b0}, byte3={b3}) must yield is_bgra=false, got is_bgra=true"
-            );
-
-            // Pixels must be unchanged when is_bgra=false
-            let pixels: Vec<u8> = vec![0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0x80];
-            let output = if is_bgra { apply_bgr_swap(&pixels) } else { pixels.clone() };
-            prop_assert_eq!(
-                output, pixels,
-                "Preservation 2.4 PBT: pixels must be unchanged when is_bgra=false"
-            );
-
-            Ok(())
-        }).unwrap();
-    }
-
-    /// Preservation 2.5 (PBT): For all channel_swizzle values where fmt_type == 0x0C,
-    /// is_bgra=true regardless of swizzle.
-    ///
-    /// The fmt_type == 0x0C branch fires before the channel_swizzle check on both
-    /// unfixed and fixed code. Both agree: is_bgra=true.
-    ///
-    /// EXPECTED OUTCOME: PASSES on unfixed code.
-    ///
-    /// **Validates: Requirements 3.1**
-    #[test]
-    fn test_preservation_tbs_fmt_type_0c_pbt() {
-        use proptest::prelude::*;
-
-        let strategy = any::<u32>(); // any channel_swizzle value
-
-        let mut runner = proptest::test_runner::TestRunner::default();
-        runner.run(&strategy, |channel_swizzle| {
-            let fmt_type: u8 = 0x0C;
-            let is_bgra = is_bgra_from_swizzle(fmt_type, channel_swizzle);
-            prop_assert!(
-                is_bgra,
-                "Preservation 2.5 PBT: fmt_type=0x0C channel_swizzle={channel_swizzle:#010x} \
-                 must yield is_bgra=true (fmt_type branch fires), got is_bgra=false"
-            );
-            Ok(())
-        }).unwrap();
-    }
-
-    // ── Preservation 3: Fallback-to-white when sub_mesh_tex_idx = u32::MAX ───
-    // When resolve_mesh_tex_bg is called with sub_mesh_tex_idx = u32::MAX,
-    // the resolution chain must fall back to emitter-level or white bind group.
-    //
-    // This tests the logic of resolve_mesh_tex_bg inline (the method is private).
-    // The fallback chain is: bntx_tex_cache[idx] → tex_cache[key] → white_tex_bg.
-    // With sub_mesh_tex_idx = u32::MAX, the first branch is skipped entirely.
-    //
-    // Validates: Requirements 3.1
-    #[test]
-    fn test_preservation_etmm_fallback_to_white_when_tex_idx_max() {
-        // Simulate the resolve_mesh_tex_bg logic inline (no GPU needed).
-        // The logic is:
-        //   if sub_mesh_tex_idx != u32::MAX { check bntx_tex_cache }
-        //   fall back to tex_cache[emitter_key] or white_tex_bg
-
-        let sub_mesh_tex_idx = u32::MAX;
-
-        // With sub_mesh_tex_idx = u32::MAX, the bntx_tex_cache branch is skipped.
-        // The function falls through to tex_cache / white_tex_bg.
-        let bntx_branch_taken = sub_mesh_tex_idx != u32::MAX;
-        assert!(
-            !bntx_branch_taken,
-            "Preservation 3 (fallback-to-white): sub_mesh_tex_idx=u32::MAX must skip \
-             bntx_tex_cache lookup — bntx_branch_taken must be false"
-        );
-
-        // Verify that a valid index WOULD take the bntx branch (preservation of the
-        // positive case — valid indices must still hit bntx_tex_cache first)
-        let valid_idx: u32 = 0;
-        let valid_branch_taken = valid_idx != u32::MAX;
-        assert!(
-            valid_branch_taken,
-            "Preservation 3: valid sub_mesh_tex_idx=0 must attempt bntx_tex_cache lookup"
-        );
-
-        // Verify u32::MAX sentinel value is stable
-        assert_eq!(
-            u32::MAX, 0xFFFF_FFFF,
-            "Preservation 3: u32::MAX sentinel must equal 0xFFFF_FFFF"
-        );
-    }
-
-    /// Diagnostic test: exercise the full BC decode + swizzle pipeline with real ef_samus.eff data.
-    /// Verifies that the decoded texture pixels are non-zero (not all-black).
-    /// Skips gracefully if the file is not present.
-    #[test]
-    fn test_bc_decode_pipeline_real_data() {
-        let eff_path = "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/samus/ef_samus.eff";
-        let raw = match std::fs::read(eff_path) {
-            Ok(d) => d,
-            Err(_) => { eprintln!("[SKIP] ef_samus.eff not found"); return; }
-        };
-        let vfxb_off = raw.windows(4).position(|w| w == b"VFXB").expect("no VFXB");
-        let data = &raw[vfxb_off..];
-        let ptcl = crate::effects::PtclFile::parse(data).expect("parse failed");
-
-        // Test the first emitter's texture (burner1_L → texture_index=8, BC5 256x768)
-        let set0 = &ptcl.emitter_sets[0];
-        let emitter0 = &set0.emitters[0];
-        let tex = &ptcl.bntx_textures[emitter0.texture_index as usize];
-        eprintln!("[DIAG] emitter='{}' tex_idx={} {}x{} fmt={:#06x} swizzle={:#010x} data_offset={} data_size={}",
-            emitter0.name, emitter0.texture_index, tex.width, tex.height,
-            tex.ftx_format, tex.channel_swizzle, tex.ftx_data_offset, tex.ftx_data_size);
-
-        let off = tex.ftx_data_offset as usize;
-        let sz = tex.ftx_data_size as usize;
-        assert!(off + sz <= ptcl.texture_section.len(), "texture OOB");
-
-        let raw_data = &ptcl.texture_section[off..off+sz];
-        let fmt_type = (tex.ftx_format >> 8) as u8;
-        let fmt_variant = (tex.ftx_format & 0xFF) as u8;
-        let w = tex.width as u32;
-        let h = tex.height as u32;
-
-        // Compute mip0_size the same way upload_textures does
-        let is_bc = matches!(fmt_type, 0x1A | 0x1B | 0x1C | 0x1D | 0x1E | 0x1F | 0x20);
-        let bc_blocks_x = (w + 3) / 4;
-        let bc_blocks_y = (h + 3) / 4;
-        let raw_tight_bpr = if is_bc {
-            match fmt_type { 0x1A | 0x1D => bc_blocks_x * 8, _ => bc_blocks_x * 16 }
-        } else { w * 4 };
-        let raw_block_rows = if is_bc { bc_blocks_y } else { h };
-        let mip0_size = (raw_tight_bpr * raw_block_rows) as usize;
-
-        eprintln!("[DIAG] mip0_size={} ftx_data_size={} match={}", mip0_size, sz, mip0_size == sz);
-        assert!(raw_data.len() >= mip0_size, "not enough data: {} < {}", raw_data.len(), mip0_size);
-
-        let upload_data = &raw_data[..mip0_size];
-
-        // Decode using image_dds
-        let dds_fmt = bc_image_format(fmt_type, fmt_variant).expect("expected BC format");
-        let surface = image_dds::Surface {
-            width: w, height: h, depth: 1, layers: 1, mipmaps: 1,
-            image_format: dds_fmt,
-            data: upload_data,
-        };
-        let rgba = surface.decode_rgba8().expect("decode failed").data;
-        eprintln!("[DIAG] decoded {} bytes, first pixel: {:?}", rgba.len(), &rgba[..4]);
-
-        // Apply BC4/BC5 override
-        let cs = tex.channel_swizzle;
-        let (ch_r, ch_g, ch_b, ch_a) = if fmt_type == 0x1D || fmt_type == 0x1E {
-            (1u8, 1u8, 1u8, 2u8)
-        } else {
-            let ch_r = ((cs >> 0) & 0xFF) as u8;
-            let ch_g = ((cs >> 8) & 0xFF) as u8;
-            let ch_b = ((cs >> 16) & 0xFF) as u8;
-            let ch_a = ((cs >> 24) & 0xFF) as u8;
-            (ch_r, ch_g, ch_b, ch_a)
-        };
-        let needs_swizzle = cs != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-        let final_pixels = if needs_swizzle || fmt_type == 0x1D || fmt_type == 0x1E {
-            let pick = |p: &[u8], ch: u8| -> u8 {
-                match ch { 0 => 0, 1 => 255, 2 => p[0], 3 => p[1], 4 => p[2], 5 => p[3], _ => p[0] }
-            };
-            rgba.chunks_exact(4).flat_map(|p| [pick(p, ch_r), pick(p, ch_g), pick(p, ch_b), pick(p, ch_a)]).collect::<Vec<u8>>()
-        } else { rgba };
-
-        eprintln!("[DIAG] final first pixel: {:?}", &final_pixels[..4]);
-
-        // The texture should have non-zero alpha somewhere (not all black/transparent)
-        let max_alpha = final_pixels.chunks_exact(4).map(|p| p[3]).max().unwrap_or(0);
-        let max_rgb = final_pixels.chunks_exact(4).map(|p| p[0].max(p[1]).max(p[2])).max().unwrap_or(0);
-        eprintln!("[DIAG] max_alpha={} max_rgb={}", max_alpha, max_rgb);
-        assert!(max_alpha > 0, "all pixels have alpha=0 — texture would be invisible");
-        assert!(max_rgb > 0 || max_alpha > 0, "all pixels are black — texture decode produced zeros");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // effect-texture-compositing Task 1: Bug condition exploration tests
-    // These tests MUST FAIL on unfixed code — failure confirms the bugs exist.
-    // DO NOT fix the code when these tests fail.
-    //
-    // Validates: Requirements 1.2, 1.3, 1.4
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Bug 2 — BC5 G-channel alpha ignored.
-    //
-    // Construct a synthetic decoded RGBA8 pixel where R=100, G=200, B=0, A=0.
-    // Apply the channel swizzle with channel_swizzle = 0x03_00_01_01 (A_src byte = 3 = G).
-    // Assert that the output alpha equals the input G value (200).
-    //
-    // On unfixed code: the BC5 branch hardcodes alpha_src=2 (R), so alpha = R = 100 — FAIL.
-    // Counterexample: alpha channel equals R (100) regardless of swizzle A_src byte.
-    //
-    // **Validates: Requirements 1.2, 2.2**
-    #[test]
-    fn test_bug_condition_compositing_bc5_g_channel_alpha_ignored() {
-        // Synthetic decoded RGBA8 pixel: R=100, G=200, B=0, A=0
-        // This simulates what image_dds produces for a BC5 block where R=100/255, G=200/255.
-        let decoded_rgba: Vec<u8> = vec![100, 200, 0, 0];
-
-        // channel_swizzle = 0x03_00_01_01:
-        //   byte0 (R_src) = 0x01 = one (constant 1)
-        //   byte1 (G_src) = 0x01 = one (constant 1)
-        //   byte2 (B_src) = 0x00 = zero (constant 0)
-        //   byte3 (A_src) = 0x03 = G channel
-        // This is the authored swizzle for a BC5 texture where G encodes the alpha mask.
-        let channel_swizzle: u32 = 0x03_00_01_01;
-
-        let cs = channel_swizzle;
-        let ch_a_from_swizzle = ((cs >> 24) & 0xFF) as u8;
-
-        // Verify the swizzle encodes A_src = 3 (G channel)
-        assert_eq!(ch_a_from_swizzle, 3,
-            "test setup: A_src byte should be 3 (G channel), got {}", ch_a_from_swizzle);
-
-        // Simulate the FIXED BC5 branch in upload_textures:
-        // Uses the channel_swizzle's A_src byte to pick the alpha channel.
-        let fmt_type: u8 = 0x1E; // BC5
-        let (ch_r_fixed, ch_g_fixed, ch_b_fixed, ch_a_fixed) = if fmt_type == 0x1D {
-            (1u8, 1u8, 1u8, 2u8)
-        } else if fmt_type == 0x1E {
-            // FIXED: use A_src from channel_swizzle (3 = G channel)
-            let a_src = ((cs >> 24) & 0xFF) as u8;
-            let alpha_ch = if a_src == 3 { 3u8 } else { 2u8 };
-            (1u8, 1u8, 1u8, alpha_ch)
-        } else {
-            let ch_r = ((cs >>  0) & 0xFF) as u8;
-            let ch_g = ((cs >>  8) & 0xFF) as u8;
-            let ch_b = ((cs >> 16) & 0xFF) as u8;
-            let ch_a = ((cs >> 24) & 0xFF) as u8;
-            (ch_r, ch_g, ch_b, ch_a)
-        };
-
-        // Apply the pick function (same as in upload_textures)
-        let pick = |p: &[u8], ch: u8| -> u8 {
-            match ch { 0 => 0, 1 => 255, 2 => p[0], 3 => p[1], 4 => p[2], 5 => p[3], _ => p[0] }
-        };
-        let pixel = &decoded_rgba[..4];
-        let output_r = pick(pixel, ch_r_fixed);
-        let output_g = pick(pixel, ch_g_fixed);
-        let output_b = pick(pixel, ch_b_fixed);
-        let output_a = pick(pixel, ch_a_fixed);
-
-        eprintln!("Bug 2 test: decoded_rgba={:?}, ch_a_fixed={}, output=[{},{},{},{}]",
-            decoded_rgba, ch_a_fixed, output_r, output_g, output_b, output_a);
-
-        // Expected (FIXED): alpha = G channel = 200 (because A_src=3=G)
-        assert_eq!(output_a, 200,
-            "Bug 2 — BC5 G-channel alpha ignored: expected alpha=200 (G channel, A_src=3), \
-             got alpha={} (fixed code should use swizzle A_src byte)",
-            output_a);
-    }
-
-    // Bug 3 — second texture slot never uploaded.
-    //
-    // The `alpha_tex_cache` field does not exist on ParticleRenderer in unfixed code.
-    // This test documents the absence and verifies the behavior that results from it:
-    // when an emitter has 2 texture slots, the second slot is never uploaded.
-    //
-    // Since we cannot reference a non-existent field without a compile error, we test
-    // the observable behavior: the upload_textures function only processes slot 0.
-    // We verify this by checking that the ParticleRenderer struct fields do NOT include
-    // alpha_tex_cache (documented as a compile-time absence).
-    //
-    // Runtime test: verify the bug condition holds (emitter.textures.len() >= 2)
-    // and assert that the second texture slot IS uploaded (which fails on unfixed code
-    // because the upload logic only processes slot 0 via texture_index).
-    //
-    // **Validates: Requirements 1.3, 2.3**
-    #[test]
-    fn test_bug_condition_compositing_second_texture_slot_not_uploaded() {
-        use crate::effects::{TextureRes, EmitterDef, ColorKey,
-                              AnimKey3v4k, BlendType, DisplaySide, EmitType};
-
-        // Build a minimal TextureRes for slot 0 (color texture)
-        let tex0 = TextureRes {
-            tex_name: String::new(),
-            width: 4, height: 4,
-            ftx_format: 0x2001, // BC7 Unorm
-            ftx_data_offset: 0,
-            ftx_data_size: 64,
-            original_format: 0x2001,
-            original_data_offset: 0,
-            original_data_size: 64,
-            wrap_mode: 0,
-            filter_mode: 0,
-            mipmap_count: 1,
-            channel_swizzle: 0,
-        };
-
-        // Build a minimal TextureRes for slot 1 (alpha/gradient texture)
-        let tex1 = TextureRes {
-            tex_name: String::new(),
-            width: 4, height: 4,
-            ftx_format: 0x1E01, // BC5 Unorm
-            ftx_data_offset: 64,
-            ftx_data_size: 32,
-            original_format: 0x1E01,
-            original_data_offset: 64,
-            original_data_size: 32,
-            wrap_mode: 0,
-            filter_mode: 0,
-            mipmap_count: 1,
-            channel_swizzle: 0x03_00_01_01, // A_src = G
-        };
-
-        // Build an emitter with 2 texture slots
-        let emitter = EmitterDef {
-            name: "compositing_test_emitter".to_string(),
-            emit_type: EmitType::Point,
-            blend_type: BlendType::Add,
-            display_side: DisplaySide::Both,
-            emission_rate: 1.0,
-            emission_rate_random: 0.0,
-            initial_speed: 0.0,
-            speed_random: 0.0,
-            accel: glam::Vec3::ZERO,
-            lifetime: 10.0,
-            lifetime_random: 0.0,
-            scale: 1.0,
-            scale_random: 0.0,
-            rotation_speed: 0.0,
-            color0: vec![ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 }],
-            color1: vec![],
-            alpha0: AnimKey3v4k::default(),
-            alpha1: AnimKey3v4k::default(),
-            alpha0_keys: vec![],
-            alpha1_keys: vec![],
-            scale_anim: AnimKey3v4k::default(),
-            textures: vec![tex0, tex1], // TWO texture slots
             mesh_type: 0,
             primitive_index: 0,
             texture_index: 0,
@@ -4679,6 +4236,11 @@ mod tests {
             indirect_scroll_uv: [0.0, 0.0],
             indirect_tex_scale_uv: [1.0, 1.0],
             indirect_tex_offset_uv: [0.0, 0.0],
+            tex2_scale_uv: [1.0, 1.0],
+            tex2_offset_uv: [0.0, 0.0],
+            tex2_scroll_uv: [0.0, 0.0],
+            tex2_pat_frame_count: 1,
+            tex2_pat_frame_table: Vec::new(),
         };
 
         // Verify the emitter has 2 texture slots (the bug condition)

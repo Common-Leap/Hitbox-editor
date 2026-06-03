@@ -76,6 +76,8 @@ pub mod bind_groups {
         pub indirect_tex: &'a wgpu::TextureView,
         pub indirect_sampler: &'a wgpu::Sampler,
         pub indirect_params: wgpu::BufferBinding<'a>,
+        pub slot2_tex: &'a wgpu::TextureView,
+        pub slot2_sampler: &'a wgpu::Sampler,
     }
     const LAYOUT_DESCRIPTOR1: wgpu::BindGroupLayoutDescriptor = wgpu::BindGroupLayoutDescriptor {
         label: Some("LayoutDescriptor1"),
@@ -144,6 +146,24 @@ pub mod bind_groups {
                 },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float {
+                        filterable: true,
+                    },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
         ],
     };
     impl BindGroup1 {
@@ -195,6 +215,18 @@ pub mod bind_groups {
                                 binding: 6,
                                 resource: wgpu::BindingResource::Buffer(
                                     bindings.indirect_params,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: wgpu::BindingResource::TextureView(
+                                    bindings.slot2_tex,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 8,
+                                resource: wgpu::BindingResource::Sampler(
+                                    bindings.slot2_sampler,
                                 ),
                             },
                         ],

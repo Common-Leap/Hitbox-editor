@@ -23,6 +23,10 @@ pub struct ShaderStageReflection {
     pub index_sampler: u32,
     /// Index into shader_slots for first constant buffer
     pub index_constant_buffer: u32,
+    /// Index into shader_slots for first shader output
+    pub index_shader_output: u32,
+    /// Total number of shader slot entries (= index_unordered_access_buffer)
+    pub index_unordered_access_buffer: u32,
 }
 
 impl ShaderStageReflection {
@@ -159,8 +163,10 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
     let ofs_sampler_dict = read_u8(ofs_reflection + 0x10) as usize;
     let ofs_cbuffer_dict = read_u8(ofs_reflection + 0x18) as usize;
     let ofs_image_dict = read_u8(ofs_reflection + 0x20) as usize; // might be at different offset
+    let index_shader_output = read_u4(ofs_reflection + 0x28);
     let index_sampler = read_u4(ofs_reflection + 0x2C);
     let index_constant_buffer = read_u4(ofs_reflection + 0x30);
+    let index_unordered_access_buffer = read_u4(ofs_reflection + 0x34);
     let ofs_shader_slot_array = read_u4(ofs_reflection + 0x38) as usize;
     let _index_image = read_u4(ofs_reflection + 0x48);  // not used yet, may be needed for texture bindless resolution
 
@@ -202,6 +208,8 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
         shader_slots,
         index_sampler,
         index_constant_buffer,
+        index_shader_output,
+        index_unordered_access_buffer,
     })
 }
 

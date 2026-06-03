@@ -166,6 +166,8 @@ pub struct EmitterDef {
     pub scale_random: f32,
     /// Rotation speed (radians/frame)
     pub rotation_speed: f32,
+    pub rotation_init: f32,
+    pub rotation_init_random: f32,
     /// Color table 0 (up to 8 RGBA entries, each 8 bytes: frame u32 + rgba u8x4)
     pub color0: Vec<ColorKey>,
     /// Color table 1
@@ -218,6 +220,16 @@ pub struct EmitterDef {
     pub indirect_tex_scale_uv: [f32; 2],
     /// UV offset for the indirect texture (from TexPatAnim[1], default [0.0, 0.0])
     pub indirect_tex_offset_uv: [f32; 2],
+    /// Slot-2 UV scale (from TexPatAnim[2], default [1.0, 1.0])
+    pub tex2_scale_uv: [f32; 2],
+    /// Slot-2 UV offset (from TexPatAnim[2], default [0.0, 0.0])
+    pub tex2_offset_uv: [f32; 2],
+    /// Slot-2 UV scroll speed (from TexScrollAnim[2], default [0.0, 0.0])
+    pub tex2_scroll_uv: [f32; 2],
+    /// Slot-2 sprite-sheet frame count (from TexPatAnim[2].num)
+    pub tex2_pat_frame_count: usize,
+    /// Slot-2 per-frame sprite-sheet indices (from TexPatAnim[2].Table)
+    pub tex2_pat_frame_table: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1162,7 +1174,9 @@ impl PtclFile {
                 lifetime_random: 0.0,
                 scale: 1.0,
                 scale_random: 0.0,
-                rotation_speed: 0.05,
+                rotation_speed: 0.0,
+                rotation_init: 0.0,
+                rotation_init_random: 0.0,
                 color0: Vec::new(),
                 color1: Vec::new(),
                 alpha0: AnimKey3v4k::default(),
@@ -1190,6 +1204,11 @@ impl PtclFile {
                 indirect_scroll_uv: [0.0, 0.0],
                 indirect_tex_scale_uv: [1.0, 1.0],
                 indirect_tex_offset_uv: [0.0, 0.0],
+                tex2_scale_uv: [1.0, 1.0],
+                tex2_offset_uv: [0.0, 0.0],
+                tex2_scroll_uv: [0.0, 0.0],
+                tex2_pat_frame_count: 1,
+                tex2_pat_frame_table: Vec::new(),
             }],
         }).collect();
         Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
@@ -1217,7 +1236,9 @@ impl PtclFile {
                     lifetime_random: 0.0,
                     scale,
                     scale_random: 0.0,
-                    rotation_speed: 0.05,
+                    rotation_speed: 0.0,
+                    rotation_init: 0.0,
+                    rotation_init_random: 0.0,
                     color0: vec![ColorKey { frame: 0.0, r, g, b, a: 1.0 }],
                     color1: Vec::new(),
                     alpha0: AnimKey3v4k::default(),
@@ -1245,6 +1266,11 @@ impl PtclFile {
                     indirect_scroll_uv: [0.0, 0.0],
                     indirect_tex_scale_uv: [1.0, 1.0],
                     indirect_tex_offset_uv: [0.0, 0.0],
+                    tex2_scale_uv: [1.0, 1.0],
+                    tex2_offset_uv: [0.0, 0.0],
+                    tex2_scroll_uv: [0.0, 0.0],
+                    tex2_pat_frame_count: 1,
+                    tex2_pat_frame_table: Vec::new(),
                 }],
             }
         }).collect();
@@ -1749,9 +1775,8 @@ impl ParticleSystem {
                     sa0, a0, a1);
             }
             // For sprite-sheet animations: cycle through frames based on normalized age.
-            // Only scroll tex_offset[0] for non-sprite-sheet emitters.
             if emitter.tex_pat_frame_count > 1 {
-                // Sprite sheet: TexPatternAnim table values drive the atlas row.
+                // Sprite sheet: determine the frame index from the pattern animation table.
                 let frame = if emitter.tex_pat_frame_table.is_empty() {
                     (t * emitter.tex_pat_frame_count as f32).floor() as usize
                 } else {
@@ -1759,8 +1784,14 @@ impl ParticleSystem {
                     emitter.tex_pat_frame_table[table_idx.min(emitter.tex_pat_frame_table.len() - 1)]
                 };
                 let frame = frame.min(emitter.tex_pat_frame_count - 1);
-                p.tex_offset[0] = emitter.tex_offset_uv[0]; // fixed at authored offset
-                p.tex_offset[1] = frame as f32 * emitter.tex_scale_uv[1];
+                // Convert frame index to UV offset assuming a grid layout.
+                // tex_scale_uv gives the UV size of each frame (e.g., [1.0, 0.2] for a 1×5 vertical strip,
+                // [0.25, 0.25] for a 4×4 grid). Infer the grid columns from the scale.
+                let cols = (1.0 / emitter.tex_scale_uv[0].max(0.001)).round() as usize;
+                let col = frame % cols;
+                let row = frame / cols;
+                p.tex_offset[0] = emitter.tex_offset_uv[0] + col as f32 * emitter.tex_scale_uv[0];
+                p.tex_offset[1] = emitter.tex_offset_uv[1] + row as f32 * emitter.tex_scale_uv[1];
             } else {
                 // Scrolling texture: wrap within the tile size so tiled textures scroll correctly
                 let tile_u = (1.0 / emitter.tex_scale_uv[0].max(0.001)).min(1.0);
@@ -1908,7 +1939,7 @@ impl ParticleSystem {
                         let rf = rand_factor((self.particles.len() + i).wrapping_add(7));
                         (base_size * (1.0 + rf * emitter.scale_random)).max(0.01)
                     },
-                    rotation: seed * 0.5,
+                    rotation: emitter.rotation_init + seed * emitter.rotation_init_random,
                     rotation_speed: emitter.rotation_speed,
                     emitter_set_idx: inst.emitter_set_idx,
                     emitter_idx: inst.emitter_idx,

@@ -11,3 +11,4 @@ pub mod shader_cache;
 pub mod bnsh_ffi;
 pub mod effect_converter;
 pub mod spirv_to_wgsl;
+pub mod spirv_patch;

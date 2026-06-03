@@ -42,6 +42,8 @@ struct IndirectParams {
 @group(1) @binding(4) var indirect_tex: texture_2d<f32>;
 @group(1) @binding(5) var indirect_sampler: sampler;
 @group(1) @binding(6) var<uniform> indirect_params: IndirectParams;
+@group(1) @binding(7) var slot2_tex: texture_2d<f32>;
+@group(1) @binding(8) var slot2_sampler: sampler;
 
 // Material texture bindings (from shader reflection)
 // These are dynamically populated based on BNSH shader reflection data
@@ -209,6 +211,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     
+    // Slot-2 texture: multiply RGB with existing color, multiply alpha
+    let slot2_sample = textureSample(slot2_tex, slot2_sampler, final_uv);
+    tex_color = vec4<f32>(tex_color.rgb * slot2_sample.rgb, tex_color.a * slot2_sample.a);
+
     let final_alpha = tex_color.a * alpha_mask;
     let result      = vec4<f32>(tex_color.rgb, final_alpha) * in.color;
     if result.a < 0.001 { discard; }
