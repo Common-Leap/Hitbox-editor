@@ -2735,9 +2735,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 state.pipeline_for_blend(device, self.surface_format, blend, &shader_label);
             }
 
-            let extra_tex_bg = if crate::fx_native_fs_enabled() {
-                None
-            } else {
+            let extra_tex_bg = {
                 let (tex_view, tex_sampler) = self.emitter_texture_for_slot(key, emitter, 0);
                 Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("bnsh_tex_bg"),
@@ -2933,9 +2931,9 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     }
 }
 
-/// Six-vertex triangle-list quad corners.  Corner *positions* are not written here —
-/// the BNSH VS derives ±0.5 offsets from gl_VertexIndex bits 0-1.  Per-corner UVs
-/// in attr2 are still required for the NVN UV register chain.
+/// Six-vertex triangle-list quad corners.  Corner half-extents are written to
+/// in_attr6_/in_attr7_.xy (±0.5); the native BNSH VS expands them through the
+/// NVN register chain rather than gl_VertexIndex.
 const BNSH_QUAD_CORNER_UVS: [([f32; 2], [f32; 2]); 6] = [
     ([-0.5, -0.5], [0.0, 0.0]),
     ([ 0.5, -0.5], [1.0, 0.0]),
@@ -2958,7 +2956,7 @@ fn append_bnsh_particle_vertices(
     let life_t = if p.lifetime <= 0.0 { 1.0 } else { (p.age / p.lifetime).clamp(0.0, 1.0) };
     let aspect = if aspect_ratio > 0.0 { 1.0 / aspect_ratio } else { 1.0 };
 
-    // attr0: particle center (identical for all 6 verts — VS expands via VertexIndex)
+    // attr0: particle center (identical for all 6 verts — VS expands via in_attr6/7)
     let center = [p.position.x, p.position.y, p.position.z, 1.0];
 
     // attr3-7: simulation data for NVN register chains (gpr_10/13/9 path)

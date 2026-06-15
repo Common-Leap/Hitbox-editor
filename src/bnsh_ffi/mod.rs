@@ -82,8 +82,8 @@ impl BnshDecoder {
         // Get the CLI tool path
         let cli_path = Self::get_cli_path()?;
         
-        // Create unique temporary directory for I/O (avoids races in parallel tests)
-        let temp_dir = tempfile::tempdir()
+        // Create unique temporary directory for I/O (on disk, not /tmp tmpfs)
+        let temp_dir = crate::scratch_dirs::app_scratch_dir("bnsh-")
             .map_err(|e| anyhow!("Failed to create temp directory: {}", e))?;
         let temp_dir_path = temp_dir.path().to_path_buf();
         
@@ -96,7 +96,9 @@ impl BnshDecoder {
             .map_err(|e| anyhow!("Failed to write BNSH temp file: {}", e))?;
         
         // Run bnsh-decoder CLI
-        eprintln!("[BNSH] Decoding {} bytes with bnsh-decoder CLI...", bnsh_data.len());
+        if crate::fx_debug_enabled() {
+            eprintln!("[BNSH] Decoding {} bytes with bnsh-decoder CLI...", bnsh_data.len());
+        }
         
         let output = std::process::Command::new(&cli_path)
             .arg("--input").arg(&input_path)
@@ -151,8 +153,8 @@ impl BnshDecoder {
 
         let cli_path = Self::get_cli_path()?;
         
-        // Create unique temporary directory for I/O (avoids races in parallel tests)
-        let temp_dir = tempfile::tempdir()
+        // Create unique temporary directory for I/O (on disk, not /tmp tmpfs)
+        let temp_dir = crate::scratch_dirs::app_scratch_dir("bnsh-")
             .map_err(|e| anyhow!("Failed to create temp directory: {}", e))?;
         let temp_dir_path = temp_dir.path().to_path_buf();
         
@@ -165,7 +167,9 @@ impl BnshDecoder {
             .map_err(|e| anyhow!("Failed to write BNSH temp file: {}", e))?;
         
         // Run bnsh-decoder CLI
-        eprintln!("[BNSH] Decoding {} bytes with metadata extraction...", bnsh_data.len());
+        if crate::fx_debug_enabled() {
+            eprintln!("[BNSH] Decoding {} bytes with metadata extraction...", bnsh_data.len());
+        }
         
         let output = std::process::Command::new(&cli_path)
             .arg("--input").arg(&input_path)
@@ -209,6 +213,14 @@ impl BnshDecoder {
 
     /// Get the path to the bnsh-decoder CLI tool
     fn get_cli_path() -> Result<String> {
+        use std::sync::OnceLock;
+        static CLI: OnceLock<Result<String, String>> = OnceLock::new();
+        CLI.get_or_init(|| Self::discover_cli_path().map_err(|e| e.to_string()))
+            .clone()
+            .map_err(|e| anyhow!(e))
+    }
+
+    fn discover_cli_path() -> Result<String> {
         eprintln!("[BNSH_FFI] Searching for bnsh-decoder CLI tool...");
         
         // First, check the compile-time embedded path from build.rs (set via cargo:rustc-env).
@@ -257,21 +269,15 @@ impl BnshDecoder {
     /// Parse shader metadata from JSON
     fn parse_shader_metadata(json_str: &str) -> Result<ShaderMetadata> {
         use serde_json::json;
-        
-        eprintln!("[BNSH_FFI] JSON metadata: {}", json_str);
-        
-        let metadata = serde_json::from_str(json_str)
-            .unwrap_or_else(|_| json!({}));
-        
-        // Extract entry point
+
+        let metadata = serde_json::from_str(json_str).unwrap_or_else(|_| json!({}));
+
         let entry_point = metadata
             .get("entryPoint")
             .and_then(|v| v.as_str())
             .unwrap_or("main")
             .to_string();
-        
-        eprintln!("[BNSH_FFI] Entry point: {}", entry_point);
-        
+
         // Determine stage from entry point or explicit field
         let stage_name = metadata
             .get("stage")

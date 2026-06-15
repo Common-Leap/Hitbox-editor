@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 use crate::effects::{
     AnimKey3v4k, BlendType, BfresModel, ColorKey, DisplaySide, EmitType, EmitterDef, EmitterSet,
     PrimitiveData, PtclFile, TextureRes,
@@ -37,30 +39,183 @@ fn get_cli_path() -> anyhow::Result<PathBuf> {
     );
 }
 
+// ── Temp / cache (avoid /tmp tmpfs quota exhaustion) ─────────────────────────
+
+pub use crate::scratch_dirs::app_storage_root as effect_storage_root;
+
+fn effect_scratch_dir() -> anyhow::Result<tempfile::TempDir> {
+    crate::scratch_dirs::app_scratch_dir("ec-")
+}
+
+fn effect_dump_cache_root() -> PathBuf {
+    effect_storage_root().join("ptcl-dumps")
+}
+
+fn cache_key_for_bytes(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
+
+fn dump_dir_is_usable(dump_dir: &Path) -> bool {
+    if !dump_dir.is_dir() {
+        return false;
+    }
+    if let Ok(rd) = std::fs::read_dir(dump_dir) {
+        for entry in rd.flatten() {
+            if entry.path().is_dir() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest_path = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn install_dump_cache(src_input: &Path, cache_input: &Path) -> std::io::Result<()> {
+    if let Some(parent) = cache_input.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if cache_input.exists() {
+        std::fs::remove_dir_all(cache_input)?;
+    }
+    copy_dir_recursive(src_input, cache_input)
+}
+
+fn byte_unit_str(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1} MB", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1} KB", n as f64 / 1_000.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Run EffectConverter on `input_path` with CWD = `work_dir` (expects `./input/` dump).
+fn run_effect_converter(cli: &Path, input_path: &Path, work_dir: &Path) -> anyhow::Result<()> {
+    use std::io::Read;
+    eprint!("  >> Converting effect");
+    let mut child = Command::new(cli)
+        .arg(input_path)
+        .current_dir(work_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("EffectConverter execution failed: {e}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        let mut count = 0usize;
+        let mut reader = std::io::BufReader::new(stdout);
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b == b'\n' {
+                    count += 1;
+                }
+            }
+        }
+        count
+    });
+    let spinner = ['|', '/', '-', '\\'];
+    let mut frame = 0usize;
+    while !reader.is_finished() {
+        eprint!("\r  >> {} Converting effect", spinner[frame % 4]);
+        frame += 1;
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    let line_count = reader.join().unwrap();
+    let status = child.wait().map_err(|e| anyhow::anyhow!("EffectConverter wait failed: {e}"))?;
+    let stderr_text = std::io::read_to_string(stderr).unwrap_or_default();
+    eprintln!("\r  >> Converted effect ({line_count} sections)                ");
+
+    if !status.success() {
+        anyhow::bail!(
+            "EffectConverter CLI exited with status {:?}{}",
+            status.code(),
+            if stderr_text.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr_text}")
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Parse embedded PTCL bytes from an `.eff` via EffectConverter, with disk cache.
+pub fn parse_embedded_ptcl(data: &[u8]) -> anyhow::Result<PtclFile> {
+    eprintln!(
+        ">>> Loading effect ({}) [storage: {}]",
+        byte_unit_str(data.len() as u64),
+        effect_storage_root().display()
+    );
+
+    let cache_key = cache_key_for_bytes(data);
+    let cached_input = effect_dump_cache_root().join(&cache_key).join("input");
+    if dump_dir_is_usable(&cached_input) {
+        eprintln!(
+            "[EC] Using cached dump ({}) at {}",
+            &cache_key[..16.min(cache_key.len())],
+            cached_input.display()
+        );
+        return load_dump(&cached_input);
+    }
+
+    let cli = get_cli_path()?;
+    let scratch = effect_scratch_dir()?;
+    let input_path = scratch.path().join("input.ptcl");
+    std::fs::write(&input_path, data)?;
+
+    run_effect_converter(&cli, &input_path, scratch.path())?;
+
+    let dump_dir = scratch.path().join("input");
+    if !dump_dir_is_usable(&dump_dir) {
+        anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
+    }
+    eprintln!("[EC] Dump dir: {:?}", dump_dir);
+
+    let ptcl = load_dump(&dump_dir)?;
+
+    match install_dump_cache(&dump_dir, &cached_input) {
+        Ok(()) => eprintln!("[EC] Cached dump at {}", cached_input.display()),
+        Err(e) => eprintln!("[EC] Warning: could not cache effect dump: {e}"),
+    }
+
+    Ok(ptcl)
+}
+
+pub fn is_effect_io_error(err: &anyhow::Error) -> bool {
+    crate::scratch_dirs::is_disk_quota_error(err.as_ref())
+}
+
 // ── Top-level entry point ─────────────────────────────────────────────────────
 
 /// Load a `.eff` file by dumping it via EffectConverter and reading back the dump.
 pub fn load_ptcl_from_eff(path: &Path) -> anyhow::Result<PtclFile> {
     let cli = get_cli_path()?;
 
-    // Create a temp directory and copy the .eff file there so the CLI's
-    // sibling-dump output doesn't pollute the game-data directory.
-    let tmp = tempfile::tempdir()?;
-    let tmp_input = tmp.path().join("input.eff");
+    let scratch = effect_scratch_dir()?;
+    let tmp_input = scratch.path().join("input.eff");
     std::fs::copy(path, &tmp_input)?;
 
-    let status = Command::new(&cli)
-        .arg(&tmp_input)
-        .current_dir(tmp.path())
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run EffectConverter: {e}"))?;
-
-    if !status.success() {
-        anyhow::bail!("EffectConverter CLI exited with non-zero status");
-    }
-
-    // The CLI creates ./input/ (stem of the filename, relative to CWD)
-    let dump_dir = tmp.path().join("input");
+    run_effect_converter(&cli, &tmp_input, scratch.path())?;
+    let dump_dir = scratch.path().join("input");
     if !dump_dir.is_dir() {
         anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
     }
@@ -73,21 +228,13 @@ pub fn load_ptcl_from_eff(path: &Path) -> anyhow::Result<PtclFile> {
 pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
     let cli = get_cli_path()?;
 
-    let tmp = tempfile::tempdir()?;
-    let tmp_input = tmp.path().join("input.ptcl");
+    let scratch = effect_scratch_dir()?;
+    let tmp_input = scratch.path().join("input.ptcl");
     std::fs::copy(path, &tmp_input)?;
 
-    let status = Command::new(&cli)
-        .arg(&tmp_input)
-        .current_dir(tmp.path())
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run EffectConverter: {e}"))?;
+    run_effect_converter(&cli, &tmp_input, scratch.path())?;
 
-    if !status.success() {
-        anyhow::bail!("EffectConverter CLI exited with non-zero status");
-    }
-
-    let dump_dir = tmp.path().join("input");
+    let dump_dir = scratch.path().join("input");
     if !dump_dir.is_dir() {
         anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
     }

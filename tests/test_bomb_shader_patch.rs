@@ -112,6 +112,53 @@ fn test_samus_bomb_shader_links_locations_6_and_7() {
 }
 
 #[test]
+fn test_samus_bomb_fs_mrt_clamped_to_location_0() {
+    std::env::set_var("FX_NATIVE_FS", "1");
+    let Some(pair) = bomb_pair() else {
+        eprintln!("Samus effect not found — skipping");
+        return;
+    };
+
+    let fs = pair.fragment.as_ref().expect("fs");
+    let mut fs_w = hitbox_editor::spirv_to_wgsl::bytes_to_words(&fs.spirv).unwrap();
+    let _ = hitbox_editor::spirv_patch::nvn_to_vulkan_patch(&mut fs_w);
+    let to_bytes = |w: &[u32]| w.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let (fs_wgsl, _) = hitbox_editor::spirv_to_wgsl::spirv_to_wgsl(
+        &to_bytes(&fs_w),
+        naga::ShaderStage::Fragment,
+        "bomb_fs",
+    )
+    .unwrap();
+
+    let clamped = hitbox_editor::spirv_to_wgsl::clamp_fragment_output_locations(
+        &fs_wgsl,
+        hitbox_editor::spirv_to_wgsl::PARTICLE_COMPOSITE_MRT_LOCATIONS,
+    );
+    assert!(
+        clamped.contains("@location(0) out_attr0_"),
+        "visible colour must remain at location 0"
+    );
+    assert!(
+        !clamped.contains("@location(1)"),
+        "deferred G-buffer outputs must be trimmed for single-target composite"
+    );
+    assert!(
+        clamped.contains("return FragmentOutput(_e239"),
+        "constructor must keep only the primary colour arg"
+    );
+
+    let enhanced = hitbox_editor::spirv_to_wgsl::enhance_native_fragment_wgsl(&clamped);
+    assert!(
+        enhanced.contains("textureSample(color_tex, color_sampler"),
+        "native FS must sample emitter texture into location 0"
+    );
+    assert!(
+        enhanced.contains("_c.rgb * _ts.rgb"),
+        "texture must modulate native out_attr0_ chain, not a secondary MRT"
+    );
+}
+
+#[test]
 fn test_samus_bomb_sub_pipeline_valid_on_gpu() {
     std::env::set_var("FX_NATIVE_FS", "1");
     let Some(pair) = bomb_pair() else {
@@ -437,7 +484,22 @@ fn simulation_render_visible(
     target_frame: f32,
     native_fs: bool,
 ) -> Option<(usize, bool)> {
+    simulation_render_visible_opts(effect_rel, spawn_handle, target_frame, native_fs, false)
+}
+
+fn simulation_render_visible_opts(
+    effect_rel: &str,
+    spawn_handle: &str,
+    target_frame: f32,
+    native_fs: bool,
+    native_vs_pos: bool,
+) -> Option<(usize, bool)> {
     std::env::set_var("FX_NATIVE_FS", if native_fs { "1" } else { "0" });
+    if native_vs_pos {
+        std::env::set_var("FX_NATIVE_VS_POS", "1");
+    } else {
+        std::env::remove_var("FX_NATIVE_VS_POS");
+    }
     let path = Path::new(EFFECT_DIR).join(effect_rel);
     if !path.exists() {
         return None;
@@ -580,6 +642,48 @@ fn test_samus_bomb_simulation_renders_with_native_and_patched_fs() {
     assert!(
         native_vis || patched_vis,
         "samus bomb simulation produced no visible pixels (native={native_vis}, patched={patched_vis})"
+    );
+}
+
+/// Native NVN position chain (no billboard override) + native FS colour chain.
+#[test]
+fn test_samus_bomb_native_vs_and_fs_renders_pixels() {
+    let path = Path::new(EFFECT_DIR)
+        .join("fighter")
+        .join("samus")
+        .join("ef_samus.eff");
+    if !path.exists() {
+        eprintln!("Samus effect not found — skipping");
+        return;
+    }
+    let eff = hitbox_editor::effects::EffIndex::from_file(&path).expect("eff");
+    let spawn = eff
+        .handles
+        .keys()
+        .find(|k| k.contains("bomb") || k.contains("Bomb"))
+        .cloned()
+        .unwrap_or_else(|| "samus_atk_bomb".to_string());
+
+    let Some((count, visible)) = simulation_render_visible_opts(
+        "fighter/samus/ef_samus.eff",
+        &spawn,
+        30.0,
+        true,
+        true,
+    ) else {
+        eprintln!("No GPU or effect — skipping");
+        return;
+    };
+    eprintln!(
+        "[SIM-RENDER] samus bomb native_vs+native_fs particles={count} visible={visible}"
+    );
+    if count == 0 {
+        eprintln!("No particles at frame 30 — try different frame/handle");
+        return;
+    }
+    assert!(
+        visible,
+        "samus bomb with FX_NATIVE_VS_POS=1 and FX_NATIVE_FS=1 produced no visible pixels"
     );
 }
 
@@ -824,9 +928,8 @@ fn diag_framed_color() {
     let vp = proj * view;
     let right = view.col(0).truncate();
     let up = view.col(1).truncate();
-    // NOTE: `fx_native_fs_enabled()` reads FX_NATIVE_FS once (OnceLock) and treats ANY value as
-    // enabled. So we DON'T set it here — control the FS mode by setting/unsetting the env var in
-    // the shell when launching this test (unset => patched FS, set => native FS).
+    // NOTE: `fx_native_fs_enabled()` is cached (OnceLock). Native FS is the default;
+    // set FX_PATCHED_FS=1 or FX_NATIVE_FS=0 before the first shader load for patched FS.
     let label = if hitbox_editor::fx_native_fs_enabled() { "framed_native" } else { "framed_patched" };
     for handle in ["mario_pump_hit", "mario_fb_bullet_l", "mario_appeal"] {
         diag_render(rel, handle, 65.0, label, vp, right, up);

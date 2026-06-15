@@ -139,13 +139,17 @@ pub fn load_bnsh_shader_modules(
     } else {
         crate::spirv_to_wgsl::patch_fragment_wgsl(fs_wgsl)
     };
-    // NVN deferred shaders may declare up to ~10 MRT color outputs; WebGPU rejects color
-    // output locations >= max_color_attachments (8). Particles composite into a single
-    // target, so trim the FragmentOutput struct to the in-range locations.
+    // NVN deferred shaders declare many MRT outputs; WebGPU rejects locations >= 8 and we
+    // composite only @location(0). Trim the FragmentOutput struct before pipeline creation.
     let fs_wgsl = crate::spirv_to_wgsl::clamp_fragment_output_locations(
         &fs_wgsl,
-        crate::spirv_to_wgsl::MAX_COLOR_ATTACHMENT_LOCATIONS,
+        crate::spirv_to_wgsl::PARTICLE_COMPOSITE_MRT_LOCATIONS,
     );
+    let fs_wgsl = if crate::fx_native_fs_enabled() {
+        crate::spirv_to_wgsl::enhance_native_fragment_wgsl(&fs_wgsl)
+    } else {
+        fs_wgsl
+    };
     let fs_wgsl = if std::env::var("FX_DEBUG_SOLID_FS").is_ok() {
         crate::spirv_to_wgsl::debug_solid_fragment_wgsl(&fs_wgsl)
     } else {
@@ -247,9 +251,8 @@ impl BnshPipelineState {
 
         let mut bgl_all = Vec::with_capacity(bind_group_layouts.len() + 1);
         bgl_all.extend(bind_group_layouts.iter().map(|b| Some(b)));
-        if !crate::fx_native_fs_enabled() {
-            bgl_all.push(Some(tex_bg_layout));
-        }
+        // @group(1) emitter texture: patched FS and enhance_native_fragment_wgsl both sample it.
+        bgl_all.push(Some(tex_bg_layout));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("bnsh_pipeline_layout_{label_tag}")),
             bind_group_layouts: &bgl_all,

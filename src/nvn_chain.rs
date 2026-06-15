@@ -105,14 +105,14 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///   [1]      = Texture tiling density/offset (.x = scale, .y = additive bias)
 ///
 /// cbuf_8 (Vertex Color Chain — SHARED with position chain data):
-///   Verified accesses: 0,1,2,3, 6,7, 8,9,10,11, 16, 17,18
-///   [0..3]   = Color table 0 first 4 entries (RGBA keyframes from EmitterDef.color0)
-///              (particle FS only)
+///   Verified accesses: 0,1,2,3, 6,7, 8,9,10,11, 12,13,14, 16, 17,18
+///   [0..3]   = Color table 0 (used by some FS variants; particle BNSH Family A often
+///              reads cbuf_9 colour splines instead — do NOT conflate with [12..14])
 ///   [6..7]   = Color chain coefficients / blend factors (interpolation weights)
-///              (particle FS only)
-///   [8..11]  = View-projection matrix (row-major 4×4, all shaders read this)
+///   [8..11]  = View-projection matrix (row-major 4×4, all particle VS read this)
+///   [12..14] = 3×4 world-position transform rows (NOT colour keyframes — must be
+///              identity/pass-through rows before the VP multiply at [8..11])
 ///   [16]     = Color table 1 first entry (first keyframe of EmitterDef.color1)
-///              (particle shaders only)
 ///   [17..18] = Position chain parameters (model shaders read both; particle VS only reads 18)
 ///
 /// cbuf_9 (Vertex Position Chain — most heavily accessed buffer):
@@ -120,7 +120,9 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///                      48,49,50,51, 53, 59,60,61,62, 68,69,70,71, 76,77,
 ///                      84, 92, 96,97,98,99
 ///   [0..3]   = NOT READ by the native VS (dead data). VP now lives in cbuf_8[8-11].
-///   [5]      = Render flags bitmask (2 × u32 packed as f32, all-1 = pass all)
+///   [5]      = Render flags bitmask in late VS (bitcast<i32> AND). Family-A VS also reads
+///              `.x` as a float scale early in the position chain (~L589) — must be 1.0, not
+///              bitcast(!0u32) which is NaN and poisons gpr_17_ before the VP multiply.
 ///   [8]      = Sprite sheet columns count (.x) + division data (.z used in frag as divisor)
 ///   [9]      = Animation blend weight / sprite-sheet column mixing
 ///   [10]     = Sprite sheet columns (redundant, for alternative animation path)
@@ -141,11 +143,10 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///   [49..51] = Additional subdivision / sprite layout data
 ///   [53]     = Secondary subdivision count (.z)
 ///   [59..62] = Frame interpolation pair 1: blend=(59), lo=(60), hi=(61), coeff=(62)
-///              Chain: t = (life_t - lo.w) / (hi.w - lo.w),
-///                     coeff.xyz = lo.xyz + (hi.xyz - lo.xyz) * t,
-///                     result = blend * table[index] * coeff.xyz
+///              Native FS evaluates RGB by spline over per-pixel lifetime; CPU fills 60/61
+///              with combiner output at life 0 and 1 (see `nvn_color_table0_keyframes`).
 ///   [68..71] = Frame interpolation pair 2: lo=(68), hi=(69), coeff=(70), blend2=(71)
-///              Same computation as pair 1, for color table 1.
+///              Alpha spline; CPU fills from `nvn_alpha_table1_keyframes`.
 ///   [76..77] = Frame interpolation pair 3: lo=(76), hi=(77) (texture frame selector)
 ///   [84]     = Additional animation timing data
 ///   [92]     = UV tile/scroll data
@@ -157,10 +158,12 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///
 /// cbuf_10 (Particle Attribute Buffer):
 ///   Verified accesses: 0,1,2,3, 4,5,6, 8,9,10
-///   [0]      = Identity quaternion .w (= 1.0, used as multiplier in frag chain)
-///   [1..3]   = Identity quaternion (xyz = 0, neutral rotation basis)
-///   [2.x]    = Particle life gate (VS/FS compare in_attr5_.w > cbuf_10[2].x to
-///              early-cull expired particles; must be >= 1.0 for normalized life_t)
+///   [0]      = Per-channel scale (.xyz) and alpha scale (.w) — must be all-ones so
+///              colour and position chain multiplies pass through unchanged
+///   [1]      = Neutral multiply (.xyz = 1) — VS scales gpr registers by these components
+///   [2]      = Life gate threshold in .x (in_attr5_.w > cbuf_10[2].x early-culls)
+///   [3]      = Rotation-chain coefficients (.x→out_attr3, .y→gpr_20 scale, .z/.w multiplied
+///              into corner rotation — all components must be 1.0 for neutral pass-through)
 ///   [4]      = UV transform matrix row U (tex_scale.x, 0, 0, tex_offset.x)
 ///   [5]      = UV transform matrix row V (0, tex_scale.y, 0, tex_offset.y)
 ///   [6]      = UV transform matrix row W (0, 0, 1, 0)
@@ -176,13 +179,13 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///
 /// The NVN vertex shader natively computes gl_Position = cbuf_8[8-11] ×
 /// vec4(gpr_10, gpr_13, gpr_9, 1.0), where the three gpr registers carry
-/// the transformed vertex position (rotation by cbuf_10[4-6] plus a small
-/// ±0.5 corner offset from gl_VertexIndex bits 0-1).
+/// the transformed vertex position (rotation by cbuf_10[4-6] plus corner offsets
+/// from in_attr6_/in_attr7_ scaled by in_attr4_.y).
 ///
 /// Phase 3: the vertex buffer provides particle CENTERS (in_attr0_) for every
-/// corner vertex.  The native chain applies ±0.5 corner offsets from
-/// gl_VertexIndex bits 0-1, scaled by per-vertex size (in_attr4_.y) and the
-/// camera basis in cbuf_9[46-47], then transforms via cbuf_8[8-11] VP matrix.
+/// corner vertex.  Family-A BNSH shaders read ±0.5 corner seeds from in_attr6_.xy
+/// / in_attr7_.xyz (not gl_VertexIndex bits), apply sin/cos rotation via
+/// cbuf_10[3-6], then transform via cbuf_8[12-14] and cbuf_8[8-11] VP matrix.
 
 /// Merge cbuf slot usage maps from multiple shader stages (VS + FS).
 pub fn merge_cbuf_slot_usage(
@@ -413,6 +416,25 @@ fn alpha_samples(emitter: &EmitterDef, life_t: f32) -> (f32, f32) {
 /// over life, then run the emitter's colour combiner. This is the value the native fragment
 /// shader reads back through `cbuf_9[60]` (RGB) / `cbuf_9[68].x` (A).
 fn emitter_display_color(emitter: &EmitterDef, life_t: f32) -> [f32; 4] {
+    nvn_emitter_color_endpoint(emitter, life_t, NvnColorEndpointMode::Display)
+}
+
+/// How [`nvn_emitter_color_endpoint`] applies the combiner for native FS table fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NvnColorEndpointMode {
+    /// Full combiner (CPU display / process 2+ GPU tables with one Hermite RGB spline).
+    Display,
+    /// Hermite RGB/A endpoints for process 0/1: colour0 + alpha combiner only; texture×colour
+    /// and colour1 are handled by the NVN FS chain + `enhance_native_fragment_wgsl`.
+    NativeTableEndpoint,
+}
+
+/// Sample emitter colour at normalized life for native FS cbuf_9 table keyframes or CPU display.
+fn nvn_emitter_color_endpoint(
+    emitter: &EmitterDef,
+    life_t: f32,
+    mode: NvnColorEndpointMode,
+) -> [f32; 4] {
     use crate::effects::{sample_alpha, sample_color_or_white};
     use glam::Vec4;
     let t = life_t.clamp(0.0, 1.0);
@@ -432,12 +454,81 @@ fn emitter_display_color(emitter: &EmitterDef, life_t: f32) -> [f32; 4] {
     } else {
         sample_alpha(&emitter.alpha1_keys, t)
     };
+
+    let combiner = &emitter.combiner;
+    if mode == NvnColorEndpointMode::NativeTableEndpoint
+        && crate::combiner::combiner_is_configured(combiner)
+        && combiner.color_combiner_process <= 1
+    {
+        let alpha = crate::combiner::combine_particle_rgba(
+            [c0.x, c0.y, c0.z, c0.w],
+            [c1.x, c1.y, c1.z, c1.w],
+            a0,
+            a1,
+            combiner,
+        )[3];
+        return [c0.x, c0.y, c0.z, alpha];
+    }
+
     crate::combiner::combine_particle_rgba(
         [c0.x, c0.y, c0.z, c0.w],
         [c1.x, c1.y, c1.z, c1.w],
         a0,
         a1,
-        &emitter.combiner,
+        combiner,
+    )
+}
+
+/// Per-pixel time the native FS feeds to cbuf_9 colour/alpha Hermite splines (lifetime path).
+///
+/// Early FS sets `gpr_0 = cbuf_10[2].x - in_attr5.w` (remaining life), then on the lifetime
+/// branch (~L1711): `gpr_10 = gpr_0 / float(int(trunc(in_attr4.w)))`.
+pub fn nvn_fs_spline_time(life_t: f32, life_gate: f32, attr4w: f32) -> f32 {
+    let remaining = (life_gate - life_t).clamp(0.0, life_gate.max(0.0));
+    let frame_scale = attr4w.trunc().max(1.0);
+    remaining / frame_scale
+}
+
+/// Flipbook-branch spline time when `cbuf_9[8].x > 0` (~L1678): fractional frame index.
+pub fn nvn_fs_spline_time_flipbook(
+    life_t: f32,
+    life_gate: f32,
+    attr7x: f32,
+    cols: f32,
+    cbuf9_9y: f32,
+) -> f32 {
+    if cols <= 0.0 {
+        return nvn_fs_spline_time(life_t, life_gate, 1.0);
+    }
+    let remaining = (life_gate - life_t).clamp(0.0, life_gate.max(0.0));
+    let v = attr7x * cbuf9_9y * cols + remaining;
+    (v / cols).fract()
+}
+
+/// Build NVN colour-table-0 keyframes (cbuf_9 slots 60–62) for the native FS Hermite spline.
+///
+/// The fragment shader evaluates these with per-pixel `gpr_10_` (= remaining life on the
+/// lifetime path). Keyframe `.w` stays 0→1 but colours are swapped: death colour at w=0,
+/// birth colour at w=1, matching the inverted time axis.
+fn nvn_color_table0_keyframes(emitter: &EmitterDef) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let c0 = nvn_emitter_color_endpoint(emitter, 0.0, NvnColorEndpointMode::NativeTableEndpoint);
+    let c1 = nvn_emitter_color_endpoint(emitter, 1.0, NvnColorEndpointMode::NativeTableEndpoint);
+    (
+        [c1[0], c1[1], c1[2], 0.0],
+        [c0[0], c0[1], c0[2], 1.0],
+        [c0[0], c0[1], c0[2], 1.0],
+    )
+}
+
+/// Build NVN colour-table-1 / alpha keyframes (cbuf_9 slots 68–71) for the native FS alpha spline.
+fn nvn_alpha_table1_keyframes(emitter: &EmitterDef) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+    let a0 = nvn_emitter_color_endpoint(emitter, 0.0, NvnColorEndpointMode::NativeTableEndpoint)[3];
+    let a1 = nvn_emitter_color_endpoint(emitter, 1.0, NvnColorEndpointMode::NativeTableEndpoint)[3];
+    (
+        [a1, a1, a1, 0.0],
+        [a0, a0, a0, 1.0],
+        [a0, a0, a0, 1.0],
+        [a0, a0, a0, 1.0],
     )
 }
 
@@ -480,8 +571,14 @@ fn build_cbuf_by_name(
     data
 }
 
+/// True when the shader reads cbuf_8 VP columns [8..11] (particle position chain).
+fn cbuf_8_vp_block_active(slots: &HashSet<u32>) -> bool {
+    slots.iter().any(|&s| (8..=11).contains(&s))
+}
+
 fn build_cbuf_8_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBufferData {
     let combiner_coeffs = crate::combiner::eval_combiner_gpu_coeffs(&ctx.emitter.combiner);
+    let vp_block = cbuf_8_vp_block_active(slots);
     let mut data = NvnBufferData::default();
     for &slot in slots {
         // NOTE: specific slots are matched BEFORE the color-table ranges (0..=15 / 16..=31),
@@ -493,6 +590,21 @@ fn build_cbuf_8_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
             8..=11 => {
                 let vp = ctx.view_proj.to_cols_array_2d();
                 data.set(slot as u64, vp[(slot - 8) as usize]);
+            }
+            // Particle VS/FS treat [12..14] as a 3×4 transform applied before the VP at [8..11].
+            // Identity rows pass the NVN register-chain world position through unchanged.
+            12..=14 => {
+                let row = (slot - 12) as usize;
+                let mut v = [0.0f32; 4];
+                v[row] = 1.0;
+                data.set(slot as u64, v);
+            }
+            // Some VS variants read [0..3] as a 4×4 pre-transform (fma chains), not colour table 0.
+            // When the VP block [8..11] is also present, treat [0..3] as identity columns.
+            0..=3 if vp_block => {
+                let mut v = [0.0f32; 4];
+                v[slot as usize] = 1.0;
+                data.set(slot as u64, v);
             }
             17 | 18 => data.set(slot as u64, [1.0, 1.0, 1.0, 1.0]),
             0..=15 => data.set(slot as u64, color0_entry(ctx.emitter, slot as usize, ctx.life_t)),
@@ -524,11 +636,9 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
     for &slot in slots {
         match slot {
             0..=3 => data.set(slot as u64, vp[slot as usize]),
-            5 => {
-                let mask: [f32; 4] = bytemuck::cast([!0u32, !0u32, 0u32, 0u32]);
-                data.set(5, mask);
-            }
-            8 => data.set(8, [cols, 0.0, 0.0, 0.0]),
+            5 => data.set(5, [1.0, 1.0, 0.0, 0.0]),
+            // .x/.y gate flipbook vs lifetime spline time; UV columns stay in [10].y.
+            8 => data.set(8, [0.0, 0.0, 0.0, 0.0]),
             9 => data.set(9, [1.0, 1.0, 1.0, 1.0]),
             10 => data.set(10, [0.0, cols, 0.0, 0.0]),
             13 => data.set(13, [ctx.emitter.tex_scroll_uv[0], ctx.emitter.tex_scroll_uv[1], 0.0, 0.0]),
@@ -550,45 +660,28 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
             47 => data.set(47, [0.0, ctx.cam_up.x, ctx.cam_up.y, ctx.cam_up.z]),
             48 => data.set(48, [0.0, 0.0, subdiv, subdiv]),
             53 => data.set(53, [0.0, 0.0, subdiv, 0.0]),
-            // Colour-table 0 is a 3-keyframe (A=60, B=61, C=62) Hermite animation the native FS
-            // evaluates by a per-particle normalised lifetime `t` (= (cbuf_10[2].x - life)/frames,
-            // range ~[0,1]). Each segment is enabled once `t >= keyframe.w`; when enabled the base
-            // keyframe is *subtracted out* (`fma(enable, -base, base)`) and rebuilt from the
-            // segment slopes. We pre-sample the display colour on the CPU and want it emitted flat,
-            // so we place every keyframe time strictly AFTER any realistic `t` (1000/1001/1002,
-            // distinct to avoid 1/(tB-tA) div-by-zero). All predicates are then false, no segment
-            // subtracts the base, and the output equals keyframe-A colour = the display colour.
+            // Colour-table 0: 3-keyframe Hermite spline (lo=60, hi=61, segment C=62). Colours are
+            // sampled at life 0 and 1 so the FS can interpolate per-pixel from varyings; do NOT
+            // pre-sample at the per-draw average life_t (that broke multi-particle batches).
             59 => data.set(59, [1.0, 1.0, 1.0, 1.0]),
-            60 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(60, [c[0], c[1], c[2], 1000.0]);
+            60 | 61 | 62 => {
+                let (kf60, kf61, kf62) = nvn_color_table0_keyframes(ctx.emitter);
+                let v = match slot {
+                    60 => kf60,
+                    61 => kf61,
+                    _ => kf62,
+                };
+                data.set(slot as u64, v);
             }
-            61 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(61, [c[0], c[1], c[2], 1001.0]);
-            }
-            62 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(62, [c[0], c[1], c[2], 1002.0]);
-            }
-            // Colour-table 1 / alpha: same keyframe-spline structure (base + segments at 68/69/70,
-            // 71 closing the last segment), .x carries alpha. Same "times after t" trick so the
-            // flat pre-sampled alpha (keyframe-A) passes through.
-            68 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(68, [c[3], c[3], c[3], 1000.0]);
-            }
-            69 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(69, [c[3], c[3], c[3], 1001.0]);
-            }
-            70 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(70, [c[3], c[3], c[3], 1002.0]);
-            }
-            71 => {
-                let c = emitter_display_color(ctx.emitter, ctx.life_t);
-                data.set(71, [c[3], c[3], c[3], 1003.0]);
+            68 | 69 | 70 | 71 => {
+                let (kf68, kf69, kf70, kf71) = nvn_alpha_table1_keyframes(ctx.emitter);
+                let v = match slot {
+                    68 => kf68,
+                    69 => kf69,
+                    70 => kf70,
+                    _ => kf71,
+                };
+                data.set(slot as u64, v);
             }
             76 => data.set(76, [0.0, 0.0, 0.0, 0.0]),
             77 => data.set(77, [0.0, 0.0, 0.0, frame_count]),
@@ -627,16 +720,22 @@ fn build_cbuf_10_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuf
 
     for &slot in slots {
         match slot {
-            // Per-channel colour multiplier in the native FS (out.rgb *= cbuf_10[0].xyz,
-            // out.a *= cbuf_10[0].w). Must be all-ones so the colour passes through; the VS
-            // position chain that also read this slot is replaced by override_billboard_position.
+            // Per-channel scale in the native VS/FS chains (out *= cbuf_10[0]). All-ones = pass-through.
             0 => data.set(0, [1.0, 1.0, 1.0, 1.0]),
-            1 => data.set(1, [0.0, 1.0, 0.0, 0.0]),
-            2 => data.set(2, [1.0, 0.0, 1.0, 0.0]),
-            3 => data.set(3, [0.0, 0.0, 0.0, 1.0]),
-            4 => data.set(4, [ts[0], 0.0, 0.0, to[0]]),
-            5 => data.set(5, [0.0, ts[1], 0.0, to[1]]),
-            6 => data.set(6, [0.0, 0.0, 1.0, 0.0]),
+            // VS multiplies gpr components by .xyz (see bomb VS cbuf_10[1] at ~line 2617).
+            // Neutral multiply = 1, not 0 — [0,1,0,0] zeroed .x/.z and collapsed geometry.
+            1 => data.set(1, [1.0, 1.0, 1.0, 0.0]),
+            2 => data.set(2, [1.0, 0.0, 0.0, 0.0]),
+            // Native VS (Family A) assigns .y to gpr_20 then multiplies it into the sin/cos
+            // rotation chain; .z/.w are pure multiplies (see bomb VS ~L1213/L1317/L1325).
+            // [0,0,0,1] zeroed .y/.z and collapsed world position before the VP multiply.
+            3 => data.set(3, [1.0, 1.0, 1.0, 1.0]),
+            // Rows 4-6 feed both UV scroll (.w offsets) and a sin/cos rotation block that
+            // multiplies chain registers by .x (bomb VS ~L1109/L1114/L1127). .x must be 1.0
+            // on every row for neutral pass-through; .y/.z remain available for tex-scale fma.
+            4 => data.set(4, [1.0, 1.0, 1.0, to[0]]),
+            5 => data.set(5, [1.0, ts[1], ts[1], to[1]]),
+            6 => data.set(6, [1.0, 1.0, 1.0, 0.0]),
             8 => data.set(8, [1.0, 1.0, 1.0, 1.0]),
             9 => data.set(9, [to[0], to[1], 0.0, 0.0]),
             10 => data.set(10, [1.0, 1.0, 1.0, 1.0]),
@@ -665,13 +764,14 @@ fn documented_cbuf_8_slots() -> HashSet<u32> {
     let mut s: HashSet<u32> = (0..=31).collect();
     s.extend([6, 7, 32, 17, 18]);
     s.extend(8..=11);
+    s.extend(12..=14);
     s
 }
 
 fn documented_cbuf_9_slots() -> HashSet<u32> {
     [
         0, 1, 2, 3, 5, 8, 9, 10, 13, 14, 15, 17, 44, 45, 46, 47, 48, 53, 59, 60, 61, 62, 68, 69,
-        70, 71, 76, 77, 84, 96, 97, 98, 99,
+        70, 71, 76, 77, 78, 84, 96, 97, 98, 99, 113, 114, 115,
     ]
     .into_iter()
     .collect()
@@ -876,6 +976,59 @@ mod tests {
         let c16 = result.get("cbuf_16_1_").unwrap();
         let slot1 = c16.slot_data.get(&1).unwrap();
         assert_eq!(slot1[3], 0.0, "add blend uses w=0");
+        let slot2 = c16.slot_data.get(&2).unwrap();
+        assert_eq!(slot2[2], 1.0, "process 1 keeps lerp branch disabled");
+    }
+
+    #[test]
+    fn test_cbuf_16_modulate_neutral_fills_match_native_fs() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_16_1_".to_string(), [1u32, 2, 3].into_iter().collect());
+        let emitter = EmitterDef::default();
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let c16 = NvnChainEvaluator::evaluate_usage(&usage, &params)
+            .get("cbuf_16_1_")
+            .unwrap()
+            .slot_data
+            .clone();
+        assert_eq!(c16.get(&1).copied(), Some([1.0, 0.0, 1.0, 1.0]));
+        assert_eq!(c16.get(&2).map(|v| v[1]), Some(0.0));
+        assert_eq!(c16.get(&2).map(|v| v[2]), Some(1.0));
+        assert_eq!(c16.get(&3).map(|v| v[2]), Some(0.0));
+    }
+
+    #[test]
+    fn test_native_table_endpoints_use_color0_for_process1() {
+        let mut emitter = EmitterDef::default();
+        emitter.combiner.color_combiner_process = 1;
+        emitter.color0 = vec![
+            ColorKey {
+                frame: 0.0,
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            ColorKey {
+                frame: 1.0,
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        ];
+        emitter.color1 = vec![ColorKey {
+            frame: 0.0,
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }];
+        let (kf60, kf61, _) = nvn_color_table0_keyframes(&emitter);
+        // Remaining-life axis: slot 60 w=0 = death (life=1), slot 61 w=1 = birth (life=0).
+        assert!((kf60[1] - 1.0).abs() < 0.01, "death endpoint uses colour0 at life=1");
+        assert!((kf61[0] - 1.0).abs() < 0.01, "birth endpoint uses colour0 at life=0");
+        assert!((kf60[2] - 1.0).abs() > 0.5, "colour1 must not leak into RGB table");
     }
 
     #[test]
@@ -903,6 +1056,245 @@ mod tests {
             slot2[0], 1.0,
             "life gate threshold must be 1.0 so normalized life_t in 0..1 is not culled"
         );
+    }
+
+    #[test]
+    fn test_cbuf_8_slots_0_3_are_transform_columns_when_position_chain() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_8_1_".to_string(),
+            [0u32, 1, 2, 3, 8, 9].into_iter().collect(),
+        );
+        let mut emitter = EmitterDef::default();
+        emitter.color0 = vec![ColorKey {
+            frame: 0.0,
+            r: 0.9,
+            g: 0.1,
+            b: 0.2,
+            a: 0.3,
+        }];
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c8 = result.get("cbuf_8_1_").unwrap();
+        assert_eq!(c8.slot_data.get(&0).copied(), Some([1.0, 0.0, 0.0, 0.0]));
+        assert_eq!(c8.slot_data.get(&1).copied(), Some([0.0, 1.0, 0.0, 0.0]));
+        assert_eq!(c8.slot_data.get(&2).copied(), Some([0.0, 0.0, 1.0, 0.0]));
+        assert_eq!(c8.slot_data.get(&3).copied(), Some([0.0, 0.0, 0.0, 1.0]));
+        // VP column 0 still written at slot 8.
+        assert!(c8.slot_data.get(&8).is_some());
+    }
+
+    #[test]
+    fn test_cbuf_8_slots_12_14_are_transform_rows_not_color() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_8_1_".to_string(),
+            [12u32, 13, 14, 0].into_iter().collect(),
+        );
+        let mut emitter = EmitterDef::default();
+        emitter.color0 = vec![ColorKey {
+            frame: 0.0,
+            r: 0.9,
+            g: 0.1,
+            b: 0.2,
+            a: 0.3,
+        }];
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c8 = result.get("cbuf_8_1_").unwrap();
+        assert_eq!(c8.slot_data.get(&12).copied(), Some([1.0, 0.0, 0.0, 0.0]));
+        assert_eq!(c8.slot_data.get(&13).copied(), Some([0.0, 1.0, 0.0, 0.0]));
+        assert_eq!(c8.slot_data.get(&14).copied(), Some([0.0, 0.0, 1.0, 0.0]));
+        // Slot 0 still receives colour data when explicitly requested.
+        let slot0 = c8.slot_data.get(&0).unwrap();
+        assert!((slot0[0] - 0.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_nvn_color_table0_keyframes_span_life_endpoints() {
+        let mut emitter = EmitterDef::default();
+        emitter.color0 = vec![
+            ColorKey {
+                frame: 0.0,
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            ColorKey {
+                frame: 1.0,
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        ];
+        emitter.alpha0_keys = vec![
+            ColorKey {
+                frame: 0.0,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            ColorKey {
+                frame: 1.0,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
+        let (kf60, kf61, _) = nvn_color_table0_keyframes(&emitter);
+        assert_eq!(kf60[3], 0.0);
+        assert_eq!(kf61[3], 1.0);
+        // Remaining-life axis: w=0 carries death (life=1) colour, w=1 carries birth (life=0).
+        assert!((kf60[1] - 1.0).abs() < 0.01, "slot 60 should be life=1 colour");
+        assert!((kf61[0] - 1.0).abs() < 0.01, "slot 61 should be life=0 colour");
+        let (a68, a69, _, _) = nvn_alpha_table1_keyframes(&emitter);
+        assert_eq!(a68[3], 0.0);
+        assert_eq!(a69[3], 1.0);
+        // Default alpha0 fades 1→0 over life; remaining-life axis swaps endpoints.
+        assert!((a68[0] - 0.0).abs() < 0.01, "alpha w=0 should be life=1 endpoint");
+        assert!((a69[0] - 1.0).abs() < 0.01, "alpha w=1 should be life=0 endpoint");
+    }
+
+    #[test]
+    fn test_nvn_fs_spline_time_is_remaining_life() {
+        assert!((nvn_fs_spline_time(0.0, 1.0, 1.0) - 1.0).abs() < 1e-5);
+        assert!((nvn_fs_spline_time(1.0, 1.0, 1.0) - 0.0).abs() < 1e-5);
+        assert!((nvn_fs_spline_time(0.25, 1.0, 1.0) - 0.75).abs() < 1e-5);
+        assert!((nvn_fs_spline_time(0.5, 1.0, 2.0) - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_cbuf_9_slot8_x_zero_forces_lifetime_spline_path() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [8u32, 10].into_iter().collect());
+        let mut emitter = EmitterDef::default();
+        emitter.tex_scale_uv = [0.25, 1.0];
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c9 = result.get("cbuf_9_1_").unwrap();
+        assert_eq!(c9.slot_data.get(&8).copied(), Some([0.0, 0.0, 0.0, 0.0]));
+        assert_eq!(c9.slot_data.get(&10).copied(), Some([0.0, 4.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn test_cbuf_9_color_keyframes_use_life_endpoints_not_draw_life_t() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_9_1_".to_string(),
+            [60u32, 61, 68, 69].into_iter().collect(),
+        );
+        let mut emitter = EmitterDef::default();
+        emitter.color0 = vec![
+            ColorKey {
+                frame: 0.0,
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            ColorKey {
+                frame: 1.0,
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 0.5,
+            },
+        ];
+        emitter.alpha0_keys = vec![
+            ColorKey {
+                frame: 0.0,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            ColorKey {
+                frame: 1.0,
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.5,
+            },
+        ];
+        // Draw-time life_t=0.5 would yield purple-ish if flat-sampled; endpoints must differ.
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c9 = result.get("cbuf_9_1_").unwrap();
+        let kf60 = c9.slot_data.get(&60).unwrap();
+        let kf61 = c9.slot_data.get(&61).unwrap();
+        assert!((kf60[2] - 1.0).abs() < 0.01, "slot 60 should be life=1 colour (remaining-life w=0)");
+        assert!((kf61[0] - 1.0).abs() < 0.01, "slot 61 should be life=0 colour (remaining-life w=1)");
+        assert!(kf60[3] < kf61[3], "keyframe times must span remaining life 0..1");
+        let kf68 = c9.slot_data.get(&68).unwrap();
+        let kf69 = c9.slot_data.get(&69).unwrap();
+        assert!(kf68[3] < kf69[3], "alpha keyframe times must span remaining life 0..1");
+        assert_ne!(kf68[0], kf69[0], "alpha endpoints should differ for fade emitter");
+        let (exp68, exp69, _, _) = nvn_alpha_table1_keyframes(&emitter);
+        assert_eq!(*kf68, exp68);
+        assert_eq!(*kf69, exp69);
+    }
+
+    #[test]
+    fn test_cbuf_9_slot5_x_is_finite_float_not_nan_mask() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [5u32].into_iter().collect());
+        let emitter = EmitterDef::default();
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot5 = result.get("cbuf_9_1_").unwrap().slot_data.get(&5).unwrap();
+        assert_eq!(slot5[0], 1.0);
+        assert!(slot5[0].is_finite(), "native VS assigns cbuf_9[5].x to gpr_17 as float");
+    }
+
+    #[test]
+    fn test_cbuf_10_slot3_is_neutral_rotation_coeff() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_10_1_".to_string(), [3u32].into_iter().collect());
+        let emitter = EmitterDef::default();
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot3 = result.get("cbuf_10_1_").unwrap().slot_data.get(&3).unwrap();
+        assert_eq!(slot3[0], 1.0, ".x feeds out_attr3 chain");
+        assert_eq!(slot3[1], 1.0, ".y must not zero gpr_20 scale");
+        assert_eq!(slot3[2], 1.0, ".z is a pure multiply in rotation chain");
+        assert_eq!(slot3[3], 1.0, ".w is a pure multiply in rotation chain");
+    }
+
+    #[test]
+    fn test_cbuf_10_rows_4_6_x_components_pass_through_native_vs() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_10_1_".to_string(),
+            [4u32, 5, 6].into_iter().collect(),
+        );
+        let emitter = EmitterDef::default();
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c10 = result.get("cbuf_10_1_").unwrap();
+        for slot in [4u64, 5, 6] {
+            let row = c10.slot_data.get(&slot).unwrap();
+            assert_eq!(
+                row[0], 1.0,
+                "slot {slot} .x is multiplied into gpr_28/29/31 — must not be zero"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cbuf_10_slot1_is_neutral_multiply() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_10_1_".to_string(), [1u32].into_iter().collect());
+        let emitter = EmitterDef::default();
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot1 = result.get("cbuf_10_1_").unwrap().slot_data.get(&1).unwrap();
+        assert_eq!(slot1[0], 1.0, ".x must not zero gpr_9 in VS chain");
+        assert_eq!(slot1[1], 1.0);
+        assert_eq!(slot1[2], 1.0, ".z must not zero gpr_2 in VS chain");
     }
 
     #[test]

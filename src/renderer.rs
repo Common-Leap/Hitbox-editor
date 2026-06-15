@@ -306,15 +306,31 @@ impl HitboxRenderState {
         device: &wgpu::Device, 
         queue: &wgpu::Queue, 
         bnsh_shaders: &crate::particle_renderer_bnsh::BnshShaderSet,
-    ) {
+    ) -> bool {
         eprintln!("[ParticleRenderer] Updating with BNSH shaders: {}", bnsh_shaders.summary());
-        // Recreate the particle renderer with the new shaders
-        *self.particle_renderer.lock().unwrap() = Some(crate::particle_renderer::ParticleRenderer::new(
-            device,
-            queue,
-            self.surface_format,
-            bnsh_shaders,
-        ));
+        let native_fs = crate::fx_native_fs_enabled();
+        let surface_format = self.surface_format;
+        let bnsh = bnsh_shaders.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            crate::particle_renderer::ParticleRenderer::new(
+                device,
+                queue,
+                surface_format,
+                &bnsh,
+            )
+        }));
+        match result {
+            Ok(pr) => {
+                *self.particle_renderer.lock().unwrap() = Some(pr);
+            }
+            Err(_) => {
+                eprintln!(
+                    "[ParticleRenderer] FAILED to create GPU particle renderer (native_fs={native_fs}). \
+                     Check stderr above for WGSL/pipeline validation errors."
+                );
+                return false;
+            }
+        }
         
         // Set material texture bindings from shader reflection
         if let Some(pr) = self.particle_renderer.lock().unwrap().as_mut() {
@@ -325,6 +341,7 @@ impl HitboxRenderState {
                 bnsh_shaders.material_bindings.emissive_bindings.len() + 
                 bnsh_shaders.material_bindings.pbr_bindings.len());
         }
+        true
     }
 
     pub fn weapon_skel_count(&self) -> usize {
@@ -651,7 +668,14 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             }
             let pr = state.particle_renderer.lock().unwrap();
             let Some(pr) = pr.as_ref() else {
-                eprintln!("[VIEWPORT] paint skipped: particle_renderer not initialized (load .eff first)");
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[VIEWPORT] paint skipped: particle_renderer not initialized (load .eff first). \
+                         This message prints once; check earlier logs for [BNSH] / [ParticleRenderer] errors."
+                    );
+                }
                 return;
             };
             pr.composite_editor_particles(render_pass);

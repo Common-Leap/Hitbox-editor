@@ -57,6 +57,71 @@ fn build_effect_converter() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let build_dir = out_dir.join("effect-converter-build");
 
+    println!("cargo:rerun-if-env-changed=EFFECT_CONVERTER_CLI");
+    println!("cargo:rerun-if-env-changed=EFFECT_CONVERTER_FORCE_REBUILD");
+
+    let cli_path = if cfg!(windows) {
+        build_dir.join("EffectConverter.exe")
+    } else {
+        build_dir.join("EffectConverter")
+    };
+    let stable_cli = PathBuf::from("target/effect-converter").join(effect_converter_exe_name());
+    let vendored_dir = vendored_effect_converter_dir();
+
+    // Explicit override (system install or copied binary).
+    if let Ok(env_cli) = std::env::var("EFFECT_CONVERTER_CLI") {
+        let p = PathBuf::from(&env_cli);
+        if p.exists() {
+            println!("cargo:rustc-env=EFFECT_CONVERTER_CLI={}", p.display());
+            println!(
+                "cargo:warning=Using EffectConverter from EFFECT_CONVERTER_CLI={}",
+                p.display()
+            );
+            return;
+        }
+        println!(
+            "cargo:warning=EFFECT_CONVERTER_CLI set but missing: {}",
+            p.display()
+        );
+    }
+
+    // Reuse a previous successful publish in OUT_DIR (avoids flaky dotnet/csc crashes).
+    if cli_path.exists() && std::env::var("EFFECT_CONVERTER_FORCE_REBUILD").is_err() {
+        if !effect_converter_sources_changed(&cli_path, &effect_lib_dir) {
+            emit_effect_converter_cli(&cli_path);
+            return;
+        }
+        println!("cargo:warning=EffectConverter sources changed — rebuilding");
+    }
+
+    // OUT_DIR changes when crate metadata changes; fall back to a stable project cache.
+    if !cli_path.exists()
+        && std::env::var("EFFECT_CONVERTER_FORCE_REBUILD").is_err()
+        && restore_effect_converter_from_dir(
+            stable_cli.parent(),
+            &build_dir,
+            &cli_path,
+            &effect_lib_dir,
+            "stable cache",
+        )
+    {
+        return;
+    }
+
+    // Vendored publish output (survives `cargo clean` / tmp cache wipes).
+    if !cli_path.exists()
+        && std::env::var("EFFECT_CONVERTER_FORCE_REBUILD").is_err()
+        && restore_effect_converter_from_dir(
+            vendored_dir.as_deref(),
+            &build_dir,
+            &cli_path,
+            &effect_lib_dir,
+            "tools/effect-converter",
+        )
+    {
+        return;
+    }
+
     println!("cargo:warning=Building EffectConverter CLI from {}", effect_lib_dir.display());
     println!("cargo:warning=Build output directory: {}", build_dir.display());
 
@@ -72,6 +137,15 @@ fn build_effect_converter() {
             println!("cargo:warning=Using .NET: {}", version.lines().next().unwrap_or("unknown"));
         }
         _ => {
+            if try_use_existing_effect_converter(
+                &cli_path,
+                &stable_cli,
+                vendored_dir.as_deref(),
+                &build_dir,
+                "dotnet not found in PATH",
+            ) {
+                return;
+            }
             println!("cargo:warning=ERROR: dotnet not found in PATH");
             println!("cargo:warning=Install .NET 6.0+ SDK to build EffectConverter");
             std::process::exit(1);
@@ -84,37 +158,254 @@ fn build_effect_converter() {
         std::process::exit(1);
     }
 
+    std::fs::create_dir_all(&build_dir).expect("Failed to create effect-converter build directory");
+    let dotnet_tmp = build_dir.join("dotnet-tmp");
+    let _ = std::fs::create_dir_all(&dotnet_tmp);
+
     println!("cargo:warning=Publishing EffectConverter...");
-    let publish_status = Command::new("dotnet")
+    let publish_output = Command::new("dotnet")
         .arg("publish")
         .arg(&csproj)
         .arg("-c").arg("Release")
         .arg("-o").arg(&build_dir)
         .arg("--self-contained").arg("false")
-        .status()
+        .arg("-maxcpucount:1")
+        .arg("-p:UseSharedCompilation=false")
+        .env("TMPDIR", &dotnet_tmp)
+        .env("TEMP", &dotnet_tmp)
+        .env("TMP", &dotnet_tmp)
+        .env("MSBUILDDISABLENODEREUSE", "1")
+        .output()
         .expect("Failed to publish EffectConverter");
 
-    if !publish_status.success() {
+    if !publish_output.status.success() {
+        let stderr = String::from_utf8_lossy(&publish_output.stderr);
+        let stdout = String::from_utf8_lossy(&publish_output.stdout);
+        if !stdout.trim().is_empty() {
+            println!("cargo:warning=EffectConverter publish stdout:\n{stdout}");
+        }
+        if !stderr.trim().is_empty() {
+            println!("cargo:warning=EffectConverter publish stderr:\n{stderr}");
+        }
+        if try_use_existing_effect_converter(
+            &cli_path,
+            &stable_cli,
+            vendored_dir.as_deref(),
+            &build_dir,
+            "dotnet publish failed",
+        ) {
+            return;
+        }
         println!("cargo:warning=ERROR: dotnet publish failed for EffectConverter");
+        println!("cargo:warning=Bundled copy expected at tools/effect-converter/{}/", vendored_platform_dir());
+        println!("cargo:warning=Or set EFFECT_CONVERTER_CLI to a working EffectConverter binary.");
         std::process::exit(1);
     }
 
-    let cli_path = if cfg!(windows) {
-        build_dir.join("EffectConverter.exe")
-    } else {
-        build_dir.join("EffectConverter")
-    };
-
     if cli_path.exists() {
-        println!("cargo:rustc-env=EFFECT_CONVERTER_CLI={}", cli_path.display());
-        println!("cargo:warning=✓ EffectConverter CLI built successfully: {}", cli_path.display());
+        emit_effect_converter_cli(&cli_path);
+        if let Some(stable_dir) = stable_cli.parent() {
+            if let Err(e) = sync_effect_converter_dir(&build_dir, stable_dir) {
+                println!("cargo:warning=Failed to update stable EffectConverter cache: {e}");
+            }
+        }
     } else {
+        if try_use_existing_effect_converter(
+            &cli_path,
+            &stable_cli,
+            vendored_dir.as_deref(),
+            &build_dir,
+            "publish succeeded but binary missing",
+        ) {
+            return;
+        }
         println!("cargo:warning=ERROR: EffectConverter CLI binary not found at {}", cli_path.display());
-        println!("cargo:warning=Searched: {}", cli_path.display());
         std::process::exit(1);
     }
 
     println!("cargo:rerun-if-changed=extern/effect-library");
+    println!("cargo:rerun-if-changed=tools/effect-converter");
+}
+
+fn effect_converter_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "EffectConverter.exe"
+    } else {
+        "EffectConverter"
+    }
+}
+
+fn vendored_platform_dir() -> &'static str {
+    if cfg!(windows) {
+        "win-x64"
+    } else {
+        "linux-x64"
+    }
+}
+
+fn vendored_effect_converter_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let dir = PathBuf::from("tools/effect-converter").join(vendored_platform_dir());
+    let cli = dir.join(effect_converter_exe_name());
+    cli.exists().then_some(dir)
+}
+
+fn restore_effect_converter_from_dir(
+    src_dir: Option<&std::path::Path>,
+    build_dir: &std::path::Path,
+    cli_path: &std::path::Path,
+    effect_lib_dir: &std::path::Path,
+    label: &str,
+) -> bool {
+    let Some(src_dir) = src_dir else {
+        return false;
+    };
+    let src_cli = src_dir.join(effect_converter_exe_name());
+    if !src_cli.exists() {
+        return false;
+    }
+    if effect_converter_sources_changed(&src_cli, effect_lib_dir) {
+        return false;
+    }
+    std::fs::create_dir_all(build_dir).expect("Failed to create effect-converter build directory");
+    if let Err(e) = sync_effect_converter_dir(src_dir, build_dir) {
+        println!("cargo:warning=Failed to copy EffectConverter from {label}: {e}");
+        return false;
+    }
+    if cli_path.exists() {
+        emit_effect_converter_cli(cli_path);
+        println!(
+            "cargo:warning=✓ EffectConverter restored from {label}: {}",
+            src_cli.display()
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// True when any tracked EffectConverter source is newer than the built CLI.
+fn effect_converter_sources_changed(cli_path: &std::path::Path, effect_lib_dir: &std::path::Path) -> bool {
+    let Ok(cli_mtime) = std::fs::metadata(cli_path).and_then(|m| m.modified()) else {
+        return true;
+    };
+    let tracked = [
+        effect_lib_dir.join("EffectConverter/EffectConverter.csproj"),
+        effect_lib_dir.join("EffectLibrary/EffectLibrary.csproj"),
+    ];
+    for path in tracked {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.modified().ok().is_some_and(|t| t > cli_mtime) {
+                return true;
+            }
+        }
+    }
+    for subdir in ["EffectConverter", "EffectLibrary"] {
+        let root = effect_lib_dir.join(subdir);
+        if sources_under_newer_than(&root, cli_mtime) {
+            return true;
+        }
+    }
+    false
+}
+
+fn sources_under_newer_than(root: &std::path::Path, cutoff: std::time::SystemTime) -> bool {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("cs") {
+            if entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .is_some_and(|t| t > cutoff)
+            {
+                return true;
+            }
+        } else if path.is_dir() {
+            if sources_under_newer_than(&path, cutoff) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn try_use_existing_effect_converter(
+    cli_path: &std::path::Path,
+    stable_cli: &std::path::Path,
+    vendored_dir: Option<&std::path::Path>,
+    build_dir: &std::path::Path,
+    reason: &str,
+) -> bool {
+    if cli_path.exists() {
+        emit_effect_converter_cli(cli_path);
+        println!(
+            "cargo:warning=Reusing existing EffectConverter ({reason}): {}",
+            cli_path.display()
+        );
+        return true;
+    }
+    for (label, dir) in [
+        ("stable cache", stable_cli.parent()),
+        ("tools/effect-converter", vendored_dir),
+    ] {
+        let Some(dir) = dir else { continue };
+        let src_cli = dir.join(effect_converter_exe_name());
+        if !src_cli.exists() {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(build_dir);
+        if sync_effect_converter_dir(dir, build_dir).is_ok() && cli_path.exists() {
+            emit_effect_converter_cli(cli_path);
+            println!(
+                "cargo:warning=Reusing {label} EffectConverter ({reason}): {}",
+                src_cli.display()
+            );
+            return true;
+        }
+    }
+    false
+}
+
+fn emit_effect_converter_cli(cli_path: &std::path::Path) {
+    println!("cargo:rustc-env=EFFECT_CONVERTER_CLI={}", cli_path.display());
+    println!(
+        "cargo:warning=✓ EffectConverter CLI ready: {}",
+        cli_path.display()
+    );
+    println!("cargo:rerun-if-changed=extern/effect-library");
+}
+
+fn sync_effect_converter_dir(src_dir: &std::path::Path, dest_dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest_dir)?;
+    for entry in std::fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let dest = dest_dir.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            let _ = std::fs::remove_dir_all(&dest);
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest_path = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn build_bnsh_decoder_cli() {

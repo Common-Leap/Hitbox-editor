@@ -642,7 +642,7 @@ pub fn spirv_to_wgsl(
     stage: naga::ShaderStage,
     shader_name: &str,
 ) -> Result<(String, Vec<DescriptorInfo>)> {
-    let temp_dir = tempfile::tempdir()
+    let temp_dir = crate::scratch_dirs::app_scratch_dir("spirv-")
         .map_err(|e| anyhow!("Failed to create temp directory: {}", e))?;
     let temp_dir_path = temp_dir.path().to_path_buf();
 
@@ -828,6 +828,13 @@ pub fn spirv_to_wgsl(
 /// 8 is the spec default (and the value reported on native Vulkan/Metal/DX adapters).
 pub const MAX_COLOR_ATTACHMENT_LOCATIONS: u32 = 8;
 
+/// MRT locations kept when compositing particles to a single RGBA target.
+///
+/// NVN deferred FS shaders write G-buffer data to `@location(1+)`, but the visible particle
+/// colour always lives at `@location(0)` (`out_attr0_`). The offscreen pass and blit composite
+/// only bind that one attachment — no merge of secondary MRT outputs is required.
+pub const PARTICLE_COMPOSITE_MRT_LOCATIONS: u32 = 1;
+
 /// Find the index of the `)` that closes the `(` at `open_paren_idx` (paren depth only).
 fn matching_close_paren(s: &str, open_paren_idx: usize) -> Option<usize> {
     let bytes = s.as_bytes();
@@ -853,20 +860,22 @@ fn matching_close_paren(s: &str, open_paren_idx: usize) -> Option<usize> {
 }
 
 /// Trim a fragment shader's `FragmentOutput` (multiple-render-target) struct to color
-/// `@location`s that WebGPU accepts.
+/// `@location`s that WebGPU accepts and/or the particle composite path binds.
 ///
 /// NVN deferred/G-buffer shaders frequently declare up to ~10 MRT color outputs, but
-/// particles composite into a single color attachment. WebGPU permits a fragment shader to
-/// write to color locations that have no bound target *provided the location index is in
-/// range* (`< max_color_attachments`). spirv-cross faithfully reproduces all 10 outputs, so
-/// `@location(8)`/`@location(9)` make pipeline creation fail with
+/// particles composite into a single color attachment at `@location(0)`. Secondary outputs
+/// (normals, material IDs, etc.) are not read by the blit path. WebGPU permits a fragment
+/// shader to write to color locations that have no bound target *provided the location index
+/// is in range* (`< max_color_attachments`), but spirv-cross faithfully reproduces all ~10
+/// outputs so `@location(8)`/`@location(9)` make pipeline creation fail with
 /// `ColorAttachmentLocationTooLarge`.
 ///
 /// This removes out-of-range fields from the `FragmentOutput` struct and the matching
-/// positional `return FragmentOutput(...)` constructor, preserving `@location(0)` (the color
-/// we actually composite) and the relative order of every kept field. `@builtin(...)` outputs
-/// (e.g. `frag_depth`) are always kept. Returns the input unchanged if there is nothing to trim
-/// or the shape is unexpected (so this is a safe no-op for already-valid shaders).
+/// positional `return FragmentOutput(...)` constructor, preserving `@location(0)` (the visible
+/// colour) and the relative order of every kept field. Pass [`PARTICLE_COMPOSITE_MRT_LOCATIONS`]
+/// to drop deferred G-buffer outputs 1+; pass [`MAX_COLOR_ATTACHMENT_LOCATIONS`] to keep all
+/// in-range locations. `@builtin(...)` outputs (e.g. `frag_depth`) are always kept. Returns the
+/// input unchanged if there is nothing to trim or the shape is unexpected.
 pub fn clamp_fragment_output_locations(wgsl: &str, max_locations: u32) -> String {
     let start_marker = "struct FragmentOutput {";
     let Some(start) = wgsl.find(start_marker) else {
@@ -958,19 +967,28 @@ pub fn clamp_fragment_output_locations(wgsl: &str, max_locations: u32) -> String
 ///   world = center + corner.x·size·right + corner.y·size·up
 ///   clip  = VP · world
 ///
-/// where `center = in_attr0_`, `corner = in_attr6_.xy`, `size = in_attr4_.y`, the VP matrix is
-/// stored column-major in `cbuf_9[0..3]`, and the camera basis is `cbuf_9[46]` (right) /
-/// `cbuf_9[47].yzw` (up). Referencing those slots makes the data-driven NVN evaluator fill them
-/// (the slot-usage scan runs on the patched WGSL). Returns the input unchanged when the shader
-/// is not a billboard particle VS (missing `in_attr6_`/center inputs), so mesh/primitive
-/// shaders keep their native transform.
+/// where `center = in_attr0_`, `corner = in_attr6_.xy`, `size = in_attr4_.y`. Most particle BNSH
+/// shaders store the VP matrix in `cbuf_8[8..11]` (Family A); older variants use `cbuf_9[0..3]`
+/// (Family B). The camera basis is `cbuf_9[46]` (right) / `cbuf_9[47].yzw` (up). Referencing
+/// those slots makes the data-driven NVN evaluator fill them (the slot-usage scan runs on the
+/// patched WGSL). Returns the input unchanged when the shader is not a billboard particle VS
+/// (missing center/size inputs), so mesh/primitive shaders keep their native transform.
 pub fn override_billboard_position(wgsl: &str) -> String {
     let marker = "main_1();";
     let Some(pos) = wgsl.find(marker) else {
         return wgsl.to_string();
     };
-    let base_needed = ["in_attr0_1", "in_attr4_1", "cbuf_9_1_", "gl_Position"];
+    let uses_cbuf8_vp = wgsl.contains("cbuf_8_1_._m0_[8]")
+        || wgsl.contains("cbuf_8_1_._m0_[9]")
+        || wgsl.contains("cbuf_8_1_._m0_[10]")
+        || wgsl.contains("cbuf_8_1_._m0_[11]");
+    let vp_buf = if uses_cbuf8_vp { "cbuf_8_1_" } else { "cbuf_9_1_" };
+    let vp_base: u32 = if uses_cbuf8_vp { 8 } else { 0 };
+    let base_needed = ["in_attr0_1", "in_attr4_1", vp_buf, "gl_Position"];
     if base_needed.iter().any(|id| !wgsl.contains(id)) {
+        return wgsl.to_string();
+    }
+    if !wgsl.contains("cbuf_9_1_") {
         return wgsl.to_string();
     }
     // Corner offsets: prefer attr6 (±0.5 half-extents written by the renderer), else derive
@@ -985,10 +1003,10 @@ pub fn override_billboard_position(wgsl: &str) -> String {
     let insert_at = pos + marker.len();
     let mut override_code = format!(
         "\n    {{\n\
-        \x20       let _vp0 = cbuf_9_1_._m0_[0];\n\
-        \x20       let _vp1 = cbuf_9_1_._m0_[1];\n\
-        \x20       let _vp2 = cbuf_9_1_._m0_[2];\n\
-        \x20       let _vp3 = cbuf_9_1_._m0_[3];\n\
+        \x20       let _vp0 = {vp_buf}._m0_[{vp0}];\n\
+        \x20       let _vp1 = {vp_buf}._m0_[{vp1}];\n\
+        \x20       let _vp2 = {vp_buf}._m0_[{vp2}];\n\
+        \x20       let _vp3 = {vp_buf}._m0_[{vp3}];\n\
         \x20       let _right = cbuf_9_1_._m0_[46].xyz;\n\
         \x20       let _up = vec3<f32>(cbuf_9_1_._m0_[47].y, cbuf_9_1_._m0_[47].z, cbuf_9_1_._m0_[47].w);\n\
         \x20       let _sz = in_attr4_1.y;\n\
@@ -996,6 +1014,11 @@ pub fn override_billboard_position(wgsl: &str) -> String {
         \x20       let _corner = {corner_expr};\n\
         \x20       let _world = in_attr0_1.xyz + _corner.x * _sz * _aspect * _right + _corner.y * _sz * _up;\n\
         \x20       gl_Position = _vp0 * _world.x + _vp1 * _world.y + _vp2 * _world.z + _vp3;\n",
+        vp_buf = vp_buf,
+        vp0 = vp_base,
+        vp1 = vp_base + 1,
+        vp2 = vp_base + 2,
+        vp3 = vp_base + 3,
     );
     // The native NVN colour/UV varying chains are as unreliable as the position chain; forward
     // CPU-simulated per-particle colour and quad UV so both native and patched FS paths receive
@@ -1213,9 +1236,112 @@ pub fn patch_fragment_wgsl(wgsl: &str) -> String {
     result
 }
 
+/// Post-process native fragment WGSL: modulate the NVN chain's primary colour output
+/// (first `FragmentOutput` argument) by the emitter texture. Decoded BNSH particle FS has no
+/// `textureSample`; we multiply the native RGBA by a `@group(1)` sample (same layout as
+/// [`patch_fragment_wgsl`]).
+pub fn enhance_native_fragment_wgsl(wgsl: &str) -> String {
+    let mut result = wgsl.to_string();
+
+    if !result.contains("@group(1)") {
+        let tex_decls = "\n@group(1) @binding(0) var color_tex: texture_2d<f32>;\n\
+                        @group(1) @binding(1) var color_sampler: sampler;\n";
+        if let Some(priv_pos) = result.find("var<private>") {
+            result.insert_str(priv_pos, tex_decls);
+        } else if let Some(entry) = result.find("@fragment") {
+            result.insert_str(entry, tex_decls);
+        }
+    }
+
+    let uv_expr = if result.contains("in_attr2_1") {
+        "in_attr2_1.xy".to_string()
+    } else if result.contains("in_attr6_1") {
+        "(in_attr6_1.xy + vec2<f32>(0.5, 0.5))".to_string()
+    } else {
+        "vec2<f32>(0.5, 0.5)".to_string()
+    };
+
+    let ctor = "return FragmentOutput(";
+    let Some(ret) = result.rfind(ctor) else {
+        return result;
+    };
+    let open = ret + ctor.len() - 1;
+    let Some(close) = matching_close_paren(&result, open) else {
+        return result;
+    };
+    let mut args = split_top_level_commas(&result[open + 1..close]);
+    if args.is_empty() {
+        return result;
+    }
+    // WGSL does not allow compound statements inside call arguments — hoist to `let`s.
+    let line_start = result[..ret].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let indent = result[line_start..ret]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect::<String>();
+    let native_in = args[0].trim().to_string();
+    let prelude = format!(
+        "{indent}let _fx_native_in = {native_in};\n\
+         {indent}let _fx_ts = textureSample(color_tex, color_sampler, {uv_expr});\n\
+         {indent}let _fx_native_col = vec4<f32>(_fx_native_in.rgb * _fx_ts.rgb, _fx_native_in.a * _fx_ts.a);\n"
+    );
+    args[0] = "_fx_native_col".to_string();
+    let new_return = format!("{ctor}{})", args.join(", "));
+    result.insert_str(line_start, &prelude);
+    let ret2 = result.rfind(ctor).expect("return FragmentOutput vanished after prelude insert");
+    let open2 = ret2 + ctor.len() - 1;
+    let close2 = matching_close_paren(&result, open2).expect("FragmentOutput paren");
+    result.replace_range(ret2..close2 + 1, &new_return);
+    result
+}
+
 #[cfg(test)]
 mod patch_tests {
     use super::*;
+
+    #[test]
+    fn enhance_native_fragment_modulates_first_output_with_texture() {
+        let fs = "\
+@fragment
+fn main(@location(6) in_attr6_: vec4<f32>) -> FragmentOutput {
+    var in_attr6_1: vec4<f32>;
+    in_attr6_1 = in_attr6_;
+    let _e0 = vec4<f32>(1.0, 0.5, 0.25, 1.0);
+    return FragmentOutput(_e0, _e0);
+}
+";
+        let out = enhance_native_fragment_wgsl(fs);
+        assert!(out.contains("@group(1) @binding(0) var color_tex"));
+        assert!(out.contains("textureSample(color_tex, color_sampler"));
+        assert!(out.contains("in_attr6_1.xy + vec2<f32>(0.5, 0.5)"));
+        assert!(out.contains("let _fx_native_col = vec4<f32>(_fx_native_in.rgb * _fx_ts.rgb"));
+        assert!(out.contains("return FragmentOutput(_fx_native_col, _e0)"));
+        assert!(!out.contains("FragmentOutput({"));
+    }
+
+    #[test]
+    fn clamp_fragment_outputs_trims_deferred_mrt_to_visible_only() {
+        let fs = "\
+struct FragmentOutput {
+    @location(0) out_attr0_: vec4<f32>,
+    @location(1) out_attr1_: vec4<f32>,
+    @location(2) out_attr2_: vec4<f32>,
+    @location(3) out_attr3_: vec4<f32>,
+    @location(4) out_attr4_: vec4<f32>,
+    @location(5) out_attr5_: vec4<f32>,
+}
+
+@fragment
+fn main() -> FragmentOutput {
+    return FragmentOutput(_e0, _e1, _e2, _e3, _e4, _e5);
+}
+";
+        let out = clamp_fragment_output_locations(fs, PARTICLE_COMPOSITE_MRT_LOCATIONS);
+        assert!(out.contains("@location(0) out_attr0_"));
+        assert!(!out.contains("@location(1)"));
+        assert!(!out.contains("_e1"));
+        assert!(out.contains("return FragmentOutput(_e0)"));
+    }
 
     #[test]
     fn clamp_fragment_outputs_trims_mrt_beyond_limit() {
@@ -1292,6 +1418,33 @@ fn main() -> FragmentOutput {
         assert_eq!(fields[1].location, 7);
         assert_eq!(fields[1].name, "in_attr7_");
         assert_eq!(fields[1].ty, "vec4<f32>");
+    }
+
+    #[test]
+    fn override_billboard_uses_cbuf8_vp_when_shader_reads_cbuf8() {
+        let wgsl = "\
+fn main_1() { gl_Position = vec4(0.0); }
+@vertex
+fn main(@location(0) in_attr0_: vec4<f32>, @location(4) in_attr4_: vec4<f32>, \
+@location(6) in_attr6_: vec4<f32>) -> VertexOutput {
+    in_attr0_1 = in_attr0_;
+    in_attr4_1 = in_attr4_;
+    in_attr6_1 = in_attr6_;
+    main_1();
+    return VertexOutput(out_attr0_, gl_Position);
+}
+var<private> in_attr0_1: vec4<f32>;
+var<private> in_attr4_1: vec4<f32>;
+var<private> in_attr6_1: vec4<f32>;
+var<private> out_attr0_: vec4<f32>;
+var<private> gl_Position: vec4<f32>;
+var<storage> cbuf_8_1_: cbuf_8_;
+var<storage> cbuf_9_1_: cbuf_9_;
+fn _ref() { let _ = cbuf_8_1_._m0_[8]; }
+";
+        let out = override_billboard_position(wgsl);
+        assert!(out.contains("cbuf_8_1_._m0_[8]"));
+        assert!(!out.contains("cbuf_9_1_._m0_[0]"));
     }
 
     #[test]

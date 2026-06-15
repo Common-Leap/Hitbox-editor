@@ -18,6 +18,7 @@ mod spirv_patch;
 mod nvn_chain;
 mod combiner;
 mod shader_registry;
+mod scratch_dirs;
 pub(crate) use hitbox_editor::{fx_debug_enabled, fx_native_fs_enabled};
 
 #[cfg(test)]
@@ -31,9 +32,8 @@ use ssbh_wgpu;
 fn main() -> anyhow::Result<()> {
     // Force Vulkan backend on Linux — avoids silent failures with RADV + wgpu auto-detection
     std::env::set_var("WGPU_BACKEND", "vulkan");
-    // Native FS colour chain (combiner + NVN cbufs) is opt-in via FX_NATIVE_FS=1. Default uses
-    // patch_fragment_wgsl (texture × vertex colour), which is reliable with the billboard VS
-    // override in patch_vertex_wgsl.
+    // Native FS (NVN colour chain + texture enhance) is the default.
+    // Set FX_PATCHED_FS=1 or FX_NATIVE_FS=0 for legacy patch_fragment_wgsl.
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

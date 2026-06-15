@@ -10,3 +10,7 @@ input
 # Editor/IDE
 .vscode/
 .kiro/
+
+
+# Mess
+/tools

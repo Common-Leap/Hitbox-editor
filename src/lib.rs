@@ -15,6 +15,7 @@ pub mod spirv_patch;
 pub mod nvn_chain;
 pub mod combiner;
 pub mod shader_registry;
+pub mod scratch_dirs;
 
 use std::sync::OnceLock;
 
@@ -23,10 +24,18 @@ pub fn fx_debug_enabled() -> bool {
     *FX_DEBUG.get_or_init(|| std::env::var("FX_DEBUG").is_ok())
 }
 
-/// When set, skip patch_fragment_wgsl and use the native NVN fragment color chain.
+/// Native NVN fragment colour chain is the default.
+/// Opt out with `FX_PATCHED_FS=1` or `FX_NATIVE_FS=0`.
 pub fn fx_native_fs_enabled() -> bool {
     static FX_NATIVE_FS: OnceLock<bool> = OnceLock::new();
-    *FX_NATIVE_FS.get_or_init(|| std::env::var("FX_NATIVE_FS").is_ok())
+    *FX_NATIVE_FS.get_or_init(|| match std::env::var("FX_NATIVE_FS").as_deref() {
+        Ok("0") | Ok("false") | Ok("no") => false,
+        Ok(_) => true,
+        Err(_) => !matches!(
+            std::env::var("FX_PATCHED_FS").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        ),
+    })
 }
 
 #[cfg(test)]
