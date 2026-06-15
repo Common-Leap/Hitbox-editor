@@ -143,6 +143,25 @@ pub struct EmitterSet {
     pub emitters: Vec<EmitterDef>,
 }
 
+/// A single keyframe value (x, y, z, time) for emitter-level animations.
+#[derive(Debug, Clone, Default)]
+pub struct AnimKeyframe {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub time: f32,
+}
+
+/// Emitter-level animation track loaded from EA*.json sidecar files.
+#[derive(Debug, Clone)]
+pub struct EmitterAnimDef {
+    pub enable: bool,
+    pub loop_: bool,
+    pub randomize_start_frame: bool,
+    pub loop_count: u32,
+    pub key_frames: Vec<AnimKeyframe>,
+}
+
 /// A single emitter definition parsed from the .ptcl emitter data block.
 #[derive(Debug, Clone)]
 pub struct EmitterDef {
@@ -226,10 +245,44 @@ pub struct EmitterDef {
     pub tex2_offset_uv: [f32; 2],
     /// Slot-2 UV scroll speed (from TexScrollAnim[2], default [0.0, 0.0])
     pub tex2_scroll_uv: [f32; 2],
+    /// Slot-2 texture sampler wrap mode U
+    pub tex2_wrap_u: u8,
+    /// Slot-2 texture sampler wrap mode V
+    pub tex2_wrap_v: u8,
     /// Slot-2 sprite-sheet frame count (from TexPatAnim[2].num)
     pub tex2_pat_frame_count: usize,
     /// Slot-2 per-frame sprite-sheet indices (from TexPatAnim[2].Table)
     pub tex2_pat_frame_table: Vec<usize>,
+    /// Emitter-level translation animation (from EAET.json)
+    pub anim_translate: Option<EmitterAnimDef>,
+    /// Emitter-level rotation animation (from EAER.json)
+    pub anim_rotation: Option<EmitterAnimDef>,
+    /// Emitter-level scale animation (from EAES.json)
+    pub anim_emit_scale: Option<EmitterAnimDef>,
+    /// Texture scale animation (from EASL.json)
+    pub anim_tex_scale: Option<EmitterAnimDef>,
+    /// Color 0 animation (from EAC0.json)
+    pub anim_color0: Option<EmitterAnimDef>,
+    /// Color 1 animation (from EAC1.json)
+    pub anim_color1: Option<EmitterAnimDef>,
+    /// Alpha animation (from EAA0.json)
+    pub anim_alpha: Option<EmitterAnimDef>,
+    /// Texture sampler wrap mode U (0=Repeat, 1=MirrorRepeat, 2=ClampToEdge)
+    pub tex_wrap_u: u8,
+    /// Texture sampler wrap mode V
+    pub tex_wrap_v: u8,
+    /// BNSH shader index (from ShaderReferences.shader_index, -1 = none/default)
+    pub shader_index: i32,
+    /// BNSH custom shader index (from ShaderReferences.custom_shader_index)
+    pub custom_shader_index: u32,
+    /// User-defined shader indices (from ShaderReferences.user_shader_index1/2)
+    pub user_shader_indices: [i32; 2],
+    /// Content hash of this emitter's embedded Shader.bnsh (0 = use registry default).
+    pub shader_key: crate::shader_registry::ShaderKey,
+    /// Combiner configuration from EmitterData.json.
+    pub combiner: crate::shader_registry::CombinerState,
+    /// Soft-particle / fresnel / decal flags from EmitterData.json.
+    pub particle_color: crate::shader_registry::ParticleColorState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -319,6 +372,7 @@ impl AnimKey3v4k {
         let v1 = self.start_value;
         let v2 = v1 + self.start_diff;
         let v3 = v2 + self.end_diff;
+        if self.time2 <= 0.0 && self.time3 <= 0.0 { return v1; }
         if t <= 0.0 { return v1; }
         if t >= 1.0 { return v3; }
         if t < self.time2 {
@@ -335,6 +389,98 @@ impl AnimKey3v4k {
 
 impl Default for AnimKey3v4k {
     fn default() -> Self { Self { start_value: 1.0, start_diff: 0.0, end_diff: -1.0, time2: 0.5, time3: 0.8 } }
+}
+
+impl Default for EmitterDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            emit_type: EmitType::Point,
+            blend_type: BlendType::Add,
+            display_side: DisplaySide::Both,
+            emission_rate: 8.0,
+            emission_rate_random: 0.0,
+            initial_speed: 0.3,
+            speed_random: 0.3,
+            accel: Vec3::ZERO,
+            lifetime: 30.0,
+            lifetime_random: 0.0,
+            scale: 1.0,
+            scale_random: 0.0,
+            rotation_speed: 0.0,
+            rotation_init: 0.0,
+            rotation_init_random: 0.0,
+            color0: Vec::new(),
+            color1: Vec::new(),
+            alpha0: AnimKey3v4k::default(),
+            alpha1: AnimKey3v4k::default(),
+            alpha0_keys: vec![],
+            alpha1_keys: vec![],
+            scale_anim: AnimKey3v4k::default(),
+            textures: Vec::new(),
+            mesh_type: 0,
+            primitive_index: 0,
+            texture_index: u32::MAX,
+            tex_scale_uv: [1.0, 1.0],
+            tex_offset_uv: [0.0, 0.0],
+            tex_scroll_uv: [0.0, 0.0],
+            tex_pat_frame_count: 1,
+            tex_pat_frame_table: Vec::new(),
+            emitter_offset: Vec3::ZERO,
+            emitter_rotation: Vec3::ZERO,
+            emitter_scale: Vec3::ONE,
+            is_one_time: false,
+            emission_timing: 0,
+            emission_duration: 9999,
+            is_indirect_slot1: false,
+            distortion_strength: 0.0,
+            indirect_scroll_uv: [0.0, 0.0],
+            indirect_tex_scale_uv: [1.0, 1.0],
+            indirect_tex_offset_uv: [0.0, 0.0],
+            tex2_scale_uv: [1.0, 1.0],
+            tex2_offset_uv: [0.0, 0.0],
+            tex2_scroll_uv: [0.0, 0.0],
+            tex_wrap_u: 2,
+            tex_wrap_v: 2,
+            tex2_wrap_u: 2,
+            tex2_wrap_v: 2,
+            tex2_pat_frame_count: 1,
+            tex2_pat_frame_table: Vec::new(),
+            anim_translate: None,
+            anim_rotation: None,
+            anim_emit_scale: None,
+            anim_tex_scale: None,
+            anim_color0: None,
+            anim_color1: None,
+            anim_alpha: None,
+            shader_index: -1,
+            custom_shader_index: 0,
+            user_shader_indices: [-1, -1],
+            shader_key: 0,
+            combiner: crate::shader_registry::CombinerState::default(),
+            particle_color: crate::shader_registry::ParticleColorState::default(),
+        }
+    }
+}
+
+impl Default for TextureRes {
+    fn default() -> Self {
+        Self {
+            tex_name: String::new(),
+            width: 1,
+            height: 1,
+            ftx_format: 0x0B01,
+            ftx_data_offset: 0,
+            ftx_data_size: 0,
+            original_format: 0x0B01,
+            original_data_offset: 0,
+            original_data_size: 0,
+            wrap_mode: 0,
+            filter_mode: 1,
+            mipmap_count: 1,
+            channel_swizzle: 0,
+        }
+    }
 }
 
 /// Build the emitter's local TRS matrix: T * R * S.
@@ -433,9 +579,11 @@ pub struct PtclFile {
     pub primitives: Vec<PrimitiveData>,
     /// G3PR BFRES models (one per FMDL in the embedded BFRES)
     pub bfres_models: Vec<BfresModel>,
-    /// Raw shader binary from GRSN section
+    /// All unique embedded Shader.bnsh binaries from the dump.
+    pub shader_registry: crate::shader_registry::ShaderRegistry,
+    /// Legacy: first unique BNSH (compat — prefer shader_registry).
     pub shader_binary_1: Vec<u8>,
-    /// Raw shader binary from GRSC section
+    /// Legacy: second unique BNSH (compat — prefer shader_registry).
     pub shader_binary_2: Vec<u8>,
 }
 
@@ -589,19 +737,17 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
         let data_size         = r32(brti + 0x50);
         let comp_sel          = r32(brti + 0x58);
 
-        // mip0_ptr: ptrsAddr is at BRTI+0x70 (u64, self-relative pointer within the BNTX slice).
-        // The pointer is relative to bntx_base, not to the start of `data`.
-        // We read ptrsAddr, add bntx_base to get the absolute offset, then dereference
-        // to get the mip0 data address (also relative to bntx_base).
+        // mip0_ptr: ptrsAddr is at BRTI+0x70 (u64 pointer to mipmap offset array).
+        // The pointer is self-relative within the BNTX slice. We convert to an absolute
+        // offset in `data` by adding bntx_base, then dereference to get the pixel data
+        // offset (also relative to bntx_base).
         let pts_addr = {
             let lo = r32(brti + 0x70) as u64;
             let hi = r32(brti + 0x74) as u64;
             (hi << 32 | lo) as usize
         };
-        // pts_addr is relative to bntx_base — convert to absolute offset in data
         let pts_addr_abs = bntx_base.saturating_add(pts_addr);
         let mip0_ptr = if pts_addr > 0 && pts_addr_abs + 8 <= data.len() {
-            // Read the first mipmap offset from the pointer array (also relative to bntx_base)
             let lo = r32(pts_addr_abs) as u64;
             let hi = r32(pts_addr_abs + 4) as u64;
             let rel = (hi << 32 | lo) as usize;
@@ -616,6 +762,7 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
             // Fallback: sequential cursor into BRTD pixel data block
             brtd_data_start + brtd_cursor
         };
+        let raw_end = pixel_start + (data_size as usize).min(data.len().saturating_sub(pixel_start));
         let pixel_end = pixel_start + data_size as usize;
         // Always advance cursor regardless of whether this texture is valid,
         // so subsequent textures land at the correct offset.
@@ -630,10 +777,9 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
 
         let format_id = (fmt_raw & 0xFFFF) as u32;
         let fmt_type  = (format_id >> 8) as u8;
-        eprintln!("[FMT_INFO] '{}' fmt_type={:#04x}", tex_name, fmt_type);
 
         // Deswizzle using tegra_swizzle (replaces the old hand-rolled gob_addr loop).
-        let raw = &data[pixel_start..pixel_end];
+        let raw = &data[pixel_start..raw_end];
         let is_bc = matches!(fmt_type, 0x1A | 0x1B | 0x1C | 0x1D | 0x1E | 0x1F | 0x20);
         let (blk_w, blk_h) = if is_bc { (4u32, 4u32) } else { (1u32, 1u32) };
         let bpp: u32 = match fmt_type {
@@ -659,22 +805,38 @@ pub(crate) fn parse_bntx_named(data: &[u8]) -> (HashMap<String, (TextureRes, Vec
                 .unwrap_or_else(|| tegra_swizzle::block_height_mip0(
                     tegra_swizzle::div_round_up((height + blk_h - 1) / blk_h, 8),
                 ));
+            // Compute the expected surface size for the deswizzler.
+            // If raw data is smaller, pad with zeros so deswizzle succeeds
+            // (this handles textures whose data_size is smaller than the
+            // uncompressed surface, e.g. NX compressed or misreported sizes).
+            let surface_size = (width * height * bpp / (blk_w * blk_h)) as usize;
+            let padded = if raw.len() < surface_size {
+                let mut v = raw.to_vec();
+                v.resize(surface_size, 0);
+                v
+            } else {
+                raw.to_vec()
+            };
             tegra_swizzle::surface::deswizzle_surface(
                 width, height, 1,
-                raw,
+                &padded,
                 block_dim,
                 Some(block_height),
                 bpp,
                 1, 1,
             ).unwrap_or_else(|e| {
-                eprintln!("[BNTX] deswizzle error tex {brti_idx}: {e}");
+                if crate::fx_debug_enabled() {
+                    eprintln!("[BNTX] deswizzle error tex {brti_idx} ({}x{} fmt={:#04x} bpp={}): {e}", width, height, fmt_type, bpp);
+                }
                 raw.to_vec()
             })
         };
 
         let ftx_data_offset = texture_section.len() as u32;
         let pixel_len = pixel_bytes.len() as u32;
-        eprintln!("[TEX_INFO] {} fmt_type={:#04x} name='{}'", tex_name, fmt_type, tex_name);
+        if crate::fx_debug_enabled() {
+            eprintln!("[TEX_INFO] {} fmt_type={:#04x} name='{}'", tex_name, fmt_type, tex_name);
+        }
         texture_section.extend_from_slice(&pixel_bytes);
 
         let tex_res = TextureRes {
@@ -1207,11 +1369,28 @@ impl PtclFile {
                 tex2_scale_uv: [1.0, 1.0],
                 tex2_offset_uv: [0.0, 0.0],
                 tex2_scroll_uv: [0.0, 0.0],
+                tex_wrap_u: 2,
+                tex_wrap_v: 2,
+                tex2_wrap_u: 2,
+                tex2_wrap_v: 2,
                 tex2_pat_frame_count: 1,
                 tex2_pat_frame_table: Vec::new(),
+                anim_translate: None,
+                anim_rotation: None,
+                anim_emit_scale: None,
+                anim_tex_scale: None,
+                anim_color0: None,
+                anim_color1: None,
+                anim_alpha: None,
+                shader_index: -1,
+                custom_shader_index: 0,
+                user_shader_indices: [-1, -1],
+            shader_key: 0,
+            combiner: crate::shader_registry::CombinerState::default(),
+            particle_color: crate::shader_registry::ParticleColorState::default(),
             }],
         }).collect();
-        Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
+        Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_registry: Default::default(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
     }
 
     /// Build a synthetic PtclFile where each set is named and colored based on the effect name.
@@ -1269,12 +1448,29 @@ impl PtclFile {
                     tex2_scale_uv: [1.0, 1.0],
                     tex2_offset_uv: [0.0, 0.0],
                     tex2_scroll_uv: [0.0, 0.0],
+                    tex_wrap_u: 2,
+                    tex_wrap_v: 2,
+                    tex2_wrap_u: 2,
+                    tex2_wrap_v: 2,
                     tex2_pat_frame_count: 1,
                     tex2_pat_frame_table: Vec::new(),
+                    anim_translate: None,
+                    anim_rotation: None,
+                    anim_emit_scale: None,
+                    anim_tex_scale: None,
+                    anim_color0: None,
+                    anim_color1: None,
+                    anim_alpha: None,
+                    shader_index: -1,
+                    custom_shader_index: 0,
+                    user_shader_indices: [-1, -1],
+                    shader_key: 0,
+                    combiner: crate::shader_registry::CombinerState::default(),
+                    particle_color: crate::shader_registry::ParticleColorState::default(),
                 }],
             }
         }).collect();
-        Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
+        Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_registry: Default::default(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
     }
 
     /// Scan a directory (non-recursively) for `.nutexb` files and merge their textures
@@ -1335,7 +1531,70 @@ impl PtclFile {
         }
         count
     }
+}
 
+/// Infer the best grid layout (cols × rows) for a sprite-sheet texture with
+/// `frame_count` frames.  Uses the texture dimensions to pick the factorization
+/// that makes each frame closest to square.
+pub(crate) fn infer_grid_layout(width: u16, height: u16, frame_count: usize) -> (usize, usize) {
+    let tw = width as f64;
+    let th = height as f64;
+    if tw <= 0.0 || th <= 0.0 { return (1, frame_count); }
+    let fc = frame_count;
+    let mut best_score = f64::MAX;
+    let mut best_balance = usize::MAX;
+    let mut best_cols = 1;
+    let mut best_rows = fc;
+    for cols in 1..=fc {
+        if fc % cols != 0 { continue; }
+        let rows = fc / cols;
+        let aspect = (tw * rows as f64) / (th * cols as f64);
+        let score = aspect.log10().abs();
+        let balance = (cols as isize - rows as isize).unsigned_abs();
+        if score < best_score || (score == best_score && balance < best_balance) {
+            best_score = score;
+            best_balance = balance;
+            best_cols = cols;
+            best_rows = rows;
+        }
+    }
+    (best_cols, best_rows)
+}
+
+/// Fix `tex_scale_uv` on emitters where the converter produced values that
+/// don't form a valid grid for the sprite-sheet frame count.
+///
+/// Tests whether the current UV scale corresponds to a valid `cols × rows = fc`
+/// grid.  If the scale wraps to a different number of cells than there are
+/// frames, the converter almost certainly produced a wrong value (e.g.
+/// `[1.0, 1.0]` full-texture fallback, `[1.0, 1/fc]` vertical-strip guess, or
+/// `TexScrollAnim.uv_scale` for scrolling mode).  In that case the correct
+/// grid is inferred from the texture dimensions via `infer_grid_layout()`.
+///
+/// Also fixes `tex2_scale_uv` (slot-2 texture) using the same heuristic.
+pub fn fix_tex_scale_uv(emitter: &mut EmitterDef, bntx_textures: &[TextureRes]) {
+    let fix_one = |scale_uv: &mut [f32; 2], pat_frame_count: usize| {
+        let fc = pat_frame_count;
+        if fc <= 1 { return; }
+        let Some(tex) = bntx_textures.get(emitter.texture_index as usize) else { return; };
+        let cur_cols = (1.0 / scale_uv[0].max(0.001)).round() as usize;
+        let cur_rows = (1.0 / scale_uv[1].max(0.001)).round() as usize;
+        if cur_cols * cur_rows == fc && cur_cols > 0 && cur_rows > 0 { return; }
+        let (cols, rows) = infer_grid_layout(tex.width, tex.height, fc);
+        let su = 1.0 / cols as f32;
+        let sv = 1.0 / rows as f32;
+        if (scale_uv[0] - su).abs() > 0.001 || (scale_uv[1] - sv).abs() > 0.001 {
+            eprintln!("[FIX_UV] tex='{}' {}x{} fc={}: inferred {}×{} grid → tex_scale_uv=[{}, {}] (was [{}, {}], cur_grid={}×{})",
+                tex.tex_name, tex.width, tex.height, fc, cols, rows, su, sv,
+                scale_uv[0], scale_uv[1], cur_cols, cur_rows);
+            *scale_uv = [su, sv];
+        }
+    };
+    fix_one(&mut emitter.tex_scale_uv, emitter.tex_pat_frame_count);
+    fix_one(&mut emitter.tex2_scale_uv, emitter.tex2_pat_frame_count);
+}
+
+impl PtclFile {
     pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
         if data.len() < 32 {
             anyhow::bail!("PTCL data too short: {} bytes", data.len());
@@ -1418,7 +1677,7 @@ impl PtclFile {
         }
         eprintln!("[EC] Dump dir: {:?}", dump_dir);
 
-        let ptcl = crate::effect_converter::load_dump(&dump_dir)?;
+        let mut ptcl = crate::effect_converter::load_dump(&dump_dir)?;
         Ok(ptcl)
     }
 }
@@ -1568,6 +1827,8 @@ pub struct Particle {
     pub blend_type: BlendType,
     /// Per-particle UV offset (initialized to emitter.tex_offset_uv, advanced by tex_scroll_uv each frame)
     pub tex_offset: [f32; 2],
+    /// Deterministic random seed for reproducible randomness
+    pub seed: u64,
 }
 
 impl Particle {
@@ -1625,6 +1886,16 @@ fn rand_factor(seed: usize) -> f32 {
 }
 
 impl ParticleSystem {
+    /// True if the system is in its initial reset state (no frames simulated yet).
+    pub fn is_reset(&self) -> bool {
+        self.last_frame < 0.0
+    }
+
+    /// The last frame the system was stepped to.
+    pub fn last_frame(&self) -> f32 {
+        self.last_frame
+    }
+
     pub fn reset(&mut self) {
         self.particles.clear();
         self.active_emitters.clear();
@@ -1698,8 +1969,10 @@ impl ParticleSystem {
         };
         self.last_frame = target_frame;
 
-        if !self.active_emitters.is_empty() {
-            eprintln!("[STEP] frame={target_frame} dt={dt} active_emitters={} particles={}", self.active_emitters.len(), self.particles.len());
+        if crate::fx_debug_enabled() && !self.active_emitters.is_empty() {
+            let first_p = self.particles.first().map(|p| (p.position, p.velocity, p.rotation));
+            eprintln!("[STEP] frame={target_frame} dt={dt:.3} active={} particles={} {:?}",
+                self.active_emitters.len(), self.particles.len(), first_p);
         }
 
         // Skip emission when dt=0 (paused or duplicate step) — only integrate existing particles.
@@ -1728,15 +2001,11 @@ impl ParticleSystem {
             let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
 
             let c0 = sample_color_or_white(&emitter.color0, t);
-            // NintendoWare color combiner: Color0 × Color1 (multiplicative).
-            // Color1 modulates Color0 — when absent, use white (multiplicative identity).
             let c1 = if !emitter.color1.is_empty() {
                 sample_color_or_white(&emitter.color1, t)
             } else {
                 Vec4::ONE
             };
-            // Use full key tables for accurate alpha interpolation when available.
-            // Alpha combiner: Alpha0 × Alpha1 (multiplicative).
             let a0 = if !emitter.alpha0_keys.is_empty() {
                 sample_alpha(&emitter.alpha0_keys, t)
             } else {
@@ -1747,32 +2016,22 @@ impl ParticleSystem {
             } else {
                 emitter.alpha1.sample(t)
             };
-            // NintendoWare combiner: rgb = color0 * color1, alpha = alpha0 * alpha1
-            let rgb = Vec3::new(
-                (c0.x * c1.x).clamp(0.0, 1.0),
-                (c0.y * c1.y).clamp(0.0, 1.0),
-                (c0.z * c1.z).clamp(0.0, 1.0),
+            let combined = crate::combiner::combine_particle_rgba(
+                [c0.x, c0.y, c0.z, c0.w],
+                [c1.x, c1.y, c1.z, c1.w],
+                a0,
+                a1,
+                &emitter.combiner,
             );
-            let alpha = (a0 * a1).clamp(0.0, 1.0);
-            p.color = Vec4::new(rgb.x, rgb.y, rgb.z, alpha);
+            p.color = Vec4::new(combined[0], combined[1], combined[2], combined[3]);
             p.size = (emitter.scale * emitter.scale_anim.sample(t)).max(0.01);
-            // Log first 2 particles each step to verify animation
-            if pi < 2 {
-                let has_a0k = !emitter.alpha0_keys.is_empty();
-                let has_a1k = !emitter.alpha1_keys.is_empty();
-                let has_c0k = !emitter.color0.is_empty();
-                let has_c1k = !emitter.color1.is_empty();
-                let n_c0 = emitter.color0.len();
-                let n_c1 = emitter.color1.len();
-                let n_a0 = emitter.alpha0_keys.len();
-                let n_a1 = emitter.alpha1_keys.len();
-                let sa0 = emitter.scale_anim.start_value;
-                eprintln!("[SIM] pi={} a={:.1}/{:.0} t={:.4} p=({:.1},{:.1},{:.1}) sz={:.4} c=({:.3},{:.3},{:.3}) al={:.4} a0k={} a1k={} c0k={} c1k={} sa0={:.4} a0={:.4} a1={:.4}",
+            if pi < 2 && crate::fx_debug_enabled() {
+                let raw = emitter.scale * emitter.scale_anim.sample(t);
+                eprintln!("[SIM] pi={} a={:.1}/{:.0} t={:.4} p=({:.2},{:.2},{:.2}) vel=({:.2},{:.2},{:.2}) sz={:.4} e.sc={:.4} raw={:.4}",
                     pi, p.age, emitter.lifetime, t,
                     p.position.x, p.position.y, p.position.z,
-                    p.size, p.color.x, p.color.y, p.color.z, p.color.w,
-                    n_a0, n_a1, n_c0, n_c1,
-                    sa0, a0, a1);
+                    p.velocity.x, p.velocity.y, p.velocity.z,
+                    p.size, emitter.scale, raw);
             }
             // For sprite-sheet animations: cycle through frames based on normalized age.
             if emitter.tex_pat_frame_count > 1 {
@@ -1788,8 +2047,11 @@ impl ParticleSystem {
                 // tex_scale_uv gives the UV size of each frame (e.g., [1.0, 0.2] for a 1×5 vertical strip,
                 // [0.25, 0.25] for a 4×4 grid). Infer the grid columns from the scale.
                 let cols = (1.0 / emitter.tex_scale_uv[0].max(0.001)).round() as usize;
-                let col = frame % cols;
-                let row = frame / cols;
+                let rows = (1.0 / emitter.tex_scale_uv[1].max(0.001)).round() as usize;
+                let total_slots = (cols * rows).max(1);
+                let slot = frame % total_slots;
+                let col = slot % cols.max(1);
+                let row = slot / cols.max(1);
                 p.tex_offset[0] = emitter.tex_offset_uv[0] + col as f32 * emitter.tex_scale_uv[0];
                 p.tex_offset[1] = emitter.tex_offset_uv[1] + row as f32 * emitter.tex_scale_uv[1];
             } else {
@@ -1831,8 +2093,17 @@ impl ParticleSystem {
             // plus the emitter's own Trans offset (also in bone-local space)
             let origin = bone_mat.transform_point3(emitter.emitter_offset)
                 + bone_mat.transform_vector3(inst.offset);
-            eprintln!("[EMIT] bone='{}' origin={:?} scale={} lifetime={}", 
-                inst.bone_name, origin, emitter.scale, emitter.lifetime);
+            if crate::fx_debug_enabled() {
+                let bone_pos = bone_mat.col(3).truncate();
+                let is_fallback = !bone_matrices.contains_key(&inst.bone_name)
+                    && !bone_matrices.contains_key(&inst.bone_name.to_lowercase());
+                eprintln!("[EMIT] bone='{}' (fallback={}) bone_pos=({:.2},{:.2},{:.2}) offset=({:.2},{:.2},{:.2}) inst_offset=({:.2},{:.2},{:.2}) origin=({:.2},{:.2},{:.2})",
+                    inst.bone_name, is_fallback,
+                    bone_pos.x, bone_pos.y, bone_pos.z,
+                    emitter.emitter_offset.x, emitter.emitter_offset.y, emitter.emitter_offset.z,
+                    inst.offset.x, inst.offset.y, inst.offset.z,
+                    origin.x, origin.y, origin.z);
+            }
 
             let to_emit = if emitter.is_one_time {
                 // One-time burst: fire exactly once on the burst frame (Req 7.1–7.4)
@@ -1843,7 +2114,9 @@ impl ParticleSystem {
                     // Treat emission_rate <= 0.0 as 1.0 (Req 11.3 / 7.4)
                     let rate = if emitter.emission_rate <= 0.0 { 1.0 } else { emitter.emission_rate };
                     let n = rate.floor().max(1.0) as usize;
-                    eprintln!("[EMIT] one_time burst: f={f} timing={} rate={rate} spawning={n}", emitter.emission_timing);
+                    if crate::fx_debug_enabled() {
+                        eprintln!("[EMIT] one_time burst: f={f} timing={} rate={rate} spawning={n}", emitter.emission_timing);
+                    }
                     n
                 } else {
                     0
@@ -1858,7 +2131,7 @@ impl ParticleSystem {
                 let n = inst.emit_accum.floor() as usize;
                 inst.emit_accum -= n as f32;
                 let n = n.min(256);
-                if n > 0 { eprintln!("[EMIT] continuous: f={f} timing={} dur={} rate={rate} spawning={n}", emitter.emission_timing, emitter.emission_duration); }
+                if n > 0 && crate::fx_debug_enabled() { eprintln!("[EMIT] continuous: f={f} timing={} dur={} rate={rate} spawning={n}", emitter.emission_timing, emitter.emission_duration); }
                 n
             } else {
                 0
@@ -1869,13 +2142,14 @@ impl ParticleSystem {
             let c1_spawn = if !emitter.color1.is_empty() { sample_color(&emitter.color1, 0.0) } else { Vec4::ONE };
             let a0_spawn = if !emitter.alpha0_keys.is_empty() { sample_color_or_white(&emitter.alpha0_keys, 0.0).x } else { emitter.alpha0.sample(0.0) };
             let a1_spawn = if !emitter.alpha1_keys.is_empty() { sample_color_or_white(&emitter.alpha1_keys, 0.0).x } else { emitter.alpha1.sample(0.0) };
-            // NintendoWare combiner: rgb = color0 * color1, alpha = alpha0 * alpha1
-            let base_color = Vec4::new(
-                (c0_spawn.x * c1_spawn.x).clamp(0.0, 1.0),
-                (c0_spawn.y * c1_spawn.y).clamp(0.0, 1.0),
-                (c0_spawn.z * c1_spawn.z).clamp(0.0, 1.0),
-                (a0_spawn * a1_spawn).clamp(0.0, 1.0),
+            let combined = crate::combiner::combine_particle_rgba(
+                [c0_spawn.x, c0_spawn.y, c0_spawn.z, c0_spawn.w],
+                [c1_spawn.x, c1_spawn.y, c1_spawn.z, c1_spawn.w],
+                a0_spawn,
+                a1_spawn,
+                &emitter.combiner,
             );
+            let base_color = Vec4::new(combined[0], combined[1], combined[2], combined[3]);
 
             // Extract rotation matrix from emitter TRS for velocity direction rotation (Task 4.2)
             let emitter_rot_mat = Mat4::from_euler(glam::EulerRot::ZYX,
@@ -1910,6 +2184,24 @@ impl ParticleSystem {
                         let theta = i as f32 * std::f32::consts::TAU / to_emit.max(1) as f32;
                         let y = (seed * 0.37).sin() * 0.5;
                         Vec3::new(theta.cos(), y, theta.sin()).normalize()
+                    }
+                    EmitType::Box | EmitType::FillBox => {
+                        let rx = (seed * 0.13).sin() * 2.0 - 1.0;
+                        let ry = (seed * 0.17).sin() * 2.0 - 1.0;
+                        let rz = (seed * 0.19).sin() * 2.0 - 1.0;
+                        Vec3::new(rx, ry, rz).normalize_or_zero()
+                    }
+                    EmitType::Rectangle => {
+                        let rx = (seed * 0.13).sin() * 2.0 - 1.0;
+                        let rz = (seed * 0.19).sin() * 2.0 - 1.0;
+                        Vec3::new(rx, 0.0, rz).normalize_or_zero()
+                    }
+                    EmitType::Line | EmitType::LineSameDivide => {
+                        Vec3::new(0.0, 0.0, 1.0)
+                    }
+                    EmitType::Primitive => {
+                        // Forward direction along emitter Z axis
+                        Vec3::new((seed * 0.11).sin() * 0.5, (seed * 0.13).sin() * 0.5, 1.0).normalize_or_zero()
                     }
                     _ => {
                         let theta = seed * 2.399;
@@ -1946,6 +2238,7 @@ impl ParticleSystem {
                     texture_idx: 0,
                     blend_type: emitter.blend_type,
                     tex_offset: emitter.tex_offset_uv,
+                    seed: i as u64,
                 });
             }
         } } // end skip_emission guard
@@ -1961,7 +2254,9 @@ impl ParticleSystem {
             f < full_end
         });
 
-        eprintln!("[STEP_END] frame={target_frame} particles_after_retain={} active_emitters={}", self.particles.len(), self.active_emitters.len());
+        if crate::fx_debug_enabled() {
+            eprintln!("[STEP_END] frame={target_frame} particles_after_retain={} active_emitters={}", self.particles.len(), self.active_emitters.len());
+        }
     }
 }
 
@@ -2051,3 +2346,5 @@ impl TrailSystem {
         self.trails.retain(|t| t.active || !t.samples.is_empty());
     }
 }
+
+

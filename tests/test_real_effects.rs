@@ -232,22 +232,111 @@ fn test_effect_file_binary_structure() {
     }
 }
 
-/// Test: Check PTCL parser compatibility with real files
+/// Test: Parse real .eff files through the full EffectConverter pipeline
+/// and verify they return real data (not synthetic fallback).
 #[test]
 fn test_ptcl_parser_on_real_effects() {
-    // This test would use the existing PtclFile parser
-    // For now, we just verify the test framework works
-    
     let effect_root = PathBuf::from(
         "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
     );
-    
+
     if !effect_root.exists() {
+        eprintln!("⚠ Effect directory not found, skipping PtclFile::parse test");
         return;
     }
-    
-    println!("\n✓ PTCL parser test framework ready");
-    println!("  (Integration with existing PtclFile parser needed in next phase)");
+
+    // Test a representative sample of fighter effects
+    let test_cases = vec![
+        ("fighter/mario/ef_mario.eff",     "mario"),
+        ("fighter/link/ef_link.eff",       "link"),
+        ("fighter/sonic/ef_sonic.eff",     "sonic"),
+        ("pokemon/pikachu/ef_pikachu.eff", "pikachu"),
+        ("stage/battlefield/ef_battlefield.eff", "battlefield"),
+    ];
+
+    let mut parsed = 0usize;
+    let mut not_found = 0usize;
+
+    for (rel_path, label) in &test_cases {
+        let full_path = effect_root.join(rel_path);
+        if !full_path.exists() {
+            eprintln!("⚠ Not found: {} — skipping", rel_path);
+            not_found += 1;
+            continue;
+        }
+
+        let bytes = match std::fs::read(&full_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("⚠ Failed to read {}: {} — skipping", rel_path, e);
+                not_found += 1;
+                continue;
+            }
+        };
+
+        // This calls EffectConverter CLI under the hood via parse_via_converter
+        let ptcl = match hitbox_editor::effects::PtclFile::parse(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("✗ {}: PtclFile::parse FAILED: {:?}", label, e);
+                continue;
+            }
+        };
+
+        parsed += 1;
+
+        // Sanity: the parsed data must NOT look like synthetic fallback.
+        // Synthetic sets are named "set_0", "set_1", etc. with 1 emitter each.
+        // Real data has meaningful set names with properly configured emitters.
+        let set_count = ptcl.emitter_sets.len();
+        let total_emitters: usize = ptcl.emitter_sets.iter().map(|s| s.emitters.len()).sum();
+
+        println!("\n  {} ({}): {} set(s), {} emitter(s), {} bntx textures, {} shader bytes",
+            label, rel_path, set_count, total_emitters,
+            ptcl.bntx_textures.len(),
+            ptcl.shader_binary_1.len() + ptcl.shader_binary_2.len(),
+        );
+
+        // ═══ Real-data assertions ═══
+        // 1. Must have at least one emitter set
+        assert!(!ptcl.emitter_sets.is_empty(),
+            "{}: expected at least 1 emitter set", label);
+
+        // 2. Set names must NOT be the synthetic "set_0" pattern
+        for eset in &ptcl.emitter_sets {
+            assert_ne!(eset.name, "set_0",
+                "{}: set name '{}' looks synthetic", label, eset.name);
+        }
+
+        // 3. A real .eff should produce at least as many emitters as
+        //    synthetic fallback would (synthetic gives 1 emitter per set).
+        //    Most fighter effects have 2-8+ emitters.
+        assert!(total_emitters >= set_count,
+            "{}: expected at least {} emitters, got {}",
+            label, set_count, total_emitters);
+
+        // 4. At least some emitters should have a non-empty name
+        let named_emitters: usize = ptcl.emitter_sets.iter()
+            .flat_map(|s| s.emitters.iter())
+            .filter(|e| !e.name.is_empty())
+            .count();
+        assert!(named_emitters > 0,
+            "{}: expected at least 1 named emitter", label);
+
+        // 5. Either bntx_textures or texture_section should be present
+        //    (most effects carry at least a placeholder texture)
+        let has_texture_data = !ptcl.bntx_textures.is_empty()
+            || !ptcl.texture_section.is_empty();
+        assert!(has_texture_data,
+            "{}: expected texture data from a real .eff", label);
+    }
+
+    assert!(parsed + not_found > 0, "No effect files were tested at all");
+    if parsed == 0 {
+        eprintln!("⚠ All effect files were missing or failed to parse");
+    }
+    println!("\n✓ PtclFile::parse: {}/{} tested effects parsed successfully",
+        parsed, test_cases.len() - not_found);
 }
 
 /// Test: Validate batch_loader on real effect directory

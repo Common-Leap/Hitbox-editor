@@ -2,11 +2,13 @@
 /// Uses egui-wgpu paint callbacks to render directly into the egui surface.
 
 use std::path::Path;
+use std::sync::Mutex;
 use glam::{Mat4, Vec3, Vec4};
 use ssbh_wgpu::{
     CameraTransforms, ModelFolder, ModelRenderOptions, RenderModel, RenderSettings,
     SharedRenderData, SsbhRenderer,
 };
+use crate::particle_renderer::BnshDrawFilter;
 
 #[allow(dead_code)]
 pub struct Camera {
@@ -89,8 +91,8 @@ pub struct HitboxRenderState {
     last_frame: f32,
     last_anim_path: Option<std::path::PathBuf>,
     last_skel_path: Option<std::path::PathBuf>,
-    /// Particle + trail renderer
-    pub particle_renderer: Option<crate::particle_renderer::ParticleRenderer>,
+    /// Particle + trail renderer (locked for paint()-time draw recording)
+    pub particle_renderer: Mutex<Option<crate::particle_renderer::ParticleRenderer>>,
     /// Particle data to render this frame (set by update loop before prepare)
     pub pending_particles: Vec<crate::effects::Particle>,
     pub pending_trails: Vec<crate::effects::SwordTrail>,
@@ -98,7 +100,8 @@ pub struct HitboxRenderState {
     particle_target: Option<(wgpu::Texture, wgpu::TextureView)>,
     particle_target_size: (u32, u32),
     pub surface_format: wgpu::TextureFormat,
-    /// Cached queue for use in paint() (needed for per-draw uniform writes)
+    /// Cached GPU handles for use in paint()
+    pub wgpu_device: Option<wgpu::Device>,
     pub wgpu_queue: Option<wgpu::Queue>,
 }
 
@@ -140,12 +143,13 @@ impl HitboxRenderState {
             last_frame: -1.0,
             last_anim_path: None,
             last_skel_path: None,
-            particle_renderer: Some(crate::particle_renderer::ParticleRenderer::new(device, queue, surface_format)),
+            particle_renderer: Mutex::new(None),
             pending_particles: Vec::new(),
             pending_trails: Vec::new(),
             particle_target: None,
             particle_target_size: (0, 0),
             surface_format,
+            wgpu_device: Some(device.clone()),
             wgpu_queue: Some(queue.clone()),
         }
     }
@@ -180,14 +184,29 @@ impl HitboxRenderState {
         let mv_inv = transforms.model_view_matrix.inverse();
         let cam_right = mv_inv.col(0).truncate().normalize();
         let cam_up    = mv_inv.col(1).truncate().normalize();
+        static CAM_LOG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !CAM_LOG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) && crate::fx_debug_enabled() {
+            let pos = transforms.model_view_matrix.col(3).truncate();
+            eprintln!("[CAMERA] pos=({:.2},{:.2},{:.2}) rot=({:.3},{:.3},{:.3}) fov={:.1}° right={:.3},{:.3},{:.3} up={:.3},{:.3},{:.3}",
+                self.camera.translation.x, self.camera.translation.y, self.camera.translation.z,
+                self.camera.rotation.x, self.camera.rotation.y, self.camera.rotation.z,
+                self.camera.fov_y.to_degrees(),
+                cam_right.x, cam_right.y, cam_right.z,
+                cam_up.x, cam_up.y, cam_up.z);
+        }
         (transforms.mvp_matrix, cam_right, cam_up)
     }
 
     pub fn load_model(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, model_dir: &Path) {
         self.render_models.clear();
         self.weapon_skels.clear();
+        if !model_dir.exists() {
+            eprintln!("[MODEL] model directory does not exist: {:?}", model_dir);
+            return;
+        }
         let folder = ModelFolder::load_folder(model_dir);
         let render_model = RenderModel::from_folder(device, queue, &folder, &self.shared_data);
+        eprintln!("[MODEL] loaded from {:?}", model_dir);
         self.render_models.push(render_model);
 
         // Scan sibling directories for weapon skeletons.
@@ -290,15 +309,15 @@ impl HitboxRenderState {
     ) {
         eprintln!("[ParticleRenderer] Updating with BNSH shaders: {}", bnsh_shaders.summary());
         // Recreate the particle renderer with the new shaders
-        self.particle_renderer = Some(crate::particle_renderer::ParticleRenderer::new_with_shaders(
-            device, 
-            queue, 
+        *self.particle_renderer.lock().unwrap() = Some(crate::particle_renderer::ParticleRenderer::new(
+            device,
+            queue,
             self.surface_format,
-            Some(bnsh_shaders),
+            bnsh_shaders,
         ));
         
         // Set material texture bindings from shader reflection
-        if let Some(pr) = self.particle_renderer.as_mut() {
+        if let Some(pr) = self.particle_renderer.lock().unwrap().as_mut() {
             let bindings = bnsh_shaders.material_bindings.as_gpu_slots();
             pr.set_material_texture_bindings(bindings);
             eprintln!("[ParticleRenderer] Applied {} material texture bindings", 
@@ -312,18 +331,47 @@ impl HitboxRenderState {
         self.weapon_skels.len()
     }
 
+    /// Eagerly load skeleton data so bone_world_matrices() returns valid results
+    /// immediately, without waiting for the first prepare() call.
+    pub fn load_skeleton(&mut self, skel_path: &Path) {
+        self.cached_skel = ssbh_data::skel_data::SkelData::from_file(skel_path)
+            .ok()
+            .map(|s| (skel_path.to_path_buf(), s));
+    }
+
     /// Returns a map of bone name -> world matrix for the current frame.
     /// Includes both body skeleton bones and weapon skeleton bones.
     /// The offset from ACMD should be transformed by this matrix (not just added).
     pub fn bone_world_matrices(&self) -> std::collections::HashMap<String, glam::Mat4> {
+        self.bone_world_matrices_at(self.last_frame.max(0.0))
+    }
+
+    /// Like `bone_world_matrices()` but evaluates animation at an explicit `frame`
+    /// instead of `self.last_frame`. Use this from the simulation code so bone
+    /// positions are correct on the very first frame (no 1-frame delay).
+    pub fn bone_world_matrices_at(&self, frame: f32) -> std::collections::HashMap<String, glam::Mat4> {
             let mut result = std::collections::HashMap::new();
             let skel = match self.cached_skel.as_ref() {
                 Some((_, s)) => s,
-                None => return result,
+                None => {
+                    if crate::fx_debug_enabled() {
+                        eprintln!("[BONE] cached_skel is NONE — returning empty map");
+                    }
+                    return result;
+                },
             };
             let anim = self.cached_anim.as_ref().map(|(_, a)| a);
-            let frame = self.last_frame.max(0.0);
             let bone_count = skel.bones.len();
+            if crate::fx_debug_enabled() {
+                let names: Vec<&str> = skel.bones.iter().map(|b| b.name.as_str()).take(15).collect();
+                eprintln!("[BONE] {} bones, names={:?}, anim={}, frame={}",
+                    bone_count, names, anim.is_some(), frame);
+                // Log bone 0's bind-pose translation
+                if let Some(b0) = skel.bones.first() {
+                    let m = glam::Mat4::from_cols_array_2d(&b0.transform);
+                    eprintln!("[BONE] bone[0] '{}' bind_trans={:?}", b0.name, m.col(3).truncate());
+                }
+            }
 
             struct BoneState {
                 translation: glam::Vec3,
@@ -377,6 +425,13 @@ impl HitboxRenderState {
                 world[i] = parent * local;
                 result.insert(bone.name.clone(), world[i]);
                 result.insert(bone.name.to_lowercase(), world[i]);
+            }
+
+            if crate::fx_debug_enabled() {
+                for (name, mat) in &result {
+                    let pos = mat.col(3).truncate();
+                    eprintln!("[BONE_MAT] '{}' pos=({:.3},{:.3},{:.3})", name, pos.x, pos.y, pos.z);
+                }
             }
 
             // `top` = character root (feet), identity matrix
@@ -451,10 +506,9 @@ fn weapon_attach_bone(weapon_dir: &str) -> String {
     }
 }
 ///
-/// In `prepare`: runs all ssbh_wgpu internal passes (skinning, shadow, bloom, etc.)
-///               into intermediate textures via `begin_render_models`.
-/// In `paint`:   calls `end_render_models` on the egui surface render pass,
-///               which composites the final result onto the surface.
+/// In `prepare`: runs ssbh internal passes + uploads particle uniforms/geometry.
+/// In `finish_prepare`: renders Normal/Add particles to transparent offscreen target.
+/// In `paint`: composites offscreen particles, then draws Sub-blend directly on scene.
 pub struct ViewportCallback {
     pub width: f32,
     pub height: f32,
@@ -476,6 +530,15 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        // Set up uncaptured error handler to surface wgpu validation errors
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ERROR_HANDLER_SET: AtomicBool = AtomicBool::new(false);
+        if !ERROR_HANDLER_SET.swap(true, Ordering::Relaxed) {
+            device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+                eprintln!("[wgpu ERROR] {:?}", e);
+            }));
+        }
+
         if let Some(state) = resources.get_mut::<HitboxRenderState>() {
             let w = self.width as u32;
             let h = self.height as u32;
@@ -486,7 +549,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
 
             state.resize(device, w, h);
             state.update_camera(queue, self.width, self.height);
-            // Cache queue for use in paint()
+            state.wgpu_device = Some(device.clone());
             state.wgpu_queue = Some(queue.clone());
 
             // Re-skin when frame, animation, or skeleton changes
@@ -510,37 +573,67 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 &state.model_render_options,
             );
 
-            // Upload particle instance data for direct rendering in paint().
-            // Particles are drawn directly into the scene render pass so each emitter
-            // uses its correct blend mode against the actual scene content.
             if !self.particles.is_empty() || !self.trails.is_empty() {
                 let (view_proj, cam_right, cam_up) = state.camera_vectors();
-                if let Some(pr) = state.particle_renderer.as_mut() {
-                    pr.prepare_draw(
-                        device, queue,
-                        view_proj, cam_right, cam_up,
-                        &self.particles, &self.emitter_sets,
+                if let Some(pr) = state.particle_renderer.lock().unwrap().as_mut() {
+                    pr.prepare_particle_frame(
+                        device,
+                        queue,
+                        view_proj,
+                        cam_right,
+                        cam_up,
+                        &self.particles,
+                        &self.trails,
+                        &self.emitter_sets,
+                        &self.bfres_models,
                     );
-                    // Trails still use the offscreen target (additive, blit is fine)
-                    if !self.trails.is_empty() {
-                        if let Some((_, ref target_view)) = state.particle_target {
-                            { let _ = egui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("trail_target_clear"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: target_view, resolve_target: None,
-                                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                                    depth_slice: None,
-                                })],
-                                depth_stencil_attachment: None, multiview_mask: None, timestamp_writes: None, occlusion_query_set: None,
-                            }); }
-                            pr.render(device, queue, egui_encoder, target_view,
-                                view_proj, cam_right, cam_up,
-                                &[], &self.trails, &self.emitter_sets, &self.bfres_models);
-                            pr.prepare_composite(device, target_view);
-                        }
-                    }
                 }
             }
+        }
+        Vec::new()
+    }
+
+    fn finish_prepare(
+        &self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if self.particles.is_empty() && self.trails.is_empty() {
+            return Vec::new();
+        }
+        let Some(state) = resources.get_mut::<HitboxRenderState>() else {
+            return Vec::new();
+        };
+        let Some((_, particle_view)) = state.particle_target.as_ref() else {
+            return Vec::new();
+        };
+        let particle_view = particle_view.clone();
+        let mut pr_guard = state.particle_renderer.lock().unwrap();
+        let Some(pr) = pr_guard.as_mut() else {
+            return Vec::new();
+        };
+        pr.prepare_composite(device, &particle_view);
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("particle_offscreen"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &particle_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                multiview_mask: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            // Normal/Add/Screen/Multiply (+ trails) render to transparent offscreen target.
+            pr.draw_prepared_particles_filtered(&mut rpass, true, BnshDrawFilter::ExcludeSub);
         }
         Vec::new()
     }
@@ -551,23 +644,19 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
-        // Composite the rendered scene onto the egui surface via the overlay pass.
         if let Some(state) = resources.get::<HitboxRenderState>() {
             state.renderer.end_render_models(render_pass);
-            // Draw particles directly into the scene render pass (correct blend modes).
-            if !self.particles.is_empty() {
-                if let Some(pr) = state.particle_renderer.as_ref() {
-                    if let Some(q) = state.wgpu_queue.as_ref() {
-                        pr.draw_into_pass(render_pass, q, &self.emitter_sets);
-                    }
-                }
+            if self.particles.is_empty() && self.trails.is_empty() {
+                return;
             }
-            // Composite trails (offscreen additive blit).
-            if !self.trails.is_empty() {
-                if let Some(pr) = state.particle_renderer.as_ref() {
-                    pr.composite(render_pass);
-                }
-            }
+            let pr = state.particle_renderer.lock().unwrap();
+            let Some(pr) = pr.as_ref() else {
+                eprintln!("[VIEWPORT] paint skipped: particle_renderer not initialized (load .eff first)");
+                return;
+            };
+            pr.composite_editor_particles(render_pass);
+        } else {
+            eprintln!("[VIEWPORT] paint skipped: HitboxRenderState missing (load a model first)");
         }
     }
 }

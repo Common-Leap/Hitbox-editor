@@ -14,9 +14,10 @@ pub struct ShaderStageReflection {
     pub sampler_names: Vec<String>,
     /// Constant buffer names from the constant_buffer dictionary
     pub constant_buffer_names: Vec<String>,
-    /// Texture names (if present)
-    #[allow(dead_code)]
+    /// Texture/image names (if present)
     pub texture_names: Vec<String>,
+    /// Index into shader_slots for first image/texture
+    pub index_image: u32,
     /// Shader slot array: GPU binding slots for each resource
     pub shader_slots: Vec<u32>,
     /// Index into shader_slots for first sampler
@@ -31,7 +32,6 @@ pub struct ShaderStageReflection {
 
 impl ShaderStageReflection {
     /// Build the driver jump table for samplers: maps sampler name -> GPU binding slot
-    #[allow(dead_code)]
     pub fn build_sampler_jump_table(&self) -> HashMap<String, u32> {
         let mut table = HashMap::new();
         for (sampler_idx, sampler_name) in self.sampler_names.iter().enumerate() {
@@ -45,7 +45,6 @@ impl ShaderStageReflection {
     }
 
     /// Build the driver jump table for constant buffers
-    #[allow(dead_code)]
     pub fn build_cbuffer_jump_table(&self) -> HashMap<String, u32> {
         let mut table = HashMap::new();
         for (cbuf_idx, cbuf_name) in self.constant_buffer_names.iter().enumerate() {
@@ -57,11 +56,38 @@ impl ShaderStageReflection {
         }
         table
     }
+
+    /// Build the driver jump table for texture/image resources.
+    pub fn build_texture_jump_table(&self) -> HashMap<String, u32> {
+        let mut table = HashMap::new();
+        for (tex_idx, tex_name) in self.texture_names.iter().enumerate() {
+            let slot_idx = self.index_image as usize + tex_idx;
+            if slot_idx < self.shader_slots.len() {
+                let gpu_slot = self.shader_slots[slot_idx];
+                table.insert(tex_name.clone(), gpu_slot);
+            }
+        }
+        table
+    }
+
+    /// Ordered (texture_binding, sampler_binding) pairs for emitter slots 0/1/2.
+    ///
+    /// NVN reflection stores sampler GPU slots; on desktop the texture binding is
+    /// typically the sampler slot and the paired sampler is at slot+1 (same layout
+    /// used by material texture bind groups).
+    pub fn build_ordered_texture_pairs(&self) -> Vec<(u32, u32)> {
+        let mut entries: Vec<(String, u32)> = self.build_sampler_jump_table().into_iter().collect();
+        entries.sort_by_key(|(_, slot)| *slot);
+        entries
+            .into_iter()
+            .take(3)
+            .map(|(_, tex_binding)| (tex_binding, tex_binding.saturating_add(1)))
+            .collect()
+    }
 }
 
 /// Parse a dictionary from BNSH reflection data
 /// Dictionary format: magic "_DIC" + str_count + padding + strings
-#[allow(dead_code)]
 fn parse_dictionary(data: &[u8], ofs_entry: usize) -> Result<Vec<String>> {
     if ofs_entry == 0 {
         return Ok(Vec::new());
@@ -120,7 +146,6 @@ fn parse_dictionary(data: &[u8], ofs_entry: usize) -> Result<Vec<String>> {
 }
 
 /// Parse shader reflection data from a single stage (vertex, fragment, etc.)
-#[allow(dead_code)]
 pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Result<ShaderStageReflection> {
     if ofs_reflection == 0 {
         return Ok(ShaderStageReflection::default());
@@ -162,13 +187,13 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
 
     let ofs_sampler_dict = read_u8(ofs_reflection + 0x10) as usize;
     let ofs_cbuffer_dict = read_u8(ofs_reflection + 0x18) as usize;
-    let ofs_image_dict = read_u8(ofs_reflection + 0x20) as usize; // might be at different offset
+    let ofs_image_dict = read_u8(ofs_reflection + 0x20) as usize;
     let index_shader_output = read_u4(ofs_reflection + 0x28);
     let index_sampler = read_u4(ofs_reflection + 0x2C);
     let index_constant_buffer = read_u4(ofs_reflection + 0x30);
     let index_unordered_access_buffer = read_u4(ofs_reflection + 0x34);
     let ofs_shader_slot_array = read_u4(ofs_reflection + 0x38) as usize;
-    let _index_image = read_u4(ofs_reflection + 0x48);  // not used yet, may be needed for texture bindless resolution
+    let index_image = read_u4(ofs_reflection + 0x48);
 
     // Parse dictionaries
     let sampler_names = parse_dictionary(data, ofs_sampler_dict).unwrap_or_default();
@@ -210,12 +235,12 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
         index_constant_buffer,
         index_shader_output,
         index_unordered_access_buffer,
+        index_image,
     })
 }
 
 /// Resolve bindless texture samplers using the driver jump table
 /// Maps material texture names (from FMAT) to their GPU binding slots
-#[allow(dead_code)]
 pub fn resolve_material_sampler_bindings(
     stage_reflection: &ShaderStageReflection,
     material_textures: &[(String, u32)], // (texture_name, bntx_index)
@@ -254,9 +279,9 @@ mod tests {
 
     #[test]
     fn test_sampler_jump_table() {
-        let mut reflection = ShaderStageReflection {
+        let reflection = ShaderStageReflection {
             sampler_names: vec!["tex_diffuse".to_string(), "tex_normal".to_string()],
-            shader_slots: vec![0, 2, 5], // GPU slots
+            shader_slots: vec![0, 2, 5],
             index_sampler: 0,
             ..Default::default()
         };
@@ -264,6 +289,18 @@ mod tests {
         let table = reflection.build_sampler_jump_table();
         assert_eq!(table.get("tex_diffuse"), Some(&0));
         assert_eq!(table.get("tex_normal"), Some(&2));
+    }
+
+    #[test]
+    fn test_ordered_texture_pairs() {
+        let reflection = ShaderStageReflection {
+            sampler_names: vec!["a".into(), "b".into(), "c".into()],
+            shader_slots: vec![4, 8, 12],
+            index_sampler: 0,
+            ..Default::default()
+        };
+        let pairs = reflection.build_ordered_texture_pairs();
+        assert_eq!(pairs, vec![(4, 5), (8, 9), (12, 13)]);
     }
 
     #[test]

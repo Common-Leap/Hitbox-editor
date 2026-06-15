@@ -51,9 +51,11 @@ dirs = "5"
 sha2 = "0.10"
 bincode = "1"
 tempfile = "3"
+winit = "0.30"
 
 [dev-dependencies]
 proptest = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 wgsl_to_wgpu = "0.18"

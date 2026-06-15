@@ -635,7 +635,7 @@ impl HitboxEditorApp {
                         if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
                             let _ = eff_index.merge_from_file_with_ptcl(p, ptcl);
                         }
-                        self.state.pending_texture_upload = true;
+                        self.queue_bnsh_reload_from_ptcl("ef_common.eff");
                         found_sys = true;
                         break;
                     }
@@ -651,7 +651,9 @@ impl HitboxEditorApp {
                             if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
                                 let _ = eff_index.merge_from_file_with_ptcl(&p, ptcl);
                             }
-                            self.state.pending_texture_upload = true;
+                            self.queue_bnsh_reload_from_ptcl(
+                                p.file_name().and_then(|n| n.to_str()).unwrap_or("ef_sys.eff"),
+                            );
                             found_sys = true;
                             break;
                         }
@@ -738,10 +740,27 @@ impl HitboxEditorApp {
                                         tex2_scale_uv: [1.0, 1.0],
                                         tex2_offset_uv: [0.0, 0.0],
                                         tex2_scroll_uv: [0.0, 0.0],
+                                        tex_wrap_u: 2,
+                                        tex_wrap_v: 2,
+                                        tex2_wrap_u: 2,
+                                        tex2_wrap_v: 2,
                                         tex2_pat_frame_count: 1,
                                         tex2_pat_frame_table: Vec::new(),
+                                        anim_translate: None,
+                                        anim_rotation: None,
+                                        anim_emit_scale: None,
+                                        anim_tex_scale: None,
+                                        anim_color0: None,
+                                        anim_color1: None,
+                                        anim_alpha: None,
+                                        shader_index: -1,
+                                        custom_shader_index: 0,
+                                        user_shader_indices: [-1, -1],
+                                        shader_key: 0,
+                                        combiner: crate::shader_registry::CombinerState::default(),
+                                        particle_color: crate::shader_registry::ParticleColorState::default(),
                                     }],
-                                });
+                                 });
                             }
                         }
                     }
@@ -884,6 +903,28 @@ impl HitboxEditorApp {
         self.fetching_acmd = false;
     }
 
+    /// Decode BNSH shaders from the current PTCL and queue GPU renderer refresh.
+    fn queue_bnsh_reload_from_ptcl(&mut self, source_label: &str) {
+        let Some(ptcl) = &self.state.ptcl else { return };
+        match crate::particle_renderer_bnsh::BnshShaderSet::from_ptcl_file(ptcl, source_label) {
+            Ok(bnsh_set) => {
+                let audit = crate::shader_registry::audit_ptcl(ptcl);
+                eprintln!(
+                    "[BNSH] Queued reload ({} variants, {} emitter shader keys): {}",
+                    bnsh_set.all_shaders.len(),
+                    audit.distinct_shader_keys,
+                    bnsh_set.summary(),
+                );
+                self.state.bnsh_shaders = Some(bnsh_set);
+                self.state.pending_texture_upload = true;
+            }
+            Err(e) => {
+                eprintln!("[BNSH] Shader reload failed: {e}");
+                self.state.bnsh_shaders = None;
+            }
+        }
+    }
+
     /// Re-spawn all effects into the particle/trail systems using current eff_index + ptcl.
     /// Call this after loading a new .eff file or after fetching ACMD.
     fn load_eff_file(&mut self, path: &std::path::Path) {
@@ -928,36 +969,17 @@ impl HitboxEditorApp {
                                 }
                             }
                             eprintln!("[EFF] ptcl ok: {} emitter sets", ptcl.emitter_sets.len());
-                            
-                            // Try to decode BNSH shaders from the effect
-                            match crate::bnsh_shader_integration::decode_effect_shaders(&ptcl) {
-                                Ok(shader_pair) => {
-                                    let stats = crate::bnsh_shader_integration::get_shader_stats(&shader_pair);
-                                    let material_bindings = crate::bnsh_shader_integration::MaterialTextureBindings::from_ptcl_file(&ptcl);
-                                    let bnsh_set = crate::particle_renderer_bnsh::BnshShaderSet {
-                                        shader_pair,
-                                        material_bindings,
-                                        stats,
-                                        source_name: path.file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or("effect.eff")
-                                            .to_string(),
-                                    };
-                                    eprintln!("[BNSH] Loaded shaders: {}", bnsh_set.summary());
-                                    self.state.bnsh_shaders = Some(bnsh_set);
-                                }
-                                Err(e) => {
-                                    eprintln!("[BNSH] Failed to decode shaders: {}", e);
-                                    self.state.bnsh_shaders = None;
-                                }
-                            }
-                            
+
                             self.state.status = format!(
                                 "Loaded {} effects ({} emitter sets)",
                                 eff.handles.len(), ptcl.emitter_sets.len()
                             );
                             self.state.ptcl = Some(ptcl);
-                            self.state.pending_texture_upload = true;
+                            self.queue_bnsh_reload_from_ptcl(
+                                path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("effect.eff"),
+                            );
                         }
                         Err(e) => {
                             // VFXB (Switch format) — fall back to name-aware synthetic emitter sets
@@ -1823,6 +1845,11 @@ impl eframe::App for HitboxEditorApp {
 
                     if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
                         rs.load_model(device, queue, &model_dir);
+                        // Eagerly load skeleton so bone_world_matrices() returns valid
+                        // bone data from the very first particle simulation frame.
+                        if let Some(skel_path) = &self.current_skel_path {
+                            rs.load_skeleton(skel_path);
+                        }
                         let weapon_count = rs.weapon_skel_count();
                         if weapon_count > 0 {
                             self.state.status = format!("Model loaded ({} weapon skeleton{})",
@@ -1836,9 +1863,22 @@ impl eframe::App for HitboxEditorApp {
             }
         }
 
+        // Ensure viewport GPU state exists before shader/texture upload (eff may load before model).
+        if let Some(wgpu_state) = frame.wgpu_render_state() {
+            let mut renderer = wgpu_state.renderer.write();
+            if renderer.callback_resources.get::<HitboxRenderState>().is_none() {
+                let rs = HitboxRenderState::new(
+                    &wgpu_state.device,
+                    &wgpu_state.queue,
+                    wgpu_state.target_format,
+                );
+                renderer.callback_resources.insert(rs);
+            }
+        }
+
         // Extract shader reflection BEFORE consuming bnsh_shaders
         let saved_shader_reflection = self.state.bnsh_shaders.as_ref()
-            .and_then(|bnsh_set| bnsh_set.shader_pair.fragment.as_ref())
+            .and_then(|bnsh_set| bnsh_set.default_pair().fragment.as_ref())
             .and_then(|frag_shader| frag_shader.reflection.as_ref())
             .cloned();
 
@@ -1849,7 +1889,11 @@ impl eframe::App for HitboxEditorApp {
                 let mut renderer = wgpu_state.renderer.write();
                 if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
                     rs.update_particle_renderer_with_shaders(&wgpu_state.device, &wgpu_state.queue, bnsh_set);
-                    eprintln!("[BNSH] Applied BNSH shaders to particle renderer");
+                    let native = crate::fx_native_fs_enabled();
+                    eprintln!(
+                        "[BNSH] Applied BNSH pipeline to particle renderer (native_fs={native}, {} variants)",
+                        bnsh_set.all_shaders.len()
+                    );
                     // Clear it so we don't re-apply every frame
                     self.state.bnsh_shaders = None;
                 }
@@ -1863,9 +1907,12 @@ impl eframe::App for HitboxEditorApp {
                 if let Some(wgpu_state) = frame.wgpu_render_state() {
                     let mut renderer = wgpu_state.renderer.write();
                     if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
-                        if let Some(pr) = rs.particle_renderer.as_mut() {
+                        if let Some(pr) = rs.particle_renderer.lock().unwrap().as_mut() {
                             pr.upload_textures(&wgpu_state.device, &wgpu_state.queue, ptcl);
                             pr.upload_meshes(&wgpu_state.device, &wgpu_state.queue, ptcl);
+                            // BNSH pipelines are compiled lazily per emitter shader on first use
+                            // (see ensure_bnsh_pipeline). Eagerly warming every variant blocks the
+                            // UI for a long time on effects with many shaders (e.g. mario ≈ 92).
                             // Create material texture bind groups from BFRES models with shader-resolved slots
                             pr.create_material_texture_bind_groups(&wgpu_state.device, &wgpu_state.queue, ptcl, saved_shader_reflection.as_ref());
                             eprintln!("[TEX] texture upload and material texture bind group creation complete");
@@ -1908,21 +1955,29 @@ impl eframe::App for HitboxEditorApp {
 
         // Step particle simulation and trail recording each frame
         if self.state.ptcl.is_some() {
-            eprintln!("[SIM] ptcl present, active_emitters={} particles={} current_frame={}", 
-                self.state.particle_system.active_emitters.len(),
-                self.state.particle_system.particles.len(),
-                self.state.current_frame);
-            // Get bone matrices from the render state
-            let bone_matrices = if let Some(wgpu_state) = frame.wgpu_render_state() {
-                let renderer = wgpu_state.renderer.read();
-                renderer.callback_resources.get::<crate::renderer::HitboxRenderState>()
-                    .map(|rs| rs.bone_world_matrices())
-                    .unwrap_or_default()
-            } else {
-                std::collections::HashMap::new()
-            };
-
+            if hitbox_editor::fx_debug_enabled() {
+                eprintln!("[SIM] ptcl present, active_emitters={} particles={} current_frame={}", 
+                    self.state.particle_system.active_emitters.len(),
+                    self.state.particle_system.particles.len(),
+                    self.state.current_frame);
+            }
+            // Get bone matrices from the render state at a given simulation frame.
             let current_frame = self.state.current_frame;
+            let get_bone_matrices = |sim_frame: u32| -> std::collections::HashMap<String, glam::Mat4> {
+                if let Some(wgpu_state) = frame.wgpu_render_state() {
+                    let renderer = wgpu_state.renderer.read();
+                    renderer.callback_resources.get::<crate::renderer::HitboxRenderState>()
+                        .map(|rs| rs.bone_world_matrices_at(sim_frame as f32))
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                }
+            };
+            let bone_matrices = get_bone_matrices(current_frame);
+            if crate::fx_debug_enabled() {
+                eprintln!("[SIM] bone_matrices count: {} (frame={})", bone_matrices.len(), current_frame);
+            }
+
 
             // Detect scrub-frame change (including backwards scrub / loop)
             let frame_changed = current_frame != self.last_simulated_frame;
@@ -2045,6 +2100,95 @@ impl eframe::App for HitboxEditorApp {
                                 }
                             }
                             break; // only need to trigger once per frame step
+                        }
+                    }
+
+                    // When scrubbing forward (not playing), advance the simulation to match the
+                    // current frame. Three cases:
+                    // 1. is_reset(): active_start handler just did reset+respawn — step 0..=current_frame
+                    // 2. No emitters: first scrub, no prior playback — reset, respawn, then step
+                    // 3. Has emitters: system is alive — step delta (last_frame+1..=current_frame)
+                    if !self.state.playing && !scrub_backwards {
+                        if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
+                            let is_reset = self.state.particle_system.is_reset();
+                            let has_emitters = !self.state.particle_system.active_emitters.is_empty();
+                            if !is_reset && !has_emitters {
+                                // Case 2: no prior playback — full reset+respawn from frame 0
+                                let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
+                                    .iter()
+                                    .map(|n| (n.to_lowercase(), n.clone()))
+                                    .collect();
+                                self.state.particle_system.reset();
+                                self.active_effects.clear();
+                                self.particle_clock = 0.0;
+                                for ec2 in &self.state.effects.clone() {
+                                    if ec2.active_start > current_frame { continue; }
+                                    let name_lower2 = ec2.effect_name.to_lowercase();
+                                    let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
+                                        .cloned()
+                                        .unwrap_or_else(|| ec2.bone_name.clone());
+                                    let is_trail2 = ec2.follows_bone && (
+                                        name_lower2.contains("sword") || name_lower2.contains("trail") ||
+                                        name_lower2.contains("after") || name_lower2.contains("tex_") ||
+                                        name_lower2.contains("katana") || name_lower2.contains("blade") ||
+                                        name_lower2.contains("slash") || name_lower2.contains("arc") ||
+                                        name_lower2.contains("swing") || name_lower2.contains("energy") ||
+                                        name_lower2.contains("aura") || name_lower2.contains("ribbon")
+                                    );
+                                    if is_trail2 { continue; }
+                                    let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
+                                        .or_else(|| eff_index.handles.get(&name_lower2))
+                                        .copied()
+                                        .filter(|&idx| idx >= 0)
+                                        .map(|idx| idx as usize)
+                                        .filter(|&idx| idx < ptcl.emitter_sets.len());
+                                    self.state.particle_system.spawn_effect(
+                                        &ec2.effect_name, &canonical_bone2,
+                                        glam::Vec3::from(ec2.offset),
+                                        glam::Vec3::from(ec2.rotation),
+                                        0.0, 9999.0,
+                                        eff_index, ptcl,
+                                    );
+                                    if let Some(set_idx2) = set_idx_opt2 {
+                                        let max_lifetime2 = ptcl.emitter_sets[set_idx2].emitters.iter()
+                                            .map(|e| {
+                                                let emit_end = e.emission_timing as f32 + e.emission_duration as f32;
+                                                emit_end + e.lifetime + e.lifetime_random
+                                            })
+                                            .fold(0.0f32, f32::max)
+                                            .max(1.0);
+                                        self.active_effects.push(ActiveEffect {
+                                            anim_clock: 0.0,
+                                            max_lifetime: max_lifetime2,
+                                            emitter_set_idx: set_idx2,
+                                        });
+                                    }
+                                }
+                            }
+
+                            if is_reset || !has_emitters {
+                                // Full simulation from frame 0 (system was just reset or has no emitters).
+                                // Compute bone matrices at each step's frame so early-spawning particles
+                                // get the correct skeleton pose for their spawn frame.
+                                for f in 0..=current_frame {
+                                    let frame_bone_matrices = get_bone_matrices(f);
+                                    self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
+                                }
+                            } else {
+                                // Delta simulation: only step frames not yet simulated
+                                let last_sim = self.state.particle_system.last_frame() as u32;
+                                if current_frame > last_sim {
+                                    for f in (last_sim + 1)..=current_frame {
+                                        let frame_bone_matrices = get_bone_matrices(f);
+                                        self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
+                                    }
+                                }
+                            }
+
+                            self.particle_clock = current_frame as f32;
+                            for effect in &mut self.active_effects {
+                                effect.anim_clock = (current_frame as f32).min(effect.max_lifetime);
+                            }
                         }
                     }
                 }
@@ -2224,8 +2368,6 @@ impl eframe::App for HitboxEditorApp {
                 let n_trails = self.state.trail_system.trails.len();
                 if n_particles > 0 || n_trails > 0 {
                 }
-                let n_part = self.state.particle_system.particles.len();
-                eprintln!("[VIEWPORT] Creating ViewportCallback with {n_part} particles");
                 let callback = egui_wgpu::Callback::new_paint_callback(
                     rect,
                     ViewportCallback {

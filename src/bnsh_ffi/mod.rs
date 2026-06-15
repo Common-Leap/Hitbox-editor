@@ -82,15 +82,14 @@ impl BnshDecoder {
         // Get the CLI tool path
         let cli_path = Self::get_cli_path()?;
         
-        // Create temporary directory for I/O
-        let temp_dir = std::env::temp_dir().join(format!("bnsh-decoder-{}", 
-            std::process::id()));
-        std::fs::create_dir_all(&temp_dir)
+        // Create unique temporary directory for I/O (avoids races in parallel tests)
+        let temp_dir = tempfile::tempdir()
             .map_err(|e| anyhow!("Failed to create temp directory: {}", e))?;
+        let temp_dir_path = temp_dir.path().to_path_buf();
         
-        let input_path = temp_dir.join("shader.bnsh");
-        let output_spirv = temp_dir.join("shader.spv");
-        let output_json = temp_dir.join("shader.json");
+        let input_path = temp_dir_path.join("shader.bnsh");
+        let output_spirv = temp_dir_path.join("shader.spv");
+        let output_json = temp_dir_path.join("shader.json");
         
         // Write BNSH data to temporary file
         std::fs::write(&input_path, bnsh_data)
@@ -135,11 +134,7 @@ impl BnshDecoder {
         
         eprintln!("[BNSH] Decoded {} SPIR-V words", spirv_words.len());
         
-        // Clean up temp files
-        let _ = std::fs::remove_file(&input_path);
-        let _ = std::fs::remove_file(&output_spirv);
-        let _ = std::fs::remove_file(&output_json);
-        let _ = std::fs::remove_dir(&temp_dir);
+        // temp_dir is dropped here, automatically cleaning up
         
         Ok(spirv_words)
     }
@@ -156,15 +151,14 @@ impl BnshDecoder {
 
         let cli_path = Self::get_cli_path()?;
         
-        // Create temporary directory for I/O
-        let temp_dir = std::env::temp_dir().join(format!("bnsh-decoder-meta-{}", 
-            std::process::id()));
-        std::fs::create_dir_all(&temp_dir)
+        // Create unique temporary directory for I/O (avoids races in parallel tests)
+        let temp_dir = tempfile::tempdir()
             .map_err(|e| anyhow!("Failed to create temp directory: {}", e))?;
+        let temp_dir_path = temp_dir.path().to_path_buf();
         
-        let input_path = temp_dir.join("shader.bnsh");
-        let output_spirv = temp_dir.join("shader.spv");
-        let output_json = temp_dir.join("shader.json");
+        let input_path = temp_dir_path.join("shader.bnsh");
+        let output_spirv = temp_dir_path.join("shader.spv");
+        let output_json = temp_dir_path.join("shader.json");
         
         // Write BNSH data to temporary file
         std::fs::write(&input_path, bnsh_data)
@@ -200,11 +194,7 @@ impl BnshDecoder {
         
         let metadata = Self::parse_shader_metadata(&json_text)?;
         
-        // Clean up temp files
-        let _ = std::fs::remove_file(&input_path);
-        let _ = std::fs::remove_file(&output_spirv);
-        let _ = std::fs::remove_file(&output_json);
-        let _ = std::fs::remove_dir(&temp_dir);
+        // temp_dir is dropped here, automatically cleaning up
         
         Ok(BnshDecodeResult {
             spirv: spirv_words,
@@ -221,12 +211,14 @@ impl BnshDecoder {
     fn get_cli_path() -> Result<String> {
         eprintln!("[BNSH_FFI] Searching for bnsh-decoder CLI tool...");
         
-        // First, check the environment variable set by build.rs (embedded binary)
-        if let Ok(cli_path) = std::env::var("BNSH_DECODER_CLI") {
+        // First, check the compile-time embedded path from build.rs (set via cargo:rustc-env).
+        // NOTE: must use option_env!(), NOT std::env::var() — build.rs uses cargo:rustc-env
+        // which is compile-time only and invisible to the runtime process environment.
+        if let Some(cli_path) = option_env!("BNSH_DECODER_CLI") {
             eprintln!("[BNSH_FFI] ✓ Found BNSH_DECODER_CLI from build: {}", cli_path);
-            if std::path::Path::new(&cli_path).exists() {
+            if std::path::Path::new(cli_path).exists() {
                 eprintln!("[BNSH_FFI] ✓ Embedded bnsh-decoder CLI ready: {}", cli_path);
-                return Ok(cli_path);
+                return Ok(cli_path.to_string());
             } else {
                 eprintln!("[BNSH_FFI] ✗ BNSH_DECODER_CLI path does not exist: {}", cli_path);
                 eprintln!("[BNSH_FFI]   (This may indicate a build issue - was CMake available?)");
@@ -340,9 +332,10 @@ impl BnshDecoder {
             decode_result.stage = ShaderStage::Vertex;
         }
         
-        // Strip capabilities that wgpu/naga rejects (e.g. StorageImageReadWithoutFormat)
-        // This patches the SPIR-V words in-place before converting to bytes.
-        Self::strip_unsupported_spirv_caps(&mut decode_result.spirv);
+        // Note: naga's SPIR-V frontend handles capabilities with strict_capabilities: false.
+        // We do NOT strip OpCapability instructions here — replacing them with OpNop would
+        // cause naga 29.0.1 to error with UnsupportedInstruction(Empty, Nop) since it
+        // doesn't implement Op::Nop.
 
         // Convert SPIR-V u32 words to u8 bytes for wgpu (little-endian)
         let spirv_bytes: Vec<u8> = decode_result.spirv.iter()
@@ -365,45 +358,6 @@ impl BnshDecoder {
     /// Backwards-compatible method for normal decode (used in tests)
     pub fn decode_wgsl(bnsh_data: &[u8]) -> Result<WgslDecodeResult> {
         Self::decode_wgsl_with_index(bnsh_data, 0)
-    }
-
-    /// Strip SPIR-V capabilities that wgpu/naga rejects (e.g. StorageImageReadWithoutFormat).
-    /// Patches the SPIR-V word stream in-place.
-    ///
-    /// Unsupported capability values (by ID):
-    ///   - StorageImageReadWithoutFormat = 55
-    ///
-    /// Each OpCapability instruction is 2 words: (word_count=2 | opcode=17) + capability_value.
-    /// We zero out both words to safely skip the instruction while keeping word alignment.
-    fn strip_unsupported_spirv_caps(spirv: &mut Vec<u32>) {
-        const UNSUPPORTED_CAPS: &[u32] = &[55]; // StorageImageReadWithoutFormat
-        const OP_CAPABILITY: u32 = 17;
-
-        let mut i = 5; // skip SPIR-V header (5 words: magic, version, generator, bound, schema)
-        let mut stripped = 0;
-
-        while i < spirv.len() {
-            let word = spirv[i];
-            let word_count = (word >> 16) as usize;
-            let opcode = (word & 0xFFFF) as u32;
-            if word_count == 0 {
-                break; // malformed
-            }
-            if opcode == OP_CAPABILITY && word_count == 2 && i + 1 < spirv.len() {
-                let cap_value = spirv[i + 1];
-                if UNSUPPORTED_CAPS.contains(&cap_value) {
-                    // Replace with valid OpNop instructions (word_count=1, opcode=0).
-                    // Zeroing would create word_count=0 which Naga rejects.
-                    spirv[i] = 0x00010000;     // OpNop
-                    spirv[i + 1] = 0x00010000; // OpNop
-                    stripped += 1;
-                }
-            }
-            i += word_count;
-        }
-        if stripped > 0 {
-            eprintln!("[BNSH] Stripped {} unsupported SPIR-V capabilities", stripped);
-        }
     }
 
 }

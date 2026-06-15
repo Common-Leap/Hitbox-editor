@@ -26,9 +26,7 @@ fn process_shader(src_path: &str, out_path: &str) {
 }
 
 fn main() {
-    process_shader("src/particle.wgsl", "src/particle_shader.rs");
     process_shader("src/trail.wgsl",    "src/trail_shader.rs");
-    process_shader("src/mesh.wgsl",     "src/mesh_shader.rs");
 
     // Build the bnsh-decoder CLI tool from git submodule
     build_bnsh_decoder_cli();
@@ -38,6 +36,17 @@ fn main() {
 
     // Build the EffectConverter CLI from git submodule
     build_effect_converter();
+}
+
+fn cmake_build_command(build_dir: &std::path::Path) -> std::process::Command {
+    let tmp_dir = build_dir.join("compiler-tmp");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let mut cmd = std::process::Command::new("cmake");
+    // gcc/clang write large .s files to TMPDIR; /tmp is often a small tmpfs.
+    cmd.env("TMPDIR", &tmp_dir);
+    cmd.env("TEMP", &tmp_dir);
+    cmd.env("TMP", &tmp_dir);
+    cmd
 }
 
 fn build_effect_converter() {
@@ -163,7 +172,7 @@ fn build_bnsh_decoder_cli() {
     
     // Build bnsh-decoder CLI
     println!("cargo:warning=Building bnsh-decoder CLI...");
-    let build_status = Command::new("cmake")
+    let build_status = cmake_build_command(&build_dir)
         .arg("--build").arg(&build_dir)
         .arg("--config").arg("Release")
         .status()
@@ -272,7 +281,7 @@ fn build_spirv_cross_library() {
     
     // Build spirv-cross
     println!("cargo:warning=Building spirv-cross CLI...");
-    let build_status = Command::new("cmake")
+    let build_status = cmake_build_command(&build_dir)
         .arg("--build").arg(&build_dir)
         .arg("--config").arg("Release")
         .status()

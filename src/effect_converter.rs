@@ -13,6 +13,7 @@ use crate::effects::{
     AnimKey3v4k, BlendType, BfresModel, ColorKey, DisplaySide, EmitType, EmitterDef, EmitterSet,
     PrimitiveData, PtclFile, TextureRes,
 };
+use crate::shader_registry::{CombinerState, ParticleColorState, ShaderRegistry, audit_ptcl};
 
 // ── CLI discovery ─────────────────────────────────────────────────────────────
 
@@ -111,8 +112,7 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
     let mut texture_section: Vec<u8> = Vec::new();
     let mut primitives: Vec<PrimitiveData> = Vec::new();
     let mut bfres_models: Vec<BfresModel> = Vec::new();
-    let mut shader_binary_1: Vec<u8> = Vec::new();
-    let mut shader_binary_2: Vec<u8> = Vec::new();
+    let mut shader_registry = ShaderRegistry::default();
 
     for (set_idx, set_name) in eset_info.order.iter().enumerate() {
         let set_dir = dump_dir.join(set_name);
@@ -140,22 +140,42 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
 
             let data_path = emtr_dir.join("EmitterData.json");
             let emitter_data: EmitterDataJson = if data_path.exists() {
-                match std::fs::read_to_string(&data_path) {
-                    Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-                    Err(_) => EmitterDataJson::default(),
+                let text = std::fs::read_to_string(&data_path).unwrap_or_default();
+                match serde_json::from_str::<EmitterDataJson>(&text) {
+                    Ok(ed) => ed,
+                    Err(e) => {
+                        eprintln!("[EC_WARN] parse error {set_name}/{emtr_name}: {e}");
+                        EmitterDataJson::default()
+                    }
                 }
             } else {
                 EmitterDataJson::default()
             };
+
+            // Read EA*.json sidecar animation files (EASL, EAC0/1, EAET, EAER, EAES, EAA0)
+            let ea_anims: Vec<(String, EmitterAnimJson)> = {
+                let mut anims = Vec::new();
+                for name in &["EASL", "EAC0", "EAC1", "EAET", "EAER", "EAES", "EAA0"] {
+                    let path = emtr_dir.join(format!("{name}.json"));
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        if let Ok(anim) = serde_json::from_str::<EmitterAnimJson>(&text) {
+                            anims.push((name.to_string(), anim));
+                        }
+                    }
+                }
+                anims
+            };
+            if !ea_anims.is_empty() {
+                let names: Vec<&str> = ea_anims.iter().map(|(n, _)| n.as_str()).collect();
+                eprintln!("[EA] {set_name}/{emtr_name}: {}", names.join(", "));
+            }
+
+            let mut emitter_shader_key = 0u64;
             let shader_path = emtr_dir.join("Shader.bnsh");
             if shader_path.exists() {
                 let bytes = std::fs::read(&shader_path).unwrap_or_default();
                 if !bytes.is_empty() {
-                    if shader_binary_1.is_empty() {
-                        shader_binary_1 = bytes;
-                    } else if shader_binary_2.is_empty() {
-                        shader_binary_2 = bytes;
-                    }
+                    emitter_shader_key = shader_registry.register(bytes);
                 }
             }
 
@@ -221,6 +241,20 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
             }
 
             let mut emitter = convert_emitter_data(&emitter_data, emtr_name, &bntx_textures, &tex_list);
+            emitter.shader_key = emitter_shader_key;
+            if emitter.shader_index >= 0 {
+                shader_registry.register_library_index(emitter.shader_index, emitter_shader_key);
+            }
+
+            // Attach EA*.json animation data
+            let anim_map: std::collections::HashMap<&str, &EmitterAnimJson> = ea_anims.iter().map(|(n, a)| (n.as_str(), a)).collect();
+            if let Some(a) = anim_map.get("EASL") { emitter.anim_tex_scale = Some(emit_anim_from_json(a)); }
+            if let Some(a) = anim_map.get("EAC0") { emitter.anim_color0 = Some(emit_anim_from_json(a)); }
+            if let Some(a) = anim_map.get("EAC1") { emitter.anim_color1 = Some(emit_anim_from_json(a)); }
+            if let Some(a) = anim_map.get("EAET") { emitter.anim_translate = Some(emit_anim_from_json(a)); }
+            if let Some(a) = anim_map.get("EAER") { emitter.anim_rotation = Some(emit_anim_from_json(a)); }
+            if let Some(a) = anim_map.get("EAES") { emitter.anim_emit_scale = Some(emit_anim_from_json(a)); }
+            if let Some(a) = anim_map.get("EAA0") { emitter.anim_alpha = Some(emit_anim_from_json(a)); }
 
             // If this emitter has BFRES models, use mesh_type=2 (BFRES model rendering)
             // The converter always exports models as .bfres files, not as raw PRMA primitives.
@@ -247,16 +281,21 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
     // The per-emitter dump folders already contain the extracted textures
     // (.bntx), shaders (.bnsh), and models (.bfres) we need.
 
-    Ok(PtclFile {
+    let (shader_binary_1, shader_binary_2) = shader_registry.legacy_pair();
+
+    let ptcl = PtclFile {
         emitter_sets,
         texture_section,
         texture_section_offset: 0,
         bntx_textures,
         primitives,
         bfres_models,
+        shader_registry,
         shader_binary_1,
         shader_binary_2,
-    })
+    };
+    audit_ptcl(&ptcl);
+    Ok(ptcl)
 }
 
 // ── JSON schema (subset of EmitterData fields we care about) ──────────────────
@@ -276,12 +315,12 @@ struct EmitterOrder {
     order: Vec<String>,
 }
 
-/// Minimal deserialization of EmitterData.json — only the fields needed to
-/// populate our own `EmitterDef`.  Extra fields get silently ignored.
+/// Deserialization of EmitterData.json.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmitterDataJson {
     flag: u32,
+    random_seed: u32,
     name: Option<String>,
     namev40: Option<String>,
     emitter_static: Option<EmitterStaticJson>,
@@ -292,28 +331,259 @@ struct EmitterDataJson {
     particle_data: Option<ParticleDataJson>,
     particle_velocity: Option<ParticleVelocityJson>,
     particle_scale: Option<ParticleScaleJson>,
+    child_inheritance: Option<ChildInheritanceJson>,
+    combiner: Option<CombinerJson>,
+    shader_references: Option<ShaderReferencesJson>,
+    action: Option<ActionJson>,
+    particle_color: Option<ParticleColorJson>,
+    particle_fluctuation: Option<ParticleFluctuationJson>,
+    sampler0: Option<SamplerJson>,
+    sampler1: Option<SamplerJson>,
+    sampler2: Option<SamplerJson>,
+    texture_anim0: Option<TextureAnimJson>,
+    texture_anim1: Option<TextureAnimJson>,
+    texture_anim2: Option<TextureAnimJson>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct ChildInheritanceJson {
+    velocity: u32,
+    scale: u32,
+    rotate: u32,
+    color_scale: u32,
+    color0: u32,
+    color1: u32,
+    alpha0: u32,
+    alpha1: u32,
+    draw_path: u32,
+    pre_draw: u32,
+    alpha0_each_frame: u32,
+    alpha1_each_frame: u32,
+    enable_emitter_particle: u32,
+    unknown_v40: u32,
+    velocity_rate: f32,
+    scale_rate: f32,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct CombinerJson {
+    color_combiner_process: u32,
+    alpha_combiner_process: u32,
+    texture1_color_blend: u32,
+    texture2_color_blend: u32,
+    primitive_color_blend: u32,
+    texture1_alpha_blend: u32,
+    texture2_alpha_blend: u32,
+    primitive_alpha_blend: u32,
+    tex_color0_input_type: u32,
+    tex_color1_input_type: u32,
+    tex_color2_input_type: u32,
+    tex_alpha0_input_type: u32,
+    tex_alpha1_input_type: u32,
+    tex_alpha2_input_type: u32,
+    primitive_color_input_type: u32,
+    primitive_alpha_input_type: u32,
+    shader_type: u32,
+    apply_alpha: u32,
+    is_distortion_by_camera_distance: u32,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct ShaderReferencesJson {
+    #[serde(rename = "Type")]
+    type_: u32,
+    shader_index: i32,
+    compute_shader_index: i32,
+    user_shader_index1: i32,
+    user_shader_index2: i32,
+    custom_shader_index: u32,
+    custom_shader_flag: u32,
+    custom_shader_switch: u32,
+    extra_shader_index2: i32,
+    user_shader_define1: String,
+    user_shader_define2: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct ActionJson {
+    action_index: u32,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct ParticleColorJson {
+    is_soft_particle: u32,
+    is_fresnel_alpha: u32,
+    is_near_dist_alpha: u32,
+    is_far_dist_alpha: u32,
+    is_decal: u32,
+    #[serde(default)]
+    color0_type: serde_json::Value,
+    #[serde(default)]
+    color1_type: serde_json::Value,
+    #[serde(default)]
+    alpha0_type: serde_json::Value,
+    alpha1_type: String,
+    color0_r: f32,
+    color0_g: f32,
+    color0_b: f32,
+    alpha0: f32,
+    color1_r: f32,
+    color1_g: f32,
+    color1_b: f32,
+    alpha1: f32,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct ParticleFluctuationJson {
+    is_apply_alpha: u32,
+    is_applay_scale: u32,
+    is_applay_scale_y: u32,
+    is_wave_type: u32,
+    is_phase_random_x: u32,
+    is_phase_random_y: u32,
+}
+
+/// Note: JSON uses `TextureID` (not `TextureId`) — alias handles it.
+/// Same for `MaxLOD` / `LODBias`.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct SamplerJson {
+    #[serde(alias = "TextureID")]
+    texture_id: u64,
+    wrap_u: String,
+    wrap_v: String,
+    filter: u32,
+    is_sphere_map: u32,
+    #[serde(alias = "MaxLOD")]
+    max_lod: f32,
+    #[serde(alias = "LODBias")]
+    lod_bias: f32,
+    mip_level_limit: u32,
+    is_density_fixed_u: u32,
+    is_density_fixed_v: u32,
+    is_square_rgb: u32,
+    is_on_another_binary: u32,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct TextureAnimJson {
+    pattern_anim_type: u32,
+    is_scroll: bool,
+    is_rotate: bool,
+    is_scale: bool,
+    repeat: u32,
+    inv_rand_u: u32,
+    inv_rand_v: u32,
+    is_pat_anim_loop_random: u32,
+    uv_channel: u32,
+    is_crossfade: u32,
+}
+
+/// Animation keyframe data loaded from EA*.json sidecar files (EASL.json,
+/// EAC0.json, EAET.json, EAER.json, EAES.json, EAA0.json).
+/// Each file contains a single animation track for the emitter.
+#[derive(serde::Deserialize, Default, Clone)]
+#[serde(rename_all = "PascalCase")]
+struct EmitterAnimJson {
+    enable: bool,
+    #[serde(rename = "Loop")]
+    loop_: bool,
+    #[serde(default)]
+    randomize_start_frame: bool,
+    #[serde(default)]
+    loop_count: u32,
+    key_frames: Vec<AnimKeyJson>,
 }
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmitterStaticJson {
+    // Flags
+    flags1: u32,
+    flags2: u32,
+    flags3: u32,
+    flags4: u32,
+    // Key counts
     num_color0_keys: u32,
     num_alpha0_keys: u32,
     num_color1_keys: u32,
     num_alpha1_keys: u32,
     num_scale_keys: u32,
+    num_param_keys: u32,
+    num_anim2_keys: u32,
+    num_anim3_keys: u32,
+    num_anim4_keys: u32,
+    num_anim5_keys: u32,
+    // Animation tables
     color0: Option<AnimKeyTableJson>,
     alpha0: Option<AnimKeyTableJson>,
     color1: Option<AnimKeyTableJson>,
     alpha1: Option<AnimKeyTableJson>,
     scale_anim: Option<AnimKeyTableJson>,
+    param_anim: Option<AnimKeyTableJson>,
+    // Texture pattern/scroll anims
     tex_pattern_anim0: Option<TexPatAnimJson>,
     tex_pattern_anim1: Option<TexPatAnimJson>,
     tex_pattern_anim2: Option<TexPatAnimJson>,
     tex_scroll_anim0: Option<TexScrollAnimJson>,
     tex_scroll_anim1: Option<TexScrollAnimJson>,
     tex_scroll_anim2: Option<TexScrollAnimJson>,
+    // Loop rates & random
+    color0_loop_rate: f32,
+    alpha0_loop_rate: f32,
+    color1_loop_rate: f32,
+    alpha1_loop_rate: f32,
+    scale_loop_rate: f32,
+    color0_loop_random: f32,
+    alpha0_loop_random: f32,
+    color1_loop_random: f32,
+    alpha1_loop_random: f32,
+    scale_loop_random: f32,
+    // Air resistance
+    air_res: f32,
+    // Center/Offset/Amplitude/Cycle (wave parameters)
+    center_x: f32,
+    center_y: f32,
+    offset: f32,
+    amplitude_x: f32,
+    amplitude_y: f32,
+    cycle_x: f32,
+    cycle_y: f32,
+    phase_rnd_x: f32,
+    phase_rnd_y: f32,
+    phase_init_x: f32,
+    phase_init_y: f32,
+    coefficient0: f32,
+    coefficient1: f32,
+    // Color scale
+    color_scale: f32,
+    // Soft/Fresnel/Near/Far/Decal alpha params
+    soft_edge_param1: f32,
+    soft_edge_param2: f32,
+    fresnel_alpha_param1: f32,
+    fresnel_alpha_param2: f32,
+    near_dist_alpha_param1: f32,
+    near_dist_alpha_param2: f32,
+    far_dist_alpha_param1: f32,
+    far_dist_alpha_param2: f32,
+    decal_param1: f32,
+    decal_param2: f32,
+    alpha_threshold: f32,
+    add_vel_to_scale: f32,
+    soft_partcile_dist: f32,
+    soft_particle_volume: f32,
+    // Scale limit
+    scale_limit_dist_near: f32,
+    scale_limit_dist_far: f32,
     // Rotation
+    rotate_regist: f32,
     rotate_add_x: f32,
     rotate_add_y: f32,
     rotate_add_z: f32,
@@ -339,7 +609,7 @@ struct AnimKeyTableJson {
     keys: Vec<AnimKeyJson>,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, Clone)]
 #[serde(rename_all = "PascalCase")]
 struct AnimKeyJson {
     x: f32,
@@ -351,12 +621,35 @@ struct AnimKeyJson {
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct EmitterInfoJson {
+    is_particle_draw: u32,
+    sort_type: u32,
+    calc_type: u32,
+    follow_type: u32,
+    is_fade_emit: u32,
+    is_fade_alpha_fade: u32,
+    is_scale_fade: u32,
+    random_seed_type: u32,
+    is_update_matrix_by_emit: u32,
+    test_always: u32,
+    interpolate_emission_amount: u32,
+    is_alpha_fade_in: u32,
+    is_scale_fade_in: u32,
+    random_seed: u32,
+    draw_path: u32,
+    alpha_fade_time: u32,
+    fade_in_time: u32,
     trans_x: f32,
     trans_y: f32,
     trans_z: f32,
+    trans_rand_x: f32,
+    trans_rand_y: f32,
+    trans_rand_z: f32,
     rotate_x: f32,
     rotate_y: f32,
     rotate_z: f32,
+    rotate_rand_x: f32,
+    rotate_rand_y: f32,
+    rotate_rand_z: f32,
     scale_x: f32,
     scale_y: f32,
     scale_z: f32,
@@ -368,6 +661,9 @@ struct EmitterInfoJson {
     color1_g: f32,
     color1_b: f32,
     color1_a: f32,
+    emission_range_near: f32,
+    emission_range_far: f32,
+    emission_ratio_far: f32,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]
@@ -375,52 +671,159 @@ struct EmitterInfoJson {
 struct EmissionJson {
     #[serde(rename = "isOneTime")]
     is_one_time: bool,
+    is_world_gravity: bool,
+    is_emit_dist_enabled: bool,
+    is_world_oriented_velocity: bool,
     start: u32,
     timing: u32,
     duration: u32,
     rate: f32,
     rate_random: f32,
+    interval: u32,
+    interval_random: f32,
+    position_random: f32,
+    gravity_scale: f32,
+    gravity_dir_x: f32,
+    gravity_dir_y: f32,
+    gravity_dir_z: f32,
+    emitter_dist_unit: f32,
+    emitter_dist_min: f32,
+    emitter_dist_max: f32,
+    emitter_dist_marg: f32,
+    emitter_dist_particles_max: u32,
 }
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct ShapeInfoJson {
     volume_type: u32,
+    sweep_start_random: u32,
+    arc_type: u32,
+    is_volume_latitude_enabled: u32,
+    volume_tbl_index: u32,
+    volume_tbl_index64: u64,
+    volume_latitude_dir: u32,
+    is_gpu_emitter: u32,
+    sweep_longitude: f32,
+    sweep_latitude: f32,
+    sweep_start: f32,
+    volume_surface_pos_rand: f32,
+    caliber_ratio: f32,
+    line_center: f32,
+    line_length: f32,
+    volume_radius_x: f32,
+    volume_radius_y: f32,
+    volume_radius_z: f32,
+    volume_form_scale_x: f32,
+    volume_form_scale_y: f32,
+    volume_form_scale_z: f32,
+    prim_emit_type: u32,
+    #[serde(alias = "PrimitiveIndex")]
     primitive_index: u64,
+    num_divide_circle: u32,
+    num_divide_circle_random: u32,
+    num_divide_line: u32,
+    num_divide_line_random: u32,
+    is_on_another_binary_volume_primitive: u32,
 }
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct RenderStateJson {
+    is_blend_enable: bool,
+    is_depth_test: bool,
+    depth_func: u32,
+    is_depth_mask: bool,
+    is_alpha_test: bool,
+    alpha_func: u32,
     blend_type: u32,
     display_side: u32,
+    alpha_threshold: f32,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ParticleDataJson {
+    infinite_life: bool,
+    is_triming: bool,
+    billboard_type: u32,
+    rot_type: u32,
+    offset_type: u32,
+    rot_rev_rand_x: bool,
+    rot_rev_rand_y: bool,
+    rot_rev_rand_z: bool,
+    is_rotate_x: bool,
+    is_rotate_y: bool,
+    is_rotate_z: u32,
+    primitive_scale_type: u32,
+    is_texture_common_random: u32,
+    connect_ptcl_scale_and_z_offset: u32,
+    enable_avoid_z_fighting: u32,
     life: u32,
     life_random: u32,
+    momentum_random: f32,
+    primitive_vertex_info_flags: u32,
     #[serde(rename = "PrimitiveID")]
     primitive_id: u64,
     #[serde(rename = "PrimitiveExID", default)]
     primitive_ex_id: u64,
+    loop_color0: bool,
+    loop_alpha0: bool,
+    loop_color1: bool,
+    loop_alpha1: bool,
+    scale_loop: bool,
+    loop_random_color0: bool,
+    loop_random_alpha0: bool,
+    loop_random_color1: bool,
+    loop_random_alpha1: bool,
+    scale_loop_random: bool,
+    prim_flag1: u32,
+    prim_flag2: u32,
+    color0_loop_rate: u32,
+    alpha0_loop_rate: u32,
+    color1_loop_rate: u32,
+    alpha1_loop_rate: u32,
+    scale_loop_rate: u32,
+    color0_loop_rate16: u32,
+    alpha0_loop_rate16: u32,
+    color1_loop_rate16: u32,
+    alpha1_loop_rate16: u32,
+    scale_loop_rate16: u32,
 }
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct ParticleVelocityJson {
     all_direction: f32,
+    designated_dir_scale: f32,
+    designated_dir_x: f32,
+    designated_dir_y: f32,
+    designated_dir_z: f32,
+    diffusion_dir_angle: f32,
+    #[serde(alias = "XZDiffusion")]
+    xz_diffusion: f32,
+    diffusion_x: f32,
+    diffusion_y: f32,
+    diffusion_z: f32,
     vel_random: f32,
+    em_vel_inherit: f32,
 }
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct ParticleScaleJson {
     scale_x: f32,
-    scale_random_x: f32,
     scale_y: f32,
     scale_z: f32,
+    scale_random_x: f32,
+    scale_random_y: f32,
+    scale_random_z: f32,
+    enable_scaling_by_camera_dist_near: u32,
+    enable_scaling_by_camera_dist_far: u32,
+    enable_add_scale_y: u32,
+    enable_link_fovy_to_scale_value: u32,
+    scale_min: f32,
+    scale_max: f32,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -429,6 +832,8 @@ struct TexPatAnimJson {
     num: f32,
     frequency: f32,
     num_random: f32,
+    #[serde(default)]
+    pad: f32,
     #[serde(default)]
     table: Vec<u32>,
     /// UV scale (X component)
@@ -457,15 +862,25 @@ struct TexScrollAnimJson {
     scale_x: f32,
     scale_y: f32,
     /// UV scale per frame (set when sprite-sheet layout is defined)
-    #[serde(default)]
+    /// Note: JSON uses `UVScaleX` (abbreviation uppercase), not `UvScaleX`.
+    #[serde(default, alias = "UVScaleX")]
     uv_scale_x: f32,
-    #[serde(default)]
+    #[serde(default, alias = "UVScaleY")]
     uv_scale_y: f32,
     /// Number of UV divisions (columns/rows in the sprite sheet grid)
-    #[serde(default)]
+    /// Note: JSON uses `UVDivX` (abbreviation uppercase), not `UvDivX`.
+    #[serde(default, alias = "UVDivX")]
     uv_div_x: f32,
-    #[serde(default)]
+    #[serde(default, alias = "UVDivY")]
     uv_div_y: f32,
+    /// UV scroll-add speed
+    #[serde(default)]
+    scroll_add_uv_x: f32,
+    #[serde(default)]
+    scroll_add_uv_y: f32,
+    /// UV distortion strength (VFXB TexScrollAnim[1]+8, clamped [0,1])
+    #[serde(default)]
+    distortion_strength: f32,
 }
 
 // ── Converter: JSON → EmitterDef ──────────────────────────────────────────────
@@ -522,10 +937,21 @@ fn convert_emitter_data(
         .unwrap_or(0.0);
 
     // ── Particle velocity ──────────────────────────────────────────────────
+    // Some PTCL files use all_direction=0 and designated_dir_scale for speed
+    // (the actual direction is set via emit_type or the designated_dir_x/y/z).
+    // Use whichever gives non-zero speed; default to 0.3 when both are absent.
     let initial_speed = json
         .particle_velocity
         .as_ref()
-        .map(|v| v.all_direction)
+        .map(|v| {
+            if v.all_direction.abs() > 0.001 {
+                v.all_direction
+            } else if v.designated_dir_scale.abs() > 0.001 {
+                v.designated_dir_scale
+            } else {
+                0.5 // conservative fallback so particles actually move
+            }
+        })
         .unwrap_or(0.3);
     let speed_random = json
         .particle_velocity
@@ -545,10 +971,12 @@ fn convert_emitter_data(
         .map(|s| s.scale_random_x)
         .unwrap_or(0.0);
 
-    // ── Rotation speed (use RotateAddX from EmitterStatic if available) ────
-    let rotation_speed = json.emitter_static.as_ref().map(|s| s.rotate_add_x).unwrap_or(0.0);
-    let rotation_init = json.emitter_static.as_ref().map(|s| s.rotate_init_x).unwrap_or(0.0);
-    let rotation_init_random = json.emitter_static.as_ref().map(|s| s.rotate_init_rand_x).unwrap_or(0.0);
+    // ── Rotation speed and initial rotation ────
+    // Billboards rotate in the screen plane → use Z-axis values.
+    // (X/Y rotation is for 3D mesh-type particles, which we render as camera-facing quads.)
+    let rotation_speed = json.emitter_static.as_ref().map(|s| s.rotate_add_z).unwrap_or(0.0);
+    let rotation_init = json.emitter_static.as_ref().map(|s| s.rotate_init_z).unwrap_or(0.0);
+    let rotation_init_random = json.emitter_static.as_ref().map(|s| s.rotate_init_rand_z).unwrap_or(0.0);
 
     // ── Accel (from gravity direction + scale in EmitterStatic) ────────────
     let accel = json.emitter_static.as_ref().map(|s| {
@@ -672,6 +1100,12 @@ fn convert_emitter_data(
         .as_ref()
         .and_then(|s| s.tex_pattern_anim0.as_ref())
         .map(|t| [t.scroll_x, t.scroll_y])
+        .or_else(|| {
+            json.emitter_static
+                .as_ref()
+                .and_then(|s| s.tex_scroll_anim0.as_ref())
+                .map(|t| [t.scroll_x, t.scroll_y])
+        })
         .unwrap_or([0.0, 0.0]);
 
     let tex_pat_frame_count = inferred_frame_count;
@@ -697,7 +1131,10 @@ fn convert_emitter_data(
         .get(1)
         .map(|t| t.tex_name.to_lowercase().contains("indirect"))
         .unwrap_or(false);
-    let distortion_strength = 0.0; // TODO: extract from data
+    let distortion_strength = json.emitter_static.as_ref()
+        .and_then(|s| s.tex_scroll_anim1.as_ref())
+        .map(|t| t.distortion_strength.clamp(0.0, 1.0))
+        .unwrap_or(0.0);
     let indirect_scroll_uv = raw_scroll(
         json.emitter_static
             .as_ref()
@@ -766,6 +1203,21 @@ fn convert_emitter_data(
         0
     };
 
+    // ── Sampler wrap modes ─────────────────────────────────────────────────
+    fn sampler_wrap_to_u8(s: &str) -> u8 {
+        match s.to_lowercase().as_str() {
+            "repeat" | "wrap" => 0,
+            "mirror" | "mirrored_repeat" => 1,
+            "clamp" | "clamp_to_edge" | "clamp_to_border" => 2,
+            _ => 2, // safe default: ClampToEdge
+        }
+    }
+    let def_wrap = 2u8; // ClampToEdge
+    let tex_wrap_u = json.sampler0.as_ref().map(|s| sampler_wrap_to_u8(&s.wrap_u)).unwrap_or(def_wrap);
+    let tex_wrap_v = json.sampler0.as_ref().map(|s| sampler_wrap_to_u8(&s.wrap_v)).unwrap_or(def_wrap);
+    let tex2_wrap_u = json.sampler1.as_ref().map(|s| sampler_wrap_to_u8(&s.wrap_u)).unwrap_or(def_wrap);
+    let tex2_wrap_v = json.sampler1.as_ref().map(|s| sampler_wrap_to_u8(&s.wrap_v)).unwrap_or(def_wrap);
+
     EmitterDef {
         name,
         emit_type,
@@ -815,6 +1267,60 @@ fn convert_emitter_data(
         tex2_scroll_uv,
         tex2_pat_frame_count,
         tex2_pat_frame_table,
+        tex_wrap_u,
+        tex_wrap_v,
+        tex2_wrap_u,
+        tex2_wrap_v,
+        anim_translate: None,
+        anim_rotation: None,
+        anim_emit_scale: None,
+        anim_tex_scale: None,
+        anim_color0: None,
+        anim_color1: None,
+        anim_alpha: None,
+        shader_index: json.shader_references.as_ref().map(|r| r.shader_index).unwrap_or(-1),
+        custom_shader_index: json.shader_references.as_ref().map(|r| r.custom_shader_index).unwrap_or(0),
+        user_shader_indices: [
+            json.shader_references.as_ref().map(|r| r.user_shader_index1).unwrap_or(-1),
+            json.shader_references.as_ref().map(|r| r.user_shader_index2).unwrap_or(-1),
+        ],
+        shader_key: 0,
+        combiner: json.combiner.as_ref().map(combiner_from_json).unwrap_or_default(),
+        particle_color: json.particle_color.as_ref().map(particle_color_from_json).unwrap_or_default(),
+    }
+}
+
+fn combiner_from_json(c: &CombinerJson) -> CombinerState {
+    CombinerState {
+        color_combiner_process: c.color_combiner_process,
+        alpha_combiner_process: c.alpha_combiner_process,
+        texture1_color_blend: c.texture1_color_blend,
+        texture2_color_blend: c.texture2_color_blend,
+        primitive_color_blend: c.primitive_color_blend,
+        texture1_alpha_blend: c.texture1_alpha_blend,
+        texture2_alpha_blend: c.texture2_alpha_blend,
+        primitive_alpha_blend: c.primitive_alpha_blend,
+        tex_color0_input_type: c.tex_color0_input_type,
+        tex_color1_input_type: c.tex_color1_input_type,
+        tex_color2_input_type: c.tex_color2_input_type,
+        tex_alpha0_input_type: c.tex_alpha0_input_type,
+        tex_alpha1_input_type: c.tex_alpha1_input_type,
+        tex_alpha2_input_type: c.tex_alpha2_input_type,
+        primitive_color_input_type: c.primitive_color_input_type,
+        primitive_alpha_input_type: c.primitive_alpha_input_type,
+        shader_type: c.shader_type,
+        apply_alpha: c.apply_alpha,
+        is_distortion_by_camera_distance: c.is_distortion_by_camera_distance,
+    }
+}
+
+fn particle_color_from_json(p: &ParticleColorJson) -> ParticleColorState {
+    ParticleColorState {
+        is_soft_particle: p.is_soft_particle != 0,
+        is_fresnel_alpha: p.is_fresnel_alpha != 0,
+        is_near_dist_alpha: p.is_near_dist_alpha != 0,
+        is_far_dist_alpha: p.is_far_dist_alpha != 0,
+        is_decal: p.is_decal != 0,
     }
 }
 
@@ -946,6 +1452,21 @@ fn raw_uv_scale(anim: Option<&TexPatAnimJson>) -> [f32; 2] {
 fn raw_uv_offset(anim: Option<&TexPatAnimJson>) -> [f32; 2] {
     anim.map(|t| [t.scroll_x, t.scroll_y])
         .unwrap_or([0.0, 0.0])
+}
+
+fn emit_anim_from_json(src: &EmitterAnimJson) -> crate::effects::EmitterAnimDef {
+    crate::effects::EmitterAnimDef {
+        enable: src.enable,
+        loop_: src.loop_,
+        randomize_start_frame: src.randomize_start_frame,
+        loop_count: src.loop_count,
+        key_frames: src.key_frames.iter().map(|k| crate::effects::AnimKeyframe {
+            x: k.x,
+            y: k.y,
+            z: k.z,
+            time: k.time,
+        }).collect(),
+    }
 }
 
 #[cfg(test)]

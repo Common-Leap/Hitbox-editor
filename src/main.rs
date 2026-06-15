@@ -15,6 +15,10 @@ mod bnsh_shader_integration;
 mod effect_converter;
 mod spirv_to_wgsl;
 mod spirv_patch;
+mod nvn_chain;
+mod combiner;
+mod shader_registry;
+pub(crate) use hitbox_editor::{fx_debug_enabled, fx_native_fs_enabled};
 
 #[cfg(test)]
 mod integration_tests;
@@ -27,6 +31,9 @@ use ssbh_wgpu;
 fn main() -> anyhow::Result<()> {
     // Force Vulkan backend on Linux — avoids silent failures with RADV + wgpu auto-detection
     std::env::set_var("WGPU_BACKEND", "vulkan");
+    // Native FS colour chain (combiner + NVN cbufs) is opt-in via FX_NATIVE_FS=1. Default uses
+    // patch_fragment_wgsl (texture × vertex colour), which is reliable with the billboard VS
+    // override in patch_vertex_wgsl.
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
