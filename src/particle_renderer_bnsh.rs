@@ -10,33 +10,128 @@ use crate::bnsh_shader_integration::{
 };
 use crate::shader_registry::ShaderKey;
 
+/// Depth format for per-draw_path offscreen passes (cleared each path like NVN).
+pub const PARTICLE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Depth/stencil for offscreen particle passes. Billboards keep depth writes off so alpha
+/// blending stays correct; the attachment is primed from mesh depth each path.
+pub fn particle_depth_stencil_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: PARTICLE_DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Depth test + write for opaque-core particles (within-path occlusion approximation).
+pub fn particle_depth_stencil_state_write() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: PARTICLE_DEPTH_FORMAT,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
 /// GPU pipeline state for one BNSH shader variant (keyed by ShaderKey).
 pub struct BnshPipelineState {
     pub vs_module: wgpu::ShaderModule,
     pub fs_module: wgpu::ShaderModule,
+    /// Fragment shader with per-pixel alpha-test `discard` for opaque-core depth-write passes.
+    pub fs_module_depth_write: wgpu::ShaderModule,
     pub vs_entry: String,
     pub fs_entry: String,
     pub descriptors: Vec<crate::spirv_to_wgsl::DescriptorInfo>,
     pub bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     pub pipeline_layout: wgpu::PipelineLayout,
     pub pipeline_cache: HashMap<BlendType, wgpu::RenderPipeline>,
+    /// Same blends as [`Self::pipeline_cache`] but with a depth attachment (offscreen paths).
+    pub pipeline_cache_depth: HashMap<BlendType, wgpu::RenderPipeline>,
+    /// Opaque-core pass: depth test + write for within-path occlusion.
+    pub pipeline_cache_depth_write: HashMap<BlendType, wgpu::RenderPipeline>,
     pub storage_bufs: HashMap<u32, wgpu::Buffer>,
     pub bind_group_cache: HashMap<(usize, usize), wgpu::BindGroup>,
     pub vertex_layout: wgpu::VertexBufferLayout<'static>,
     pub cbuf_slot_usage: HashMap<String, HashSet<u32>>,
+    pub extra_tex_slots_needed: [bool; 3],
+    pub tex_blend_uniform_needed: bool,
 }
 
 /// Loaded WGSL modules + descriptor reflection for one shader pair.
 pub struct BnshLoadedModules {
     pub vs_module: wgpu::ShaderModule,
     pub fs_module: wgpu::ShaderModule,
+    pub fs_module_depth_write: wgpu::ShaderModule,
     pub vs_entry: String,
     pub fs_entry: String,
     pub descriptors: Vec<crate::spirv_to_wgsl::DescriptorInfo>,
     pub cbuf_slot_usage: HashMap<String, HashSet<u32>>,
+    pub extra_tex_slots_needed: [bool; 3],
+    pub tex_blend_uniform_needed: bool,
 }
 
-/// Shared vertex layout for all BNSH particle quads (12 × vec4<f32> at stride 192).
+/// WGSL after NVN patch + particle simulation wiring (no GPU modules yet).
+pub struct PreparedBnshWgsl {
+    pub vs_wgsl: String,
+    pub fs_wgsl: String,
+    pub fs_wgsl_depth_write: String,
+    pub cbuf_slot_usage: HashMap<String, HashSet<u32>>,
+    pub extra_tex_slots_needed: [bool; 3],
+    pub tex_blend_uniform_needed: bool,
+}
+
+/// Full CPU-side BNSH WGSL pipeline shared by the renderer and integration tests.
+pub fn prepare_bnsh_wgsl(
+    vs_wgsl: &str,
+    fs_wgsl: &str,
+    vs_hint: Option<crate::shader_registry::ShaderVsProfile>,
+) -> PreparedBnshWgsl {
+    let vs_prefixed = crate::spirv_to_wgsl::wire_vertex_simulation_varyings(vs_wgsl);
+    let fs_prefixed = {
+        let fs = crate::spirv_to_wgsl::wire_crossfade_fragment_input(fs_wgsl, &vs_prefixed);
+        crate::spirv_to_wgsl::wire_extra_tex_fragment_input(&fs, &vs_prefixed)
+    };
+    let vs_wgsl = crate::spirv_to_wgsl::patch_vertex_wgsl_with_hint(
+        &vs_prefixed,
+        &fs_prefixed,
+        vs_hint,
+    );
+    let fs_clamped = crate::spirv_to_wgsl::clamp_fragment_output_locations(
+        &fs_prefixed,
+        crate::spirv_to_wgsl::PARTICLE_COMPOSITE_MRT_LOCATIONS,
+    );
+    let fs_wgsl = if crate::fx_native_fs_enabled() {
+        crate::spirv_to_wgsl::enhance_native_fragment_wgsl(&fs_clamped)
+    } else {
+        crate::spirv_to_wgsl::patch_fragment_wgsl(&fs_clamped)
+    };
+    let extra_tex_slots_needed = crate::spirv_to_wgsl::native_fs_extra_tex_slots_needed(&fs_wgsl);
+    let tex_blend_uniform_needed =
+        crate::spirv_to_wgsl::native_fs_tex_blend_uniform_needed(&fs_wgsl);
+    let fs_wgsl = if std::env::var("FX_DEBUG_SOLID_FS").is_ok() {
+        crate::spirv_to_wgsl::debug_solid_fragment_wgsl(&fs_wgsl)
+    } else {
+        fs_wgsl
+    };
+    let fs_wgsl_depth_write = crate::spirv_to_wgsl::inject_opaque_core_alpha_test(
+        &fs_wgsl,
+        crate::spirv_to_wgsl::OPAQUE_CORE_DEPTH_ALPHA_TEST,
+    );
+    let cbuf_slot_usage = crate::nvn_chain::cbuf_slot_usage_from_wgsl(&vs_wgsl, &fs_wgsl);
+    PreparedBnshWgsl {
+        vs_wgsl,
+        fs_wgsl,
+        fs_wgsl_depth_write,
+        cbuf_slot_usage,
+        extra_tex_slots_needed,
+        tex_blend_uniform_needed,
+    }
+}
+
+/// Shared vertex layout for all BNSH particle quads (13 × vec4<f32> at stride 208).
 pub fn bnsh_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     static LAYOUT: std::sync::OnceLock<wgpu::VertexBufferLayout<'static>> =
         std::sync::OnceLock::new();
@@ -54,9 +149,10 @@ pub fn bnsh_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 144, shader_location: 9 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 160, shader_location: 10 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 176, shader_location: 11 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 192, shader_location: 12 },
         ]));
         wgpu::VertexBufferLayout {
-            array_stride: 192,
+            array_stride: 208,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: vertex_attributes,
         }
@@ -133,30 +229,26 @@ pub fn load_bnsh_shader_modules(
         &to_bytes(&fs_w), naga::ShaderStage::Fragment, &format!("particle_bnsh_fs_{label_tag}"),
     ).expect("Failed to convert fragment SPIR-V to WGSL");
 
-    let vs_wgsl = crate::spirv_to_wgsl::patch_vertex_wgsl(vs_wgsl, fs_wgsl);
-    let fs_wgsl = if crate::fx_native_fs_enabled() {
-        fs_wgsl.clone()
-    } else {
-        crate::spirv_to_wgsl::patch_fragment_wgsl(fs_wgsl)
+    let vs_hint = {
+        let mut hint = vs_info
+            .reflection
+            .as_ref()
+            .map(crate::shader_registry::vs_profile_from_reflection)
+            .unwrap_or_default();
+        hint = hint.merge(crate::spirv_to_wgsl::classify_vs_profile(vs_wgsl));
+        if hint == crate::shader_registry::ShaderVsProfile::Unknown {
+            None
+        } else {
+            Some(hint)
+        }
     };
-    // NVN deferred shaders declare many MRT outputs; WebGPU rejects locations >= 8 and we
-    // composite only @location(0). Trim the FragmentOutput struct before pipeline creation.
-    let fs_wgsl = crate::spirv_to_wgsl::clamp_fragment_output_locations(
-        &fs_wgsl,
-        crate::spirv_to_wgsl::PARTICLE_COMPOSITE_MRT_LOCATIONS,
-    );
-    let fs_wgsl = if crate::fx_native_fs_enabled() {
-        crate::spirv_to_wgsl::enhance_native_fragment_wgsl(&fs_wgsl)
-    } else {
-        fs_wgsl
-    };
-    let fs_wgsl = if std::env::var("FX_DEBUG_SOLID_FS").is_ok() {
-        crate::spirv_to_wgsl::debug_solid_fragment_wgsl(&fs_wgsl)
-    } else {
-        fs_wgsl
-    };
-
-    let cbuf_slot_usage = crate::nvn_chain::cbuf_slot_usage_from_wgsl(&vs_wgsl, &fs_wgsl);
+    let prepared = prepare_bnsh_wgsl(vs_wgsl, fs_wgsl, vs_hint);
+    let vs_wgsl = prepared.vs_wgsl;
+    let fs_wgsl = prepared.fs_wgsl;
+    let fs_wgsl_depth_write = prepared.fs_wgsl_depth_write;
+    let extra_tex_slots_needed = prepared.extra_tex_slots_needed;
+    let tex_blend_uniform_needed = prepared.tex_blend_uniform_needed;
+    let cbuf_slot_usage = prepared.cbuf_slot_usage;
     if label_tag.contains("5740678a2aa5959f") {
         let _ = std::fs::write(
             format!("/tmp/hitbox_patched_vs_{label_tag}.wgsl"),
@@ -172,6 +264,10 @@ pub fn load_bnsh_shader_modules(
         label: Some(&format!("particle_bnsh_fs_{label_tag}")),
         source: wgpu::ShaderSource::Wgsl(fs_wgsl.into()),
     });
+    let fs_mod_depth_write = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&format!("particle_bnsh_fs_depth_write_{label_tag}")),
+        source: wgpu::ShaderSource::Wgsl(fs_wgsl_depth_write.into()),
+    });
 
     let mut descriptors = vs_descs.clone();
     descriptors.extend(fs_descs.clone());
@@ -181,10 +277,13 @@ pub fn load_bnsh_shader_modules(
     BnshLoadedModules {
         vs_module: vs_mod,
         fs_module: fs_mod,
+        fs_module_depth_write: fs_mod_depth_write,
         vs_entry: vs_info.entry_point.clone(),
         fs_entry: fs_info.entry_point.clone(),
         descriptors,
         cbuf_slot_usage,
+        extra_tex_slots_needed,
+        tex_blend_uniform_needed,
     }
 }
 
@@ -193,6 +292,7 @@ impl BnshPipelineState {
         device: &wgpu::Device,
         modules: BnshLoadedModules,
         tex_bg_layout: &wgpu::BindGroupLayout,
+        extra_tex345_bg_layout: Option<&wgpu::BindGroupLayout>,
         surface_format: wgpu::TextureFormat,
         label_tag: &str,
     ) -> Self {
@@ -249,10 +349,13 @@ impl BnshPipelineState {
             }));
         }
 
-        let mut bgl_all = Vec::with_capacity(bind_group_layouts.len() + 1);
+        let mut bgl_all = Vec::with_capacity(bind_group_layouts.len() + 2);
         bgl_all.extend(bind_group_layouts.iter().map(|b| Some(b)));
         // @group(1) emitter texture: patched FS and enhance_native_fragment_wgsl both sample it.
         bgl_all.push(Some(tex_bg_layout));
+        if modules.extra_tex_slots_needed.iter().any(|&b| b) || modules.tex_blend_uniform_needed {
+            bgl_all.push(extra_tex345_bg_layout);
+        }
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("bnsh_pipeline_layout_{label_tag}")),
             bind_group_layouts: &bgl_all,
@@ -300,16 +403,21 @@ impl BnshPipelineState {
         Self {
             vs_module: modules.vs_module,
             fs_module: modules.fs_module,
+            fs_module_depth_write: modules.fs_module_depth_write,
             vs_entry: modules.vs_entry,
             fs_entry: modules.fs_entry,
             descriptors: modules.descriptors,
             bind_group_layouts,
             pipeline_layout,
             pipeline_cache,
+            pipeline_cache_depth: HashMap::new(),
+            pipeline_cache_depth_write: HashMap::new(),
             storage_bufs: HashMap::new(),
             bind_group_cache: HashMap::new(),
             vertex_layout,
             cbuf_slot_usage: modules.cbuf_slot_usage,
+            extra_tex_slots_needed: modules.extra_tex_slots_needed,
+            tex_blend_uniform_needed: modules.tex_blend_uniform_needed,
         }
     }
 
@@ -320,11 +428,35 @@ impl BnshPipelineState {
         surface_format: wgpu::TextureFormat,
         blend: BlendType,
         label_tag: &str,
+        use_depth: bool,
+        depth_write: bool,
     ) -> &wgpu::RenderPipeline {
-        if !self.pipeline_cache.contains_key(&blend) {
+        let cache = if use_depth {
+            if depth_write {
+                &mut self.pipeline_cache_depth_write
+            } else {
+                &mut self.pipeline_cache_depth
+            }
+        } else {
+            &mut self.pipeline_cache
+        };
+        if !cache.contains_key(&blend) {
             let blend_state = blend_state_for(blend);
+            let depth_stencil = if use_depth {
+                Some(if depth_write {
+                    particle_depth_stencil_state_write()
+                } else {
+                    particle_depth_stencil_state()
+                })
+            } else {
+                None
+            };
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&format!("bnsh_blend_{label_tag}_{blend:?}")),
+                label: Some(&format!(
+                    "bnsh_blend_{label_tag}_{blend:?}{}{}",
+                    if use_depth { "_depth" } else { "" },
+                    if depth_write { "_write" } else { "" }
+                )),
                 layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &self.vs_module,
@@ -333,7 +465,11 @@ impl BnshPipelineState {
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &self.fs_module,
+                    module: if depth_write {
+                        &self.fs_module_depth_write
+                    } else {
+                        &self.fs_module
+                    },
                     entry_point: Some(&self.fs_entry),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
@@ -346,14 +482,14 @@ impl BnshPipelineState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     ..Default::default()
                 },
-                depth_stencil: None,
+                depth_stencil,
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
             });
-            self.pipeline_cache.insert(blend, pipeline);
+            cache.insert(blend, pipeline);
         }
-        self.pipeline_cache.get(&blend).unwrap()
+        cache.get(&blend).unwrap()
     }
 }
 
@@ -381,7 +517,14 @@ impl BnshShaderSet {
 
         let effect_vs = decode_legacy_stage_pair(ptcl);
         let mut all_shaders = decode_all_effect_shaders(ptcl)?;
-        let default_key = ptcl.shader_registry.default_key();
+        let mut default_key = ptcl.shader_registry.default_key();
+        if default_key == 0 {
+            default_key = all_shaders
+                .iter()
+                .find(|(_, p)| p.vertex.is_some() && p.fragment.is_some())
+                .map(|(&k, _)| k)
+                .unwrap_or(0);
+        }
         let library_indices = ptcl.shader_registry.library_indices().clone();
 
         if default_key != 0 {

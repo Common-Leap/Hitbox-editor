@@ -209,6 +209,173 @@ pub fn apply_blend_op(a: f32, b: f32, op: CombinerBlendOp) -> f32 {
     }
 }
 
+/// Physical texture slot (0..5) encoded by a combiner input-type byte (1 = Texture0 … 6 = Texture5).
+pub fn combiner_input_phys_slot(input_type: u32) -> Option<u32> {
+    match input_type {
+        0 => None,
+        n if (1..=6).contains(&n) => Some(n - 1),
+        _ => None,
+    }
+}
+
+/// Default cbuf_16 slot for TextureAnim3–5 `extra_idx` (0..2 → phys slots 3..5).
+pub fn combiner_extra_tex_default_cbuf16_slot(extra_idx: usize) -> u32 {
+    (extra_idx as u32) + 1
+}
+
+/// cbuf_16 slot (1..3) whose combiner channel references physical texture slot `phys_slot`.
+pub fn combiner_cbuf16_slot_for_phys_texture(combiner: &CombinerState, phys_slot: u32) -> Option<u32> {
+    let channels: [(u32, u32, u32); 4] = [
+        (combiner.tex_color0_input_type, combiner.tex_alpha0_input_type, 1),
+        (combiner.tex_color1_input_type, combiner.tex_alpha1_input_type, 2),
+        (combiner.tex_color2_input_type, combiner.tex_alpha2_input_type, 3),
+        (
+            combiner.primitive_color_input_type,
+            combiner.primitive_alpha_input_type,
+            3,
+        ),
+    ];
+    for (color_in, alpha_in, slot) in channels {
+        if combiner_input_phys_slot(color_in) == Some(phys_slot)
+            || combiner_input_phys_slot(alpha_in) == Some(phys_slot)
+        {
+            return Some(slot);
+        }
+    }
+    None
+}
+
+fn extra_tex_blend_raw(combiner: &CombinerState, extra_idx: usize, cbuf_slot: u32) -> (u32, u32) {
+    if combiner.has_v50_extra_tex_blend {
+        match extra_idx {
+            0 => (
+                combiner.texture3_color_blend,
+                combiner.texture3_alpha_blend,
+            ),
+            1 => (
+                combiner.texture4_color_blend,
+                combiner.texture4_alpha_blend,
+            ),
+            2 => (
+                combiner.texture5_color_blend,
+                combiner.texture5_alpha_blend,
+            ),
+            _ => (0, 0),
+        }
+    } else {
+        match cbuf_slot {
+            1 => (
+                combiner.texture1_color_blend,
+                combiner.texture1_alpha_blend,
+            ),
+            2 => (
+                combiner.texture2_color_blend,
+                combiner.texture2_alpha_blend,
+            ),
+            _ => (
+                combiner.primitive_color_blend,
+                combiner.primitive_alpha_blend,
+            ),
+        }
+    }
+}
+
+/// cbuf_16 slot and colour/alpha blend ops for TextureAnim3–5 `extra_idx` (phys slots 3..5).
+pub fn combiner_extra_tex_blend(
+    combiner: &CombinerState,
+    extra_idx: usize,
+) -> (u32, CombinerBlendOp, CombinerBlendOp) {
+    let phys_slot = extra_idx as u32 + 3;
+    let cbuf_slot = combiner_cbuf16_slot_for_phys_texture(combiner, phys_slot)
+        .unwrap_or_else(|| combiner_extra_tex_default_cbuf16_slot(extra_idx));
+    let (color_raw, alpha_raw) = extra_tex_blend_raw(combiner, extra_idx, cbuf_slot);
+    (
+        cbuf_slot,
+        blend_op_from_raw(color_raw),
+        blend_op_from_raw(alpha_raw),
+    )
+}
+
+fn combiner_phys_slot_blend_raw(combiner: &CombinerState, phys_slot: u32) -> (u32, u32) {
+    let cbuf_slot = combiner_cbuf16_slot_for_phys_texture(combiner, phys_slot).unwrap_or(1);
+    if combiner.has_v50_extra_tex_blend && (3..=5).contains(&phys_slot) {
+        extra_tex_blend_raw(combiner, phys_slot as usize - 3, cbuf_slot)
+    } else {
+        match cbuf_slot {
+            1 => (
+                combiner.texture1_color_blend,
+                combiner.texture1_alpha_blend,
+            ),
+            2 => (
+                combiner.texture2_color_blend,
+                combiner.texture2_alpha_blend,
+            ),
+            _ => (
+                combiner.primitive_color_blend,
+                combiner.primitive_alpha_blend,
+            ),
+        }
+    }
+}
+
+/// FS cbuf_16[1]-format coeff for primary `@group(1)` color_tex (physical slot 0).
+pub fn combiner_primary_tex_cbuf16_coeff(combiner: &CombinerState) -> [f32; 4] {
+    let (color_raw, _) = combiner_phys_slot_blend_raw(combiner, 0);
+    fs_cbuf_16_slot_1(blend_op_from_raw(color_raw))
+}
+
+/// FS cbuf_16 coeff for injected extra tex `extra_idx` (0=tex3 … 2=tex5).
+pub fn combiner_injected_extra_tex_cbuf16_coeff(
+    combiner: &CombinerState,
+    extra_idx: usize,
+) -> [f32; 4] {
+    let (_, color_op, _) = combiner_extra_tex_blend(combiner, extra_idx);
+    let injected_slot = extra_idx as u32 + 1;
+    let table_threshold = color_table_chain_threshold(combiner.color_combiner_process)
+        .min(color_table_chain_threshold(combiner.alpha_combiner_process));
+    match injected_slot {
+        1 => fs_cbuf_16_slot_1(color_op),
+        2 => fs_cbuf_16_slot_2(color_op, table_threshold),
+        _ => fs_cbuf_16_slot_3(color_op),
+    }
+}
+
+/// Per-draw `@group(2)` uniform: primary + tex3–5 blend coeff vec4s (64 bytes).
+pub fn combiner_draw_tex_blend_uniform(combiner: &CombinerState) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    out[0..4].copy_from_slice(&combiner_primary_tex_cbuf16_coeff(combiner));
+    for i in 0..3 {
+        let coeff = combiner_injected_extra_tex_cbuf16_coeff(combiner, i);
+        out[(1 + i) * 4..(2 + i) * 4].copy_from_slice(&coeff);
+    }
+    out
+}
+
+/// Returns which combiner texture input slots (0=color, 1=alpha/indirect, 2=tertiary) are active.
+pub fn combiner_texture_slots_used(c: &CombinerState) -> [bool; 3] {
+    let t0 = c.tex_color0_input_type != 0 || c.color_combiner_process >= 1;
+    let t1 = c.tex_color1_input_type != 0;
+    let t2 = c.tex_color2_input_type != 0;
+    [t0, t1, t2]
+}
+
+/// True when TextureAnim3–5 slot `idx` (0..2) is referenced by the combiner or has anim data.
+pub fn combiner_extra_texture_slot_used(emitter: &crate::effects::EmitterDef, idx: usize) -> bool {
+    crate::effects::extra_tex_slot_active(emitter, idx)
+}
+
+/// Intersect shader-referenced extra texture slots with emitter-side active slots.
+pub fn emitter_extra_tex_bind_mask(
+    emitter: &crate::effects::EmitterDef,
+    shader_slots: [bool; 3],
+) -> [bool; 3] {
+    [
+        shader_slots[0] && combiner_extra_texture_slot_used(emitter, 0),
+        shader_slots[1] && combiner_extra_texture_slot_used(emitter, 1),
+        shader_slots[2] && combiner_extra_texture_slot_used(emitter, 2),
+    ]
+}
+
 /// True when emitter JSON carries an explicit combiner configuration.
 pub fn combiner_is_configured(c: &CombinerState) -> bool {
     c.color_combiner_process != 0
@@ -236,6 +403,17 @@ mod tests {
         assert_eq!(coeffs.cbuf_16_slot_1, [1.0, 0.0, 1.0, 1.0]);
         assert_eq!(coeffs.cbuf_16_slot_2[1], 0.0, "modulate must not add bias via .y");
         assert_eq!(coeffs.cbuf_16_slot_2[2], 1.0, "process 0/1 skips lerp branch");
+    }
+
+    #[test]
+    fn test_combiner_texture_slots_used() {
+        let c = CombinerState {
+            color_combiner_process: 1,
+            tex_color1_input_type: 1,
+            tex_color2_input_type: 1,
+            ..Default::default()
+        };
+        assert_eq!(combiner_texture_slots_used(&c), [true, true, true]);
     }
 
     #[test]
@@ -322,5 +500,84 @@ mod tests {
         );
         assert!((rgba[0] - 1.0).abs() < 0.001, "process 1 uses colour0 only on CPU");
         assert!((rgba[3] - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_combiner_extra_texture_slot_used() {
+        let mut emitter = crate::effects::EmitterDef::default();
+        emitter.textures = vec![
+            crate::effects::TextureRes::default(),
+            crate::effects::TextureRes::default(),
+            crate::effects::TextureRes::default(),
+            crate::effects::TextureRes::default(),
+        ];
+        assert!(combiner_extra_texture_slot_used(&emitter, 0));
+    }
+
+    #[test]
+    fn test_emitter_extra_tex_bind_mask() {
+        let mut emitter = crate::effects::EmitterDef::default();
+        emitter.textures = vec![
+            crate::effects::TextureRes::default(),
+            crate::effects::TextureRes::default(),
+            crate::effects::TextureRes::default(),
+            crate::effects::TextureRes::default(),
+        ];
+        let mask = emitter_extra_tex_bind_mask(&emitter, [true, true, false]);
+        assert!(mask[0] && !mask[1] && !mask[2]);
+    }
+
+    #[test]
+    fn test_combiner_cbuf16_slot_for_phys_texture() {
+        let mut c = CombinerState::default();
+        c.tex_color1_input_type = 5; // Texture4
+        assert_eq!(combiner_cbuf16_slot_for_phys_texture(&c, 4), Some(2));
+        c.tex_color2_input_type = 4; // Texture3
+        assert_eq!(combiner_cbuf16_slot_for_phys_texture(&c, 3), Some(3));
+    }
+
+    #[test]
+    fn test_combiner_extra_tex_blend_uses_channel_ops() {
+        let mut c = CombinerState::default();
+        c.texture2_color_blend = 1;
+        c.tex_color1_input_type = 4; // Texture3 → channel 2
+        let (slot, color_op, _) = combiner_extra_tex_blend(&c, 0);
+        assert_eq!(slot, 2);
+        assert_eq!(color_op, CombinerBlendOp::Add);
+    }
+
+    #[test]
+    fn test_combiner_extra_tex_default_cbuf16_mapping() {
+        let c = CombinerState::default();
+        let (slot, color_op, _) = combiner_extra_tex_blend(&c, 2);
+        assert_eq!(slot, 3);
+        assert_eq!(color_op, CombinerBlendOp::Modulate);
+    }
+
+    #[test]
+    fn test_combiner_draw_tex_blend_uniform_primary_add() {
+        let mut c = CombinerState::default();
+        c.texture1_color_blend = 1;
+        c.tex_color0_input_type = 1;
+        let uniform = combiner_draw_tex_blend_uniform(&c);
+        assert!((uniform[1] - 1.0).abs() < 0.001, "add sets ch12 .y");
+    }
+
+    #[test]
+    fn test_combiner_injected_extra_tex_routes_channel2_blend() {
+        let mut c = CombinerState::default();
+        c.texture2_color_blend = 1;
+        c.tex_color1_input_type = 4; // Texture3 on channel 2
+        let coeff = combiner_injected_extra_tex_cbuf16_coeff(&c, 0);
+        assert!((coeff[1] - 1.0).abs() < 0.001, "tex3 injected slot1 uses add via channel2 op");
+    }
+
+    #[test]
+    fn test_combiner_v50_extra_tex_blend_fields() {
+        let mut c = CombinerState::default();
+        c.has_v50_extra_tex_blend = true;
+        c.texture5_color_blend = 2;
+        let (_, color_op, _) = combiner_extra_tex_blend(&c, 2);
+        assert_eq!(color_op, CombinerBlendOp::Subtract);
     }
 }

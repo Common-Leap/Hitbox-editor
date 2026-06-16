@@ -16,31 +16,20 @@ pub mod nvn_chain;
 pub mod combiner;
 pub mod shader_registry;
 pub mod scratch_dirs;
+pub mod sphere_volume_tables;
+pub mod fx_env;
 
-use std::sync::OnceLock;
-
-pub fn fx_debug_enabled() -> bool {
-    static FX_DEBUG: OnceLock<bool> = OnceLock::new();
-    *FX_DEBUG.get_or_init(|| std::env::var("FX_DEBUG").is_ok())
-}
-
-/// Native NVN fragment colour chain is the default.
-/// Opt out with `FX_PATCHED_FS=1` or `FX_NATIVE_FS=0`.
-pub fn fx_native_fs_enabled() -> bool {
-    static FX_NATIVE_FS: OnceLock<bool> = OnceLock::new();
-    *FX_NATIVE_FS.get_or_init(|| match std::env::var("FX_NATIVE_FS").as_deref() {
-        Ok("0") | Ok("false") | Ok("no") => false,
-        Ok(_) => true,
-        Err(_) => !matches!(
-            std::env::var("FX_PATCHED_FS").as_deref(),
-            Ok("1") | Ok("true") | Ok("yes")
-        ),
-    })
-}
+pub use fx_env::{fx_debug_enabled, fx_native_fs_enabled, fx_native_vs_pos_enabled, fx_prim_per_triangle_enabled};
 
 #[cfg(test)]
 mod test_eff_pipeline {
-    use std::path::Path;
+    use std::path::PathBuf;
+
+    fn local_eff_path(fighter: &str) -> PathBuf {
+        crate::scratch_dirs::resolve_fighter_eff(fighter).unwrap_or_else(|| {
+            PathBuf::from("/nonexistent").join(format!("ef_{fighter}.eff"))
+        })
+    }
 
     /// Test the grid-layout inference for sprite-sheet textures.
     #[test]
@@ -79,9 +68,13 @@ mod test_eff_pipeline {
 
     #[test]
     fn test_eff_pipeline_mario() {
-        let eff_path = Path::new("/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/ef_mario.eff");
-        
-        let eff = crate::effects::EffIndex::from_file(eff_path)
+        let eff_path = local_eff_path("mario");
+        if !eff_path.exists() {
+            eprintln!("Mario effect not found — skipping");
+            return;
+        }
+
+        let eff = crate::effects::EffIndex::from_file(&eff_path)
             .expect("EffIndex::from_file failed");
         
         println!("EffIndex OK: {} handles, ptcl_data={} bytes", eff.handles.len(), eff.ptcl_data.len());
@@ -99,8 +92,12 @@ mod test_eff_pipeline {
 
     #[test]
     fn test_emitter_uv_data() {
-        let eff_path = Path::new("/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/samus/ef_samus.eff");
-        let eff = crate::effects::EffIndex::from_file(eff_path)
+        let eff_path = local_eff_path("samus");
+        if !eff_path.exists() {
+            eprintln!("Samus effect not found — skipping");
+            return;
+        }
+        let eff = crate::effects::EffIndex::from_file(&eff_path)
             .expect("EffIndex::from_file failed");
         let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data)
             .expect("PtclFile::parse failed");
@@ -140,8 +137,12 @@ mod test_eff_pipeline {
 
     #[test]
     fn test_samus_headless_simulation() {
-        let eff_path = Path::new("/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/samus/ef_samus.eff");
-        let eff = crate::effects::EffIndex::from_file(eff_path)
+        let eff_path = local_eff_path("samus");
+        if !eff_path.exists() {
+            eprintln!("Samus effect not found — skipping");
+            return;
+        }
+        let eff = crate::effects::EffIndex::from_file(&eff_path)
             .expect("EffIndex::from_file failed");
         let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data)
             .expect("PtclFile::parse failed");
@@ -193,68 +194,105 @@ mod test_eff_pipeline {
         }
     }
 
-    /// Every embedded Shader.bnsh in Samus must produce a linked VS→FS WGSL interface.
+    /// Every embedded Shader.bnsh must produce a linked VS→FS WGSL interface.
+    /// Requires a local effect export (editor data root or HITBOX_EFFECT_EXPORT).
     #[test]
     fn test_samus_all_registry_shaders_link_stages() {
-        use crate::particle_renderer_bnsh::BnshShaderSet;
-        use crate::spirv_to_wgsl::{fragment_input_locations, patch_vertex_wgsl, vertex_return_wires_fs_inputs};
+        use crate::bnsh_shader_integration::{
+            decode_cached_dump_shaders, decode_shaders_from_fighter_eff,
+            shader_link_coverage_report, BOMB_SHADER_KEY, ShaderLinkSource,
+        };
 
-        let eff_path = Path::new(
-            "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/samus/ef_samus.eff",
-        );
-        if !eff_path.exists() {
-            eprintln!("Samus effect not found — skipping");
+        let export_pairs = decode_shaders_from_fighter_eff("samus").unwrap_or_default();
+        let export_complete: std::collections::HashMap<_, _> = export_pairs
+            .iter()
+            .filter(|(_, p)| p.vertex.is_some() && p.fragment.is_some())
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+        if export_complete.is_empty() {
+            eprintln!("Skipping: no effect export (set data_root or HITBOX_EFFECT_EXPORT)");
             return;
         }
-        let eff = crate::effects::EffIndex::from_file(eff_path).expect("eff");
-        let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data).expect("ptcl");
-        let set = BnshShaderSet::from_ptcl_file(&ptcl, "ef_samus.eff").expect("bnsh set");
 
-        let mut failures = Vec::new();
-        for (&key, pair) in &set.all_shaders {
-            if pair.vertex.is_none() || pair.fragment.is_none() {
-                failures.push(format!("{key:#x}: incomplete decode"));
-                continue;
-            }
-            let label = format!("{key:#x}");
-            let vs = pair.vertex.as_ref().unwrap();
-            let fs = pair.fragment.as_ref().unwrap();
-            let mut vs_w = crate::spirv_to_wgsl::bytes_to_words(&vs.spirv).unwrap();
-            let mut fs_w = crate::spirv_to_wgsl::bytes_to_words(&fs.spirv).unwrap();
-            let _ = crate::spirv_patch::nvn_to_vulkan_patch(&mut vs_w);
-            let _ = crate::spirv_patch::nvn_to_vulkan_patch(&mut fs_w);
-            let to_bytes = |w: &[u32]| w.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
-            let (vs_wgsl, _) = crate::spirv_to_wgsl::spirv_to_wgsl(
-                &to_bytes(&vs_w),
-                naga::ShaderStage::Vertex,
-                &format!("link_vs_{label}"),
-            )
-            .unwrap();
-            let (fs_wgsl, _) = crate::spirv_to_wgsl::spirv_to_wgsl(
-                &to_bytes(&fs_w),
-                naga::ShaderStage::Fragment,
-                &format!("link_fs_{label}"),
-            )
-            .unwrap();
-            let patched = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
-            for loc in fragment_input_locations(&fs_wgsl) {
-                let needle = format!("@location({loc})");
-                if !patched.contains(&needle) {
-                    failures.push(format!("{key:#x}: VS missing output {needle}"));
-                }
-            }
-            if !vertex_return_wires_fs_inputs(&patched, &fs_wgsl) {
-                failures.push(format!("{key:#x}: return VertexOutput missing FS varyings"));
+        let mut export_labels = std::collections::HashMap::new();
+        if let Some(eff_path) = crate::scratch_dirs::resolve_fighter_eff("samus") {
+            for key in export_complete.keys().copied() {
+                export_labels.insert(key, eff_path.display().to_string());
             }
         }
 
-        if !failures.is_empty() {
-            for f in failures.iter().take(20) {
-                eprintln!("[SHADER-LINK] {f}");
-            }
-            panic!(
-                "{} Samus shader(s) failed stage linking (showing up to 20)",
-                failures.len()
+        assert!(
+            export_complete.contains_key(&BOMB_SHADER_KEY),
+            "bomb flare shader ({:#x}) must be present in Samus export",
+            BOMB_SHADER_KEY
+        );
+
+        let (cache_pairs, cache_labels) = decode_cached_dump_shaders();
+        let report = shader_link_coverage_report(
+            &export_complete,
+            &export_labels,
+            &cache_pairs,
+            &cache_labels,
+        );
+        eprintln!("{}", report.summary_line());
+        for r in report
+            .results
+            .iter()
+            .filter(|r| r.source == ShaderLinkSource::Export)
+        {
+            eprintln!(
+                "[SHADER-LINK] {} {:#x} {}",
+                if r.ok { "PASS" } else { "FAIL" },
+                r.key,
+                r.fixture.as_deref().unwrap_or("?")
+            );
+        }
+        if report.cache_extension_pairs > 0 {
+            eprintln!(
+                "[SHADER-LINK] +{} cached shader(s) beyond Samus export",
+                report.cache_extension_pairs
+            );
+        }
+
+        report.assert_all_passed();
+    }
+
+    /// Samus export should expose a large shader registry; fixtures auto-sync locally (not committed).
+    #[test]
+    fn test_samus_shader_fixture_coverage() {
+        use crate::bnsh_shader_integration::{
+            count_shader_fixtures_on_disk, ensure_shader_fixtures, registry_fixture_coverage,
+            shader_fixtures_dir, shader_registry_entry_count,
+        };
+
+        let synced = ensure_shader_fixtures("samus");
+        if synced > 0 {
+            eprintln!("[FIXTURE] synced {synced} new Samus shader(s)");
+        }
+
+        let registry_count = shader_registry_entry_count("samus").unwrap_or(0);
+        let (registry_total, fixtures_for_registry) =
+            registry_fixture_coverage("samus").unwrap_or((0, 0));
+        let fixture_files = count_shader_fixtures_on_disk();
+
+        if registry_count == 0 && fixture_files == 0 {
+            eprintln!("Skipping: no Samus shaders (set data_root or HITBOX_EFFECT_EXPORT)");
+            return;
+        }
+
+        eprintln!(
+            "[FIXTURE] registry={registry_count} synced={fixtures_for_registry}/{registry_total} \
+             files={fixture_files} dir={}",
+            shader_fixtures_dir().display()
+        );
+        assert!(
+            registry_count >= 128 || fixture_files >= 128,
+            "expected broad Samus shader coverage (registry={registry_count}, files={fixture_files})"
+        );
+        if registry_count > 0 {
+            assert_eq!(
+                fixtures_for_registry, registry_total,
+                "every registry shader should have a synced fixture ({fixtures_for_registry}/{registry_total})"
             );
         }
     }

@@ -11,10 +11,11 @@
 use anyhow::Result;
 use crate::bnsh_ffi::BnshDecoder;
 use crate::bnsh_reflection;
-use crate::effects::PtclFile;
-use crate::shader_registry::ShaderKey;
+use crate::effects::{BlendType, EmitterDef, EmitterSet, PtclFile, TextureRes};
+use crate::shader_registry::{ShaderKey, ShaderRegistry, ShaderVsProfile};
 use crate::spirv_to_wgsl::{BindingClass, DescriptorInfo};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// A decoded shader ready for wgpu pipeline creation
 /// 
@@ -302,7 +303,13 @@ pub fn decode_shader_for_key(
 /// Decode using legacy binary_1=vertex / binary_2=fragment convention.
 pub fn decode_legacy_stage_pair(ptcl: &PtclFile) -> EffectShaderPair {
     let mut pair = EffectShaderPair::default();
-    let (b1, b2) = ptcl.shader_registry.legacy_pair();
+    let (mut b1, mut b2) = ptcl.shader_registry.legacy_pair();
+    if b1.is_empty() && !ptcl.shader_binary_1.is_empty() {
+        b1 = ptcl.shader_binary_1.clone();
+    }
+    if b2.is_empty() && !ptcl.shader_binary_2.is_empty() {
+        b2 = ptcl.shader_binary_2.clone();
+    }
 
     if !b1.is_empty() {
         if let Ok(wgsl) = BnshDecoder::decode_wgsl_with_index(&b1, 1) {
@@ -360,7 +367,32 @@ pub fn decode_all_effect_shaders(ptcl: &PtclFile) -> Result<HashMap<ShaderKey, E
         }
     }
     pair_registry_shaders(&mut out, &legacy);
+    if out.is_empty() {
+        if legacy.vertex.is_some() || legacy.fragment.is_some() {
+            let key = legacy_shader_fallback_key(ptcl, &legacy);
+            if key != 0 {
+                out.insert(key, legacy);
+            }
+        }
+    }
     Ok(out)
+}
+
+/// Synthetic registry key when the PTCL has legacy VS/FS blobs but no embedded Shader.bnsh entries.
+fn legacy_shader_fallback_key(ptcl: &PtclFile, legacy: &EffectShaderPair) -> crate::shader_registry::ShaderKey {
+    if !ptcl.shader_binary_2.is_empty() {
+        return crate::shader_registry::hash_bnsh_key(&ptcl.shader_binary_2);
+    }
+    if !ptcl.shader_binary_1.is_empty() {
+        return crate::shader_registry::hash_bnsh_key(&ptcl.shader_binary_1);
+    }
+    if let Some(fs) = &legacy.fragment {
+        return crate::shader_registry::hash_bnsh_key(&fs.spirv);
+    }
+    if let Some(vs) = &legacy.vertex {
+        return crate::shader_registry::hash_bnsh_key(&vs.spirv);
+    }
+    0
 }
 
 /// Extract and decode the default shader pair from a PTCL file.
@@ -398,7 +430,7 @@ pub fn decode_effect_shaders(ptcl: &PtclFile) -> Result<EffectShaderPair> {
 }
 
 /// Extract shader reflection for a specific stage from a BNSH binary.
-fn extract_shader_reflection(
+pub fn extract_shader_reflection(
     bnsh_binary: &[u8],
     is_fragment: bool,
 ) -> Result<Option<bnsh_reflection::ShaderStageReflection>> {
@@ -657,6 +689,611 @@ fn map_descriptors_by_binding_order(descriptors: &[DescriptorInfo]) -> HashMap<(
 #[cfg(test)]
 fn extract_fragment_reflection(bnsh_binary: &[u8]) -> Result<Option<bnsh_reflection::ShaderStageReflection>> {
     extract_shader_reflection(bnsh_binary, true)
+}
+
+/// Best-effort VS profile from BNSH reflection without SPIR-V decode.
+pub fn vs_profile_from_bnsh_bytes(bnsh: &[u8]) -> crate::shader_registry::ShaderVsProfile {
+    match extract_shader_reflection(bnsh, false) {
+        Ok(Some(refl)) => crate::shader_registry::vs_profile_from_reflection(&refl),
+        _ => crate::shader_registry::ShaderVsProfile::Unknown,
+    }
+}
+
+/// Samus bomb flare shader (`P_SamusAttackBomb/flare1`).
+pub const BOMB_SHADER_KEY: ShaderKey = 0x5740_678a_2aa5_959f;
+
+/// Gitignored local mirror: `tests/fixtures/shaders/` (auto-populated from export/cache).
+pub fn shader_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shaders")
+}
+
+fn sanitize_fixture_stem(stem: &str) -> String {
+    let mut out: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out = "shader".to_string();
+    }
+    out
+}
+
+fn shader_fixture_path(stem: &str, key: ShaderKey) -> PathBuf {
+    shader_fixtures_dir().join(format!(
+        "{}_{:016x}.bnsh",
+        sanitize_fixture_stem(stem),
+        key
+    ))
+}
+
+fn shader_key_from_fixture_filename(name: &str) -> Option<ShaderKey> {
+    let stem = name.strip_suffix(".bnsh")?;
+    let hex = stem.rsplit('_').next()?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
+fn write_shader_fixture(stem: &str, key: ShaderKey, bytes: &[u8]) -> std::io::Result<bool> {
+    let dest = shader_fixture_path(stem, key);
+    if dest.exists() {
+        if let Ok(existing) = std::fs::read(&dest) {
+            if crate::shader_registry::hash_bnsh_key(&existing) == key {
+                return Ok(false);
+            }
+        }
+    }
+    std::fs::create_dir_all(shader_fixtures_dir())?;
+    std::fs::write(dest, bytes)?;
+    Ok(true)
+}
+
+/// Read a synced `.bnsh` from `tests/fixtures/shaders/` by registry key.
+pub fn read_shader_fixture_bytes(key: ShaderKey) -> Option<Vec<u8>> {
+    let dir = shader_fixtures_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let suffix = format!("_{key:016x}.bnsh");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return None;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("bnsh") {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str())?;
+        if name.ends_with(&suffix) || shader_key_from_fixture_filename(name) == Some(key) {
+            return std::fs::read(path).ok();
+        }
+    }
+    None
+}
+
+/// Copy missing shaders into `tests/fixtures/shaders/` from export + PTCL dump cache.
+pub fn ensure_shader_fixtures(fighter: &str) -> usize {
+    match try_ensure_shader_fixtures(fighter) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[FIXTURE] sync skipped: {e}");
+            0
+        }
+    }
+}
+
+fn try_ensure_shader_fixtures(fighter: &str) -> std::io::Result<usize> {
+    let mut written = 0;
+
+    if let Some(_eff_path) = crate::scratch_dirs::resolve_fighter_eff(fighter) {
+        if let Ok(eff) = crate::effects::EffIndex::from_file(&_eff_path) {
+            if let Ok(ptcl) = crate::effects::PtclFile::parse(&eff.ptcl_data) {
+                let mut stems: HashMap<ShaderKey, String> = HashMap::new();
+                for set in &ptcl.emitter_sets {
+                    for em in &set.emitters {
+                        if em.shader_key != 0 {
+                            stems
+                                .entry(em.shader_key)
+                                .or_insert_with(|| sanitize_fixture_stem(&em.name));
+                        }
+                    }
+                }
+                for (key, bytes) in ptcl.shader_registry.iter() {
+                    let stem = stems
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| format!("shader_{key:#x}"));
+                    if write_shader_fixture(&stem, key, bytes)? {
+                        written += 1;
+                        eprintln!("[FIXTURE] wrote {stem}_{key:016x}.bnsh from export");
+                    }
+                }
+            }
+        }
+    }
+
+    let root = crate::scratch_dirs::effect_dump_cache_root();
+    let mut on_shader = |path: &Path| {
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        let key = crate::shader_registry::hash_bnsh_key(&bytes);
+        let stem = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(sanitize_fixture_stem)
+            .unwrap_or_else(|| format!("shader_{key:#x}"));
+        if let Ok(true) = write_shader_fixture(&stem, key, &bytes) {
+            written += 1;
+            eprintln!("[FIXTURE] wrote {stem}_{key:016x}.bnsh from cache");
+        }
+    };
+    crate::scratch_dirs::walk_files_named(&root, "Shader.bnsh", &mut on_shader);
+
+    Ok(written)
+}
+
+/// Number of `.bnsh` files under [`shader_fixtures_dir`] (no decode).
+pub fn count_shader_fixtures_on_disk() -> usize {
+    let dir = shader_fixtures_dir();
+    if !dir.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(&dir)
+        .ok()
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        == Some("bnsh")
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Shader registry entry count from the fighter `.eff` export (no BNSH decode).
+pub fn shader_registry_entry_count(fighter: &str) -> Option<usize> {
+    let eff_path = crate::scratch_dirs::resolve_fighter_eff(fighter)?;
+    let eff = crate::effects::EffIndex::from_file(&eff_path).ok()?;
+    let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data).ok()?;
+    Some(ptcl.shader_registry.len())
+}
+
+/// `(registry_entries, fixtures_on_disk_for_registry_keys)` without decoding BNSH.
+pub fn registry_fixture_coverage(fighter: &str) -> Option<(usize, usize)> {
+    let eff_path = crate::scratch_dirs::resolve_fighter_eff(fighter)?;
+    let eff = crate::effects::EffIndex::from_file(&eff_path).ok()?;
+    let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data).ok()?;
+    let total = ptcl.shader_registry.len();
+    let present = ptcl
+        .shader_registry
+        .iter()
+        .filter(|(k, _)| read_shader_fixture_bytes(*k).is_some())
+        .count();
+    Some((total, present))
+}
+
+/// Decode every synced `.bnsh` under `tests/fixtures/shaders/`.
+pub fn decode_shader_fixtures(fighter: &str) -> (HashMap<ShaderKey, EffectShaderPair>, HashMap<ShaderKey, String>) {
+    ensure_shader_fixtures(fighter);
+    let mut pairs = HashMap::new();
+    let mut labels = HashMap::new();
+    let dir = shader_fixtures_dir();
+    if !dir.is_dir() {
+        return (pairs, labels);
+    }
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return (pairs, labels);
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("bnsh") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        let key = crate::shader_registry::hash_bnsh_key(&bytes);
+        match decode_bnsh_bytes(&bytes) {
+            Ok(pair) => {
+                labels.insert(key, path.display().to_string());
+                pairs.insert(key, pair);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[FIXTURE] decode failed {:?}: {e}",
+                    path.file_name().unwrap_or_default()
+                );
+            }
+        }
+    }
+    if !pairs.is_empty() {
+        #[allow(deprecated)]
+        {
+            complete_shader_pairs(&mut pairs);
+        }
+    }
+    (pairs, labels)
+}
+
+/// Decode shader pairs embedded in a fighter `.eff` from the configured effect export.
+pub fn decode_shaders_from_fighter_eff(fighter: &str) -> Option<HashMap<ShaderKey, EffectShaderPair>> {
+    let eff_path = crate::scratch_dirs::resolve_fighter_eff(fighter)?;
+    let eff = crate::effects::EffIndex::from_file(&eff_path).ok()?;
+    let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data).ok()?;
+    decode_all_effect_shaders(&ptcl).ok()
+}
+
+/// Decode standalone `Shader.bnsh` files from the EffectConverter PTCL dump cache.
+pub fn decode_cached_dump_shaders() -> (HashMap<ShaderKey, EffectShaderPair>, HashMap<ShaderKey, String>) {
+    let root = crate::scratch_dirs::effect_dump_cache_root();
+    let mut pairs = HashMap::new();
+    let mut labels = HashMap::new();
+    let mut on_shader = |path: &Path| {
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        let key = crate::shader_registry::hash_bnsh_key(&bytes);
+        if pairs.contains_key(&key) {
+            return;
+        }
+        match decode_bnsh_bytes(&bytes) {
+            Ok(pair) => {
+                labels.insert(key, path.display().to_string());
+                pairs.insert(key, pair);
+            }
+            Err(e) => {
+                eprintln!("[BNSH] cache decode failed {}: {e}", path.display());
+            }
+        }
+    };
+    crate::scratch_dirs::walk_files_named(&root, "Shader.bnsh", &mut on_shader);
+    if !pairs.is_empty() {
+        #[allow(deprecated)]
+        {
+            complete_shader_pairs(&mut pairs);
+        }
+    }
+    (pairs, labels)
+}
+
+/// Merge shaders from a fighter `.eff`, PTCL dump cache, and local fixture mirror.
+pub fn decode_effect_export_shaders(fighter: &str) -> (HashMap<ShaderKey, EffectShaderPair>, HashMap<ShaderKey, String>) {
+    ensure_shader_fixtures(fighter);
+    let mut labels = HashMap::new();
+    let mut pairs = decode_shaders_from_fighter_eff(fighter).unwrap_or_default();
+    if let Some(eff_path) = crate::scratch_dirs::resolve_fighter_eff(fighter) {
+        for key in pairs.keys().copied().collect::<Vec<_>>() {
+            labels.insert(key, eff_path.display().to_string());
+        }
+    }
+    let (cache_pairs, cache_labels) = decode_cached_dump_shaders();
+    for (key, pair) in cache_pairs {
+        pairs.entry(key).or_insert(pair);
+        labels.entry(key).or_insert_with(|| {
+            cache_labels
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| format!("cache:{key:#x}"))
+        });
+    }
+    let (fixture_pairs, fixture_labels) = decode_shader_fixtures(fighter);
+    for (key, pair) in fixture_pairs {
+        pairs.entry(key).or_insert(pair);
+        labels.entry(key).or_insert_with(|| {
+            fixture_labels
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| format!("fixture:{key:#x}"))
+        });
+    }
+    (pairs, labels)
+}
+
+/// Raw BNSH bytes for `shader_key` from fixtures, effect export, or PTCL dump cache.
+pub fn shader_bnsh_bytes_from_export(shader_key: ShaderKey) -> Result<Vec<u8>> {
+    ensure_shader_fixtures("samus");
+    if let Some(bytes) = read_shader_fixture_bytes(shader_key) {
+        return Ok(bytes);
+    }
+    for fighter in ["samus", "mario"] {
+        if let Some(path) = crate::scratch_dirs::resolve_fighter_eff(fighter) {
+            if let Ok(eff) = crate::effects::EffIndex::from_file(&path) {
+                if let Ok(ptcl) = crate::effects::PtclFile::parse(&eff.ptcl_data) {
+                    if let Some(bytes) = ptcl.shader_registry.get(shader_key) {
+                        return Ok(bytes.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    let (pairs, _) = decode_cached_dump_shaders();
+    if pairs.contains_key(&shader_key) {
+        let root = crate::scratch_dirs::effect_dump_cache_root();
+        let mut found = None;
+        let mut on_shader = |path: &Path| {
+            if found.is_some() {
+                return;
+            }
+            let Ok(bytes) = std::fs::read(path) else {
+                return;
+            };
+            if crate::shader_registry::hash_bnsh_key(&bytes) == shader_key {
+                found = Some(bytes);
+            }
+        };
+        crate::scratch_dirs::walk_files_named(&root, "Shader.bnsh", &mut on_shader);
+        if let Some(bytes) = found {
+            return Ok(bytes);
+        }
+    }
+    anyhow::bail!(
+        "shader {shader_key:#x} not found — set editor data root or HITBOX_EFFECT_EXPORT"
+    )
+}
+
+/// Per-shader VS→FS stage-link validation outcome.
+#[derive(Debug, Clone)]
+pub struct ShaderLinkResult {
+    pub key: ShaderKey,
+    pub fixture: Option<String>,
+    pub source: ShaderLinkSource,
+    pub ok: bool,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderLinkSource {
+    Export,
+    Cache,
+}
+
+/// Aggregate report for CI shader-link coverage.
+#[derive(Debug, Clone, Default)]
+pub struct ShaderLinkCoverageReport {
+    pub export_files: usize,
+    pub export_pairs: usize,
+    pub cache_extension_pairs: usize,
+    pub validated: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub results: Vec<ShaderLinkResult>,
+}
+
+impl ShaderLinkCoverageReport {
+    pub fn summary_line(&self) -> String {
+        format!(
+            "[SHADER-LINK] export={}/{} validated={} passed={} failed={} cache_ext={}",
+            self.export_pairs,
+            self.export_files,
+            self.validated,
+            self.passed,
+            self.failed,
+            self.cache_extension_pairs
+        )
+    }
+
+    pub fn assert_all_passed(&self) {
+        if self.failed == 0 {
+            return;
+        }
+        for r in self.results.iter().filter(|r| !r.ok).take(20) {
+            let label = r
+                .fixture
+                .as_deref()
+                .unwrap_or_else(|| match r.source {
+                    ShaderLinkSource::Export => "export",
+                    ShaderLinkSource::Cache => "cache",
+                });
+            eprintln!(
+                "[SHADER-LINK] FAIL {label} ({:#x}): {}",
+                r.key,
+                r.detail.as_deref().unwrap_or("link failed")
+            );
+        }
+        panic!(
+            "{} shader(s) failed stage linking (showing up to 20); {}",
+            self.failed,
+            self.summary_line()
+        );
+    }
+}
+
+/// Validate every shader from the effect export and optional cache extensions.
+pub fn shader_link_coverage_report(
+    export_pairs: &HashMap<ShaderKey, EffectShaderPair>,
+    export_labels: &HashMap<ShaderKey, String>,
+    cache_pairs: &HashMap<ShaderKey, EffectShaderPair>,
+    cache_labels: &HashMap<ShaderKey, String>,
+) -> ShaderLinkCoverageReport {
+    let export_files = export_labels.len();
+    let export_keys: std::collections::HashSet<ShaderKey> = export_pairs.keys().copied().collect();
+    let cache_extension_pairs = cache_pairs
+        .keys()
+        .filter(|k| !export_keys.contains(k))
+        .count();
+
+    let mut merged = export_pairs.clone();
+    merged.extend(cache_pairs.iter().map(|(&k, v)| (k, v.clone())));
+    merged.retain(|_, pair| pair.vertex.is_some() && pair.fragment.is_some());
+
+    let failures = shader_stage_link_failures(&merged);
+    let failure_by_key: HashMap<ShaderKey, String> = failures
+        .into_iter()
+        .filter_map(|msg| {
+            let key_str = msg.split(':').next()?.trim();
+            let key = u64::from_str_radix(key_str.trim_start_matches("0x"), 16).ok()?;
+            let detail = msg.split_once(':').map(|(_, d)| d.trim().to_string());
+            Some((key, detail.unwrap_or_else(|| msg.clone())))
+        })
+        .collect();
+
+    let mut results = Vec::new();
+    for (&key, pair) in &merged {
+        let source = if export_keys.contains(&key) {
+            ShaderLinkSource::Export
+        } else {
+            ShaderLinkSource::Cache
+        };
+        let fixture = export_labels
+            .get(&key)
+            .or_else(|| cache_labels.get(&key))
+            .cloned();
+        let (ok, detail) = if pair.vertex.is_none() || pair.fragment.is_none() {
+            (false, Some("incomplete decode".into()))
+        } else if let Some(err) = failure_by_key.get(&key) {
+            (false, Some(err.clone()))
+        } else {
+            (true, None)
+        };
+        results.push(ShaderLinkResult {
+            key,
+            fixture,
+            source,
+            ok,
+            detail,
+        });
+    }
+    results.sort_by_key(|r| (r.source as u8, r.fixture.clone().unwrap_or_default(), r.key));
+
+    let passed = results.iter().filter(|r| r.ok).count();
+    let failed = results.len() - passed;
+    ShaderLinkCoverageReport {
+        export_files,
+        export_pairs: export_pairs.len(),
+        cache_extension_pairs,
+        validated: results.len(),
+        passed,
+        failed,
+        results,
+    }
+}
+
+/// Build a minimal [`PtclFile`] for GPU tests: one billboard emitter bound to a shader
+/// from the configured effect export or PTCL dump cache.
+pub fn synthetic_ptcl_from_shader_key(shader_key: ShaderKey, blend: BlendType) -> Result<PtclFile> {
+    let bnsh = shader_bnsh_bytes_from_export(shader_key)?;
+    let mut shader_registry = ShaderRegistry::default();
+    let registered = shader_registry.register(bnsh);
+    if registered != shader_key {
+        anyhow::bail!(
+            "export shader hash {registered:#x} != expected {shader_key:#x}"
+        );
+    }
+    shader_registry.set_vs_profile(shader_key, ShaderVsProfile::ParticleBillboard);
+
+    let make_tex = |offset: u32| TextureRes {
+        tex_name: "fixture_col".to_string(),
+        width: 4,
+        height: 4,
+        ftx_format: 0x0B06,
+        ftx_data_offset: offset,
+        ftx_data_size: 64,
+        original_format: 0x0B06,
+        original_data_offset: offset,
+        original_data_size: 64,
+        wrap_mode: 1,
+        filter_mode: 0,
+        mipmap_count: 1,
+        channel_swizzle: 0,
+    };
+    let tex = make_tex(0);
+    let emitter = EmitterDef {
+        name: "fixture_emitter".to_string(),
+        blend_type: blend,
+        texture_index: 0,
+        textures: vec![tex],
+        shader_key,
+        scale: 40.0,
+        ..Default::default()
+    };
+    Ok(PtclFile {
+        emitter_sets: vec![EmitterSet {
+            name: "fixture_set".to_string(),
+            emitters: vec![emitter],
+        }],
+        texture_section: vec![0xFFu8; 128],
+        texture_section_offset: 0,
+        bntx_textures: vec![make_tex(0)],
+        primitives: vec![],
+        bfres_models: vec![],
+        shader_registry,
+        shader_binary_1: vec![],
+        shader_binary_2: vec![],
+    })
+}
+
+/// Return human-readable VS→FS interface link failures for decoded shader pairs.
+pub fn shader_stage_link_failures(pairs: &HashMap<ShaderKey, EffectShaderPair>) -> Vec<String> {
+    use crate::spirv_to_wgsl::{
+        fragment_input_locations, patch_vertex_wgsl, vertex_return_wires_fs_inputs,
+    };
+
+    let mut failures = Vec::new();
+    for (&key, pair) in pairs {
+        if pair.vertex.is_none() || pair.fragment.is_none() {
+            failures.push(format!("{key:#x}: incomplete decode"));
+            continue;
+        }
+        let label = format!("{key:#x}");
+        let vs = pair.vertex.as_ref().unwrap();
+        let fs = pair.fragment.as_ref().unwrap();
+        let Ok(mut vs_w) = crate::spirv_to_wgsl::bytes_to_words(&vs.spirv) else {
+            failures.push(format!("{key:#x}: invalid VS SPIR-V"));
+            continue;
+        };
+        let Ok(mut fs_w) = crate::spirv_to_wgsl::bytes_to_words(&fs.spirv) else {
+            failures.push(format!("{key:#x}: invalid FS SPIR-V"));
+            continue;
+        };
+        let _ = crate::spirv_patch::nvn_to_vulkan_patch(&mut vs_w);
+        let _ = crate::spirv_patch::nvn_to_vulkan_patch(&mut fs_w);
+        let to_bytes = |w: &[u32]| w.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let Ok((vs_wgsl, _)) = crate::spirv_to_wgsl::spirv_to_wgsl(
+            &to_bytes(&vs_w),
+            naga::ShaderStage::Vertex,
+            &format!("link_vs_{label}"),
+        ) else {
+            failures.push(format!("{key:#x}: VS SPIR-V→WGSL failed"));
+            continue;
+        };
+        let Ok((fs_wgsl, _)) = crate::spirv_to_wgsl::spirv_to_wgsl(
+            &to_bytes(&fs_w),
+            naga::ShaderStage::Fragment,
+            &format!("link_fs_{label}"),
+        ) else {
+            failures.push(format!("{key:#x}: FS SPIR-V→WGSL failed"));
+            continue;
+        };
+        let patched = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
+        for loc in fragment_input_locations(&fs_wgsl) {
+            let needle = format!("@location({loc})");
+            if !patched.contains(&needle) {
+                failures.push(format!("{key:#x}: VS missing output {needle}"));
+            }
+        }
+        if !vertex_return_wires_fs_inputs(&patched, &fs_wgsl) {
+            failures.push(format!("{key:#x}: return VertexOutput missing FS varyings"));
+        }
+    }
+    failures
 }
 
 /// Get summary stats about decoded shaders
@@ -980,6 +1617,45 @@ mod tests {
         assert!(bindings.sampler_bindings.is_empty());
         assert!(bindings.emissive_bindings.is_empty());
         assert!(bindings.pbr_bindings.is_empty());
+    }
+
+    #[test]
+    fn test_sync_shader_fixtures_from_export() {
+        let written = ensure_shader_fixtures("samus");
+        if written > 0 {
+            eprintln!("[FIXTURE] synced {written} new shader(s)");
+        }
+        if read_shader_fixture_bytes(BOMB_SHADER_KEY).is_none() {
+            eprintln!("Skipping: bomb fixture unavailable (set data_root or HITBOX_EFFECT_EXPORT)");
+            return;
+        }
+        assert!(shader_fixtures_dir().is_dir());
+    }
+
+    #[test]
+    fn test_effect_export_shaders_decode_and_link() {
+        let (export_pairs, _) = decode_effect_export_shaders("samus");
+        let complete: HashMap<_, _> = export_pairs
+            .into_iter()
+            .filter(|(_, p)| p.vertex.is_some() && p.fragment.is_some())
+            .collect();
+        if complete.is_empty() {
+            eprintln!(
+                "Skipping: no decodable Samus shaders (set data_root / HITBOX_EFFECT_EXPORT, or HITBOX_EFFECT_TMP)"
+            );
+            return;
+        }
+        assert!(
+            complete.contains_key(&BOMB_SHADER_KEY),
+            "bomb shader ({:#x}) must decode from Samus export",
+            BOMB_SHADER_KEY
+        );
+        let failures = shader_stage_link_failures(&complete);
+        assert!(
+            failures.is_empty(),
+            "export link failures: {}",
+            failures.join("; ")
+        );
     }
 
     #[test]

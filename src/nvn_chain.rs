@@ -119,7 +119,7 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///   Verified accesses: 0,1,2,3, 5, 8,9,10, 13,14,15, 17, 44,45,46,47,
 ///                      48,49,50,51, 53, 59,60,61,62, 68,69,70,71, 76,77,
 ///                      84, 92, 96,97,98,99
-///   [0..3]   = NOT READ by the native VS (dead data). VP now lives in cbuf_8[8-11].
+///   [0..3]   = View-projection matrix in Family-B particle VS (legacy); Family-A uses cbuf_8[8..11].
 ///   [5]      = Render flags bitmask in late VS (bitcast<i32> AND). Family-A VS also reads
 ///              `.x` as a float scale early in the position chain (~L589) — must be 1.0, not
 ///              bitcast(!0u32) which is NaN and poisons gpr_17_ before the VP multiply.
@@ -149,12 +149,14 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///              Alpha spline; CPU fills from `nvn_alpha_table1_keyframes`.
 ///   [76..77] = Frame interpolation pair 3: lo=(76), hi=(77) (texture frame selector)
 ///   [84]     = Additional animation timing data
-///   [92]     = UV tile/scroll data
+///   [92]     = UV tile/scroll data (slot1 indirect .xy, slot2 tex2 .zw)
 ///   [96..99] = Sprite sheet UV layout matrix (4 rows):
 ///              [96] = (0, 0, 0, tex_scale_u)    — column stride
 ///              [97] = (tex_scale_u, tex_scale_v, 0, 1.0) — cell size + identity
 ///              [98] = (0, 0, 0, tex_scale_v)    — row stride
 ///              [99] = (tex_scale_u, tex_scale_v, 0, 1.0) — cell size + identity
+///   [100]    = TextureAnim3–4 scroll UV (.xy = slot3, .zw = slot4) — mirrors [92] pattern
+///   [101]    = TextureAnim5 scroll UV (.xy = slot5)
 ///
 /// cbuf_10 (Particle Attribute Buffer):
 ///   Verified accesses: 0,1,2,3, 4,5,6, 8,9,10
@@ -168,6 +170,8 @@ pub fn print_cbuf_usage(wgsl: &str, label: &str) {
 ///   [5]      = UV transform matrix row V (0, tex_scale.y, 0, tex_offset.y)
 ///   [6]      = UV transform matrix row W (0, 0, 1, 0)
 ///   [8..10]  = Extra particle attribute defaults (safe identity/zero)
+///   [11]     = TextureAnim3–4 per-draw UV offset (.xy = slot3, .zw = slot4) — mirrors [9]
+///   [12]     = TextureAnim5 offset (.xy) + slot3 scale (.zw) when combiner reads extra slots
 ///
 /// cbuf_16 (Fragment Color Chain):
 ///   Verified accesses: 1, 2, 3
@@ -202,10 +206,28 @@ pub fn merge_cbuf_slot_usage(
 
 /// Extract merged cbuf slot usage from vertex + fragment WGSL sources.
 pub fn cbuf_slot_usage_from_wgsl(vs_wgsl: &str, fs_wgsl: &str) -> HashMap<String, HashSet<u32>> {
-    merge_cbuf_slot_usage([
+    let mut usage = merge_cbuf_slot_usage([
         extract_cbuf_slots_from_wgsl(vs_wgsl),
         extract_cbuf_slots_from_wgsl(fs_wgsl),
-    ])
+    ]);
+    supplement_hybrid_finalize_slots(&mut usage, vs_wgsl);
+    usage
+}
+
+/// Ensure cbuf_9 camera-basis slots are filled for hybrid VP×billboard finalize.
+pub fn supplement_hybrid_finalize_slots(
+    usage: &mut HashMap<String, HashSet<u32>>,
+    vs_wgsl: &str,
+) {
+    let needs_basis = crate::spirv_to_wgsl::is_partial_family_b_billboard_vs(vs_wgsl)
+        || (crate::spirv_to_wgsl::billboard_particle_vs(vs_wgsl)
+            && !crate::spirv_to_wgsl::trusts_native_position_chain(vs_wgsl));
+    if needs_basis {
+        usage
+            .entry("cbuf_9_1_".to_string())
+            .or_default()
+            .extend([46u32, 47]);
+    }
 }
 
 /// ── Phase 4a: Data-driven NVN chain evaluator ─────────────────────────────
@@ -229,6 +251,18 @@ pub struct NvnChainParams<'a> {
     pub cam_right: Vec3,
     pub cam_up: Vec3,
     pub aspect: f32,
+    /// 3×4 world transform rows for cbuf_8[12..14] (emitter/bone TRS before VP).
+    pub world_trs: Mat4,
+    /// Average flipbook crossfade blend for the current draw batch (0..1).
+    pub pat_blend: f32,
+    /// Batch-averaged per-particle UV offsets for TextureAnim3–5 (attr11 carries slots 3–4).
+    pub tex_extra_avg: [[f32; 2]; 3],
+    /// Batch-averaged particle velocity (Stripe / ComplexStripe basis).
+    pub batch_velocity: Vec3,
+    /// PRMA meshes for primitive billboard mode.
+    pub primitives: &'a [crate::effects::PrimitiveData],
+    /// BFRES models for primitive draw mesh lookup.
+    pub bfres_models: &'a [crate::effects::BfresModel],
 }
 
 impl<'a> NvnChainParams<'a> {
@@ -246,6 +280,12 @@ impl<'a> NvnChainParams<'a> {
             cam_right: Vec3::X,
             cam_up: Vec3::Y,
             aspect: 1.0,
+            world_trs: Mat4::IDENTITY,
+            pat_blend: 0.0,
+            tex_extra_avg: [[0.0, 0.0]; 3],
+            batch_velocity: Vec3::ZERO,
+            primitives: &[],
+            bfres_models: &[],
         }
     }
 
@@ -253,6 +293,36 @@ impl<'a> NvnChainParams<'a> {
         self.cam_right = cam_right;
         self.cam_up = cam_up;
         self.aspect = aspect;
+        self
+    }
+
+    pub fn with_world_trs(mut self, world_trs: Mat4) -> Self {
+        self.world_trs = world_trs;
+        self
+    }
+
+    pub fn with_pat_blend(mut self, pat_blend: f32) -> Self {
+        self.pat_blend = pat_blend;
+        self
+    }
+
+    pub fn with_tex_extra_avg(mut self, tex_extra_avg: [[f32; 2]; 3]) -> Self {
+        self.tex_extra_avg = tex_extra_avg;
+        self
+    }
+
+    pub fn with_batch_velocity(mut self, batch_velocity: Vec3) -> Self {
+        self.batch_velocity = batch_velocity;
+        self
+    }
+
+    pub fn with_primitives(mut self, primitives: &'a [crate::effects::PrimitiveData]) -> Self {
+        self.primitives = primitives;
+        self
+    }
+
+    pub fn with_bfres_models(mut self, bfres_models: &'a [crate::effects::BfresModel]) -> Self {
+        self.bfres_models = bfres_models;
         self
     }
 
@@ -265,6 +335,12 @@ impl<'a> NvnChainParams<'a> {
             cam_right: self.cam_right,
             cam_up: self.cam_up,
             aspect: self.aspect,
+            world_trs: self.world_trs,
+            pat_blend: self.pat_blend,
+            tex_extra_avg: self.tex_extra_avg,
+            batch_velocity: self.batch_velocity,
+            primitives: self.primitives,
+            bfres_models: self.bfres_models,
         }
     }
 }
@@ -278,6 +354,12 @@ struct NvnEvalContext<'a> {
     cam_right: Vec3,
     cam_up: Vec3,
     aspect: f32,
+    world_trs: Mat4,
+    pat_blend: f32,
+    tex_extra_avg: [[f32; 2]; 3],
+    batch_velocity: Vec3,
+    primitives: &'a [crate::effects::PrimitiveData],
+    bfres_models: &'a [crate::effects::BfresModel],
 }
 
 impl NvnChainEvaluator {
@@ -342,15 +424,106 @@ pub fn sample_emitter_anim(anim: &EmitterAnimDef, t: f32) -> [f32; 3] {
 }
 
 fn effective_tex_scale_uv(emitter: &EmitterDef, life_t: f32) -> [f32; 2] {
-    let mut scale = emitter.tex_scale_uv;
-    if let Some(anim) = &emitter.anim_tex_scale {
-        if anim.enable {
-            let v = sample_emitter_anim(anim, life_t);
-            scale[0] *= v[0].max(0.001);
-            scale[1] *= v[1].max(0.001);
+    use crate::effects::{effective_tex_scale_uv as eff, TextureAnimFlags};
+    let anim = TextureAnimFlags {
+        pattern_anim_type: emitter.tex_pattern_anim_type,
+        is_scroll: emitter.tex_is_scroll,
+        is_rotate: emitter.tex_is_rotate,
+        is_scale: emitter.tex_is_scale,
+        inv_rand_u: emitter.tex_inv_rand_u,
+        inv_rand_v: emitter.tex_inv_rand_v,
+        pat_loop_random: emitter.tex_pat_loop_random,
+        crossfade: emitter.tex_crossfade,
+        scroll_rotation: emitter.tex_scroll_rotation,
+        scroll_rotation_add: emitter.tex_scroll_rotation_add,
+    };
+    eff(
+        emitter.tex_scale_uv,
+        &anim,
+        emitter.anim_tex_scale.as_ref(),
+        life_t,
+    )
+}
+
+fn scroll_uv_angle(emitter: &EmitterDef, life_t: f32) -> f32 {
+    use crate::effects::{scroll_uv_angle_at_life, TextureAnimFlags};
+    let anim = TextureAnimFlags {
+        pattern_anim_type: emitter.tex_pattern_anim_type,
+        is_scroll: emitter.tex_is_scroll,
+        is_rotate: emitter.tex_is_rotate,
+        is_scale: emitter.tex_is_scale,
+        inv_rand_u: emitter.tex_inv_rand_u,
+        inv_rand_v: emitter.tex_inv_rand_v,
+        pat_loop_random: emitter.tex_pat_loop_random,
+        crossfade: emitter.tex_crossfade,
+        scroll_rotation: emitter.tex_scroll_rotation,
+        scroll_rotation_add: emitter.tex_scroll_rotation_add,
+    };
+    scroll_uv_angle_at_life(&anim, life_t, emitter.lifetime)
+}
+
+fn fill_cbuf_9_uv_rotation_slots(
+    data: &mut NvnBufferData,
+    slots: &HashSet<u32>,
+    angle: f32,
+    aspect: f32,
+    cam_right: Vec3,
+    cam_up: Vec3,
+    emitter: &EmitterDef,
+    view_dir: Vec3,
+    batch_velocity: Vec3,
+    mesh_ctx: Option<&crate::effects::SpawnMeshContext<'_>>,
+    primitives: &[crate::effects::PrimitiveData],
+) {
+    let (basis_right, basis_up) = crate::effects::billboard_basis_for_emitter(
+        emitter,
+        cam_right,
+        cam_up,
+        view_dir,
+        batch_velocity,
+        mesh_ctx,
+        primitives,
+    );
+    let primitive_mesh_loaded = emitter.billboard_type == crate::effects::BillboardType::Primitive
+        && (mesh_ctx
+            .and_then(|ctx| crate::effects::emitter_draw_mesh(ctx, emitter))
+            .is_some()
+            || crate::effects::emitter_primitive(emitter, primitives).is_some());
+    let pivot47 = crate::effects::billboard_pivot_cbuf47(emitter.offset_type);
+    let (c, s) = (angle.cos(), angle.sin());
+    let aspect_scale = if aspect > 0.0 { 1.0 / aspect } else { 1.0 };
+    for &slot in slots {
+        match slot {
+            // UV 2×2 rotation matrix coefficients (scroll TexScrollAnim rotation path).
+            44 if angle.abs() > 1e-6 => data.set(44, [c, -s, 1.0, 1.0]),
+            45 if angle.abs() > 1e-6 => data.set(45, [aspect_scale, s, c, 1.0]),
+            44 => data.set(44, [0.0, 0.0, 1.0, 1.0]),
+            45 => data.set(45, [aspect_scale, 1.0, 0.0, 1.0]),
+            46 => data.set(46, [basis_right.x, basis_right.y, basis_right.z, 1.0]),
+            47 if primitive_mesh_loaded && crate::fx_env::fx_native_vs_pos_enabled() => {
+                // Native VS: .y/.z carry pivot offsets; .w carries mesh-up Z for gpr coupling.
+                data.set(
+                    47,
+                    [pivot47[0], pivot47[1], pivot47[2], basis_up.z],
+                )
+            }
+            47 if primitive_mesh_loaded => {
+                // Patched VS mode 7 reads mesh up from .yzw.
+                data.set(47, [0.0, basis_up.x, basis_up.y, basis_up.z])
+            }
+            47 if crate::fx_env::fx_native_vs_pos_enabled() => data.set(
+                47,
+                [
+                    pivot47[0],
+                    pivot47[1],
+                    pivot47[2],
+                    basis_up.z,
+                ],
+            ),
+            47 => data.set(47, [0.0, basis_up.x, basis_up.y, basis_up.z]),
+            _ => {}
         }
     }
-    scale
 }
 
 fn color0_entry(emitter: &EmitterDef, index: usize, life_t: f32) -> [f32; 4] {
@@ -592,12 +765,10 @@ fn build_cbuf_8_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
                 data.set(slot as u64, vp[(slot - 8) as usize]);
             }
             // Particle VS/FS treat [12..14] as a 3×4 transform applied before the VP at [8..11].
-            // Identity rows pass the NVN register-chain world position through unchanged.
             12..=14 => {
+                let rows = crate::effects::mat4_to_cbuf_rows_3x4(ctx.world_trs);
                 let row = (slot - 12) as usize;
-                let mut v = [0.0f32; 4];
-                v[row] = 1.0;
-                data.set(slot as u64, v);
+                data.set(slot as u64, rows[row]);
             }
             // Some VS variants read [0..3] as a 4×4 pre-transform (fma chains), not colour table 0.
             // When the VP block [8..11] is also present, treat [0..3] as identity columns.
@@ -631,19 +802,41 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
     let cols = (1.0 / su).round();
     let subdiv = cols.max(1.0);
     let frame_count = ctx.emitter.tex_pat_frame_count.max(1) as f32;
+    let flipbook = crate::effects::emitter_uses_tex_pattern(ctx.emitter);
     let vp = ctx.view_proj.to_cols_array_2d();
+    let uv_angle = scroll_uv_angle(ctx.emitter, ctx.life_t);
 
     for &slot in slots {
         match slot {
             0..=3 => data.set(slot as u64, vp[slot as usize]),
             5 => data.set(5, [1.0, 1.0, 0.0, 0.0]),
             // .x/.y gate flipbook vs lifetime spline time; UV columns stay in [10].y.
-            8 => data.set(8, [0.0, 0.0, 0.0, 0.0]),
-            9 => data.set(9, [1.0, 1.0, 1.0, 1.0]),
+            8 => {
+                if flipbook {
+                    data.set(8, [cols, 0.0, subdiv, 0.0]);
+                } else {
+                    data.set(8, [0.0, 0.0, 0.0, 0.0]);
+                }
+            }
+            9 => {
+                let blend = if ctx.emitter.tex_crossfade {
+                    ctx.pat_blend.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                data.set(9, [blend, 1.0 - blend, 1.0, 1.0]);
+            }
             10 => data.set(10, [0.0, cols, 0.0, 0.0]),
             13 => data.set(13, [ctx.emitter.tex_scroll_uv[0], ctx.emitter.tex_scroll_uv[1], 0.0, 0.0]),
             14 => data.set(14, [1.0, 1.0, 0.0, 0.0]),
-            15 => data.set(15, [0.0, 0.0, 0.0, 0.0]),
+            15 => {
+                let blend = if ctx.emitter.tex_crossfade {
+                    ctx.pat_blend.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                data.set(15, [blend, 1.0 - blend, 0.0, 0.0]);
+            }
             17 => {
                 if let Some(tex) = ctx.tex_res {
                     data.set(17, [tex.width as f32, tex.height as f32, 0.0, 0.0]);
@@ -651,13 +844,7 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
                     data.set(17, [256.0, 256.0, 0.0, 0.0]);
                 }
             }
-            44 => data.set(44, [0.0, 0.0, 1.0, 1.0]),
-            45 => {
-                let aspect_scale = if ctx.aspect > 0.0 { 1.0 / ctx.aspect } else { 1.0 };
-                data.set(45, [aspect_scale, 1.0, 0.0, 1.0]);
-            }
-            46 => data.set(46, [ctx.cam_right.x, ctx.cam_right.y, ctx.cam_right.z, 1.0]),
-            47 => data.set(47, [0.0, ctx.cam_up.x, ctx.cam_up.y, ctx.cam_up.z]),
+            44..=47 => {}
             48 => data.set(48, [0.0, 0.0, subdiv, subdiv]),
             53 => data.set(53, [0.0, 0.0, subdiv, 0.0]),
             // Colour-table 0: 3-keyframe Hermite spline (lo=60, hi=61, segment C=62). Colours are
@@ -693,13 +880,60 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
             // Axis scales for in_attr0_.xyz — must be 1.0 so particle center reaches gl_Position
             115 => data.set(115, [1.0, 1.0, 1.0, 1.0]),
             84 => data.set(84, [0.0, 0.0, 0.0, 0.0]),
+            92 => data.set(
+                92,
+                [
+                    ctx.emitter.indirect_scroll_uv[0],
+                    ctx.emitter.indirect_scroll_uv[1],
+                    ctx.emitter.tex2_scroll_uv[0],
+                    ctx.emitter.tex2_scroll_uv[1],
+                ],
+            ),
             96 => data.set(96, [0.0, 0.0, 0.0, su]),
             97 => data.set(97, [su, sv, 0.0, 1.0]),
             98 => data.set(98, [0.0, 0.0, 0.0, sv]),
             99 => data.set(99, [su, sv, 0.0, 1.0]),
+            100 if crate::effects::extra_tex_slot_active(ctx.emitter, 0)
+                || crate::effects::extra_tex_slot_active(ctx.emitter, 1) =>
+            {
+                data.set(
+                    100,
+                    [
+                        ctx.emitter.tex_extra_slots[0].scroll_uv[0],
+                        ctx.emitter.tex_extra_slots[0].scroll_uv[1],
+                        ctx.emitter.tex_extra_slots[1].scroll_uv[0],
+                        ctx.emitter.tex_extra_slots[1].scroll_uv[1],
+                    ],
+                )
+            }
+            101 if crate::effects::extra_tex_slot_active(ctx.emitter, 2) => data.set(
+                101,
+                [
+                    ctx.emitter.tex_extra_slots[2].scroll_uv[0],
+                    ctx.emitter.tex_extra_slots[2].scroll_uv[1],
+                    0.0,
+                    0.0,
+                ],
+            ),
             _ => {}
         }
     }
+    fill_cbuf_9_uv_rotation_slots(
+        &mut data,
+        slots,
+        uv_angle,
+        ctx.aspect,
+        ctx.cam_right,
+        ctx.cam_up,
+        ctx.emitter,
+        ctx.cam_right.cross(ctx.cam_up).normalize_or_zero(),
+        ctx.batch_velocity,
+        Some(&crate::effects::SpawnMeshContext {
+            primitives: ctx.primitives,
+            bfres_models: ctx.bfres_models,
+        }),
+        ctx.primitives,
+    );
     if std::env::var("FX_DEBUG_CBUF").is_ok() {
         let mut present: Vec<u32> = slots.iter().copied().collect();
         present.sort_unstable();
@@ -716,7 +950,13 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
 fn build_cbuf_10_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBufferData {
     let mut data = NvnBufferData::default();
     let ts = effective_tex_scale_uv(ctx.emitter, ctx.life_t);
-    let to = ctx.emitter.tex_offset_uv;
+    let su = ts[0].max(0.001);
+    let sv = ts[1].max(0.001);
+    let angle = scroll_uv_angle(ctx.emitter, ctx.life_t);
+    let (c, s) = (angle.cos(), angle.sin());
+    let rotate = angle.abs() > 1e-6;
+    // Per-particle UV offset is supplied via vertex attr5.xy; keep cbuf offset neutral.
+    let to = [0.0f32, 0.0];
 
     for &slot in slots {
         match slot {
@@ -730,15 +970,59 @@ fn build_cbuf_10_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuf
             // rotation chain; .z/.w are pure multiplies (see bomb VS ~L1213/L1317/L1325).
             // [0,0,0,1] zeroed .y/.z and collapsed world position before the VP multiply.
             3 => data.set(3, [1.0, 1.0, 1.0, 1.0]),
-            // Rows 4-6 feed both UV scroll (.w offsets) and a sin/cos rotation block that
-            // multiplies chain registers by .x (bomb VS ~L1109/L1114/L1127). .x must be 1.0
-            // on every row for neutral pass-through; .y/.z remain available for tex-scale fma.
-            4 => data.set(4, [1.0, 1.0, 1.0, to[0]]),
-            5 => data.set(5, [1.0, ts[1], ts[1], to[1]]),
+            // Rows 4-6: UV transform matrix (scroll rotation when tex_is_rotate).
+            4 => {
+                if rotate {
+                    data.set(4, [su * c, -su * s, 1.0, to[0]]);
+                } else {
+                    data.set(4, [1.0, 1.0, 1.0, to[0]]);
+                }
+            }
+            5 => {
+                if rotate {
+                    data.set(5, [sv * s, sv * c, sv, to[1]]);
+                } else {
+                    data.set(5, [1.0, ts[1], ts[1], to[1]]);
+                }
+            }
             6 => data.set(6, [1.0, 1.0, 1.0, 0.0]),
             8 => data.set(8, [1.0, 1.0, 1.0, 1.0]),
-            9 => data.set(9, [to[0], to[1], 0.0, 0.0]),
+            9 => data.set(
+                9,
+                [
+                    ctx.emitter.indirect_tex_offset_uv[0],
+                    ctx.emitter.indirect_tex_offset_uv[1],
+                    ctx.emitter.tex2_offset_uv[0],
+                    ctx.emitter.tex2_offset_uv[1],
+                ],
+            ),
             10 => data.set(10, [1.0, 1.0, 1.0, 1.0]),
+            11 if crate::effects::extra_tex_slot_active(ctx.emitter, 0)
+                || crate::effects::extra_tex_slot_active(ctx.emitter, 1) =>
+            {
+                data.set(
+                    11,
+                    [
+                        ctx.tex_extra_avg[0][0],
+                        ctx.tex_extra_avg[0][1],
+                        ctx.tex_extra_avg[1][0],
+                        ctx.tex_extra_avg[1][1],
+                    ],
+                )
+            }
+            12 if crate::effects::extra_tex_slot_active(ctx.emitter, 2)
+                || crate::effects::extra_tex_slot_active(ctx.emitter, 0) =>
+            {
+                data.set(
+                    12,
+                    [
+                        ctx.tex_extra_avg[2][0],
+                        ctx.tex_extra_avg[2][1],
+                        ctx.emitter.tex_extra_slots[0].scale_uv[0],
+                        ctx.emitter.tex_extra_slots[0].scale_uv[1],
+                    ],
+                )
+            }
             _ => {}
         }
     }
@@ -771,14 +1055,14 @@ fn documented_cbuf_8_slots() -> HashSet<u32> {
 fn documented_cbuf_9_slots() -> HashSet<u32> {
     [
         0, 1, 2, 3, 5, 8, 9, 10, 13, 14, 15, 17, 44, 45, 46, 47, 48, 53, 59, 60, 61, 62, 68, 69,
-        70, 71, 76, 77, 78, 84, 96, 97, 98, 99, 113, 114, 115,
+        70, 71, 76, 77, 78, 84, 92, 96, 97, 98, 99, 100, 101, 113, 114, 115,
     ]
     .into_iter()
     .collect()
 }
 
 fn documented_cbuf_10_slots() -> HashSet<u32> {
-    [0, 1, 2, 3, 4, 5, 6, 8, 9, 10].into_iter().collect()
+    [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12].into_iter().collect()
 }
 
 fn documented_cbuf_16_slots() -> HashSet<u32> {
@@ -1032,6 +1316,53 @@ mod tests {
     }
 
     #[test]
+    fn test_cbuf_10_slot11_carries_extra_tex_offsets() {
+        let mut emitter = EmitterDef::default();
+        emitter.textures = std::iter::repeat_with(TextureRes::default).take(4).collect();
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_10_1_".to_string(), [11u32, 12].into_iter().collect());
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None)
+            .with_tex_extra_avg([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot11 = result.get("cbuf_10_1_").unwrap().slot_data.get(&11).unwrap();
+        assert!((slot11[0] - 0.1).abs() < 0.001);
+        assert!((slot11[2] - 0.3).abs() < 0.001);
+        let slot12 = result.get("cbuf_10_1_").unwrap().slot_data.get(&12).unwrap();
+        assert!((slot12[0] - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cbuf_9_slot100_carries_extra_tex_scroll() {
+        let mut emitter = EmitterDef::default();
+        emitter.textures = std::iter::repeat_with(TextureRes::default).take(4).collect();
+        emitter.tex_extra_slots[0].scroll_uv = [0.05, 0.06];
+        emitter.tex_extra_slots[1].scroll_uv = [0.07, 0.08];
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [100u32].into_iter().collect());
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot100 = result.get("cbuf_9_1_").unwrap().slot_data.get(&100).unwrap();
+        assert!((slot100[0] - 0.05).abs() < 0.001);
+        assert!((slot100[3] - 0.08).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cbuf_9_slot9_carries_crossfade_blend() {
+        let mut emitter = EmitterDef::default();
+        emitter.tex_crossfade = true;
+        emitter.tex_pat_frame_count = 4;
+        let usage = documented_cbuf_9_slots();
+        let mut map = HashMap::new();
+        map.insert("cbuf_9_1_".to_string(), usage);
+        let params = NvnChainParams::new(&emitter, 0.25, &Mat4::IDENTITY, None)
+            .with_pat_blend(0.4);
+        let result = NvnChainEvaluator::evaluate_usage(&map, &params);
+        let slot9 = result.get("cbuf_9_1_").unwrap().slot_data.get(&9).unwrap();
+        assert!((slot9[0] - 0.4).abs() < 0.001);
+        assert!((slot9[1] - 0.6).abs() < 0.001);
+    }
+
+    #[test]
     fn test_cbuf_9_slot115_scales_particle_position() {
         let mut usage = HashMap::new();
         usage.insert("cbuf_9_1_".to_string(), [115u32].into_iter().collect());
@@ -1082,6 +1413,24 @@ mod tests {
         assert_eq!(c8.slot_data.get(&3).copied(), Some([0.0, 0.0, 0.0, 1.0]));
         // VP column 0 still written at slot 8.
         assert!(c8.slot_data.get(&8).is_some());
+    }
+
+    #[test]
+    fn test_cbuf_8_slots_12_14_emit_world_trs() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_8_1_".to_string(),
+            [12u32, 13, 14].into_iter().collect(),
+        );
+        let emitter = EmitterDef::default();
+        let trs = Mat4::from_translation(Vec3::new(3.0, 4.0, 5.0));
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None)
+            .with_world_trs(trs);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c8 = result.get("cbuf_8_1_").unwrap();
+        assert_eq!(c8.slot_data.get(&12).copied(), Some([1.0, 0.0, 0.0, 3.0]));
+        assert_eq!(c8.slot_data.get(&13).copied(), Some([0.0, 1.0, 0.0, 4.0]));
+        assert_eq!(c8.slot_data.get(&14).copied(), Some([0.0, 0.0, 1.0, 5.0]));
     }
 
     #[test]
@@ -1168,6 +1517,39 @@ mod tests {
     }
 
     #[test]
+    fn test_cbuf_9_slot8_x_nonzero_for_flipbook_emitter() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [8u32, 10].into_iter().collect());
+        let mut emitter = EmitterDef::default();
+        emitter.tex_scale_uv = [0.25, 1.0];
+        emitter.tex_pat_frame_count = 4;
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c9 = result.get("cbuf_9_1_").unwrap();
+        assert_eq!(c9.slot_data.get(&8).copied(), Some([4.0, 0.0, 4.0, 0.0]));
+        assert_eq!(c9.slot_data.get(&10).copied(), Some([0.0, 4.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn test_cbuf_10_offset_neutral_for_attr5_path() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_10_1_".to_string(),
+            [4u32, 5, 9].into_iter().collect(),
+        );
+        let mut emitter = EmitterDef::default();
+        emitter.tex_offset_uv = [0.25, 0.5];
+        emitter.tex_scale_uv = [0.125, 0.25];
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c10 = result.get("cbuf_10_1_").unwrap();
+        assert_eq!(c10.slot_data.get(&4).map(|v| v[3]), Some(0.0));
+        assert_eq!(c10.slot_data.get(&5).map(|v| v[3]), Some(0.0));
+        assert_eq!(c10.slot_data.get(&9).map(|v| v[0]), Some(0.0));
+        assert_eq!(c10.slot_data.get(&9).map(|v| v[1]), Some(0.0));
+    }
+
+    #[test]
     fn test_cbuf_9_slot8_x_zero_forces_lifetime_spline_path() {
         let mut usage = HashMap::new();
         usage.insert("cbuf_9_1_".to_string(), [8u32, 10].into_iter().collect());
@@ -1248,6 +1630,121 @@ mod tests {
         let slot5 = result.get("cbuf_9_1_").unwrap().slot_data.get(&5).unwrap();
         assert_eq!(slot5[0], 1.0);
         assert!(slot5[0].is_finite(), "native VS assigns cbuf_9[5].x to gpr_17 as float");
+    }
+
+    #[test]
+    fn test_cbuf_9_slot47_pivot_when_native_vs() {
+        std::env::set_var("FX_NATIVE_VS_POS", "1");
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [47u32].into_iter().collect());
+        let mut emitter = EmitterDef::default();
+        emitter.offset_type = 1;
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot47 = result.get("cbuf_9_1_").unwrap().slot_data.get(&47).unwrap();
+        assert_eq!(slot47[1], -0.5, ".y carries pivot Y offset");
+        std::env::remove_var("FX_NATIVE_VS_POS");
+    }
+
+    #[test]
+    fn test_cbuf_9_slot46_uses_billboard_basis() {
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [46u32].into_iter().collect());
+        let mut emitter = EmitterDef::default();
+        emitter.billboard_type = crate::effects::BillboardType::PlateXy;
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot46 = result.get("cbuf_9_1_").unwrap().slot_data.get(&46).unwrap();
+        assert_eq!(slot46[0], 1.0);
+        assert_eq!(slot46[1], 0.0);
+        assert_eq!(slot46[2], 0.0);
+    }
+
+    #[test]
+    fn test_cbuf_9_primitive_mesh_basis_slots() {
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_9_1_".to_string(),
+            [46u32, 47].into_iter().collect(),
+        );
+        let prim = crate::effects::PrimitiveData {
+            id: 1,
+            vertices: vec![
+                crate::effects::MeshVertex {
+                    position: [0.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                crate::effects::MeshVertex {
+                    position: [1.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                crate::effects::MeshVertex {
+                    position: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.billboard_type = crate::effects::BillboardType::Primitive;
+        emitter.particle_primitive_id = 1;
+        let primitives = [prim];
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None)
+            .with_primitives(&primitives);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c9 = result.get("cbuf_9_1_").unwrap();
+        let slot46 = c9.slot_data.get(&46).unwrap();
+        let slot47 = c9.slot_data.get(&47).unwrap();
+        assert!(slot46[0].abs() > 0.9, "mesh right.x from triangle");
+        assert!(slot47[2].abs() > 0.9, "patched VS mode 7 reads mesh up.y in .z");
+        assert_eq!(slot47[0], 0.0);
+        assert_eq!(slot47[1], 0.0);
+    }
+
+    #[test]
+    fn test_cbuf_9_slot47_primitive_pivot_native_vs() {
+        std::env::set_var("FX_NATIVE_VS_POS", "1");
+        let mut usage = HashMap::new();
+        usage.insert(
+            "cbuf_9_1_".to_string(),
+            [47u32].into_iter().collect(),
+        );
+        let prim = crate::effects::PrimitiveData {
+            id: 1,
+            vertices: vec![
+                crate::effects::MeshVertex {
+                    position: [0.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                crate::effects::MeshVertex {
+                    position: [1.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                crate::effects::MeshVertex {
+                    position: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.billboard_type = crate::effects::BillboardType::Primitive;
+        emitter.particle_primitive_id = 1;
+        emitter.offset_type = 1;
+        let primitives = [prim];
+        let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None)
+            .with_primitives(&primitives);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let slot47 = result.get("cbuf_9_1_").unwrap().slot_data.get(&47).unwrap();
+        assert_eq!(slot47[1], -0.5, ".y carries pivot Y for native VS");
+        assert_eq!(slot47[2], 0.0, ".z carries pivot X for native VS");
+        std::env::remove_var("FX_NATIVE_VS_POS");
     }
 
     #[test]
@@ -1344,9 +1841,28 @@ mod tests {
     }
 
     #[test]
+    fn test_cbuf_9_uv_rotation_slots() {
+        let mut emitter = EmitterDef::default();
+        emitter.tex_is_rotate = true;
+        emitter.tex_scroll_rotation = 0.0;
+        emitter.tex_scroll_rotation_add = std::f32::consts::FRAC_PI_2;
+        emitter.lifetime = 1.0;
+
+        let mut usage = HashMap::new();
+        usage.insert("cbuf_9_1_".to_string(), [44u32, 45].into_iter().collect());
+        let params = NvnChainParams::new(&emitter, 1.0, &Mat4::IDENTITY, None);
+        let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
+        let c9 = result.get("cbuf_9_1_").unwrap();
+        let s44 = c9.slot_data.get(&44).unwrap();
+        assert!(s44[0].abs() < 0.01, "cos(π/2)≈0 got {}", s44[0]);
+        assert!((s44[1] - (-1.0)).abs() < 0.01, "-sin(π/2)≈-1 got {}", s44[1]);
+    }
+
+    #[test]
     fn test_ea_anim_tex_scale_modulates_cbuf_9() {
         let mut emitter = EmitterDef::default();
         emitter.tex_scale_uv = [0.5, 0.25];
+        emitter.tex_is_scale = true;
         emitter.anim_tex_scale = Some(EmitterAnimDef {
             enable: true,
             loop_: false,
@@ -1398,6 +1914,18 @@ mod tests {
         assert!(usage.get("cbuf_9_1_").unwrap().contains(&5));
         assert!(usage.get("cbuf_8_1_").unwrap().contains(&8));
         assert!(usage.get("cbuf_8_1_").unwrap().contains(&11));
+    }
+
+    #[test]
+    fn test_supplement_hybrid_finalize_slots_for_partial_family_b() {
+        let vs = "\
+main_1(); in_attr0_1 in_attr4_1 in_attr6_1 cbuf_9_1_ cbuf_9_1_._m0_[0] gl_Position";
+        assert!(crate::spirv_to_wgsl::is_partial_family_b_billboard_vs(vs));
+        let mut usage = extract_cbuf_slots_from_wgsl(vs);
+        supplement_hybrid_finalize_slots(&mut usage, vs);
+        let slots = usage.get("cbuf_9_1_").unwrap();
+        assert!(slots.contains(&46));
+        assert!(slots.contains(&47));
     }
 
     #[test]

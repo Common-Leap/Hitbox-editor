@@ -160,7 +160,9 @@ fn build_effect_converter() {
 
     std::fs::create_dir_all(&build_dir).expect("Failed to create effect-converter build directory");
     let dotnet_tmp = build_dir.join("dotnet-tmp");
+    let nuget_packages = build_dir.join("nuget-packages");
     let _ = std::fs::create_dir_all(&dotnet_tmp);
+    let _ = std::fs::create_dir_all(&nuget_packages);
 
     println!("cargo:warning=Publishing EffectConverter...");
     let publish_output = Command::new("dotnet")
@@ -174,6 +176,7 @@ fn build_effect_converter() {
         .env("TMPDIR", &dotnet_tmp)
         .env("TEMP", &dotnet_tmp)
         .env("TMP", &dotnet_tmp)
+        .env("NUGET_PACKAGES", &nuget_packages)
         .env("MSBUILDDISABLENODEREUSE", "1")
         .output()
         .expect("Failed to publish EffectConverter");

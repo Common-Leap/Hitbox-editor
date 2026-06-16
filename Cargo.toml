@@ -22,9 +22,10 @@ naga = { version = "29", features = ["glsl-in", "spv-in", "wgsl-out"] }
 glam = { version = "0.28.0", features = ["bytemuck"] }
 
 # SSBU file formats
-ssbh_wgpu = { git = "https://github.com/ScanMountGoat/ssbh_wgpu" }
+# Patched fork of ScanMountGoat/ssbh_wgpu (submodule extern/ssbh_wgpu, branch hitbox-editor).
+ssbh_wgpu = { path = "extern/ssbh_wgpu/ssbh_wgpu" }
 ssbh_data = { version = "0.19.0", features = ["serde"] }
-nutexb_wgpu = { git = "https://github.com/ScanMountGoat/ssbh_wgpu" }
+nutexb_wgpu = { path = "extern/ssbh_wgpu/nutexb_wgpu" }
 prc = { package = "prc-rs", version = "1.6", features = ["xml-feat"] }
 motion_lib = { package = "motion_list_rs", version = "1.5" }
 hash40 = "1.3"

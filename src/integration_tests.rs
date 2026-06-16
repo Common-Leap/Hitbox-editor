@@ -10,10 +10,12 @@ mod integration_tests {
     #[test]
     #[ignore] // Enable only with real effect files
     fn test_batch_load_and_cache_flow() {
+        let Some(data_root) = crate::scratch_dirs::game_data_root() else {
+            eprintln!("Skipping: set data_root or HITBOX_DATA_ROOT");
+            return;
+        };
         // 1. Initialize batch loader pointing to dumped effects
-        let mut loader = BatchEffectLoader::new(
-            PathBuf::from("/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/")
-        );
+        let mut loader = BatchEffectLoader::new(data_root);
 
         // 2. Scan all available effects (fast - metadata only)
         let scan_count = loader.scan().expect("Failed to scan effects");
@@ -144,9 +146,9 @@ pub fn example_load_all_effects() -> anyhow::Result<()> {
     use std::path::PathBuf;
 
     // Initialize
-    let mut loader = BatchEffectLoader::new(
-        PathBuf::from("/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/")
-    );
+    let data_root = crate::scratch_dirs::game_data_root()
+        .ok_or_else(|| anyhow::anyhow!("set data_root or HITBOX_DATA_ROOT"))?;
+    let mut loader = BatchEffectLoader::new(data_root);
 
     // Scan effects
     let count = loader.scan()?;

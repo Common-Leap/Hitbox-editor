@@ -13,6 +13,64 @@ pub fn hash_bnsh_key(bnsh: &[u8]) -> ShaderKey {
     u64::from_le_bytes(digest[0..8].try_into().unwrap())
 }
 
+/// Decoded vertex-shader role used to avoid mesh/model false positives in hybrid finalize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShaderVsProfile {
+    #[default]
+    Unknown,
+    ParticleBillboard,
+    MeshModel,
+}
+
+impl ShaderVsProfile {
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (ShaderVsProfile::MeshModel, _) | (_, ShaderVsProfile::MeshModel) => {
+                ShaderVsProfile::MeshModel
+            }
+            (ShaderVsProfile::ParticleBillboard, ShaderVsProfile::ParticleBillboard) => {
+                ShaderVsProfile::ParticleBillboard
+            }
+            (ShaderVsProfile::ParticleBillboard, ShaderVsProfile::Unknown)
+            | (ShaderVsProfile::Unknown, ShaderVsProfile::ParticleBillboard) => {
+                ShaderVsProfile::ParticleBillboard
+            }
+            _ => ShaderVsProfile::Unknown,
+        }
+    }
+}
+
+/// Classify VS profile from BNSH stage reflection input names when available.
+pub fn vs_profile_from_reflection(
+    reflection: &crate::bnsh_reflection::ShaderStageReflection,
+) -> ShaderVsProfile {
+    if reflection.input_names.is_empty() {
+        return ShaderVsProfile::Unknown;
+    }
+    let lower: Vec<String> = reflection
+        .input_names
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let particle_markers = lower.iter().any(|n| {
+        n.contains("attr4")
+            || n.contains("_a4")
+            || n.contains("attr6")
+            || n.contains("_a6")
+            || n.contains("life")
+    });
+    let mesh_markers = lower.iter().any(|n| {
+        n.contains("normal") || n.contains("tangent") || n.contains("binormal")
+    });
+    if mesh_markers && !particle_markers {
+        ShaderVsProfile::MeshModel
+    } else if particle_markers {
+        ShaderVsProfile::ParticleBillboard
+    } else {
+        ShaderVsProfile::Unknown
+    }
+}
+
 /// Combiner / blend configuration from EmitterData.json (drives render state).
 #[derive(Debug, Clone, Default)]
 pub struct CombinerState {
@@ -35,6 +93,15 @@ pub struct CombinerState {
     pub shader_type: u32,
     pub apply_alpha: u32,
     pub is_distortion_by_camera_distance: u32,
+    /// v50+ EmitterCombinerV40 padding: dedicated tex3 colour/alpha blend (0=modulate).
+    pub texture3_color_blend: u32,
+    pub texture3_alpha_blend: u32,
+    pub texture4_color_blend: u32,
+    pub texture4_alpha_blend: u32,
+    pub texture5_color_blend: u32,
+    pub texture5_alpha_blend: u32,
+    /// True when EmitterData.json carried v50 padding blend fields.
+    pub has_v50_extra_tex_blend: bool,
 }
 
 /// Particle color / soft-particle flags from EmitterData.json.
@@ -51,6 +118,7 @@ pub struct ParticleColorState {
 #[derive(Debug, Clone, Default)]
 pub struct ShaderRegistry {
     binaries: HashMap<ShaderKey, Vec<u8>>,
+    vs_profiles: HashMap<ShaderKey, ShaderVsProfile>,
     /// First registered key — used when an emitter has no embedded shader.
     first_key: ShaderKey,
     /// Emitters whose `shader_index` != -1 (for future library lookup).
@@ -69,6 +137,16 @@ impl ShaderRegistry {
         }
         self.binaries.entry(key).or_insert(bnsh);
         key
+    }
+
+    pub fn set_vs_profile(&mut self, key: ShaderKey, profile: ShaderVsProfile) {
+        if key != 0 && profile != ShaderVsProfile::Unknown {
+            self.vs_profiles.insert(key, profile);
+        }
+    }
+
+    pub fn vs_profile(&self, key: ShaderKey) -> ShaderVsProfile {
+        self.vs_profiles.get(&key).copied().unwrap_or_default()
     }
 
     pub fn register_library_index(&mut self, library_index: i32, key: ShaderKey) {
@@ -188,4 +266,29 @@ pub fn audit_ptcl(ptcl: &crate::effects::PtclFile) -> ShaderAuditReport {
         report.log(&ptcl.emitter_sets.first().map(|s| s.name.as_str()).unwrap_or("?"));
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vs_profile_from_reflection_detects_mesh_inputs() {
+        let mesh = crate::bnsh_reflection::ShaderStageReflection {
+            input_names: vec!["Position".into(), "Normal".into(), "TexCoord0".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            vs_profile_from_reflection(&mesh),
+            ShaderVsProfile::MeshModel
+        );
+        let particle = crate::bnsh_reflection::ShaderStageReflection {
+            input_names: vec!["ATTR0".into(), "ATTR4".into(), "ATTR6".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            vs_profile_from_reflection(&particle),
+            ShaderVsProfile::ParticleBillboard
+        );
+    }
 }

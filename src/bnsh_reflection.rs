@@ -10,6 +10,8 @@ use std::collections::HashMap;
 /// Parsed reflection data from a single shader stage (vertex, fragment, compute, etc.)
 #[derive(Debug, Clone, Default)]
 pub struct ShaderStageReflection {
+    /// Vertex / stage input names from the shader input dictionary.
+    pub input_names: Vec<String>,
     /// Sampler names extracted from the sampler dictionary
     pub sampler_names: Vec<String>,
     /// Constant buffer names from the constant_buffer dictionary
@@ -185,6 +187,7 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
         u32::from_le_bytes(data[off..off + 4].try_into().unwrap_or([0; 4]))
     };
 
+    let ofs_input_dict = read_u8(ofs_reflection + 0x00) as usize;
     let ofs_sampler_dict = read_u8(ofs_reflection + 0x10) as usize;
     let ofs_cbuffer_dict = read_u8(ofs_reflection + 0x18) as usize;
     let ofs_image_dict = read_u8(ofs_reflection + 0x20) as usize;
@@ -196,6 +199,7 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
     let index_image = read_u4(ofs_reflection + 0x48);
 
     // Parse dictionaries
+    let input_names = parse_dictionary(data, ofs_input_dict).unwrap_or_default();
     let sampler_names = parse_dictionary(data, ofs_sampler_dict).unwrap_or_default();
     let constant_buffer_names = parse_dictionary(data, ofs_cbuffer_dict).unwrap_or_default();
     let texture_names = parse_dictionary(data, ofs_image_dict).unwrap_or_default();
@@ -227,6 +231,7 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
     }
 
     Ok(ShaderStageReflection {
+        input_names,
         sampler_names,
         constant_buffer_names,
         texture_names,

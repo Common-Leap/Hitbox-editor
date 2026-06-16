@@ -9,6 +9,101 @@ use ssbh_wgpu::{
     SharedRenderData, SsbhRenderer,
 };
 use crate::particle_renderer::BnshDrawFilter;
+use crate::particle_renderer_bnsh::PARTICLE_DEPTH_FORMAT;
+
+/// Per-draw_path offscreen color + depth targets for particle compositing.
+struct ParticlePathTarget {
+    color: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    sub_color: wgpu::Texture,
+    sub_color_view: wgpu::TextureView,
+    depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+}
+
+/// Whether the editor can bind ssbh_wgpu's mesh depth buffer for particle depth tests.
+///
+/// Patched ssbh_wgpu fills a 1× resolved depth texture at the end of
+/// [`SsbhRenderer::begin_render_models`] ([`SsbhRenderer::refresh_mesh_depth_resolved`]) and exposes
+/// [`SsbhRenderer::copy_mesh_depth_resolved`] to copy it into per-path particle depth buffers.
+pub fn editor_mesh_depth_sharing_available() -> bool {
+    true
+}
+
+fn create_particle_path_depth(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("particle_path_depth"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: PARTICLE_DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+fn create_particle_path_color(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+fn copy_depth_texture(
+    encoder: &mut wgpu::CommandEncoder,
+    src: &wgpu::Texture,
+    dst: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) {
+    encoder.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: src,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: dst,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
 
 #[allow(dead_code)]
 pub struct Camera {
@@ -96,9 +191,12 @@ pub struct HitboxRenderState {
     /// Particle data to render this frame (set by update loop before prepare)
     pub pending_particles: Vec<crate::effects::Particle>,
     pub pending_trails: Vec<crate::effects::SwordTrail>,
-    /// Offscreen texture for particle compositing (same size as viewport)
-    particle_target: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// Offscreen textures for per-draw_path particle compositing (same size as viewport).
+    particle_path_targets: Vec<ParticlePathTarget>,
     particle_target_size: (u32, u32),
+    /// Resolved 1× mesh depth for priming particle path depth attachments.
+    scene_mesh_depth: Option<(wgpu::Texture, wgpu::TextureView)>,
+    scene_mesh_depth_size: (u32, u32),
     pub surface_format: wgpu::TextureFormat,
     /// Cached GPU handles for use in paint()
     pub wgpu_device: Option<wgpu::Device>,
@@ -146,8 +244,10 @@ impl HitboxRenderState {
             particle_renderer: Mutex::new(None),
             pending_particles: Vec::new(),
             pending_trails: Vec::new(),
-            particle_target: None,
+            particle_path_targets: Vec::new(),
             particle_target_size: (0, 0),
+            scene_mesh_depth: None,
+            scene_mesh_depth_size: (0, 0),
             surface_format,
             wgpu_device: Some(device.clone()),
             wgpu_queue: Some(queue.clone()),
@@ -160,21 +260,57 @@ impl HitboxRenderState {
         self.renderer.resize(device, width, height, 1.0);
         self.current_width = width;
         self.current_height = height;
-        // Recreate particle offscreen target
+        // Recreate per-path particle offscreen targets when viewport size changes.
         if self.particle_target_size != (width, height) {
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("particle_target"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.surface_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.particle_target = Some((tex, view));
+            self.particle_path_targets.clear();
             self.particle_target_size = (width, height);
+            self.scene_mesh_depth = None;
+            self.scene_mesh_depth_size = (0, 0);
+        }
+    }
+
+    fn ensure_scene_mesh_depth(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if self.scene_mesh_depth_size != (width, height) {
+            let (depth, depth_view) = create_particle_path_depth(device, width, height);
+            self.scene_mesh_depth = Some((depth, depth_view));
+            self.scene_mesh_depth_size = (width, height);
+        }
+    }
+
+    /// Ensure at least `path_count` offscreen targets exist for the current viewport size.
+    fn ensure_particle_path_targets(&mut self, device: &wgpu::Device, path_count: usize) {
+        let (width, height) = self.particle_target_size;
+        if width == 0 || height == 0 {
+            return;
+        }
+        while self.particle_path_targets.len() < path_count {
+            let i = self.particle_path_targets.len();
+            let (color, color_view) = create_particle_path_color(
+                device,
+                width,
+                height,
+                self.surface_format,
+                &format!("particle_path_{i}"),
+            );
+            let (sub_color, sub_color_view) = create_particle_path_color(
+                device,
+                width,
+                height,
+                self.surface_format,
+                &format!("particle_sub_path_{i}"),
+            );
+            let (depth, depth_view) = create_particle_path_depth(device, width, height);
+            self.particle_path_targets.push(ParticlePathTarget {
+                color,
+                color_view,
+                sub_color,
+                sub_color_view,
+                depth,
+                depth_view,
+            });
         }
     }
 
@@ -524,8 +660,10 @@ fn weapon_attach_bone(weapon_dir: &str) -> String {
 }
 ///
 /// In `prepare`: runs ssbh internal passes + uploads particle uniforms/geometry.
-/// In `finish_prepare`: renders Normal/Add particles to transparent offscreen target.
-/// In `paint`: composites offscreen particles, then draws Sub-blend directly on scene.
+/// In `finish_prepare`: one wgpu render pass per distinct `draw_path` (ascending), each into its
+/// own cleared transparent offscreen target (approximates NVN depth clear between paths).
+/// Sub-blend emitters are excluded from offscreen passes.
+/// In `paint`: for each draw_path in order, blits premultiplied color then Sub reverse-subtract.
 pub struct ViewportCallback {
     pub width: f32,
     pub height: f32,
@@ -536,6 +674,8 @@ pub struct ViewportCallback {
     pub trails: Vec<crate::effects::SwordTrail>,
     pub emitter_sets: Vec<crate::effects::EmitterSet>,
     pub bfres_models: Vec<crate::effects::BfresModel>,
+    pub bone_matrices: std::collections::HashMap<String, glam::Mat4>,
+    pub active_emitters: Vec<crate::effects::EmitterInstance>,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -603,6 +743,9 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                         &self.trails,
                         &self.emitter_sets,
                         &self.bfres_models,
+                        &self.bone_matrices,
+                        &self.active_emitters,
+                        self.current_frame,
                     );
                 }
             }
@@ -623,35 +766,143 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         let Some(state) = resources.get_mut::<HitboxRenderState>() else {
             return Vec::new();
         };
-        let Some((_, particle_view)) = state.particle_target.as_ref() else {
-            return Vec::new();
+
+        let paths = {
+            let pr_guard = state.particle_renderer.lock().unwrap();
+            let Some(pr) = pr_guard.as_ref() else {
+                return Vec::new();
+            };
+            pr.prepared_draw_paths().to_vec()
         };
-        let particle_view = particle_view.clone();
+        if paths.is_empty() {
+            return Vec::new();
+        }
+
+        state.ensure_particle_path_targets(device, paths.len());
+        if state.particle_path_targets.is_empty() {
+            return Vec::new();
+        }
+
+        let (width, height) = state.particle_target_size;
+        state.ensure_scene_mesh_depth(device, width, height);
+        // Depth from pass-ordered 1× re-render at end of begin_render_models (opaque→near).
+        if editor_mesh_depth_sharing_available() {
+            if let Some((scene_depth, _)) = state.scene_mesh_depth.as_ref() {
+                state.renderer.copy_mesh_depth_resolved(
+                    encoder,
+                    scene_depth,
+                    width,
+                    height,
+                );
+            }
+        }
+
         let mut pr_guard = state.particle_renderer.lock().unwrap();
         let Some(pr) = pr_guard.as_mut() else {
             return Vec::new();
         };
-        pr.prepare_composite(device, &particle_view);
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("particle_offscreen"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &particle_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                multiview_mask: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            // Normal/Add/Screen/Multiply (+ trails) render to transparent offscreen target.
-            pr.draw_prepared_particles_filtered(&mut rpass, true, BnshDrawFilter::ExcludeSub);
+
+        use crate::particle_renderer::DepthDrawConfig;
+
+        for (i, &path) in paths.iter().enumerate() {
+            let target = &state.particle_path_targets[i];
+            if editor_mesh_depth_sharing_available() {
+                if let Some((scene_depth, _)) = state.scene_mesh_depth.as_ref() {
+                    copy_depth_texture(encoder, scene_depth, &target.depth, width, height);
+                }
+            }
+
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(&format!("particle_offscreen_path_{path}")),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: if editor_mesh_depth_sharing_available() {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(1.0)
+                            },
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    multiview_mask: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pr.draw_prepared_particles_for_path(
+                    &mut rpass,
+                    path,
+                    false,
+                    BnshDrawFilter::ExcludeSub,
+                    DepthDrawConfig::OPAQUE_CORE,
+                );
+                pr.draw_prepared_particles_for_path(
+                    &mut rpass,
+                    path,
+                    true,
+                    BnshDrawFilter::ExcludeSub,
+                    DepthDrawConfig::TRANSPARENT,
+                );
+            }
+
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(&format!("particle_sub_offscreen_path_{path}")),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.sub_color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    multiview_mask: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pr.draw_prepared_particles_for_path(
+                    &mut rpass,
+                    path,
+                    false,
+                    BnshDrawFilter::SubOnly,
+                    DepthDrawConfig::TRANSPARENT,
+                );
+            }
         }
+
+        let path_views: Vec<&wgpu::TextureView> = state
+            .particle_path_targets
+            .iter()
+            .take(paths.len())
+            .map(|t| &t.color_view)
+            .collect();
+        let sub_path_views: Vec<&wgpu::TextureView> = state
+            .particle_path_targets
+            .iter()
+            .take(paths.len())
+            .map(|t| &t.sub_color_view)
+            .collect();
+        pr.prepare_composite(device, &path_views, &sub_path_views);
         Vec::new()
     }
 

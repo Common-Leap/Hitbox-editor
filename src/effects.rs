@@ -143,6 +143,51 @@ pub struct EmitterSet {
     pub emitters: Vec<EmitterDef>,
 }
 
+/// Per-slot TextureAnim flags from Emitter.cs (`PatternAnimType`, `IsScroll`, etc.).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TextureAnimFlags {
+    pub pattern_anim_type: u8,
+    pub is_scroll: bool,
+    pub is_rotate: bool,
+    pub is_scale: bool,
+    pub inv_rand_u: bool,
+    pub inv_rand_v: bool,
+    pub pat_loop_random: bool,
+    pub crossfade: bool,
+    pub scroll_rotation: f32,
+    pub scroll_rotation_add: f32,
+}
+
+/// PatternAnimType values — mirrors `EffectLibrary.Enums.TexturePatternType`
+/// (`Emitter.cs` `TextureAnim.PatternAnimType`).
+pub mod pattern_anim_type {
+    /// No pattern playback mode (`TexturePatternType.None`).
+    pub const NONE: u8 = 0;
+    /// Advance once over particle lifetime (`TexturePatternType.FitLifespan`).
+    pub const FIT_LIFESPAN: u8 = 1;
+    /// Forward playback, hold last frame (`TexturePatternType.Clamp`).
+    pub const CLAMP: u8 = 2;
+    /// Loop pattern over lifetime (`TexturePatternType.Loop`).
+    pub const LOOP: u8 = 3;
+    /// One random frame chosen at particle birth (`TexturePatternType.Random`).
+    pub const RANDOM: u8 = 4;
+}
+
+/// TexPatAnim / TexScrollAnim metadata for TextureAnim3–5 sampler slots.
+#[derive(Debug, Clone, Default)]
+pub struct TexExtraSlotDef {
+    pub scale_uv: [f32; 2],
+    pub offset_uv: [f32; 2],
+    pub scroll_uv: [f32; 2],
+    pub pat_frame_count: usize,
+    pub pat_frame_table: Vec<usize>,
+    pub pat_frequency: f32,
+    /// Sampler wrap U (0=Repeat, 1=MirrorRepeat, 2=ClampToEdge) from TextureSampler3–5.
+    pub wrap_u: u8,
+    /// Sampler wrap V
+    pub wrap_v: u8,
+}
+
 /// A single keyframe value (x, y, z, time) for emitter-level animations.
 #[derive(Debug, Clone, Default)]
 pub struct AnimKeyframe {
@@ -217,12 +262,137 @@ pub struct EmitterDef {
     pub tex_pat_frame_count: usize,
     /// Per-frame sprite-sheet indices from TexPatAnim[0].Table.
     pub tex_pat_frame_table: Vec<usize>,
+    /// Pattern playback rate over particle lifetime (TexPatAnim[0].Frequency).
+    pub tex_pat_frequency: f32,
+    /// TextureAnim0.PatternAnimType.
+    pub tex_pattern_anim_type: u8,
+    /// TextureAnim0.IsScroll — UV scroll path when no pattern frames.
+    pub tex_is_scroll: bool,
+    /// TextureAnim0.IsRotate — apply TexScrollAnim rotation during scroll.
+    pub tex_is_rotate: bool,
+    /// TextureAnim0.IsScale — scroll/scale path uses animated UV scale.
+    pub tex_is_scale: bool,
+    /// TexScrollAnim0.Rotation (initial rotation contribution).
+    pub tex_scroll_rotation: f32,
+    /// TexScrollAnim0.RotationAdd (rotation speed, radians/frame).
+    pub tex_scroll_rotation_add: f32,
+    /// TextureAnim0.InvRandU — flip U at spawn (per-particle seed).
+    pub tex_inv_rand_u: bool,
+    /// TextureAnim0.InvRandV — flip V at spawn.
+    pub tex_inv_rand_v: bool,
+    /// TextureAnim0.IsPatAnimLoopRandom — randomize pattern phase at spawn.
+    pub tex_pat_loop_random: bool,
+    /// TextureAnim0.IsCrossfade — blend between consecutive pattern frames.
+    pub tex_crossfade: bool,
+    /// TextureAnim1 flags + slot-1 pattern timing (alpha / indirect texture).
+    pub indirect_anim: TextureAnimFlags,
+    pub indirect_pat_frame_count: usize,
+    pub indirect_pat_frame_table: Vec<usize>,
+    pub indirect_pat_frequency: f32,
+    /// TextureAnim2 flags + slot-2 pattern timing.
+    pub tex2_anim: TextureAnimFlags,
+    pub tex2_pat_frequency: f32,
+    /// TextureAnim3–5 when the combiner references those sampler slots.
+    pub tex_anims_extra: [TextureAnimFlags; 3],
+    /// TexPatAnim3–5 / TexScrollAnim3–5 metadata paired with [`tex_anims_extra`].
+    pub tex_extra_slots: [TexExtraSlotDef; 3],
     /// Emitter local position offset (Trans from EmitterInfo)
     pub emitter_offset: Vec3,
     /// Emitter local rotation (Euler angles XYZ in radians, from EmitterInfo Rotate)
     pub emitter_rotation: Vec3,
     /// Emitter local scale (per-axis, from EmitterInfo Scale)
     pub emitter_scale: Vec3,
+    /// Per-axis spawn translation jitter (EmitterInfo TransRand*)
+    pub trans_rand: Vec3,
+    /// Spherical spawn offset radius (Emission.PositionRandom)
+    pub position_random: f32,
+    /// Bone attachment mode (EmitterInfo FollowType)
+    pub follow_type: FollowType,
+    /// When true, particle base transform tracks the emitter each frame (EmitterInfo).
+    pub is_update_matrix_by_emit: bool,
+    /// Vertex transform mode (ParticleData.BillboardType / VertexTransformMode).
+    pub billboard_type: BillboardType,
+    /// Particle rotation mode (ParticleData.RotType; non-zero enables spin).
+    pub rot_type: u32,
+    /// Per-axis rotation flags (ParticleData IsRotateX/Y/Z).
+    pub rot_axis_x: bool,
+    pub rot_axis_y: bool,
+    pub rot_axis_z: bool,
+    /// Corner pivot / offset mode (ParticleData.OffsetType).
+    pub offset_type: u32,
+    /// Render pass id (EmitterInfo.DrawPath). On NVN each path may target a separate RT;
+    /// the editor composites paths via sequential wgpu passes into one offscreen texture.
+    pub draw_path: u32,
+    /// ParticleData.ColorScale multiplier.
+    pub color_scale: f32,
+    /// Emitter volume radii (ShapeInfo VolumeRadius*)
+    pub volume_radius: Vec3,
+    /// Emitter volume form scale (ShapeInfo VolumeFormScale*)
+    pub volume_form_scale: Vec3,
+    /// Line emitter length / center (ShapeInfo LineLength / LineCenter)
+    pub line_length: f32,
+    pub line_center: f32,
+    /// Surface position randomization (ShapeInfo VolumeSurfacePosRand)
+    pub volume_surface_pos_rand: f32,
+    /// Arc sweep width in radians (ShapeInfo SweepLongitude / volumeSweepParam).
+    pub sweep_longitude: f32,
+    /// Minimum spawn latitude in radians (ShapeInfo SweepLatitude / volumeLatitude).
+    pub sweep_latitude: f32,
+    /// Arc start angle in radians (ShapeInfo SweepStart / volumeSweepStart).
+    pub sweep_start: f32,
+    /// Randomize arc start per particle (ShapeInfo SweepStartRandom).
+    pub sweep_start_random: bool,
+    /// Arc emission mode (ShapeInfo ArcType).
+    pub arc_type: ArcType,
+    /// Fixed circle divide count override (ShapeInfo NumDivideCircle, 0 = use emit count).
+    pub num_divide_circle: u32,
+    /// Randomize circle divide index (ShapeInfo NumDivideCircleRandom).
+    pub num_divide_circle_random: u32,
+    /// Fixed line divide count override (ShapeInfo NumDivideLine).
+    pub num_divide_line: u32,
+    /// Randomize line divide index (ShapeInfo NumDivideLineRandom).
+    pub num_divide_line_random: u32,
+    /// Use latitude-limited sphere emission (ShapeInfo IsVolumeLatitudeEnabled).
+    pub is_volume_latitude_enabled: bool,
+    /// Index into same-divide sphere tables (ShapeInfo VolumeTblIndex).
+    pub volume_tbl_index: u8,
+    /// Index into 64-point sphere tables (ShapeInfo VolumeTblIndex64).
+    pub volume_tbl_index64: u8,
+    /// Latitude basis axis selector (ShapeInfo VolumeLatitudeDir).
+    pub volume_latitude_dir: u8,
+    /// Inner-radius ratio for fill-circle (ShapeInfo CaliberRatio / volumeCaliber).
+    pub caliber_ratio: f32,
+    /// Primitive emit mode: 0=Vertex, 1=Random, 2=EmissionRate (ShapeInfo PrimEmitType).
+    pub prim_emit_type: u32,
+    /// Shape primitive index (ShapeInfo PrimitiveIndex).
+    pub shape_primitive_index: u64,
+    /// Particle primitive id (ParticleData PrimitiveID).
+    pub particle_primitive_id: u64,
+    /// Per-axis spawn rotation randomizer (EmitterInfo RotateRand*).
+    pub rotate_rand: Vec3,
+    /// Distance-based emission along emitter motion (Emission.IsEmitDistEnabled).
+    pub is_emit_dist_enabled: bool,
+    pub emitter_dist_unit: f32,
+    pub emitter_dist_min: f32,
+    pub emitter_dist_max: f32,
+    pub emitter_dist_marg: f32,
+    pub emitter_dist_particles_max: u32,
+    /// Fixed emission direction when not omnidirectional (ParticleVelocity DesignatedDir*)
+    pub designated_dir: Vec3,
+    /// When false, velocity uses [`designated_dir`] instead of volume spread.
+    pub use_omnidirectional: bool,
+    /// Velocity direction is world-space (Emission.IsWorldOrientedVelocity).
+    pub is_world_oriented_velocity: bool,
+    /// Cone half-angle in degrees around emit direction (ParticleVelocity.DiffusionDirAngle).
+    pub diffusion_dir_angle: f32,
+    /// Per-axis direction jitter (ParticleVelocity.DiffusionX/Y/Z).
+    pub diffusion_axis: Vec3,
+    /// Add normalized spawn XZ * this to velocity direction (ParticleVelocity.XZDiffusion).
+    pub xz_diffusion: f32,
+    /// Scale for inheriting emitter motion into particle velocity (ParticleVelocity.EmVelInherit).
+    pub em_vel_inherit: f32,
+    /// Child-emitter linkage and inheritance from parent particles (ChildInheritance + Action).
+    pub child_inheritance: ChildInheritanceDef,
     /// Whether this emitter fires a one-shot burst (from VFXB Emission.isOneTime)
     pub is_one_time: bool,
     /// Emission timing offset in frames (from VFXB Emission.Timing)
@@ -285,6 +455,69 @@ pub struct EmitterDef {
     pub particle_color: crate::shader_registry::ParticleColorState,
 }
 
+/// Child emitter inheritance flags from EFT2 `EmitterInheritance` + `Action.ActionIndex`.
+#[derive(Debug, Clone)]
+pub struct ChildInheritanceDef {
+    pub inherit_velocity: bool,
+    pub inherit_scale: bool,
+    pub inherit_rotate: bool,
+    pub inherit_color0: bool,
+    pub inherit_color1: bool,
+    pub inherit_alpha0: bool,
+    pub inherit_alpha1: bool,
+    pub inherit_color_scale: bool,
+    pub inherit_draw_path: bool,
+    pub inherit_pre_draw: bool,
+    pub inherit_alpha0_each_frame: bool,
+    pub inherit_alpha1_each_frame: bool,
+    pub velocity_rate: f32,
+    pub scale_rate: f32,
+    /// When true, particles spawn only when a parent emitter's particle dies.
+    pub spawn_from_parent_particle: bool,
+    /// Parent emitter index within the same emitter set (`Action.ActionIndex`).
+    pub parent_emitter_idx: u32,
+}
+
+impl Default for ChildInheritanceDef {
+    fn default() -> Self {
+        Self {
+            inherit_velocity: false,
+            inherit_scale: false,
+            inherit_rotate: false,
+            inherit_color0: false,
+            inherit_color1: false,
+            inherit_alpha0: false,
+            inherit_alpha1: false,
+            inherit_color_scale: false,
+            inherit_draw_path: false,
+            inherit_pre_draw: false,
+            inherit_alpha0_each_frame: false,
+            inherit_alpha1_each_frame: false,
+            velocity_rate: 1.0,
+            scale_rate: 1.0,
+            spawn_from_parent_particle: false,
+            parent_emitter_idx: 0,
+        }
+    }
+}
+
+/// Per-channel inheritance multipliers applied before the combiner.
+#[derive(Debug, Clone)]
+pub struct ParticleInheritState {
+    pub color0_mul: [f32; 3],
+    pub color1_mul: [f32; 3],
+    pub alpha0_mul: f32,
+    pub alpha1_mul: f32,
+    pub color_scale: f32,
+    pub alpha0_each_frame: bool,
+    pub alpha1_each_frame: bool,
+    pub parent_seed: u64,
+    pub parent_set_idx: usize,
+    pub parent_emitter_idx: usize,
+    pub draw_path: Option<u32>,
+    pub pre_draw: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmitType {
     Point,
@@ -335,6 +568,117 @@ pub enum DisplaySide { Both, Front, Back, Unknown(u32) }
 impl From<u32> for DisplaySide {
     fn from(v: u32) -> Self {
         match v { 0 => Self::Both, 1 => Self::Front, 2 => Self::Back, v => Self::Unknown(v) }
+    }
+}
+
+/// Bone follow mode from EmitterInfo.FollowType (PtclFollowType in NW).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FollowType {
+    #[default]
+    Srt = 0,
+    None = 1,
+    Translate = 2,
+}
+
+impl From<u32> for FollowType {
+    fn from(v: u32) -> Self {
+        match v {
+            0 => Self::Srt,
+            1 => Self::None,
+            2 => Self::Translate,
+            _ => Self::Srt,
+        }
+    }
+}
+
+/// Arc sweep mode for circle/cylinder/sphere volumes (ShapeInfo `ArcType`, Switch EFT2).
+///
+/// Switch EFT2 [`EmitterShapeInfo::ArcType`](extern/effect-library/EffectLibrary/FileData/EFT2/EmitterStructs/Emitter.cs)
+/// and nw4f Cafe `eft_EmitterVolume.cpp` only define 0–2. Values beyond that are preserved as
+/// [`ArcType::Unknown`] and treated like Random for non-`*SameDivide` sweep sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArcType {
+    /// Random angle within [`EmitterDef::sweep_longitude`] starting at [`EmitterDef::sweep_start`].
+    #[default]
+    Random,
+    /// Equally-spaced stepping for `*SameDivide` emitters (uses NumDivide* when set).
+    EquallyDivided,
+    /// Fixed [`EmitterDef::sweep_start`] only (no spread within arc width).
+    Fixed,
+    /// Unrecognized on-disk value; behaves like Random for sweep spread.
+    Unknown(u8),
+}
+
+impl From<u8> for ArcType {
+    fn from(v: u8) -> Self {
+        match v {
+            0 => Self::Random,
+            1 => Self::EquallyDivided,
+            2 => Self::Fixed,
+            v => Self::Unknown(v),
+        }
+    }
+}
+
+impl ArcType {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Random => 0,
+            Self::EquallyDivided => 1,
+            Self::Fixed => 2,
+            Self::Unknown(v) => v,
+        }
+    }
+}
+
+/// Vertex transform / billboard mode (ParticleData.BillboardType).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum BillboardType {
+    #[default]
+    Billboard = 0,
+    PlateXy = 1,
+    PlateXz = 2,
+    DirectionalY = 3,
+    DirectionalPolygon = 4,
+    Stripe = 5,
+    ComplexStripe = 6,
+    Primitive = 7,
+    YBillboard = 8,
+    Unknown(u32),
+}
+
+impl From<u32> for BillboardType {
+    fn from(v: u32) -> Self {
+        match v {
+            0 => Self::Billboard,
+            1 => Self::PlateXy,
+            2 => Self::PlateXz,
+            3 => Self::DirectionalY,
+            4 => Self::DirectionalPolygon,
+            5 => Self::Stripe,
+            6 => Self::ComplexStripe,
+            7 => Self::Primitive,
+            8 => Self::YBillboard,
+            v => Self::Unknown(v),
+        }
+    }
+}
+
+impl BillboardType {
+    pub fn as_u32(self) -> u32 {
+        match self {
+            Self::Billboard => 0,
+            Self::PlateXy => 1,
+            Self::PlateXz => 2,
+            Self::DirectionalY => 3,
+            Self::DirectionalPolygon => 4,
+            Self::Stripe => 5,
+            Self::ComplexStripe => 6,
+            Self::Primitive => 7,
+            Self::YBillboard => 8,
+            Self::Unknown(v) => v,
+        }
     }
 }
 
@@ -426,9 +770,77 @@ impl Default for EmitterDef {
             tex_scroll_uv: [0.0, 0.0],
             tex_pat_frame_count: 1,
             tex_pat_frame_table: Vec::new(),
+            tex_pat_frequency: 1.0,
+            tex_pattern_anim_type: 0,
+            tex_is_scroll: false,
+            tex_is_rotate: false,
+            tex_is_scale: false,
+            tex_scroll_rotation: 0.0,
+            tex_scroll_rotation_add: 0.0,
+            tex_inv_rand_u: false,
+            tex_inv_rand_v: false,
+            tex_pat_loop_random: false,
+            tex_crossfade: false,
+            indirect_anim: TextureAnimFlags::default(),
+            indirect_pat_frame_count: 1,
+            indirect_pat_frame_table: Vec::new(),
+            indirect_pat_frequency: 1.0,
+            tex2_anim: TextureAnimFlags::default(),
+            tex2_pat_frequency: 1.0,
+            tex_anims_extra: [TextureAnimFlags::default(); 3],
+            tex_extra_slots: std::array::from_fn(|_| TexExtraSlotDef::default()),
             emitter_offset: Vec3::ZERO,
             emitter_rotation: Vec3::ZERO,
             emitter_scale: Vec3::ONE,
+            trans_rand: Vec3::ZERO,
+            position_random: 0.0,
+            follow_type: FollowType::Srt,
+            is_update_matrix_by_emit: false,
+            billboard_type: BillboardType::Billboard,
+            rot_type: 0,
+            rot_axis_x: false,
+            rot_axis_y: false,
+            rot_axis_z: false,
+            offset_type: 0,
+            draw_path: 0,
+            color_scale: 1.0,
+            volume_radius: Vec3::ONE,
+            volume_form_scale: Vec3::ONE,
+            line_length: 1.0,
+            line_center: 0.0,
+            volume_surface_pos_rand: 0.0,
+            sweep_longitude: 0.0,
+            sweep_latitude: 0.0,
+            sweep_start: 0.0,
+            sweep_start_random: false,
+            arc_type: ArcType::Random,
+            num_divide_circle: 0,
+            num_divide_circle_random: 0,
+            num_divide_line: 0,
+            num_divide_line_random: 0,
+            is_volume_latitude_enabled: false,
+            volume_tbl_index: 0,
+            volume_tbl_index64: 0,
+            volume_latitude_dir: 0,
+            caliber_ratio: 0.0,
+            prim_emit_type: 0,
+            shape_primitive_index: 0,
+            particle_primitive_id: 0,
+            rotate_rand: Vec3::ZERO,
+            is_emit_dist_enabled: false,
+            emitter_dist_unit: 1.0,
+            emitter_dist_min: 0.0,
+            emitter_dist_max: 0.0,
+            emitter_dist_marg: 0.0,
+            emitter_dist_particles_max: 0,
+            designated_dir: Vec3::Z,
+            use_omnidirectional: true,
+            is_world_oriented_velocity: false,
+            diffusion_dir_angle: 0.0,
+            diffusion_axis: Vec3::ZERO,
+            xz_diffusion: 0.0,
+            em_vel_inherit: 0.0,
+            child_inheritance: ChildInheritanceDef::default(),
             is_one_time: false,
             emission_timing: 0,
             emission_duration: 9999,
@@ -483,25 +895,2101 @@ impl Default for TextureRes {
     }
 }
 
+/// Build a rotation matrix from XYZ-named Euler angles composed in ZYX order.
+fn mat_from_euler_zyx(angles: Vec3) -> Mat4 {
+    Mat4::from_euler(glam::EulerRot::ZYX, angles.z, angles.y, angles.x)
+}
+
 /// Build the emitter's local TRS matrix: T * R * S.
 /// Returns `Mat4::IDENTITY` (and logs to stderr) if the resulting matrix is degenerate
 /// (determinant < 1e-6), per Requirement 7.3.
 pub fn build_emitter_trs(emitter: &EmitterDef) -> Mat4 {
-    let t = Mat4::from_translation(emitter.emitter_offset);
-    let r = Mat4::from_euler(glam::EulerRot::ZYX,
-        emitter.emitter_rotation.x,
-        emitter.emitter_rotation.y,
-        emitter.emitter_rotation.z,
-    );
-    let s = Mat4::from_scale(emitter.emitter_scale);
+    build_emitter_trs_at(emitter, 0.0)
+}
+
+/// Build emitter TRS at normalized effect time `effect_t` (0..1), applying EA translate /
+/// rotate / emit-scale animation tracks when enabled.
+pub fn build_emitter_trs_at(emitter: &EmitterDef, effect_t: f32) -> Mat4 {
+    let mut trans = emitter.emitter_offset;
+    let mut rot = emitter.emitter_rotation;
+    let mut scale = emitter.emitter_scale;
+
+    if let Some(anim) = &emitter.anim_translate {
+        if anim.enable && !anim.key_frames.is_empty() {
+            let v = sample_emitter_anim_track(anim, effect_t);
+            trans += Vec3::new(v[0], v[1], v[2]);
+        }
+    }
+    if let Some(anim) = &emitter.anim_rotation {
+        if anim.enable && !anim.key_frames.is_empty() {
+            let v = sample_emitter_anim_track(anim, effect_t);
+            rot += Vec3::new(v[0], v[1], v[2]);
+        }
+    }
+    if let Some(anim) = &emitter.anim_emit_scale {
+        if anim.enable && !anim.key_frames.is_empty() {
+            let v = sample_emitter_anim_track(anim, effect_t);
+            scale *= Vec3::new(v[0].max(0.001), v[1].max(0.001), v[2].max(0.001));
+        }
+    }
+
+    let t = Mat4::from_translation(trans);
+    let r = mat_from_euler_zyx(rot);
+    let s = Mat4::from_scale(scale);
     let trs = t * r * s;
-    // Check for degenerate matrix (near-zero determinant)
     let det = trs.determinant();
     if det.abs() < 1e-6 {
-        eprintln!("[TRS] degenerate emitter transform (det={det:.2e}) for '{}', using IDENTITY", emitter.name);
+        eprintln!(
+            "[TRS] degenerate emitter transform (det={det:.2e}) for '{}', using IDENTITY",
+            emitter.name
+        );
         return Mat4::IDENTITY;
     }
     trs
+}
+
+/// Sample an EA* emitter animation track at normalized time `t` (0..1).
+pub fn sample_emitter_anim_track(anim: &EmitterAnimDef, t: f32) -> [f32; 3] {
+    if !anim.enable || anim.key_frames.is_empty() {
+        return [0.0, 0.0, 0.0];
+    }
+    let keys = &anim.key_frames;
+    let t = t.clamp(0.0, 1.0);
+    if t <= keys[0].time {
+        return [keys[0].x, keys[0].y, keys[0].z];
+    }
+    let last = &keys[keys.len() - 1];
+    if t >= last.time {
+        return [last.x, last.y, last.z];
+    }
+    for i in 0..keys.len() - 1 {
+        let a = &keys[i];
+        let b = &keys[i + 1];
+        if t >= a.time && t <= b.time {
+            let range = (b.time - a.time).max(0.0001);
+            let s = (t - a.time) / range;
+            return [
+                a.x + (b.x - a.x) * s,
+                a.y + (b.y - a.y) * s,
+                a.z + (b.z - a.z) * s,
+            ];
+        }
+    }
+    [0.0, 0.0, 0.0]
+}
+
+/// Apply FollowType semantics to a bone world matrix.
+pub fn follow_bone_matrix(bone_mat: Mat4, follow_type: FollowType) -> Mat4 {
+    match follow_type {
+        FollowType::Srt => bone_mat,
+        FollowType::None => Mat4::IDENTITY,
+        FollowType::Translate => Mat4::from_translation(bone_mat.w_axis.truncate()),
+    }
+}
+
+/// Full world matrix for an emitter instance at effect time `effect_t`.
+pub fn compute_emitter_world_mat(
+    emitter: &EmitterDef,
+    inst: &EmitterInstance,
+    bone_mat: Mat4,
+    effect_t: f32,
+) -> Mat4 {
+    let parent = follow_bone_matrix(bone_mat, emitter.follow_type);
+    let inst_mat =
+        mat_from_euler_zyx(inst.rotation()) * Mat4::from_translation(inst.offset());
+    let emitter_mat = build_emitter_trs_at(emitter, effect_t);
+    parent * inst_mat * emitter_mat
+}
+
+/// Only [`EmitterDef::is_update_matrix_by_emit`] re-parents particles each frame.
+/// [`FollowType`] affects emitter spawn origin via [`compute_emitter_world_mat`], not
+/// per-particle motion after spawn (explosions/sparks integrate velocity in world space).
+fn particle_follows_emitter(emitter: &EmitterDef) -> bool {
+    emitter.is_update_matrix_by_emit
+}
+
+/// Pack a `Mat4` as the three row vectors written to NVN `cbuf_8[12..14]`.
+pub fn mat4_to_cbuf_rows_3x4(m: Mat4) -> [[f32; 4]; 3] {
+    [
+        [m.x_axis.x, m.y_axis.x, m.z_axis.x, m.w_axis.x],
+        [m.x_axis.y, m.y_axis.y, m.z_axis.y, m.w_axis.y],
+        [m.x_axis.z, m.y_axis.z, m.z_axis.z, m.w_axis.z],
+    ]
+}
+
+/// Which Euler axes participate in billboard corner rotation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RotAxisMask {
+    pub x: bool,
+    pub y: bool,
+    pub z: bool,
+}
+
+impl RotAxisMask {
+    pub fn from_emitter(emitter: &EmitterDef) -> Self {
+        if emitter.rot_type == 0 {
+            return Self::default();
+        }
+        let any = emitter.rot_axis_x || emitter.rot_axis_y || emitter.rot_axis_z;
+        Self {
+            x: emitter.rot_axis_x,
+            y: emitter.rot_axis_y,
+            z: emitter.rot_axis_z || !any,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.x || self.y || self.z
+    }
+}
+
+/// Live + spawn Euler rotation for one particle (radians).
+pub fn particle_rotation_euler(p: &Particle, emitter: &EmitterDef) -> Vec3 {
+    let axes = RotAxisMask::from_emitter(emitter);
+    if emitter.rot_type == 0 || !axes.any() {
+        return Vec3::ZERO;
+    }
+    let mut e = p.rotation_rand;
+    if axes.x {
+        e.x += p.rotation;
+    }
+    if axes.y {
+        e.y += p.rotation;
+    }
+    if axes.z {
+        e.z += p.rotation;
+    }
+    e
+}
+
+/// Rotate billboard corner half-extents around Z in the quad plane.
+pub fn rotate_billboard_corner(corner: [f32; 2], z_angle: f32, rot_type: u32, axes: RotAxisMask) -> [f32; 2] {
+    if rot_type == 0 || !axes.z || z_angle.abs() < 1e-6 {
+        return corner;
+    }
+    let (c, s) = (z_angle.cos(), z_angle.sin());
+    [corner[0] * c - corner[1] * s, corner[0] * s + corner[1] * c]
+}
+
+/// Tilt camera-facing basis by RotType X/Y axes (spawn + live euler components).
+pub fn tilt_billboard_basis(
+    right: Vec3,
+    up: Vec3,
+    euler: Vec3,
+    axes: RotAxisMask,
+) -> (Vec3, Vec3) {
+    let mut r = right;
+    let mut u = up;
+    if axes.x && euler.x.abs() > 1e-6 {
+        let m = glam::Mat3::from_rotation_x(euler.x);
+        r = m * r;
+        u = m * u;
+    }
+    if axes.y && euler.y.abs() > 1e-6 {
+        let m = glam::Mat3::from_rotation_y(euler.y);
+        r = m * r;
+        u = m * u;
+    }
+    (r, u)
+}
+
+/// Pivot bias for attr6.zw from OffsetType (0 = centered quad).
+pub fn billboard_pivot_bias(offset_type: u32) -> [f32; 2] {
+    match offset_type {
+        1 => [0.0, -0.5],
+        2 => [-0.5, 0.0],
+        3 => [0.0, 0.5],
+        4 => [0.5, 0.0],
+        5 => [-0.5, -0.5],
+        6 => [0.5, -0.5],
+        7 => [-0.5, 0.5],
+        8 => [0.5, 0.5],
+        _ => [0.0, 0.0],
+    }
+}
+
+/// cbuf_9[47] layout for native VS pivot chain (.y = Y offset, .z = X/init).
+pub fn billboard_pivot_cbuf47(offset_type: u32) -> [f32; 4] {
+    let pivot = billboard_pivot_bias(offset_type);
+    [0.0, pivot[1], pivot[0], 0.0]
+}
+
+/// Camera-facing basis (right, up) for a billboard mode.
+pub fn billboard_basis(
+    bb_type: BillboardType,
+    cam_right: Vec3,
+    cam_up: Vec3,
+    view_dir: Vec3,
+    velocity: Vec3,
+) -> (Vec3, Vec3) {
+    let fallback = || (cam_right, cam_up);
+    match bb_type {
+        BillboardType::Billboard => fallback(),
+        BillboardType::PlateXy => (Vec3::X, Vec3::Y),
+        BillboardType::PlateXz => (Vec3::X, Vec3::Z),
+        BillboardType::DirectionalY => {
+            let fwd = velocity.normalize_or_zero();
+            if fwd.length_squared() < 1e-6 {
+                fallback()
+            } else {
+                let up = Vec3::Y;
+                (up.cross(fwd).normalize_or_zero(), up)
+            }
+        }
+        BillboardType::DirectionalPolygon => {
+            let fwd = velocity.normalize_or_zero();
+            if fwd.length_squared() < 1e-6 {
+                fallback()
+            } else {
+                let right = cam_up.cross(fwd).normalize_or_zero();
+                let up = fwd.cross(right).normalize_or_zero();
+                (right, up)
+            }
+        }
+        BillboardType::Stripe | BillboardType::ComplexStripe => {
+            let along = velocity.normalize_or_zero();
+            if along.length_squared() < 1e-6 {
+                fallback()
+            } else {
+                let right = cam_up.cross(along).normalize_or_zero();
+                (right, along)
+            }
+        }
+        BillboardType::Primitive => (Vec3::X, Vec3::Y),
+        BillboardType::YBillboard => {
+            let fwd = view_dir.normalize_or_zero();
+            if fwd.length_squared() < 1e-6 {
+                fallback()
+            } else {
+                let up = Vec3::Y;
+                (up.cross(fwd).normalize_or_zero(), up)
+            }
+        }
+        BillboardType::Unknown(_) => fallback(),
+    }
+}
+
+/// Which PRMA/BFRES slot an emitter references (game ShapeInfo vs ParticleData).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrmaMeshRole {
+    /// ShapeInfo.PrimitiveIndex — volume / surface spawn mesh.
+    Spawn,
+    /// ParticleData.PrimitiveID — draw / primitive billboard mesh.
+    Draw,
+}
+
+/// Raw PRMA id from emitter metadata for the given role.
+pub fn emitter_prma_id(emitter: &EmitterDef, role: PrmaMeshRole) -> u64 {
+    match role {
+        PrmaMeshRole::Spawn => {
+            if emitter.shape_primitive_index > 0 {
+                emitter.shape_primitive_index
+            } else {
+                emitter.particle_primitive_id
+            }
+        }
+        PrmaMeshRole::Draw => {
+            if emitter.particle_primitive_id > 0 {
+                emitter.particle_primitive_id
+            } else if emitter.shape_primitive_index > 0 {
+                emitter.shape_primitive_index
+            } else {
+                emitter.primitive_index as u64
+            }
+        }
+    }
+}
+
+/// Map a PRMA descriptor id (or small sequential index) to `primitives` vec slot.
+pub fn resolve_prma_slot(primitives: &[PrimitiveData], raw_id: u64) -> usize {
+    if primitives.is_empty() {
+        return 0;
+    }
+    if raw_id > 0 {
+        if let Some(idx) = primitives.iter().position(|p| p.id == raw_id) {
+            return idx;
+        }
+        let as_idx = raw_id as usize;
+        if as_idx < primitives.len() {
+            return as_idx;
+        }
+    }
+    0
+}
+
+/// Resolve PRMA vec index for draw/billboard mesh lookup.
+pub fn emitter_primitive_index(emitter: &EmitterDef, primitives: &[PrimitiveData]) -> usize {
+    resolve_prma_slot(primitives, emitter_prma_id(emitter, PrmaMeshRole::Draw))
+}
+
+/// PRMA mesh for primitive billboard mode, if loaded.
+pub fn emitter_primitive<'a>(
+    emitter: &EmitterDef,
+    primitives: &'a [PrimitiveData],
+) -> Option<&'a PrimitiveData> {
+    let idx = emitter_primitive_index(emitter, primitives);
+    primitives.get(idx).filter(|p| !p.vertices.is_empty())
+}
+
+fn basis_from_normal(normal: Vec3) -> (Vec3, Vec3) {
+    let mut right = Vec3::Y.cross(normal).normalize_or_zero();
+    if right.length_squared() < 1e-8 {
+        right = Vec3::X;
+    }
+    let up = normal.cross(right).normalize_or_zero();
+    (right, up)
+}
+
+/// Surface-aligned tangent basis from mesh geometry (area-weighted triangle normals).
+pub fn mesh_basis(vertices: &[MeshVertex], indices: &[u16]) -> (Vec3, Vec3) {
+    let tris = mesh_triangles(vertices, indices);
+    if !tris.is_empty() {
+        let mut avg_normal = Vec3::ZERO;
+        for tri in &tris {
+            avg_normal += (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+        }
+        let normal = avg_normal.normalize_or_zero();
+        if normal.length_squared() > 1e-8 {
+            return basis_from_normal(normal);
+        }
+    }
+    let mut avg = Vec3::ZERO;
+    let mut count = 0usize;
+    for v in vertices {
+        let n = Vec3::from_array(v.normal);
+        if n.length_squared() > 1e-8 {
+            avg += n;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        let normal = (avg / count as f32).normalize_or_zero();
+        if normal.length_squared() > 1e-8 {
+            return basis_from_normal(normal);
+        }
+    }
+    let tri = |i: usize| -> Option<Vec3> {
+        let vi = *indices.get(i)? as usize;
+        vertices.get(vi).map(|v| Vec3::from_array(v.position))
+    };
+    let (Some(v0), Some(v1), Some(v2)) = (tri(0), tri(1), tri(2)) else {
+        return (Vec3::X, Vec3::Y);
+    };
+    let normal = (v1 - v0).cross(v2 - v0).normalize_or_zero();
+    if normal.length_squared() < 1e-8 {
+        (Vec3::X, Vec3::Y)
+    } else {
+        basis_from_normal(normal)
+    }
+}
+
+/// Local XY basis for primitive billboard mode from mesh triangles / vertex normals.
+pub fn primitive_mesh_basis(prim: &PrimitiveData) -> (Vec3, Vec3) {
+    mesh_basis(&prim.vertices, &prim.indices)
+}
+
+/// Surface-aligned basis from the emitter draw mesh (BFRES preferred, PRMA fallback).
+pub fn draw_mesh_basis(ctx: &SpawnMeshContext<'_>, emitter: &EmitterDef) -> Option<(Vec3, Vec3)> {
+    emitter_draw_mesh(ctx, emitter).map(|(verts, idx)| mesh_basis(verts, idx))
+}
+
+fn convex_hull_2d(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    if points.len() <= 1 {
+        return points.to_vec();
+    }
+    let mut pts: Vec<[f32; 2]> = points.to_vec();
+    pts.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal).then_with(|| {
+        a[1].partial_cmp(&b[1]).unwrap_or(std::cmp::Ordering::Equal)
+    }));
+    pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6);
+    if pts.len() <= 2 {
+        return pts;
+    }
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| {
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
+    let mut lower = Vec::new();
+    for p in &pts {
+        while lower.len() >= 2
+            && cross(lower[lower.len() - 2], lower[lower.len() - 1], *p) <= 0.0
+        {
+            lower.pop();
+        }
+        lower.push(*p);
+    }
+    let mut upper = Vec::new();
+    for p in pts.iter().rev() {
+        while upper.len() >= 2
+            && cross(upper[upper.len() - 2], upper[upper.len() - 1], *p) <= 0.0
+        {
+            upper.pop();
+        }
+        upper.push(*p);
+    }
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    lower
+}
+
+/// Minimum half-thickness on each billboard axis so degenerate line meshes still rasterize.
+const MESH_CORNER_MIN_HALF_THICKNESS: f32 = 0.25;
+
+fn principal_axis_2d(points: &[[f32; 2]]) -> Option<[f32; 2]> {
+    if points.len() < 2 {
+        return None;
+    }
+    let n = points.len() as f32;
+    let cx = points.iter().map(|p| p[0]).sum::<f32>() / n;
+    let cy = points.iter().map(|p| p[1]).sum::<f32>() / n;
+    let mut cxx = 0.0f32;
+    let mut cyy = 0.0f32;
+    let mut cxy = 0.0f32;
+    for p in points {
+        let dx = p[0] - cx;
+        let dy = p[1] - cy;
+        cxx += dx * dx;
+        cyy += dy * dy;
+        cxy += dx * dy;
+    }
+    cxx /= n;
+    cyy /= n;
+    cxy /= n;
+    let tr = cxx + cyy;
+    let det = cxx * cyy - cxy * cxy;
+    let lambda1 = tr * 0.5 + (tr * tr * 0.25 - det).max(0.0).sqrt();
+    let mut vx = if cxy.abs() > 1e-6 {
+        lambda1 - cyy
+    } else if cxx >= cyy {
+        1.0
+    } else {
+        0.0
+    };
+    let mut vy = if cxy.abs() > 1e-6 { cxy } else if cxx >= cyy { 0.0 } else { 1.0 };
+    let len = (vx * vx + vy * vy).sqrt();
+    if len < 1e-6 {
+        return None;
+    }
+    vx /= len;
+    vy /= len;
+    Some([vx, vy])
+}
+
+fn mesh_tangent_edge_axes(
+    vertices: &[MeshVertex],
+    indices: &[u16],
+    right: Vec3,
+    up: Vec3,
+) -> Vec<[f32; 2]> {
+    let mut axes = Vec::new();
+    let mut i = 0;
+    while i + 2 < indices.len() {
+        let tri = [
+            indices[i] as usize,
+            indices[i + 1] as usize,
+            indices[i + 2] as usize,
+        ];
+        for j in 0..3 {
+            let a = tri[j];
+            let b = tri[(j + 1) % 3];
+            if a >= vertices.len() || b >= vertices.len() {
+                continue;
+            }
+            let pa = Vec3::from_array(vertices[a].position);
+            let pb = Vec3::from_array(vertices[b].position);
+            let edge = [pb.dot(right) - pa.dot(right), pb.dot(up) - pa.dot(up)];
+            let len = (edge[0] * edge[0] + edge[1] * edge[1]).sqrt();
+            if len > 1e-6 {
+                axes.push([edge[0] / len, edge[1] / len]);
+            }
+        }
+        i += 3;
+    }
+    axes
+}
+
+fn ensure_min_corner_thickness(
+    min_corner: [f32; 2],
+    max_corner: [f32; 2],
+    min_half: f32,
+) -> ([f32; 2], [f32; 2]) {
+    let mut min_c = min_corner;
+    let mut max_c = max_corner;
+    for axis in 0..2 {
+        let span = max_c[axis] - min_c[axis];
+        if span < 2.0 * min_half {
+            let center = (min_c[axis] + max_c[axis]) * 0.5;
+            min_c[axis] = center - min_half;
+            max_c[axis] = center + min_half;
+        }
+    }
+    (min_c, max_c)
+}
+
+/// Minimum-area enclosing rectangle for a 2D point set.
+///
+/// Tries convex-hull edges, mesh tangent edges, and the PCA principal axis so elongated and
+/// non-convex silhouettes align with their dominant in-plane direction.
+fn min_area_rect_for_points(
+    points: &[[f32; 2]],
+    extra_axes: &[[f32; 2]],
+) -> ([f32; 2], [f32; 2], [f32; 2], [f32; 2]) {
+    if points.is_empty() {
+        return ([1.0, 0.0], [0.0, 1.0], [-0.5, -0.5], [0.5, 0.5]);
+    }
+    if points.len() == 1 {
+        return ([1.0, 0.0], [0.0, 1.0], [-0.5, -0.5], [0.5, 0.5]);
+    }
+    let hull = convex_hull_2d(points);
+    let mut candidates: Vec<[f32; 2]> = Vec::new();
+    let edge_source = if hull.len() >= 2 { &hull } else { points };
+    for i in 0..edge_source.len() {
+        let a = edge_source[i];
+        let b = edge_source[(i + 1) % edge_source.len()];
+        let edge = [b[0] - a[0], b[1] - a[1]];
+        let len = (edge[0] * edge[0] + edge[1] * edge[1]).sqrt();
+        if len > 1e-6 {
+            candidates.push([edge[0] / len, edge[1] / len]);
+        }
+    }
+    candidates.extend_from_slice(extra_axes);
+    if let Some(pca) = principal_axis_2d(points) {
+        candidates.push(pca);
+    }
+    if candidates.is_empty() {
+        candidates.push([1.0, 0.0]);
+    }
+    let mut best_area = f32::MAX;
+    let mut best = ([1.0, 0.0], [0.0, 1.0], [-0.5, -0.5], [0.5, 0.5]);
+    for axis0 in candidates {
+        let axis1 = [-axis0[1], axis0[0]];
+        let mut min0 = f32::MAX;
+        let mut max0 = f32::MIN;
+        let mut min1 = f32::MAX;
+        let mut max1 = f32::MIN;
+        for p in points {
+            let s0 = p[0] * axis0[0] + p[1] * axis0[1];
+            let s1 = p[0] * axis1[0] + p[1] * axis1[1];
+            min0 = min0.min(s0);
+            max0 = max0.max(s0);
+            min1 = min1.min(s1);
+            max1 = max1.max(s1);
+        }
+        let area = (max0 - min0).max(1e-4) * (max1 - min1).max(1e-4);
+        if area < best_area {
+            best_area = area;
+            best = (axis0, axis1, [min0, min1], [max0, max1]);
+        }
+    }
+    let (axis0, axis1, min_s, max_s) = best;
+    let center_s = [(min_s[0] + max_s[0]) * 0.5, (min_s[1] + max_s[1]) * 0.5];
+    let min_corner = [min_s[0] - center_s[0], min_s[1] - center_s[1]];
+    let max_corner = [max_s[0] - center_s[0], max_s[1] - center_s[1]];
+    (axis0, axis1, min_corner, max_corner)
+}
+
+fn polygon_area_2d(poly: &[[f32; 2]]) -> f32 {
+    if poly.len() < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0f32;
+    for i in 0..poly.len() {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len()];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    (area * 0.5).abs()
+}
+
+fn point_in_rect_2d(p: [f32; 2], min_c: [f32; 2], max_c: [f32; 2]) -> bool {
+    p[0] >= min_c[0] - 1e-5
+        && p[0] <= max_c[0] + 1e-5
+        && p[1] >= min_c[1] - 1e-5
+        && p[1] <= max_c[1] + 1e-5
+}
+
+fn rect_area_2d(min_c: [f32; 2], max_c: [f32; 2]) -> f32 {
+    (max_c[0] - min_c[0]).max(0.0) * (max_c[1] - min_c[1]).max(0.0)
+}
+
+fn covers_all_points(points: &[[f32; 2]], rects: &[([f32; 2], [f32; 2])]) -> bool {
+    points.iter().all(|p| rects.iter().any(|(min_c, max_c)| point_in_rect_2d(*p, *min_c, *max_c)))
+}
+
+fn mesh_boundary_polygon_2d(points: &[[f32; 2]], indices: &[u16]) -> Vec<[f32; 2]> {
+    use std::collections::HashMap;
+    let mut edge_count: HashMap<(u16, u16), u32> = HashMap::new();
+    let mut i = 0;
+    while i + 2 < indices.len() {
+        let tri = [indices[i], indices[i + 1], indices[i + 2]];
+        for j in 0..3 {
+            let a = tri[j];
+            let b = tri[(j + 1) % 3];
+            let key = if a <= b { (a, b) } else { (b, a) };
+            *edge_count.entry(key).or_insert(0) += 1;
+        }
+        i += 3;
+    }
+    let boundary: Vec<(u16, u16)> = edge_count
+        .into_iter()
+        .filter(|(_, count)| *count == 1)
+        .map(|(e, _)| e)
+        .collect();
+    if boundary.is_empty() {
+        return convex_hull_2d(points);
+    }
+    let boundary_len = boundary.len();
+    let mut adj: HashMap<u16, Vec<u16>> = HashMap::new();
+    for (a, b) in boundary {
+        adj.entry(a).or_default().push(b);
+        adj.entry(b).or_default().push(a);
+    }
+    for nbrs in adj.values_mut() {
+        nbrs.sort_unstable();
+    }
+    let start = *adj.keys().min().unwrap_or(&0);
+    let mut poly = Vec::new();
+    let mut current = start;
+    let mut prev = start;
+    loop {
+        let p = points.get(current as usize).copied().unwrap_or([0.0, 0.0]);
+        poly.push(p);
+        let Some(neighbors) = adj.get(&current) else {
+            break;
+        };
+        let next = if neighbors.len() == 1 {
+            neighbors[0]
+        } else {
+            neighbors
+                .iter()
+                .copied()
+                .find(|n| *n != prev)
+                .unwrap_or(neighbors[0])
+        };
+        if next == start && poly.len() > 2 {
+            break;
+        }
+        if next == prev {
+            break;
+        }
+        prev = current;
+        current = next;
+        if poly.len() > boundary_len + 2 {
+            break;
+        }
+    }
+    if poly.len() >= 3 && !polygon_is_convex(&poly) {
+        poly
+    } else if poly.len() >= 3 {
+        poly
+    } else {
+        // Last resort: vertex loop in index order (fan meshes) before convex hull fill.
+        let mut loop_pts: Vec<[f32; 2]> = indices
+            .iter()
+            .map(|&idx| points.get(idx as usize).copied().unwrap_or([0.0, 0.0]))
+            .collect();
+        loop_pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6);
+        if loop_pts.len() >= 3 && !polygon_is_convex(&loop_pts) {
+            loop_pts
+        } else {
+            convex_hull_2d(points)
+        }
+    }
+}
+
+fn polygon_is_convex(poly: &[[f32; 2]]) -> bool {
+    if poly.len() < 3 {
+        return true;
+    }
+    let mut sign = 0i32;
+    let n = poly.len();
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let c = poly[(i + 2) % n];
+        let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+        if cross.abs() < 1e-6 {
+            continue;
+        }
+        let s = if cross > 0.0 { 1 } else { -1 };
+        if sign == 0 {
+            sign = s;
+        } else if sign != s {
+            return false;
+        }
+    }
+    true
+}
+
+fn reflex_vertices_ccw(poly: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    if poly.len() < 4 {
+        return Vec::new();
+    }
+    let area = polygon_area_2d(poly);
+    let ccw = area >= 0.0;
+    let n = poly.len();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let a = poly[(i + n - 1) % n];
+        let b = poly[i];
+        let c = poly[(i + 1) % n];
+        let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+        let is_reflex = if ccw { cross < -1e-6 } else { cross > 1e-6 };
+        if is_reflex {
+            out.push(b);
+        }
+    }
+    out
+}
+
+fn try_notch_split_quads(
+    points: &[[f32; 2]],
+    reflex: [f32; 2],
+) -> Option<Vec<([f32; 2], [f32; 2])>> {
+    let min_x = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+    let max_x = points.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
+    let min_y = points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    let max_y = points.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+    let candidates = [
+        vec![
+            ([min_x, min_y], [max_x, reflex[1]]),
+            ([min_x, reflex[1]], [reflex[0], max_y]),
+        ],
+        vec![
+            ([min_x, min_y], [reflex[0], max_y]),
+            ([reflex[0], min_y], [max_x, max_y]),
+        ],
+        vec![
+            ([min_x, reflex[1]], [max_x, max_y]),
+            ([min_x, min_y], [reflex[0], reflex[1]]),
+        ],
+        vec![
+            ([reflex[0], min_y], [max_x, max_y]),
+            ([min_x, min_y], [reflex[0], max_y]),
+        ],
+    ];
+    let mut best: Option<(f32, Vec<([f32; 2], [f32; 2])>)> = None;
+    for rects in candidates {
+        if !covers_all_points(points, &rects) {
+            continue;
+        }
+        let area: f32 = rects.iter().map(|(a, b)| rect_area_2d(*a, *b)).sum();
+        if best.as_ref().map_or(true, |b| area < b.0) {
+            best = Some((area, rects));
+        }
+    }
+    best.map(|(_, rects)| rects)
+}
+
+const MESH_SILHOUETTE_MAX_QUADS: usize = 4;
+const MESH_SILHOUETTE_SPLIT_RATIO: f32 = 1.15;
+
+/// Best-effort 1–4 billboard quads covering a mesh silhouette in its tangent plane.
+///
+/// Convex outlines use one minimum-area rectangle. Non-convex outlines try notch splits at
+/// reflex vertices (L/T/U shapes) before falling back to the single enclosing rect.
+pub fn mesh_silhouette_quads(
+    vertices: &[MeshVertex],
+    indices: &[u16],
+) -> (Vec<([f32; 2], [f32; 2])>, (Vec3, Vec3)) {
+    let (min_c, max_c, basis) = mesh_corner_half_extents_single(vertices, indices);
+    if vertices.is_empty() {
+        return (vec![(min_c, max_c)], basis);
+    }
+    let (right, up) = basis;
+    let points: Vec<[f32; 2]> = vertices
+        .iter()
+        .map(|v| {
+            let p = Vec3::from_array(v.position);
+            [p.dot(right), p.dot(up)]
+        })
+        .collect();
+    let poly = mesh_boundary_polygon_2d(&points, indices);
+    let mesh_area = polygon_area_2d(&poly).max(polygon_area_2d(&points));
+    let single_area = rect_area_2d(min_c, max_c);
+    if mesh_area < 1e-6
+        || polygon_is_convex(&poly)
+        || single_area <= mesh_area * MESH_SILHOUETTE_SPLIT_RATIO
+    {
+        return (vec![(min_c, max_c)], basis);
+    }
+    let reflex = reflex_vertices_ccw(&poly);
+    let mut best_split: Option<(f32, Vec<([f32; 2], [f32; 2])>)> = None;
+    for rv in reflex {
+        if let Some(mut rects) = try_notch_split_quads(&points, rv) {
+            if rects.len() > MESH_SILHOUETTE_MAX_QUADS {
+                continue;
+            }
+            rects.truncate(MESH_SILHOUETTE_MAX_QUADS);
+            let area: f32 = rects.iter().map(|(a, b)| rect_area_2d(*a, *b)).sum();
+            if best_split.as_ref().map_or(true, |b| area < b.0) {
+                best_split = Some((area, rects));
+            }
+        }
+    }
+    if let Some((split_area, mut rects)) = best_split {
+        if split_area < single_area * 0.98 {
+            for (min_corner, max_corner) in &mut rects {
+                let (mc, mx) = ensure_min_corner_thickness(
+                    *min_corner,
+                    *max_corner,
+                    MESH_CORNER_MIN_HALF_THICKNESS,
+                );
+                *min_corner = mc;
+                *max_corner = mx;
+            }
+            return (rects, basis);
+        }
+    }
+    (vec![(min_c, max_c)], basis)
+}
+
+fn mesh_corner_half_extents_single(
+    vertices: &[MeshVertex],
+    indices: &[u16],
+) -> ([f32; 2], [f32; 2], (Vec3, Vec3)) {
+    let basis = mesh_basis(vertices, indices);
+    let (right, up) = basis;
+    if vertices.is_empty() {
+        return ([-0.5, -0.5], [0.5, 0.5], basis);
+    }
+    let points: Vec<[f32; 2]> = vertices
+        .iter()
+        .map(|v| {
+            let p = Vec3::from_array(v.position);
+            [p.dot(right), p.dot(up)]
+        })
+        .collect();
+    let edge_axes = mesh_tangent_edge_axes(vertices, indices, right, up);
+    let (axis0, axis1, min_corner, max_corner) = min_area_rect_for_points(&points, &edge_axes);
+    let (min_corner, max_corner) = ensure_min_corner_thickness(
+        min_corner,
+        max_corner,
+        MESH_CORNER_MIN_HALF_THICKNESS,
+    );
+    let new_right = (right * axis0[0] + up * axis0[1]).normalize_or_zero();
+    let new_up = (right * axis1[0] + up * axis1[1]).normalize_or_zero();
+    let final_right = if new_right.length_squared() > 1e-8 {
+        new_right
+    } else {
+        right
+    };
+    let final_up = if new_up.length_squared() > 1e-8 {
+        new_up
+    } else {
+        up
+    };
+    (min_corner, max_corner, (final_right, final_up))
+}
+
+/// Project mesh vertices onto a surface-aligned basis; returns mesh-local corner half-extents.
+///
+/// Primitive billboard mode (`BillboardType::Primitive`) maps each particle to **one axis-aligned
+/// quad** in the mesh tangent plane. Corners are stretched along the minimum-area rectangle axes
+/// (convex-hull edges, mesh tangent edges, and the in-plane PCA principal axis) so elongated
+/// meshes fill the quad along their dominant direction.
+///
+/// Returns the minimum-area enclosing rectangle (first quad of [`mesh_silhouette_quads`] when
+/// only one quad is needed).
+pub fn mesh_corner_half_extents(
+    vertices: &[MeshVertex],
+    indices: &[u16],
+) -> ([f32; 2], [f32; 2], (Vec3, Vec3)) {
+    mesh_corner_half_extents_single(vertices, indices)
+}
+
+/// Project PRMA vertices onto a mesh-local basis; returns mesh-faithful corner seeds.
+///
+/// See [`mesh_silhouette_quads`] for multi-quad concave silhouettes (up to four quads).
+pub fn primitive_corner_half_extents(prim: &PrimitiveData) -> ([f32; 2], [f32; 2], (Vec3, Vec3)) {
+    mesh_corner_half_extents(&prim.vertices, &prim.indices)
+}
+
+/// Multi-quad silhouette for primitive data (see [`mesh_silhouette_quads`]).
+pub fn primitive_silhouette_quads(prim: &PrimitiveData) -> (Vec<([f32; 2], [f32; 2])>, (Vec3, Vec3)) {
+    mesh_silhouette_quads(&prim.vertices, &prim.indices)
+}
+
+/// One axis-aligned billboard quad per mesh triangle (primitive mode).
+///
+/// Each quad covers the triangle's projected AABB in the mesh tangent plane. More accurate than
+/// [`mesh_silhouette_quads`] for sparse meshes; can emit many quads on dense geometry.
+pub fn mesh_per_triangle_quads(
+    vertices: &[MeshVertex],
+    indices: &[u16],
+) -> (Vec<([f32; 2], [f32; 2])>, (Vec3, Vec3)) {
+    let basis = mesh_basis(vertices, indices);
+    let (right, up) = basis;
+    if vertices.is_empty() || indices.len() < 3 {
+        return (vec![([-0.5, -0.5], [0.5, 0.5])], basis);
+    }
+    let mut quads = Vec::new();
+    for chunk in indices.chunks(3) {
+        if chunk.len() < 3 {
+            break;
+        }
+        let mut min_c = [f32::MAX; 2];
+        let mut max_c = [f32::MIN; 2];
+        for &idx in chunk {
+            let v = &vertices[idx as usize];
+            let p = Vec3::from_array(v.position);
+            let u = p.dot(right);
+            let v2 = p.dot(up);
+            min_c[0] = min_c[0].min(u);
+            min_c[1] = min_c[1].min(v2);
+            max_c[0] = max_c[0].max(u);
+            max_c[1] = max_c[1].max(v2);
+        }
+        let (min_c, max_c) = ensure_min_corner_thickness(min_c, max_c, MESH_CORNER_MIN_HALF_THICKNESS);
+        quads.push((min_c, max_c));
+    }
+    if quads.is_empty() {
+        quads.push(([-0.5, -0.5], [0.5, 0.5]));
+    }
+    (quads, basis)
+}
+
+pub fn primitive_per_triangle_quads(prim: &PrimitiveData) -> (Vec<([f32; 2], [f32; 2])>, (Vec3, Vec3)) {
+    mesh_per_triangle_quads(&prim.vertices, &prim.indices)
+}
+
+/// Quad set for primitive billboard particles (silhouette or per-triangle).
+pub fn primitive_billboard_quads(
+    vertices: &[MeshVertex],
+    indices: &[u16],
+    per_triangle: bool,
+) -> (Vec<([f32; 2], [f32; 2])>, (Vec3, Vec3)) {
+    if per_triangle {
+        mesh_per_triangle_quads(vertices, indices)
+    } else {
+        mesh_silhouette_quads(vertices, indices)
+    }
+}
+
+/// Union AABB of silhouette sub-quads in mesh-local corner space.
+pub fn silhouette_envelope(rects: &[([f32; 2], [f32; 2])]) -> ([f32; 2], [f32; 2]) {
+    let mut env_min = [f32::INFINITY; 2];
+    let mut env_max = [f32::NEG_INFINITY; 2];
+    for (min_c, max_c) in rects {
+        for axis in 0..2 {
+            env_min[axis] = env_min[axis].min(min_c[axis]);
+            env_max[axis] = env_max[axis].max(max_c[axis]);
+        }
+    }
+    if !env_min[0].is_finite() {
+        return ([-0.5, -0.5], [0.5, 0.5]);
+    }
+    (env_min, env_max)
+}
+
+/// Map a unit-quad UV corner into the atlas sub-rect occupied by one silhouette quad.
+pub fn silhouette_atlas_uv(
+    unit_uv: [f32; 2],
+    sub_rect: ([f32; 2], [f32; 2]),
+    envelope: ([f32; 2], [f32; 2]),
+) -> [f32; 2] {
+    let (env_min, env_max) = envelope;
+    let (sub_min, sub_max) = sub_rect;
+    let ew = (env_max[0] - env_min[0]).max(1e-6);
+    let eh = (env_max[1] - env_min[1]).max(1e-6);
+    let cx = sub_min[0] + (sub_max[0] - sub_min[0]) * unit_uv[0];
+    let cy = sub_min[1] + (sub_max[1] - sub_min[1]) * unit_uv[1];
+    [(cx - env_min[0]) / ew, (cy - env_min[1]) / eh]
+}
+
+/// Velocity-aligned ribbon corner scaling for Stripe / ComplexStripe billboard modes.
+///
+/// Width (corner X) receives texture aspect; length (corner Y) stays full size. ComplexStripe
+/// additionally biases the trailing edge backward when the particle is moving.
+pub fn stripe_corner_half_extents(
+    bb_type: BillboardType,
+    corner: [f32; 2],
+    aspect: f32,
+    velocity: Vec3,
+) -> [f32; 2] {
+    match bb_type {
+        BillboardType::Stripe => {
+            let w = if aspect > 0.0 { 1.0 / aspect } else { 1.0 };
+            [corner[0] * w, corner[1]]
+        }
+        BillboardType::ComplexStripe => {
+            let w = if aspect > 0.0 { 1.0 / aspect } else { 1.0 };
+            let trail = (velocity.length() * 0.015).clamp(0.0, 0.45);
+            let y = if corner[1] < 0.0 {
+                corner[1] - trail
+            } else {
+                corner[1]
+            };
+            [corner[0] * w, y]
+        }
+        _ => corner,
+    }
+}
+
+/// Camera-facing basis for an emitter, using draw-mesh orientation for primitive mode.
+pub fn billboard_basis_for_emitter(
+    emitter: &EmitterDef,
+    cam_right: Vec3,
+    cam_up: Vec3,
+    view_dir: Vec3,
+    batch_velocity: Vec3,
+    mesh_ctx: Option<&SpawnMeshContext<'_>>,
+    primitives: &[PrimitiveData],
+) -> (Vec3, Vec3) {
+    if emitter.billboard_type == BillboardType::Primitive {
+        if let Some(ctx) = mesh_ctx {
+            if let Some(basis) = draw_mesh_basis(ctx, emitter) {
+                return basis;
+            }
+        }
+        if let Some(prim) = emitter_primitive(emitter, primitives) {
+            return primitive_mesh_basis(prim);
+        }
+    }
+    let velocity = match emitter.billboard_type {
+        BillboardType::Stripe | BillboardType::ComplexStripe => {
+            if batch_velocity.length_squared() > 1e-6 {
+                batch_velocity
+            } else {
+                emitter.designated_dir
+            }
+        }
+        _ => batch_velocity,
+    };
+    billboard_basis(
+        emitter.billboard_type,
+        cam_right,
+        cam_up,
+        view_dir,
+        velocity,
+    )
+}
+
+fn volume_axes(emitter: &EmitterDef) -> Vec3 {
+    emitter.volume_radius * emitter.volume_form_scale
+}
+
+/// Context for primitive/BFRES mesh surface spawn sampling.
+pub struct SpawnMeshContext<'a> {
+    pub primitives: &'a [PrimitiveData],
+    pub bfres_models: &'a [BfresModel],
+}
+
+impl<'a> SpawnMeshContext<'a> {
+    pub fn from_ptcl(ptcl: &'a PtclFile) -> Self {
+        Self {
+            primitives: &ptcl.primitives,
+            bfres_models: &ptcl.bfres_models,
+        }
+    }
+}
+
+fn bfres_model_has_mesh(model: &BfresModel) -> bool {
+    model
+        .meshes
+        .first()
+        .map(|m| !m.vertices.is_empty())
+        .unwrap_or(false)
+}
+
+fn resolve_bfres_index(
+    ctx: &SpawnMeshContext<'_>,
+    emitter: &EmitterDef,
+    role: PrmaMeshRole,
+) -> Option<usize> {
+    if emitter.mesh_type != 2 {
+        return None;
+    }
+    let direct = emitter.primitive_index as usize;
+    if ctx
+        .bfres_models
+        .get(direct)
+        .map(bfres_model_has_mesh)
+        .unwrap_or(false)
+    {
+        return Some(direct);
+    }
+    let prma_id = emitter_prma_id(emitter, role);
+    if prma_id > 0 {
+        if let Some(idx) = ctx
+            .bfres_models
+            .iter()
+            .position(|m| m.source_id == prma_id && bfres_model_has_mesh(m))
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Draw mesh for primitive billboard mode (BFRES preferred, PRMA fallback).
+pub fn emitter_draw_mesh<'a>(
+    ctx: &'a SpawnMeshContext<'a>,
+    emitter: &EmitterDef,
+) -> Option<(&'a [MeshVertex], &'a [u16])> {
+    if let Some(idx) = resolve_bfres_index(ctx, emitter, PrmaMeshRole::Draw) {
+        if let Some(mesh) = ctx.bfres_models[idx].meshes.first() {
+            if !mesh.vertices.is_empty() {
+                return Some((&mesh.vertices, &mesh.indices));
+            }
+        }
+    }
+    let idx = resolve_prma_slot(ctx.primitives, emitter_prma_id(emitter, PrmaMeshRole::Draw));
+    let prim = ctx.primitives.get(idx)?;
+    if prim.vertices.is_empty() {
+        return None;
+    }
+    Some((&prim.vertices, &prim.indices))
+}
+
+const SAME_DIVIDE_SPHERE_TABLES: &[&[[f32; 3]]] =
+    crate::sphere_volume_tables::SAME_DIVIDE_SPHERE_TABLES;
+
+fn same_divide_sphere_dir(emitter: &EmitterDef, index: usize) -> Option<Vec3> {
+    let tbl_idx = emitter.volume_tbl_index as usize;
+    let table = SAME_DIVIDE_SPHERE_TABLES.get(tbl_idx)?;
+    let entry = table.get(index % table.len())?;
+    Some(Vec3::new(entry[0], entry[1], entry[2]))
+}
+
+fn same_divide_sphere64_dir(emitter: &EmitterDef, index: usize) -> Vec3 {
+    if let Some(table) =
+        crate::sphere_volume_tables::same_divide_sphere64_table(emitter.volume_tbl_index64)
+    {
+        let entry = table.get(index % table.len()).unwrap_or(&table[0]);
+        return Vec3::new(entry[0], entry[1], entry[2]);
+    }
+    // Fallback if index out of nw4f table range.
+    let n = (emitter.volume_tbl_index64 as usize + 2).max(2);
+    let i = index % n;
+    let phi = (1.0 - 2.0 * (i as f32 + 0.5) / n as f32).acos();
+    let theta = i as f32 * 2.39996323;
+    Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin())
+}
+
+fn effective_circle_divide_count(emitter: &EmitterDef, emit_count: usize) -> usize {
+    if emitter.num_divide_circle > 0 {
+        emitter.num_divide_circle as usize
+    } else {
+        emit_count.max(1)
+    }
+}
+
+fn effective_line_divide_count(emitter: &EmitterDef, emit_count: usize) -> usize {
+    if emitter.num_divide_line > 0 {
+        emitter.num_divide_line as usize
+    } else {
+        emit_count.max(1)
+    }
+}
+
+fn circle_divide_index(emitter: &EmitterDef, index: usize, count: usize, seed: usize) -> usize {
+    let count = effective_circle_divide_count(emitter, count);
+    let mut idx = index % count;
+    if emitter.num_divide_circle_random > 0 {
+        let rf = rand_factor(seed.wrapping_add(60));
+        let jitter = (rf.abs() * emitter.num_divide_circle_random as f32).round() as usize;
+        idx = (idx + jitter) % count;
+    }
+    idx
+}
+
+fn line_divide_index(emitter: &EmitterDef, index: usize, count: usize, seed: usize) -> usize {
+    let count = effective_line_divide_count(emitter, count);
+    let mut idx = index % count;
+    if emitter.num_divide_line_random > 0 {
+        let rf = rand_factor(seed.wrapping_add(61));
+        let jitter = (rf.abs() * emitter.num_divide_line_random as f32).round() as usize;
+        idx = (idx + jitter) % count;
+    }
+    idx
+}
+
+fn latitude_inside(emitter: &EmitterDef, dir: Vec3) -> bool {
+    if !emitter.is_volume_latitude_enabled || emitter.sweep_latitude <= 0.0 {
+        return true;
+    }
+    let y_cut = emitter.sweep_latitude.cos();
+    dir.y > y_cut
+}
+
+fn rotate_latitude_basis(emitter: &EmitterDef, dir: Vec3) -> Vec3 {
+    if !emitter.is_volume_latitude_enabled || emitter.volume_latitude_dir == 0 {
+        return dir;
+    }
+    // Non-zero VolumeLatitudeDir rotates from default +Y basis (nw::eft::_rotateDirection).
+    let basis = match emitter.volume_latitude_dir {
+        1 => Vec3::X,
+        2 => Vec3::NEG_Y,
+        3 => Vec3::NEG_X,
+        4 => Vec3::Z,
+        5 => Vec3::NEG_Z,
+        _ => Vec3::Y,
+    };
+    if basis == Vec3::Y {
+        return dir;
+    }
+    let q = glam::Quat::from_rotation_arc(Vec3::Y, basis.normalize_or_zero());
+    q * dir
+}
+
+fn rand_unit(seed: usize) -> f32 {
+    (rand_factor(seed) + 1.0) * 0.5
+}
+
+fn sweep_sin_cos(emitter: &EmitterDef, ru: impl Fn(usize) -> f32, salt: usize) -> (f32, f32) {
+    let theta = if emitter.is_volume_latitude_enabled {
+        ru(salt) * std::f32::consts::TAU
+    } else {
+        match emitter.arc_type {
+            ArcType::EquallyDivided | ArcType::Fixed => {
+                let start = if emitter.sweep_start_random {
+                    ru(salt.wrapping_add(1)) * std::f32::consts::TAU
+                } else {
+                    emitter.sweep_start
+                };
+                start
+            }
+            ArcType::Random | ArcType::Unknown(_) => {
+                let width = if emitter.sweep_longitude > 0.0 {
+                    emitter.sweep_longitude
+                } else {
+                    std::f32::consts::TAU
+                };
+                let start = if emitter.sweep_start_random {
+                    ru(salt.wrapping_add(2)) * std::f32::consts::TAU
+                } else {
+                    emitter.sweep_start
+                };
+                ru(salt) * width + start
+            }
+        }
+    };
+    (theta.sin(), theta.cos())
+}
+
+fn sphere_spawn_y(emitter: &EmitterDef, ru: impl Fn(usize) -> f32) -> f32 {
+    if emitter.is_volume_latitude_enabled {
+        (ru(3) * emitter.sweep_latitude).cos()
+    } else {
+        ru(3) * 2.0 - 1.0
+    }
+}
+
+fn circle_same_divide_theta(emitter: &EmitterDef, index: usize, count: usize, seed: usize) -> f32 {
+    let count = effective_circle_divide_count(emitter, count);
+    let idx = circle_divide_index(emitter, index, count, seed);
+    let start = emitter.sweep_start;
+    if count <= 1 {
+        return start;
+    }
+    let step = if emitter.sweep_longitude > 0.0 {
+        emitter.sweep_longitude / (count - 1) as f32
+    } else {
+        std::f32::consts::TAU / count as f32
+    };
+    start + idx as f32 * step
+}
+
+fn line_same_divide_t(emitter: &EmitterDef, index: usize, count: usize, seed: usize) -> f32 {
+    let count = effective_line_divide_count(emitter, count);
+    let idx = line_divide_index(emitter, index, count, seed);
+    if count <= 1 {
+        0.5
+    } else {
+        idx as f32 / (count - 1) as f32
+    }
+}
+
+fn fill_circle_radius(emitter: &EmitterDef, ru: impl Fn(usize) -> f32) -> f32 {
+    let inner = 1.0 - emitter.caliber_ratio.clamp(0.0, 1.0);
+    let r = ru(2);
+    if inner <= 0.0 {
+        r.sqrt()
+    } else {
+        (r + inner * inner * (1.0 - r)).sqrt()
+    }
+}
+
+/// Collect triangle positions/normals for mesh surface sampling.
+fn mesh_triangles(vertices: &[MeshVertex], indices: &[u16]) -> Vec<[Vec3; 3]> {
+    let mut tris = Vec::new();
+    let push_tri = |tris: &mut Vec<[Vec3; 3]>, a: usize, b: usize, c: usize| {
+        if let (Some(va), Some(vb), Some(vc)) = (vertices.get(a), vertices.get(b), vertices.get(c))
+        {
+            tris.push([
+                Vec3::from(va.position),
+                Vec3::from(vb.position),
+                Vec3::from(vc.position),
+            ]);
+        }
+    };
+    let mut i = 0;
+    while i + 2 < indices.len() {
+        let (a, b, c) = (indices[i] as usize, indices[i + 1] as usize, indices[i + 2] as usize);
+        push_tri(&mut tris, a, b, c);
+        i += 3;
+    }
+    tris
+}
+
+fn triangle_areas(tris: &[[Vec3; 3]]) -> Vec<f32> {
+    tris
+        .iter()
+        .map(|t| {
+            let e1 = t[1] - t[0];
+            let e2 = t[2] - t[0];
+            e1.cross(e2).length() * 0.5
+        })
+        .collect()
+}
+
+fn sample_triangle_surface(tris: &[[Vec3; 3]], areas: &[f32], seed: usize) -> Vec3 {
+    if tris.is_empty() {
+        return Vec3::ZERO;
+    }
+    let total: f32 = areas.iter().sum();
+    if total <= 0.0 {
+        return tris[0][0];
+    }
+    let mut pick = rand_factor(seed.wrapping_add(11)).abs() * total;
+    let tri_idx = areas
+        .iter()
+        .position(|&a| {
+            if pick <= a {
+                true
+            } else {
+                pick -= a;
+                false
+            }
+        })
+        .unwrap_or(tris.len() - 1);
+    let tri = tris[tri_idx];
+    let r1 = rand_factor(seed.wrapping_add(12)).abs();
+    let r2 = rand_factor(seed.wrapping_add(13)).abs();
+    let sqrt_r1 = r1.sqrt();
+    let u = 1.0 - sqrt_r1;
+    let v = sqrt_r1 * (1.0 - r2);
+    let w = sqrt_r1 * r2;
+    tri[0] * u + tri[1] * v + tri[2] * w
+}
+
+fn resolve_spawn_mesh<'a>(
+    ctx: &'a SpawnMeshContext<'a>,
+    emitter: &EmitterDef,
+) -> Option<(&'a [MeshVertex], &'a [u16])> {
+    // Prefer BFRES when configured; fall back to PRMA for missing/empty model indices.
+    if let Some(idx) = resolve_bfres_index(ctx, emitter, PrmaMeshRole::Spawn) {
+        if let Some(mesh) = ctx.bfres_models[idx].meshes.first() {
+            if !mesh.vertices.is_empty() {
+                return Some((&mesh.vertices, &mesh.indices));
+            }
+        }
+    }
+    let prim_idx = resolve_prma_slot(ctx.primitives, emitter_prma_id(emitter, PrmaMeshRole::Spawn));
+    let prim = ctx.primitives.get(prim_idx)?;
+    if prim.vertices.is_empty() {
+        return None;
+    }
+    Some((&prim.vertices, &prim.indices))
+}
+
+/// Sample a point on a primitive/BFRES mesh surface (PrimEmitType semantics).
+pub fn sample_primitive_surface_pos(
+    ctx: &SpawnMeshContext<'_>,
+    emitter: &EmitterDef,
+    seed: usize,
+    index: usize,
+    count: usize,
+) -> Vec3 {
+    let Some((vertices, indices)) = resolve_spawn_mesh(ctx, emitter) else {
+        return Vec3::ZERO;
+    };
+    match emitter.prim_emit_type {
+        0 => {
+            let v = &vertices[index % vertices.len()];
+            Vec3::from(v.position)
+        }
+        2 => {
+            let v = &vertices[(index + count) % vertices.len()];
+            Vec3::from(v.position)
+        }
+        _ => {
+            let tris = mesh_triangles(vertices, indices);
+            if tris.is_empty() {
+                let v = &vertices[seed % vertices.len()];
+                return Vec3::from(v.position);
+            }
+            let areas = triangle_areas(&tris);
+            sample_triangle_surface(&tris, &areas, seed)
+        }
+    }
+}
+
+/// Distance-based emission count and interpolated spawn origins (EmitSameDistance).
+pub fn emit_dist_spawn_batch(
+    emitter: &EmitterDef,
+    inst: &mut EmitterInstance,
+    curr_world_pos: Vec3,
+) -> Vec<Vec3> {
+    if !emitter.is_emit_dist_enabled || emitter.emitter_dist_unit <= 0.0 {
+        return Vec::new();
+    }
+    if !inst.emit_dist_prev_pos_set {
+        inst.emit_dist_prev_pos = curr_world_pos;
+        inst.emit_dist_prev_pos_set = true;
+        return Vec::new();
+    }
+    let prev = inst.emit_dist_prev_pos;
+    let move_len = (prev - curr_world_pos).length();
+    let mut virtual_len = move_len;
+    if virtual_len < emitter.emitter_dist_marg {
+        virtual_len = 0.0;
+    }
+    if virtual_len == 0.0 {
+        virtual_len = emitter.emitter_dist_min;
+    } else if virtual_len < emitter.emitter_dist_min {
+        virtual_len = emitter.emitter_dist_min;
+    } else if emitter.emitter_dist_max > 0.0 && virtual_len > emitter.emitter_dist_max {
+        virtual_len = emitter.emitter_dist_max;
+    }
+    inst.emit_dist_vessel += virtual_len;
+    let mut count = (inst.emit_dist_vessel / emitter.emitter_dist_unit).floor() as usize;
+    if emitter.emitter_dist_particles_max > 0 {
+        count = count.min(emitter.emitter_dist_particles_max as usize);
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        inst.emit_dist_vessel -= emitter.emitter_dist_unit;
+        let ratio = if virtual_len > 0.0 {
+            (inst.emit_dist_vessel / virtual_len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        out.push(curr_world_pos * (1.0 - ratio) + prev * ratio);
+    }
+    inst.emit_dist_prev_pos = curr_world_pos;
+    out
+}
+
+/// Per-particle rotation randomizer from EmitterInfo.RotateRand* (range [-1,1] * rand).
+pub fn spawn_rotation_rand(emitter: &EmitterDef, seed: usize) -> Vec3 {
+    let rf = |salt: usize| rand_factor(seed.wrapping_add(salt));
+    Vec3::new(
+        rf(51) * emitter.rotate_rand.x,
+        rf(52) * emitter.rotate_rand.y,
+        rf(53) * emitter.rotate_rand.z,
+    )
+}
+
+/// Local-space spawn offset inside the emitter volume (before TRS / bone transforms).
+pub fn volume_local_spawn_pos(
+    emitter: &EmitterDef,
+    seed: usize,
+    index: usize,
+    count: usize,
+    mesh_ctx: Option<&SpawnMeshContext<'_>>,
+) -> Vec3 {
+    let axes = volume_axes(emitter);
+    let rf = |salt: usize| rand_factor(seed.wrapping_add(salt));
+    let ru = |salt: usize| rand_unit(seed.wrapping_add(salt));
+    let count = count.max(1);
+
+    let mut pos = match emitter.emit_type {
+        EmitType::Point => Vec3::ZERO,
+        EmitType::Circle | EmitType::CircleSameDivide => {
+            let theta = if matches!(emitter.emit_type, EmitType::CircleSameDivide) {
+                circle_same_divide_theta(emitter, index, count, seed)
+            } else {
+                let (sin_v, cos_v) = sweep_sin_cos(emitter, ru, 1);
+                sin_v.atan2(cos_v)
+            };
+            Vec3::new(theta.cos() * axes.x, 0.0, theta.sin() * axes.z)
+        }
+        EmitType::FillCircle => {
+            let (sin_v, cos_v) = sweep_sin_cos(emitter, ru, 1);
+            let r = fill_circle_radius(emitter, ru);
+            Vec3::new(sin_v * axes.x * r, 0.0, cos_v * axes.z * r)
+        }
+        EmitType::Sphere
+        | EmitType::SphereSameDivide
+        | EmitType::SphereSameDivide64
+        | EmitType::FillSphere => {
+            let dir = if matches!(emitter.emit_type, EmitType::SphereSameDivide) {
+                same_divide_sphere_dir(emitter, index).unwrap_or_else(|| {
+                    let theta = index as f32 * std::f32::consts::TAU / count as f32;
+                    Vec3::new(theta.cos(), 0.0, theta.sin())
+                })
+            } else if matches!(emitter.emit_type, EmitType::SphereSameDivide64) {
+                same_divide_sphere64_dir(emitter, index)
+            } else {
+                let (sin_v, cos_v) = sweep_sin_cos(emitter, ru, 1);
+                let y = sphere_spawn_y(emitter, ru);
+                let r = (1.0 - y * y).max(0.0).sqrt();
+                Vec3::new(r * sin_v, y, r * cos_v)
+            };
+            let mut dir = if matches!(emitter.emit_type, EmitType::FillSphere) {
+                dir * rf(4).abs().cbrt()
+            } else {
+                dir
+            };
+            if !latitude_inside(emitter, dir) {
+                dir = dir.normalize_or_zero();
+            }
+            dir = rotate_latitude_basis(emitter, dir);
+            dir * axes
+        }
+        EmitType::Cylinder | EmitType::FillCylinder => {
+            let (sin_v, cos_v) = sweep_sin_cos(emitter, ru, 1);
+            let y = if matches!(emitter.emit_type, EmitType::FillCylinder) {
+                rf(2) * axes.y
+            } else {
+                axes.y * 0.5
+            };
+            Vec3::new(sin_v * axes.x, y, cos_v * axes.z)
+        }
+        EmitType::Box | EmitType::FillBox => {
+            if matches!(emitter.emit_type, EmitType::FillBox) {
+                Vec3::new(rf(1) * axes.x, rf(2) * axes.y, rf(3) * axes.z)
+            } else {
+                // Random point on box surface.
+                let face = (rf(1).abs() * 6.0).floor() as i32;
+                let u = rf(2);
+                let v = rf(3);
+                match face {
+                    0 => Vec3::new(axes.x, u * axes.y, v * axes.z),
+                    1 => Vec3::new(-axes.x, u * axes.y, v * axes.z),
+                    2 => Vec3::new(u * axes.x, axes.y, v * axes.z),
+                    3 => Vec3::new(u * axes.x, -axes.y, v * axes.z),
+                    4 => Vec3::new(u * axes.x, v * axes.y, axes.z),
+                    _ => Vec3::new(u * axes.x, v * axes.y, -axes.z),
+                }
+            }
+        }
+        EmitType::Rectangle => Vec3::new(rf(1) * axes.x, 0.0, rf(2) * axes.z),
+        EmitType::Line | EmitType::LineSameDivide => {
+            let t = if matches!(emitter.emit_type, EmitType::LineSameDivide) {
+                line_same_divide_t(emitter, index, count, seed)
+            } else {
+                rf(1).abs()
+            };
+            let half = emitter.line_length * 0.5;
+            let z = emitter.line_center + (t - 0.5) * emitter.line_length;
+            Vec3::new(0.0, 0.0, z.clamp(emitter.line_center - half, emitter.line_center + half))
+        }
+        EmitType::Primitive => mesh_ctx
+            .map(|ctx| sample_primitive_surface_pos(ctx, emitter, seed, index, count))
+            .unwrap_or(Vec3::ZERO),
+        EmitType::Unknown(_) => Vec3::ZERO,
+    };
+
+    if emitter.volume_surface_pos_rand.abs() > 0.0 {
+        pos += Vec3::new(rf(40), rf(41), rf(42)) * emitter.volume_surface_pos_rand;
+    }
+    pos
+}
+
+fn spawn_jitter(emitter: &EmitterDef, seed: usize) -> Vec3 {
+    let rf = |salt: usize| rand_factor(seed.wrapping_add(salt));
+    let trans_rand = Vec3::new(
+        rf(10) * emitter.trans_rand.x,
+        rf(11) * emitter.trans_rand.y,
+        rf(12) * emitter.trans_rand.z,
+    );
+    let pos_rand = if emitter.position_random.abs() > 0.0 {
+        let dir = Vec3::new(rf(20), rf(21), rf(22)).normalize_or_zero();
+        dir * emitter.position_random * rf(23).abs()
+    } else {
+        Vec3::ZERO
+    };
+    trans_rand + pos_rand
+}
+
+/// World spawn position for one particle.
+pub fn compute_particle_spawn_world_pos(
+    emitter: &EmitterDef,
+    inst: &EmitterInstance,
+    bone_mat: Mat4,
+    effect_t: f32,
+    seed: usize,
+    index: usize,
+    count: usize,
+    mesh_ctx: Option<&SpawnMeshContext<'_>>,
+) -> Vec3 {
+    let world_mat = compute_emitter_world_mat(emitter, inst, bone_mat, effect_t);
+    let local = volume_local_spawn_pos(emitter, seed, index, count, mesh_ctx) + spawn_jitter(emitter, seed);
+    world_mat.transform_point3(local)
+}
+
+/// Deterministic unit vector on the sphere (Fibonacci-style from seed).
+fn rand_unit_vec(seed: usize) -> Vec3 {
+    let theta = seed as f32 * 2.39996323;
+    let z = 1.0 - 2.0 * ((seed.wrapping_mul(1103515245).wrapping_add(12345) % 10000) as f32 / 10000.0);
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    Vec3::new(r * theta.cos(), r * theta.sin(), z).normalize_or_zero()
+}
+
+/// Sample a direction uniformly within a cone around `axis` (half-angle in radians).
+pub fn sample_cone_direction(axis: Vec3, half_angle_rad: f32, seed: usize) -> Vec3 {
+    let axis = axis.normalize_or_zero();
+    if half_angle_rad <= 0.0 || axis.length_squared() < 1e-8 {
+        return axis;
+    }
+    let u = (rand_factor(seed.wrapping_add(1)) + 1.0) * 0.5;
+    let cos_max = half_angle_rad.cos();
+    let cos_theta = cos_max + u * (1.0 - cos_max);
+    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+    let phi = rand_factor(seed.wrapping_add(2)) * std::f32::consts::TAU;
+    let up = if axis.y.abs() < 0.99 { Vec3::Y } else { Vec3::X };
+    let tangent = axis.cross(up).normalize_or_zero();
+    let bitangent = tangent.cross(axis);
+    (axis * cos_theta
+        + tangent * (sin_theta * phi.cos())
+        + bitangent * (sin_theta * phi.sin()))
+    .normalize_or_zero()
+}
+
+/// Apply cone and per-axis diffusion around a base emit direction.
+pub fn apply_velocity_diffusion(
+    base_dir: Vec3,
+    seed: usize,
+    dir_angle_deg: f32,
+    axis_spread: Vec3,
+) -> Vec3 {
+    let mut dir = if dir_angle_deg.abs() > 0.001 {
+        sample_cone_direction(base_dir, dir_angle_deg.to_radians(), seed)
+    } else {
+        base_dir.normalize_or_zero()
+    };
+    if axis_spread.length_squared() > 0.0 {
+        let r = rand_unit_vec(seed.wrapping_add(99));
+        dir = (
+            dir + Vec3::new(
+                r.x * axis_spread.x,
+                r.y * axis_spread.y,
+                r.z * axis_spread.z,
+            )
+        )
+        .normalize_or_zero();
+    }
+    dir
+}
+
+/// Add spawn XZ contribution to the velocity direction (ParticleVelocity.XZDiffusion).
+pub fn apply_xz_diffusion(dir: Vec3, local_spawn: Vec3, xz_diffusion: f32) -> Vec3 {
+    if xz_diffusion.abs() <= 0.001 {
+        return dir;
+    }
+    let xz = Vec3::new(local_spawn.x, 0.0, local_spawn.z);
+    if xz.length_squared() < 1e-8 {
+        return dir;
+    }
+    (dir + xz.normalize() * xz_diffusion).normalize_or_zero()
+}
+
+fn emit_velocity_base_direction(
+    emitter: &EmitterDef,
+    seed: usize,
+    index: usize,
+    count: usize,
+) -> Vec3 {
+    if !emitter.use_omnidirectional {
+        let dir = emitter.designated_dir.normalize_or_zero();
+        if dir.length_squared() > 0.0 {
+            return dir;
+        }
+    }
+    let count = count.max(1);
+    match emitter.emit_type {
+        EmitType::Sphere
+        | EmitType::SphereSameDivide
+        | EmitType::SphereSameDivide64
+        | EmitType::FillSphere => {
+            let theta = seed as f32 * 2.399;
+            let phi = (1.0 - 2.0 * ((seed as f32 + 0.5) / count as f32)).acos();
+            Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
+        }
+        EmitType::Point => {
+            let theta = seed as f32 * 2.399;
+            let phi = (1.0 - ((index as f32 + 0.5) / count as f32)).acos();
+            Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
+        }
+        EmitType::Circle | EmitType::CircleSameDivide | EmitType::FillCircle => {
+            let theta = index as f32 * std::f32::consts::TAU / count as f32;
+            Vec3::new(theta.cos(), 0.0, theta.sin())
+        }
+        EmitType::Cylinder | EmitType::FillCylinder => {
+            let theta = index as f32 * std::f32::consts::TAU / count as f32;
+            let y = (seed as f32 * 0.37).sin() * 0.5;
+            Vec3::new(theta.cos(), y, theta.sin()).normalize()
+        }
+        EmitType::Box | EmitType::FillBox => {
+            let rx = (seed as f32 * 0.13).sin() * 2.0 - 1.0;
+            let ry = (seed as f32 * 0.17).sin() * 2.0 - 1.0;
+            let rz = (seed as f32 * 0.19).sin() * 2.0 - 1.0;
+            Vec3::new(rx, ry, rz).normalize_or_zero()
+        }
+        EmitType::Rectangle => {
+            let rx = (seed as f32 * 0.13).sin() * 2.0 - 1.0;
+            let rz = (seed as f32 * 0.19).sin() * 2.0 - 1.0;
+            Vec3::new(rx, 0.0, rz).normalize_or_zero()
+        }
+        EmitType::Line | EmitType::LineSameDivide => Vec3::new(0.0, 0.0, 1.0),
+        EmitType::Primitive => {
+            Vec3::new(
+                (seed as f32 * 0.11).sin() * 0.5,
+                (seed as f32 * 0.13).sin() * 0.5,
+                1.0,
+            )
+            .normalize_or_zero()
+        }
+        EmitType::Unknown(_) => {
+            let theta = seed as f32 * 2.399;
+            let phi = (1.0 - 2.0 * ((seed as f32 + 0.5) / count as f32)).acos();
+            Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
+        }
+    }
+}
+
+/// Full emit direction including diffusion; transformed by emitter rotation unless world-oriented.
+pub fn emit_velocity_direction(
+    emitter: &EmitterDef,
+    seed: usize,
+    index: usize,
+    count: usize,
+    emitter_rot_mat: Mat4,
+    local_spawn: Vec3,
+) -> Vec3 {
+    let base = emit_velocity_base_direction(emitter, seed, index, count);
+    let mut dir = apply_velocity_diffusion(
+        base,
+        seed,
+        emitter.diffusion_dir_angle,
+        emitter.diffusion_axis,
+    );
+    dir = apply_xz_diffusion(dir, local_spawn, emitter.xz_diffusion);
+    if emitter.is_world_oriented_velocity {
+        dir
+    } else {
+        emitter_rot_mat.transform_vector3(dir)
+    }
+}
+
+/// Compute final particle velocity vector at spawn.
+pub fn compute_particle_velocity(
+    emitter: &EmitterDef,
+    seed: usize,
+    index: usize,
+    count: usize,
+    emitter_rot_mat: Mat4,
+    local_spawn: Vec3,
+    emitter_motion_velocity: Vec3,
+) -> Vec3 {
+    let dir = emit_velocity_direction(emitter, seed, index, count, emitter_rot_mat, local_spawn);
+    let speed = emitter.initial_speed
+        * (1.0 + (seed as f32 * 0.37).sin() * emitter.speed_random.min(0.5));
+    let mut velocity = dir * speed;
+    if emitter.em_vel_inherit.abs() > 0.0 {
+        velocity += emitter_motion_velocity * emitter.em_vel_inherit;
+    }
+    velocity
+}
+
+/// Apply child inheritance flags to spawn size / rotation / velocity / channel multipliers.
+pub fn apply_child_inheritance(
+    inh: &ChildInheritanceDef,
+    parent: &Particle,
+    mut size: f32,
+    mut rotation: f32,
+    mut velocity: Vec3,
+) -> (f32, f32, Vec3, Option<ParticleInheritState>) {
+    if inh.inherit_velocity {
+        velocity += parent.velocity * inh.velocity_rate;
+    }
+    if inh.inherit_scale {
+        size = (parent.size * inh.scale_rate).max(0.01);
+    }
+    if inh.inherit_rotate {
+        rotation = parent.rotation;
+    }
+
+    let has_channel_inherit = inh.inherit_color0
+        || inh.inherit_color1
+        || inh.inherit_alpha0
+        || inh.inherit_alpha1
+        || inh.inherit_color_scale
+        || inh.inherit_alpha0_each_frame
+        || inh.inherit_alpha1_each_frame
+        || inh.inherit_draw_path
+        || inh.inherit_pre_draw;
+
+    let inherit = if has_channel_inherit {
+        Some(ParticleInheritState {
+            color0_mul: if inh.inherit_color0 {
+                parent.color0_rgb
+            } else {
+                [1.0, 1.0, 1.0]
+            },
+            color1_mul: if inh.inherit_color1 {
+                parent.color1_rgb
+            } else {
+                [1.0, 1.0, 1.0]
+            },
+            alpha0_mul: if inh.inherit_alpha0 {
+                parent.alpha0_live
+            } else {
+                1.0
+            },
+            alpha1_mul: if inh.inherit_alpha1 {
+                parent.alpha1_live
+            } else {
+                1.0
+            },
+            color_scale: if inh.inherit_color_scale {
+                parent.color_scale_live
+            } else {
+                1.0
+            },
+            alpha0_each_frame: inh.inherit_alpha0_each_frame,
+            alpha1_each_frame: inh.inherit_alpha1_each_frame,
+            parent_seed: parent.seed,
+            parent_set_idx: parent.emitter_set_idx,
+            parent_emitter_idx: parent.emitter_idx,
+            draw_path: if inh.inherit_draw_path {
+                Some(parent.draw_path)
+            } else {
+                None
+            },
+            pre_draw: inh.inherit_pre_draw,
+        })
+    } else {
+        None
+    };
+
+    (size, rotation, velocity, inherit)
+}
+
+/// Within one `draw_path` + emitter set, order pre_draw child batches immediately before their parent.
+pub fn particle_hierarchy_order_key(p: &Particle) -> (usize, u8, usize) {
+    let idx = p.emitter_idx;
+    if p.pre_draw {
+        let parent = p
+            .parent_emitter_idx
+            .or_else(|| p.inherit.as_ref().map(|i| i.parent_emitter_idx));
+        if let Some(parent) = parent {
+            (parent, 0, idx)
+        } else {
+            // Ungrouped pre_draw: before all emitters in this set.
+            (0, 0, idx)
+        }
+    } else {
+        (idx, 1, idx)
+    }
+}
+
+/// GPU draw / batch ordering: lower `draw_path` first, then hierarchy order within each set.
+pub fn particle_draw_sort_key(p: &Particle) -> (u32, usize, usize, u8, usize) {
+    let (anchor, tier, idx) = particle_hierarchy_order_key(p);
+    (p.draw_path, p.emitter_set_idx, anchor, tier, idx)
+}
+
+/// Batch grouping key for particles sharing the same emitter shader/textures.
+pub fn particle_batch_key(p: &Particle) -> (u32, bool, usize, usize) {
+    (
+        p.draw_path,
+        p.pre_draw,
+        p.emitter_set_idx,
+        p.emitter_idx,
+    )
+}
+
+/// Ascending distinct `draw_path` ids present in `particles`.
+pub fn distinct_particle_draw_paths(particles: &[Particle]) -> Vec<u32> {
+    let mut paths: Vec<u32> = particles.iter().map(|p| p.draw_path).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
+/// Ascending draw_path ids for multi-pass compositing (particles + sword trails).
+pub fn distinct_draw_paths(particles: &[Particle], trails: &[SwordTrail]) -> Vec<u32> {
+    let mut paths = distinct_particle_draw_paths(particles);
+    for trail in trails {
+        if !paths.contains(&trail.draw_path) {
+            paths.push(trail.draw_path);
+        }
+    }
+    paths.sort_unstable();
+    paths
+}
+
+/// Clip-space depth proxy for transparent particle ordering within one batch.
+pub fn particle_clip_depth(view_proj: Mat4, p: &Particle) -> f32 {
+    let clip = view_proj * p.position.extend(1.0);
+    clip.z / clip.w.max(1e-6)
+}
+
+/// Ordered batch keys matching [`crate::particle_renderer::ParticleRenderer::prepare_particle_frame`].
+pub fn ordered_particle_batch_keys(particles: &[Particle]) -> Vec<(u32, bool, usize, usize)> {
+    ordered_particle_batch_keys_filtered(particles, None)
+}
+
+/// Batch keys for one draw path (or all paths when `draw_path` is `None`).
+pub fn ordered_particle_batch_keys_filtered(
+    particles: &[Particle],
+    draw_path: Option<u32>,
+) -> Vec<(u32, bool, usize, usize)> {
+    let mut sorted: Vec<&Particle> = particles
+        .iter()
+        .filter(|p| draw_path.map_or(true, |d| p.draw_path == d))
+        .collect();
+    sorted.sort_by_key(|p| particle_draw_sort_key(p));
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let key = particle_batch_key(sorted[i]);
+        while i < sorted.len() && particle_batch_key(sorted[i]) == key {
+            i += 1;
+        }
+        keys.push(key);
+    }
+    keys
+}
+
+/// Per-path batch key lists in ascending draw_path order (for multi-pass rendering tests).
+pub fn ordered_particle_batch_keys_by_draw_path(
+    particles: &[Particle],
+) -> Vec<(u32, Vec<(u32, bool, usize, usize)>)> {
+    distinct_particle_draw_paths(particles)
+        .into_iter()
+        .map(|path| {
+            (
+                path,
+                ordered_particle_batch_keys_filtered(particles, Some(path)),
+            )
+        })
+        .collect()
+}
+
+/// Apply per-channel inheritance multipliers before combiner evaluation.
+///
+/// When `use_live_parent_alpha` is false, each-frame alpha inheritance is deferred (multiplier 1.0)
+/// so a second pass can apply the parent's same-frame alpha after integration.
+pub fn apply_inherit_channels(
+    mut c0: [f32; 4],
+    mut c1: [f32; 4],
+    mut a0: f32,
+    mut a1: f32,
+    inherit: Option<&ParticleInheritState>,
+    parent_alphas: Option<&HashMap<(u64, usize, usize), (f32, f32)>>,
+    use_live_parent_alpha: bool,
+) -> ([f32; 4], [f32; 4], f32, f32) {
+    let Some(inh) = inherit else {
+        return (c0, c1, a0, a1);
+    };
+    for i in 0..3 {
+        c0[i] *= inh.color0_mul[i];
+        c1[i] *= inh.color1_mul[i];
+    }
+    if inh.color_scale != 1.0 {
+        for i in 0..3 {
+            c0[i] *= inh.color_scale;
+            c1[i] *= inh.color_scale;
+        }
+    }
+    let parent_key = (inh.parent_seed, inh.parent_set_idx, inh.parent_emitter_idx);
+    let parent_live = parent_alphas.and_then(|m| m.get(&parent_key).copied());
+    let a0_mul = if inh.alpha0_each_frame {
+        if use_live_parent_alpha {
+            parent_live.map(|(a0, _)| a0).unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    } else {
+        inh.alpha0_mul
+    };
+    let a1_mul = if inh.alpha1_each_frame {
+        if use_live_parent_alpha {
+            parent_live.map(|(_, a1)| a1).unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    } else {
+        inh.alpha1_mul
+    };
+    a0 *= a0_mul;
+    a1 *= a1_mul;
+    (c0, c1, a0, a1)
+}
+
+/// Re-sample emitter colour/alpha tracks and apply inheritance for one particle.
+pub fn update_particle_color_channels(
+    p: &mut Particle,
+    emitter: &EmitterDef,
+    parent_alpha_lookup: Option<&HashMap<(u64, usize, usize), (f32, f32)>>,
+    use_live_parent_alpha: bool,
+) {
+    let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
+    let c0 = sample_color_or_white(&emitter.color0, t);
+    let c1 = if !emitter.color1.is_empty() {
+        sample_color_or_white(&emitter.color1, t)
+    } else {
+        Vec4::ONE
+    };
+    let a0 = if !emitter.alpha0_keys.is_empty() {
+        sample_alpha(&emitter.alpha0_keys, t)
+    } else {
+        emitter.alpha0.sample(t)
+    };
+    let a1 = if !emitter.alpha1_keys.is_empty() {
+        sample_alpha(&emitter.alpha1_keys, t)
+    } else {
+        emitter.alpha1.sample(t)
+    };
+    let (c0_arr, c1_arr, a0_live, a1_live) = apply_inherit_channels(
+        [c0.x, c0.y, c0.z, c0.w],
+        [c1.x, c1.y, c1.z, c1.w],
+        a0,
+        a1,
+        p.inherit.as_ref(),
+        parent_alpha_lookup,
+        use_live_parent_alpha,
+    );
+    p.color0_rgb = [c0_arr[0], c0_arr[1], c0_arr[2]];
+    p.color1_rgb = [c1_arr[0], c1_arr[1], c1_arr[2]];
+    p.alpha0_live = a0_live;
+    p.alpha1_live = a1_live;
+    p.color_scale_live = emitter.color_scale;
+    p.color = combine_particle_channels(c0_arr, c1_arr, a0_live, a1_live, &emitter.combiner);
+}
+
+/// Combine sampled combiner channels into final particle RGBA.
+pub fn combine_particle_channels(
+    c0: [f32; 4],
+    c1: [f32; 4],
+    a0: f32,
+    a1: f32,
+    combiner: &crate::shader_registry::CombinerState,
+) -> Vec4 {
+    let combined = crate::combiner::combine_particle_rgba(c0, c1, a0, a1, combiner);
+    Vec4::new(combined[0], combined[1], combined[2], combined[3])
+}
+
+/// Child emitters in `set` that spawn when `parent_emitter_idx` particles die.
+pub fn child_emitters_for_parent<'a>(
+    set: &'a EmitterSet,
+    parent_emitter_idx: usize,
+) -> impl Iterator<Item = (usize, &'a EmitterDef)> {
+    set.emitters.iter().enumerate().filter(move |(_, e)| {
+        e.child_inheritance.spawn_from_parent_particle
+            && e.child_inheritance.parent_emitter_idx as usize == parent_emitter_idx
+    })
+}
+
+/// Normalized effect-local time for emitter animation tracks.
+pub fn emitter_effect_t(emitter: &EmitterDef, local_frame: f32) -> f32 {
+    let dur = emitter.emission_duration.max(1) as f32;
+    ((local_frame - emitter.emission_timing as f32) / dur).clamp(0.0, 1.0)
 }
 
 /// Texture resource parsed from the emitter data block.
@@ -538,6 +3026,8 @@ pub struct MeshVertex {
 /// Primitive mesh geometry data parsed from the VFXB file.
 #[derive(Debug, Clone)]
 pub struct PrimitiveData {
+    /// PRMA descriptor id (from PRIM binary / descriptor table).
+    pub id: u64,
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u16>,
 }
@@ -562,6 +3052,8 @@ pub struct BfresMesh {
 #[derive(Debug, Clone, Default)]
 pub struct BfresModel {
     pub name: String,
+    /// PRMA id from dump `{id}.bfres` filename (0 when unknown).
+    pub source_id: u64,
     pub meshes: Vec<BfresMesh>,
 }
 
@@ -1272,7 +3764,11 @@ fn parse_g3pr(data: &[u8], bfres_start: usize, bfres_len: usize, bntx_str_names:
         let name_off = r64(&bfres, fmdl + 0x08) as usize;
         let name = read_str(&bfres, name_off);
         eprintln!("[G3PR] parsed model '{}': {} meshes", name, meshes.len());
-        models.push(BfresModel { name, meshes });
+        models.push(BfresModel {
+            name,
+            source_id: 0,
+            meshes,
+        });
     }
 
     models
@@ -1323,71 +3819,12 @@ impl PtclFile {
         let emitter_sets = (0..=max_set_idx).map(|i| EmitterSet {
             name: format!("set_{}", i),
             emitters: vec![EmitterDef {
-                name: String::new(),
-                emit_type: EmitType::Point,
-                blend_type: BlendType::Add,
-                display_side: DisplaySide::Both,
                 emission_rate: 8.0,
-                emission_rate_random: 0.0,
                 initial_speed: 0.3,
                 speed_random: 0.3,
                 accel: Vec3::new(0.0, 0.05, 0.0),
                 lifetime: 12.0,
-                lifetime_random: 0.0,
-                scale: 1.0,
-                scale_random: 0.0,
-                rotation_speed: 0.0,
-                rotation_init: 0.0,
-                rotation_init_random: 0.0,
-                color0: Vec::new(),
-                color1: Vec::new(),
-                alpha0: AnimKey3v4k::default(),
-                alpha1: AnimKey3v4k::default(),
-                alpha0_keys: vec![],
-                alpha1_keys: vec![],
-                scale_anim: AnimKey3v4k::default(),
-                textures: Vec::new(),
-                mesh_type: 0,
-                primitive_index: 0,
-                texture_index: 0,
-                tex_scale_uv: [1.0, 1.0],
-                tex_offset_uv: [0.0, 0.0],
-                tex_scroll_uv: [0.0, 0.0],
-                tex_pat_frame_count: 1,
-                tex_pat_frame_table: Vec::new(),
-                emitter_offset: Vec3::ZERO,
-                emitter_rotation: Vec3::ZERO,
-                emitter_scale: Vec3::ONE,
-                is_one_time: false,
-                emission_timing: 0,
-                emission_duration: 9999,
-                is_indirect_slot1: false,
-                distortion_strength: 0.0,
-                indirect_scroll_uv: [0.0, 0.0],
-                indirect_tex_scale_uv: [1.0, 1.0],
-                indirect_tex_offset_uv: [0.0, 0.0],
-                tex2_scale_uv: [1.0, 1.0],
-                tex2_offset_uv: [0.0, 0.0],
-                tex2_scroll_uv: [0.0, 0.0],
-                tex_wrap_u: 2,
-                tex_wrap_v: 2,
-                tex2_wrap_u: 2,
-                tex2_wrap_v: 2,
-                tex2_pat_frame_count: 1,
-                tex2_pat_frame_table: Vec::new(),
-                anim_translate: None,
-                anim_rotation: None,
-                anim_emit_scale: None,
-                anim_tex_scale: None,
-                anim_color0: None,
-                anim_color1: None,
-                anim_alpha: None,
-                shader_index: -1,
-                custom_shader_index: 0,
-                user_shader_indices: [-1, -1],
-            shader_key: 0,
-            combiner: crate::shader_registry::CombinerState::default(),
-            particle_color: crate::shader_registry::ParticleColorState::default(),
+                ..Default::default()
             }],
         }).collect();
         Self { emitter_sets, texture_section: Vec::new(), texture_section_offset: 0, bntx_textures: Vec::new(), primitives: Vec::new(), bfres_models: Vec::new(), shader_registry: Default::default(), shader_binary_1: Vec::new(), shader_binary_2: Vec::new() }
@@ -1405,68 +3842,14 @@ impl PtclFile {
                     name: hint_name.to_string(),
                     emit_type: EmitType::Sphere,
                     blend_type: blend,
-                    display_side: DisplaySide::Both,
-                    emission_rate: 8.0,
-                    emission_rate_random: 0.0,
                     initial_speed: 0.2,
                     speed_random: 0.3,
-                    accel: Vec3::ZERO,
                     lifetime,
-                    lifetime_random: 0.0,
                     scale,
-                    scale_random: 0.0,
-                    rotation_speed: 0.0,
-                    rotation_init: 0.0,
-                    rotation_init_random: 0.0,
                     color0: vec![ColorKey { frame: 0.0, r, g, b, a: 1.0 }],
-                    color1: Vec::new(),
-                    alpha0: AnimKey3v4k::default(),
-                    alpha1: AnimKey3v4k::default(),
-                    alpha0_keys: vec![],
-                    alpha1_keys: vec![],
-                    scale_anim: AnimKey3v4k::default(),
-                    textures: Vec::new(),
-                    mesh_type: 0,
-                    primitive_index: 0,
-                    texture_index: 0,
-                    tex_scale_uv: [1.0, 1.0],
-                    tex_offset_uv: [0.0, 0.0],
-                    tex_scroll_uv: [0.0, 0.0],
-                    tex_pat_frame_count: 1,
-                    tex_pat_frame_table: Vec::new(),
-                    emitter_offset: Vec3::ZERO,
-                    emitter_rotation: Vec3::ZERO,
-                    emitter_scale: Vec3::ONE,
                     is_one_time: true,
-                    emission_timing: 0,
                     emission_duration: lifetime as u32,
-                    is_indirect_slot1: false,
-                    distortion_strength: 0.0,
-                    indirect_scroll_uv: [0.0, 0.0],
-                    indirect_tex_scale_uv: [1.0, 1.0],
-                    indirect_tex_offset_uv: [0.0, 0.0],
-                    tex2_scale_uv: [1.0, 1.0],
-                    tex2_offset_uv: [0.0, 0.0],
-                    tex2_scroll_uv: [0.0, 0.0],
-                    tex_wrap_u: 2,
-                    tex_wrap_v: 2,
-                    tex2_wrap_u: 2,
-                    tex2_wrap_v: 2,
-                    tex2_pat_frame_count: 1,
-                    tex2_pat_frame_table: Vec::new(),
-                    anim_translate: None,
-                    anim_rotation: None,
-                    anim_emit_scale: None,
-                    anim_tex_scale: None,
-                    anim_color0: None,
-                    anim_color1: None,
-                    anim_alpha: None,
-                    shader_index: -1,
-                    custom_shader_index: 0,
-                    user_shader_indices: [-1, -1],
-                    shader_key: 0,
-                    combiner: crate::shader_registry::CombinerState::default(),
-                    particle_color: crate::shader_registry::ParticleColorState::default(),
+                    ..Default::default()
                 }],
             }
         }).collect();
@@ -1559,6 +3942,392 @@ pub(crate) fn infer_grid_layout(width: u16, height: u16, frame_count: usize) -> 
         }
     }
     (best_cols, best_rows)
+}
+
+/// True when a texture slot uses flipbook/pattern animation (not pure scroll).
+pub fn slot_uses_tex_pattern(
+    anim: &TextureAnimFlags,
+    pat_frame_count: usize,
+    pat_frame_table: &[usize],
+) -> bool {
+    if pat_frame_count > 1 {
+        return true;
+    }
+    if !pat_frame_table.is_empty() {
+        return true;
+    }
+    anim.pattern_anim_type > 0
+}
+
+/// True when slot-0 texture uses flipbook/pattern animation (not pure scroll).
+pub fn emitter_uses_tex_pattern(emitter: &EmitterDef) -> bool {
+    slot_uses_tex_pattern(
+        &texture_anim_flags_slot0(emitter),
+        emitter.tex_pat_frame_count,
+        &emitter.tex_pat_frame_table,
+    )
+}
+
+fn texture_anim_flags_slot0(emitter: &EmitterDef) -> TextureAnimFlags {
+    TextureAnimFlags {
+        pattern_anim_type: emitter.tex_pattern_anim_type,
+        is_scroll: emitter.tex_is_scroll,
+        is_rotate: emitter.tex_is_rotate,
+        is_scale: emitter.tex_is_scale,
+        inv_rand_u: emitter.tex_inv_rand_u,
+        inv_rand_v: emitter.tex_inv_rand_v,
+        pat_loop_random: emitter.tex_pat_loop_random,
+        crossfade: emitter.tex_crossfade,
+        scroll_rotation: emitter.tex_scroll_rotation,
+        scroll_rotation_add: emitter.tex_scroll_rotation_add,
+    }
+}
+
+/// True when a slot uses UV scroll (`IsScroll` or non-zero scroll speed).
+pub fn slot_uses_tex_scroll(anim: &TextureAnimFlags, scroll_uv: [f32; 2]) -> bool {
+    if anim.is_scroll {
+        return true;
+    }
+    scroll_uv[0].abs() + scroll_uv[1].abs() > 1e-6
+}
+
+/// True when slot-0 texture uses UV scroll (TextureAnim0.IsScroll or non-zero scroll speed).
+pub fn emitter_uses_tex_scroll(emitter: &EmitterDef) -> bool {
+    slot_uses_tex_scroll(&texture_anim_flags_slot0(emitter), emitter.tex_scroll_uv)
+}
+
+/// Sample EASL / animated UV scale for a slot when `IsScale` is set.
+pub fn effective_tex_scale_uv(
+    base_scale: [f32; 2],
+    anim: &TextureAnimFlags,
+    anim_tex_scale: Option<&EmitterAnimDef>,
+    life_t: f32,
+) -> [f32; 2] {
+    let mut scale = base_scale;
+    if anim.is_scale {
+        if let Some(track) = anim_tex_scale {
+            if track.enable {
+                let v = sample_emitter_anim_track(track, life_t);
+                scale[0] *= v[0].max(0.001);
+                scale[1] *= v[1].max(0.001);
+            }
+        }
+    }
+    scale
+}
+
+/// Normalized pattern phase (0..1) over particle lifetime, scaled by TexPatAnim.Frequency.
+pub fn pattern_anim_phase(life_t: f32, frequency: f32, phase_offset: f32) -> f32 {
+    let freq = if frequency > 0.0 { frequency } else { 1.0 };
+    (life_t.clamp(0.0, 1.0) * freq + phase_offset).fract()
+}
+
+fn pattern_table_len(pat_frame_count: usize, pat_frame_table: &[usize]) -> usize {
+    if pat_frame_table.is_empty() {
+        pat_frame_count.max(1)
+    } else {
+        pat_frame_table.len()
+    }
+}
+
+fn pattern_table_index(
+    anim: &TextureAnimFlags,
+    life_t: f32,
+    frequency: f32,
+    phase_offset: f32,
+    table_len: usize,
+) -> (usize, f32) {
+    let life = life_t.clamp(0.0, 1.0);
+    let freq = if frequency > 0.0 { frequency } else { 1.0 };
+    let phase = life * freq + phase_offset;
+    match anim.pattern_anim_type {
+        pattern_anim_type::FIT_LIFESPAN => {
+            let denom = table_len.saturating_sub(1).max(1) as f32;
+            let raw = (phase.min(1.0) * denom).clamp(0.0, denom);
+            (raw.floor() as usize, raw.fract())
+        }
+        pattern_anim_type::CLAMP => {
+            let raw = phase * table_len as f32;
+            let idx = raw.floor() as usize;
+            (idx.min(table_len.saturating_sub(1)), raw.fract())
+        }
+        pattern_anim_type::LOOP | pattern_anim_type::NONE => {
+            let raw = phase.fract() * table_len as f32;
+            (raw.floor() as usize % table_len.max(1), raw.fract())
+        }
+        _ => {
+            let raw = phase.fract() * table_len as f32;
+            (raw.floor() as usize % table_len.max(1), raw.fract())
+        }
+    }
+}
+
+/// Resolve flipbook frame index + crossfade blend at normalized life.
+pub fn pattern_frame_at_life(
+    anim: &TextureAnimFlags,
+    pat_frame_count: usize,
+    pat_frame_table: &[usize],
+    pat_frequency: f32,
+    life_t: f32,
+    phase_offset: f32,
+    fixed_frame: Option<usize>,
+) -> (usize, f32) {
+    if anim.pattern_anim_type == pattern_anim_type::RANDOM {
+        let frame = fixed_frame.unwrap_or(0);
+        return (frame.min(pat_frame_count.saturating_sub(1)), 0.0);
+    }
+
+    let table_len = pattern_table_len(pat_frame_count, pat_frame_table);
+    let (table_idx, frac) = pattern_table_index(anim, life_t, pat_frequency, phase_offset, table_len);
+
+    let frame = if pat_frame_table.is_empty() {
+        table_idx
+    } else {
+        pat_frame_table[table_idx.min(pat_frame_table.len().saturating_sub(1))]
+    };
+    let frame = frame.min(pat_frame_count.saturating_sub(1));
+    let blend = if anim.crossfade { frac } else { 0.0 };
+    (frame, blend)
+}
+
+/// Frame index, next frame for crossfade, and blend fraction at normalized life.
+pub fn pattern_frame_with_crossfade(
+    anim: &TextureAnimFlags,
+    pat_frame_count: usize,
+    pat_frame_table: &[usize],
+    pat_frequency: f32,
+    life_t: f32,
+    phase_offset: f32,
+    fixed_frame: Option<usize>,
+) -> (usize, usize, f32) {
+    let (frame, blend) = pattern_frame_at_life(
+        anim,
+        pat_frame_count,
+        pat_frame_table,
+        pat_frequency,
+        life_t,
+        phase_offset,
+        fixed_frame,
+    );
+    if blend <= 0.0 || anim.pattern_anim_type == pattern_anim_type::RANDOM {
+        return (frame, frame, blend);
+    }
+    let table_len = pattern_table_len(pat_frame_count, pat_frame_table);
+    let (table_idx, _) = pattern_table_index(anim, life_t, pat_frequency, phase_offset, table_len);
+    let next_table_idx = (table_idx + 1) % table_len.max(1);
+    let next_frame = if pat_frame_table.is_empty() {
+        next_table_idx
+    } else {
+        pat_frame_table[next_table_idx.min(pat_frame_table.len().saturating_sub(1))]
+    };
+    (
+        frame,
+        next_frame.min(pat_frame_count.saturating_sub(1)),
+        blend,
+    )
+}
+
+/// UV delta from current flipbook cell to the next cell (for crossfade sampling).
+pub fn pattern_crossfade_uv_delta(
+    frame: usize,
+    next_frame: usize,
+    tex_scale_uv: [f32; 2],
+    tex_offset_uv: [f32; 2],
+) -> [f32; 2] {
+    let cur = frame_uv_offset(frame, tex_scale_uv, tex_offset_uv);
+    let nxt = frame_uv_offset(next_frame, tex_scale_uv, tex_offset_uv);
+    [nxt[0] - cur[0], nxt[1] - cur[1]]
+}
+
+/// True when TextureAnim3–5 slot `idx` (0..2) should be simulated for this emitter.
+pub fn extra_tex_slot_active(emitter: &EmitterDef, idx: usize) -> bool {
+    let Some(anim) = emitter.tex_anims_extra.get(idx) else {
+        return false;
+    };
+    let slot = &emitter.tex_extra_slots[idx];
+    slot_uses_tex_pattern(anim, slot.pat_frame_count, &slot.pat_frame_table)
+        || slot_uses_tex_scroll(anim, slot.scroll_uv)
+        || emitter.textures.len() > idx + 3
+}
+
+/// Resolve flipbook frame index at normalized life using frequency + optional frame table.
+pub fn pattern_frame_index(emitter: &EmitterDef, life_t: f32) -> usize {
+    pattern_frame_at_life(
+        &texture_anim_flags_slot0(emitter),
+        emitter.tex_pat_frame_count,
+        &emitter.tex_pat_frame_table,
+        emitter.tex_pat_frequency,
+        life_t,
+        0.0,
+        None,
+    )
+    .0
+}
+
+/// UV scroll rotation angle (radians) at normalized life — used for cbuf UV matrix, not billboard spin.
+pub fn scroll_uv_angle_at_life(anim: &TextureAnimFlags, life_t: f32, lifetime: f32) -> f32 {
+    if !anim.is_rotate {
+        return 0.0;
+    }
+    anim.scroll_rotation + anim.scroll_rotation_add * life_t * lifetime.max(0.0)
+}
+
+/// Apply InvRandU/V at spawn: mirror scale when the per-particle seed selects flip.
+pub fn apply_inv_rand_uv(
+    mut scale: [f32; 2],
+    mut offset: [f32; 2],
+    anim: &TextureAnimFlags,
+    seed: u64,
+) -> ([f32; 2], [f32; 2]) {
+    if anim.inv_rand_u && (seed & 1) == 1 {
+        scale[0] = -scale[0].abs();
+        offset[0] = 1.0 - offset[0];
+    }
+    if anim.inv_rand_v && (seed & 2) == 2 {
+        scale[1] = -scale[1].abs();
+        offset[1] = 1.0 - offset[1];
+    }
+    (scale, offset)
+}
+
+/// Initialize per-particle UV state at spawn for slot 0.
+pub fn init_particle_uv_at_spawn(p: &mut Particle, emitter: &EmitterDef) {
+    let anim = texture_anim_flags_slot0(emitter);
+    let (scale, offset) = apply_inv_rand_uv(
+        emitter.tex_scale_uv,
+        emitter.tex_offset_uv,
+        &anim,
+        p.seed,
+    );
+    p.tex_scale_live = effective_tex_scale_uv(
+        scale,
+        &anim,
+        emitter.anim_tex_scale.as_ref(),
+        0.0,
+    );
+    p.tex_offset = if slot_uses_tex_pattern(
+        &anim,
+        emitter.tex_pat_frame_count,
+        &emitter.tex_pat_frame_table,
+    ) {
+        let (frame, _) = pattern_frame_at_life(
+            &anim,
+            emitter.tex_pat_frame_count,
+            &emitter.tex_pat_frame_table,
+            emitter.tex_pat_frequency,
+            0.0,
+            p.pat_phase_offset,
+            p.pat_fixed_frame,
+        );
+        frame_uv_offset(frame, p.tex_scale_live, offset)
+    } else {
+        offset
+    };
+    p.pat_phase_offset = if anim.pat_loop_random {
+        ((p.seed % 997) as f32 / 997.0)
+    } else {
+        0.0
+    };
+    p.pat_fixed_frame = if anim.pattern_anim_type == pattern_anim_type::RANDOM {
+        let fc = emitter.tex_pat_frame_count.max(1);
+        Some((p.seed as usize) % fc)
+    } else {
+        None
+    };
+    p.tex_scroll_angle = if anim.is_rotate { anim.scroll_rotation } else { 0.0 };
+
+    let (ind_scale, ind_offset) = apply_inv_rand_uv(
+        emitter.indirect_tex_scale_uv,
+        emitter.indirect_tex_offset_uv,
+        &emitter.indirect_anim,
+        p.seed.wrapping_add(3),
+    );
+    p.indirect_tex_offset = ind_offset;
+    let _ = ind_scale;
+
+    let (t2_scale, t2_offset) = apply_inv_rand_uv(
+        emitter.tex2_scale_uv,
+        emitter.tex2_offset_uv,
+        &emitter.tex2_anim,
+        p.seed.wrapping_add(5),
+    );
+    p.tex2_tex_offset = t2_offset;
+    let _ = t2_scale;
+
+    for i in 0..3 {
+        if !extra_tex_slot_active(emitter, i) {
+            continue;
+        }
+        let slot = &emitter.tex_extra_slots[i];
+        let (scale, offset) = apply_inv_rand_uv(
+            slot.scale_uv,
+            slot.offset_uv,
+            &emitter.tex_anims_extra[i],
+            p.seed.wrapping_add(7 + i as u64),
+        );
+        p.tex_extra_offsets[i] = offset;
+        let _ = scale;
+    }
+}
+
+/// Advance one texture slot's UV offset for the current simulation step.
+pub fn advance_uv_slot(
+    offset: &mut [f32; 2],
+    scale_live: &mut [f32; 2],
+    scroll_angle: &mut f32,
+    anim: &TextureAnimFlags,
+    scale_uv: [f32; 2],
+    scroll_uv: [f32; 2],
+    pat_frame_count: usize,
+    pat_frame_table: &[usize],
+    pat_frequency: f32,
+    base_offset_uv: [f32; 2],
+    anim_tex_scale: Option<&EmitterAnimDef>,
+    life_t: f32,
+    dt: f32,
+    phase_offset: f32,
+    fixed_frame: Option<usize>,
+) {
+    if slot_uses_tex_pattern(anim, pat_frame_count, pat_frame_table) {
+        let (frame, _blend) = pattern_frame_at_life(
+            anim,
+            pat_frame_count,
+            pat_frame_table,
+            pat_frequency,
+            life_t,
+            phase_offset,
+            fixed_frame,
+        );
+        *offset = frame_uv_offset(frame, scale_uv, base_offset_uv);
+        *scale_live = effective_tex_scale_uv(scale_uv, anim, anim_tex_scale, life_t);
+    } else if slot_uses_tex_scroll(anim, scroll_uv) {
+        *scale_live = effective_tex_scale_uv(scale_uv, anim, anim_tex_scale, life_t);
+        let tile_u = (1.0 / scale_live[0].abs().max(0.001)).min(1.0);
+        let tile_v = (1.0 / scale_live[1].abs().max(0.001)).min(1.0);
+        offset[0] = (offset[0] + scroll_uv[0] * dt).rem_euclid(tile_u);
+        offset[1] = (offset[1] + scroll_uv[1] * dt).rem_euclid(tile_v);
+        if anim.is_rotate {
+            *scroll_angle += anim.scroll_rotation_add * dt;
+        }
+    }
+}
+
+/// Convert a sprite-sheet slot index to UV offset given scale and base offset.
+pub fn frame_uv_offset(
+    frame: usize,
+    tex_scale_uv: [f32; 2],
+    tex_offset_uv: [f32; 2],
+) -> [f32; 2] {
+    let cols = (1.0 / tex_scale_uv[0].max(0.001)).round() as usize;
+    let rows = (1.0 / tex_scale_uv[1].max(0.001)).round() as usize;
+    let total_slots = (cols * rows).max(1);
+    let slot = frame % total_slots;
+    let col = slot % cols.max(1);
+    let row = slot / cols.max(1);
+    [
+        tex_offset_uv[0] + col as f32 * tex_scale_uv[0],
+        tex_offset_uv[1] + row as f32 * tex_scale_uv[1],
+    ]
 }
 
 /// Fix `tex_scale_uv` on emitters where the converter produced values that
@@ -1728,19 +4497,57 @@ pub struct Particle {
     pub age: f32,
     pub lifetime: f32,
     pub color: Vec4,
+    /// Sampled color0 RGB before combiner (for child inheritance).
+    pub color0_rgb: [f32; 3],
+    /// Sampled color1 RGB before combiner (for child inheritance).
+    pub color1_rgb: [f32; 3],
+    pub alpha0_live: f32,
+    pub alpha1_live: f32,
+    pub color_scale_live: f32,
+    pub draw_path: u32,
+    pub pre_draw: bool,
+    /// Parent emitter index within the same set (child inheritance); used for pre_draw sibling ordering.
+    pub parent_emitter_idx: Option<usize>,
+    pub inst_start_frame: f32,
+    pub inherit: Option<ParticleInheritState>,
     pub size: f32,
     pub rotation: f32,
     pub rotation_speed: f32,
     pub emitter_set_idx: usize,
     pub emitter_idx: usize,
+    /// Spawn offset in emitter-local space (for bone/emitter re-attachment).
+    pub local_offset: Vec3,
+    pub bone_name: String,
+    pub inst_offset: Vec3,
+    pub inst_rotation: Vec3,
     #[allow(dead_code)]
     pub texture_idx: usize,
     #[allow(dead_code)]
     pub blend_type: BlendType,
-    /// Per-particle UV offset (initialized to emitter.tex_offset_uv, advanced by tex_scroll_uv each frame)
+    /// Per-particle UV offset (slot 0; initialized to emitter.tex_offset_uv)
     pub tex_offset: [f32; 2],
+    /// Per-particle UV offset for slot 1 (indirect / alpha).
+    pub indirect_tex_offset: [f32; 2],
+    /// Per-particle UV offset for slot 2.
+    pub tex2_tex_offset: [f32; 2],
+    /// Live UV scale for slot 0 (scroll + IsScale / EASL path).
+    pub tex_scale_live: [f32; 2],
+    /// UV-space scroll rotation angle (radians), separate from billboard rotation.
+    pub tex_scroll_angle: f32,
+    /// Random pattern phase offset (IsPatAnimLoopRandom).
+    pub pat_phase_offset: f32,
+    /// Fixed flipbook frame for PatternAnimType::RANDOM (chosen at spawn).
+    pub pat_fixed_frame: Option<usize>,
+    /// Crossfade blend fraction between flipbook frames (slot 0).
+    pub pat_blend: f32,
+    /// Atlas UV delta to the next flipbook cell for crossfade sampling.
+    pub pat_next_uv_delta: [f32; 2],
+    /// Per-particle UV offsets for TextureAnim3–5 slots.
+    pub tex_extra_offsets: [[f32; 2]; 3],
     /// Deterministic random seed for reproducible randomness
     pub seed: u64,
+    /// Per-axis spawn rotation offset from EmitterInfo.RotateRand* (radians).
+    pub rotation_rand: Vec3,
 }
 
 impl Particle {
@@ -1762,21 +4569,234 @@ pub struct EmitterInstance {
     /// Local offset from the bone origin (in bone-local space, applied as world translation)
     offset: Vec3,
     /// ACMD-specified rotation (Euler angles in radians, ZYX order) applied at spawn time.
-    #[allow(dead_code)]
     rotation: Vec3,
     start_frame: f32,
     end_frame: f32,
     emit_accum: f32,
     /// Prevents re-firing one-time burst emitters after the first burst frame.
     pub burst_fired: bool,
+    /// Previous emitter world position for distance-based emission.
+    emit_dist_prev_pos: Vec3,
+    emit_dist_prev_pos_set: bool,
+    /// Fractional distance accumulator (emitDistVessel).
+    emit_dist_vessel: f32,
+    /// Previous emitter world origin for EmVelInherit motion delta.
+    prev_world_pos: Vec3,
+    prev_world_pos_set: bool,
+    /// Death-only child emitters track bone motion but do not emit continuously.
+    death_only: bool,
 }
 
 impl EmitterInstance {
+    pub fn emitter_key(&self) -> (usize, usize) {
+        (self.emitter_set_idx, self.emitter_idx)
+    }
+
+    pub fn bone_name(&self) -> &str {
+        &self.bone_name
+    }
+
+    pub fn offset(&self) -> Vec3 {
+        self.offset
+    }
+
+    pub fn rotation(&self) -> Vec3 {
+        self.rotation
+    }
+
+    pub fn effect_local_frame(&self, target_frame: f32) -> f32 {
+        target_frame - self.start_frame
+    }
+
+    pub fn start_frame(&self) -> f32 {
+        self.start_frame
+    }
+
     /// Test shim: exposes emit_accum for unit tests.
     #[cfg(test)]
     pub fn emit_accum_test(&self) -> f32 {
         self.emit_accum
     }
+}
+
+/// Reconstruct an emitter instance from a dying parent particle when the parent
+/// instance was already removed from `active_emitters`.
+fn instance_from_particle(dead: &Particle) -> EmitterInstance {
+    EmitterInstance {
+        emitter_set_idx: dead.emitter_set_idx,
+        emitter_idx: dead.emitter_idx,
+        bone_name: dead.bone_name.clone(),
+        offset: dead.inst_offset,
+        rotation: dead.inst_rotation,
+        start_frame: dead.inst_start_frame,
+        end_frame: f32::MAX,
+        emit_accum: 0.0,
+        burst_fired: false,
+        emit_dist_prev_pos: Vec3::ZERO,
+        emit_dist_prev_pos_set: false,
+        emit_dist_vessel: 0.0,
+        prev_world_pos: Vec3::ZERO,
+        prev_world_pos_set: false,
+        death_only: false,
+    }
+}
+
+/// Resolve the parent emitter instance for child death spawning.
+fn instance_for_child_spawn<'a>(
+    dead: &Particle,
+    active: &'a [EmitterInstance],
+) -> std::borrow::Cow<'a, EmitterInstance> {
+    if let Some(inst) = active.iter().find(|i| {
+        i.emitter_set_idx == dead.emitter_set_idx && i.emitter_idx == dead.emitter_idx
+    }) {
+        return std::borrow::Cow::Borrowed(inst);
+    }
+    std::borrow::Cow::Owned(instance_from_particle(dead))
+}
+
+/// Build one particle at spawn time (shared by continuous emitters and child chains).
+fn build_spawned_particle(
+    emitter: &EmitterDef,
+    inst: &EmitterInstance,
+    emitter_set_idx: usize,
+    emitter_idx: usize,
+    bone_mat: Mat4,
+    effect_t: f32,
+    seed: usize,
+    index: usize,
+    count: usize,
+    position_override: Option<Vec3>,
+    inherit_from: Option<&Particle>,
+    mesh_ctx: Option<&SpawnMeshContext<'_>>,
+    emitter_motion_velocity: Vec3,
+) -> Particle {
+    let world_mat = compute_emitter_world_mat(emitter, inst, bone_mat, effect_t);
+    let local_spawn =
+        volume_local_spawn_pos(emitter, seed, index, count, mesh_ctx) + spawn_jitter(emitter, seed);
+    let position = position_override.unwrap_or_else(|| world_mat.transform_point3(local_spawn));
+    let local_offset = world_mat.inverse().transform_point3(position);
+
+    let mut velocity = compute_particle_velocity(
+        emitter,
+        seed,
+        index,
+        count,
+        {
+            let emitter_mat = build_emitter_trs_at(emitter, effect_t);
+            let (_, emitter_rot_quat, _) = emitter_mat.to_scale_rotation_translation();
+            Mat4::from_quat(emitter_rot_quat)
+        },
+        local_spawn,
+        emitter_motion_velocity,
+    );
+
+    let c0_spawn = sample_color(&emitter.color0, 0.0);
+    let c1_spawn = if !emitter.color1.is_empty() {
+        sample_color(&emitter.color1, 0.0)
+    } else {
+        Vec4::ONE
+    };
+    let mut a0_spawn = if !emitter.alpha0_keys.is_empty() {
+        sample_color_or_white(&emitter.alpha0_keys, 0.0).x
+    } else {
+        emitter.alpha0.sample(0.0)
+    };
+    let mut a1_spawn = if !emitter.alpha1_keys.is_empty() {
+        sample_color_or_white(&emitter.alpha1_keys, 0.0).x
+    } else {
+        emitter.alpha1.sample(0.0)
+    };
+    let mut size = {
+        let base_size = emitter.scale * emitter.scale_anim.sample(0.0);
+        let rf = rand_factor(seed.wrapping_add(7));
+        (base_size * (1.0 + rf * emitter.scale_random)).max(0.01)
+    };
+    let rot_rand = spawn_rotation_rand(emitter, seed);
+    let mut rotation = emitter.rotation_init + seed as f32 * emitter.rotation_init_random;
+
+    let mut inherit = None;
+    if let Some(parent) = inherit_from {
+        (size, rotation, velocity, inherit) = apply_child_inheritance(
+            &emitter.child_inheritance,
+            parent,
+            size,
+            rotation,
+            velocity,
+        );
+    }
+
+    let parent_alpha_lookup = inherit_from.map(|parent| {
+        let mut m = HashMap::new();
+        m.insert(
+            (parent.seed, parent.emitter_set_idx, parent.emitter_idx),
+            (parent.alpha0_live, parent.alpha1_live),
+        );
+        m
+    });
+    let (c0_arr, c1_arr, a0, a1) = apply_inherit_channels(
+        [c0_spawn.x, c0_spawn.y, c0_spawn.z, c0_spawn.w],
+        [c1_spawn.x, c1_spawn.y, c1_spawn.z, c1_spawn.w],
+        a0_spawn,
+        a1_spawn,
+        inherit.as_ref(),
+        parent_alpha_lookup.as_ref(),
+        true,
+    );
+    let color = combine_particle_channels(c0_arr, c1_arr, a0, a1, &emitter.combiner);
+
+    let draw_path = inherit
+        .as_ref()
+        .and_then(|i| i.draw_path)
+        .unwrap_or(emitter.draw_path);
+    let pre_draw = inherit.as_ref().map(|i| i.pre_draw).unwrap_or(false);
+    let parent_emitter_idx = inherit.as_ref().map(|i| i.parent_emitter_idx);
+
+    let mut particle = Particle {
+        position,
+        velocity,
+        age: 0.0,
+        lifetime: {
+            let rf = rand_factor(seed.wrapping_add(1));
+            let lf = 1.0 + rf * emitter.lifetime_random;
+            emitter.lifetime * lf.max(0.0)
+        },
+        color,
+        color0_rgb: [c0_arr[0], c0_arr[1], c0_arr[2]],
+        color1_rgb: [c1_arr[0], c1_arr[1], c1_arr[2]],
+        alpha0_live: a0,
+        alpha1_live: a1,
+        color_scale_live: emitter.color_scale,
+        draw_path,
+        pre_draw,
+        parent_emitter_idx,
+        inst_start_frame: inst.start_frame(),
+        inherit,
+        size,
+        rotation,
+        rotation_speed: emitter.rotation_speed,
+        emitter_set_idx,
+        emitter_idx,
+        local_offset,
+        bone_name: inst.bone_name().to_string(),
+        inst_offset: inst.offset(),
+        inst_rotation: inst.rotation(),
+        texture_idx: 0,
+        blend_type: emitter.blend_type,
+        tex_offset: emitter.tex_offset_uv,
+        indirect_tex_offset: emitter.indirect_tex_offset_uv,
+        tex2_tex_offset: emitter.tex2_offset_uv,
+        tex_scale_live: emitter.tex_scale_uv,
+        tex_scroll_angle: 0.0,
+        pat_phase_offset: 0.0,
+        pat_fixed_frame: None,
+        pat_blend: 0.0,
+        pat_next_uv_delta: [0.0, 0.0],
+        tex_extra_offsets: [[0.0, 0.0]; 3],
+        seed: seed as u64,
+        rotation_rand: rot_rand,
+    };
+    init_particle_uv_at_spawn(&mut particle, emitter);
+    particle
 }
 
 /// The full CPU particle system state.
@@ -1844,7 +4864,8 @@ impl ParticleSystem {
         }
         eprintln!("[SPAWN] OK '{effect_name}' -> set_idx={set_idx} emitters={}", ptcl.emitter_sets[set_idx].emitters.len());
         let set = &ptcl.emitter_sets[set_idx];
-        for (emitter_idx, _) in set.emitters.iter().enumerate() {
+        for (emitter_idx, emitter) in set.emitters.iter().enumerate() {
+            let death_only = emitter.child_inheritance.spawn_from_parent_particle;
             self.active_emitters.push(EmitterInstance {
                 emitter_set_idx: set_idx,
                 emitter_idx,
@@ -1855,6 +4876,12 @@ impl ParticleSystem {
                 end_frame,
                 emit_accum: 0.0,
                 burst_fired: false,
+                emit_dist_prev_pos: Vec3::ZERO,
+                emit_dist_prev_pos_set: false,
+                emit_dist_vessel: 0.0,
+                prev_world_pos: Vec3::ZERO,
+                prev_world_pos_set: false,
+                death_only,
             });
         }
     }
@@ -1894,6 +4921,7 @@ impl ParticleSystem {
         // Integrate existing particles first, so newly spawned particles this frame
         // start at age=0 and survive until the next frame (fixes lifetime=1 particles
         // being born and killed in the same step).
+        let mut died_particles: Vec<Particle> = Vec::new();
         for (pi, p) in self.particles.iter_mut().enumerate() {
             let Some(set) = ptcl.emitter_sets.get(p.emitter_set_idx) else { p.age = p.lifetime; continue };
             let Some(emitter) = set.emitters.get(p.emitter_idx) else { p.age = p.lifetime; continue };
@@ -1905,37 +4933,33 @@ impl ParticleSystem {
                 Vec3::ZERO
             };
             p.velocity += safe_accel * dt;
-            if p.velocity.is_finite() {
+            if !emitter.is_update_matrix_by_emit && p.velocity.is_finite() {
                 p.position += p.velocity * dt;
+            }
+            if particle_follows_emitter(emitter) {
+                let inst = self.active_emitters.iter().find(|inst| {
+                    inst.emitter_key() == (p.emitter_set_idx, p.emitter_idx)
+                        && inst.bone_name() == p.bone_name
+                });
+                if let Some(inst) = inst {
+                    let bone_mat = bone_matrices
+                        .get(&p.bone_name)
+                        .or_else(|| bone_matrices.get(&p.bone_name.to_lowercase()))
+                        .or_else(|| bone_matrices.get("top"))
+                        .or_else(|| bone_matrices.get("Trans"))
+                        .copied()
+                        .unwrap_or(Mat4::IDENTITY);
+                    let f = inst.effect_local_frame(target_frame);
+                    let effect_t = emitter_effect_t(emitter, f);
+                    let world_mat = compute_emitter_world_mat(emitter, inst, bone_mat, effect_t);
+                    p.position = world_mat.transform_point3(p.local_offset);
+                }
             }
             p.rotation += p.rotation_speed * dt;
 
             let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
 
-            let c0 = sample_color_or_white(&emitter.color0, t);
-            let c1 = if !emitter.color1.is_empty() {
-                sample_color_or_white(&emitter.color1, t)
-            } else {
-                Vec4::ONE
-            };
-            let a0 = if !emitter.alpha0_keys.is_empty() {
-                sample_alpha(&emitter.alpha0_keys, t)
-            } else {
-                emitter.alpha0.sample(t)
-            };
-            let a1 = if !emitter.alpha1_keys.is_empty() {
-                sample_alpha(&emitter.alpha1_keys, t)
-            } else {
-                emitter.alpha1.sample(t)
-            };
-            let combined = crate::combiner::combine_particle_rgba(
-                [c0.x, c0.y, c0.z, c0.w],
-                [c1.x, c1.y, c1.z, c1.w],
-                a0,
-                a1,
-                &emitter.combiner,
-            );
-            p.color = Vec4::new(combined[0], combined[1], combined[2], combined[3]);
+            update_particle_color_channels(p, emitter, None, false);
             p.size = (emitter.scale * emitter.scale_anim.sample(t)).max(0.01);
             if pi < 2 && crate::fx_debug_enabled() {
                 let raw = emitter.scale * emitter.scale_anim.sample(t);
@@ -1945,33 +4969,174 @@ impl ParticleSystem {
                     p.velocity.x, p.velocity.y, p.velocity.z,
                     p.size, emitter.scale, raw);
             }
-            // For sprite-sheet animations: cycle through frames based on normalized age.
-            if emitter.tex_pat_frame_count > 1 {
-                // Sprite sheet: determine the frame index from the pattern animation table.
-                let frame = if emitter.tex_pat_frame_table.is_empty() {
-                    (t * emitter.tex_pat_frame_count as f32).floor() as usize
-                } else {
-                    let table_idx = (t * emitter.tex_pat_frame_table.len() as f32).floor() as usize;
-                    emitter.tex_pat_frame_table[table_idx.min(emitter.tex_pat_frame_table.len() - 1)]
-                };
-                let frame = frame.min(emitter.tex_pat_frame_count - 1);
-                // Convert frame index to UV offset assuming a grid layout.
-                // tex_scale_uv gives the UV size of each frame (e.g., [1.0, 0.2] for a 1×5 vertical strip,
-                // [0.25, 0.25] for a 4×4 grid). Infer the grid columns from the scale.
-                let cols = (1.0 / emitter.tex_scale_uv[0].max(0.001)).round() as usize;
-                let rows = (1.0 / emitter.tex_scale_uv[1].max(0.001)).round() as usize;
-                let total_slots = (cols * rows).max(1);
-                let slot = frame % total_slots;
-                let col = slot % cols.max(1);
-                let row = slot / cols.max(1);
-                p.tex_offset[0] = emitter.tex_offset_uv[0] + col as f32 * emitter.tex_scale_uv[0];
-                p.tex_offset[1] = emitter.tex_offset_uv[1] + row as f32 * emitter.tex_scale_uv[1];
+            // Texture animation: pattern flipbook vs UV scroll for slots 0–2.
+            let slot0 = texture_anim_flags_slot0(emitter);
+            advance_uv_slot(
+                &mut p.tex_offset,
+                &mut p.tex_scale_live,
+                &mut p.tex_scroll_angle,
+                &slot0,
+                emitter.tex_scale_uv,
+                emitter.tex_scroll_uv,
+                emitter.tex_pat_frame_count,
+                &emitter.tex_pat_frame_table,
+                emitter.tex_pat_frequency,
+                emitter.tex_offset_uv,
+                emitter.anim_tex_scale.as_ref(),
+                t,
+                dt,
+                p.pat_phase_offset,
+                p.pat_fixed_frame,
+            );
+            let (cur_frame, next_frame, blend) = pattern_frame_with_crossfade(
+                &slot0,
+                emitter.tex_pat_frame_count,
+                &emitter.tex_pat_frame_table,
+                emitter.tex_pat_frequency,
+                t,
+                p.pat_phase_offset,
+                p.pat_fixed_frame,
+            );
+            p.pat_blend = blend;
+            p.pat_next_uv_delta = if blend > 0.0 {
+                pattern_crossfade_uv_delta(
+                    cur_frame,
+                    next_frame,
+                    emitter.tex_scale_uv,
+                    emitter.tex_offset_uv,
+                )
             } else {
-                // Scrolling texture: wrap within the tile size so tiled textures scroll correctly
-                let tile_u = (1.0 / emitter.tex_scale_uv[0].max(0.001)).min(1.0);
-                let tile_v = (1.0 / emitter.tex_scale_uv[1].max(0.001)).min(1.0);
-                p.tex_offset[0] = (p.tex_offset[0] + emitter.tex_scroll_uv[0] * dt).rem_euclid(tile_u);
-                p.tex_offset[1] = (p.tex_offset[1] + emitter.tex_scroll_uv[1] * dt).rem_euclid(tile_v);
+                [0.0, 0.0]
+            };
+            let mut _ind_scale = [1.0, 1.0];
+            let mut _ind_angle = 0.0f32;
+            advance_uv_slot(
+                &mut p.indirect_tex_offset,
+                &mut _ind_scale,
+                &mut _ind_angle,
+                &emitter.indirect_anim,
+                emitter.indirect_tex_scale_uv,
+                emitter.indirect_scroll_uv,
+                emitter.indirect_pat_frame_count,
+                &emitter.indirect_pat_frame_table,
+                emitter.indirect_pat_frequency,
+                emitter.indirect_tex_offset_uv,
+                None,
+                t,
+                dt,
+                p.pat_phase_offset,
+                None,
+            );
+            let mut _t2_scale = [1.0, 1.0];
+            let mut _t2_angle = 0.0f32;
+            advance_uv_slot(
+                &mut p.tex2_tex_offset,
+                &mut _t2_scale,
+                &mut _t2_angle,
+                &emitter.tex2_anim,
+                emitter.tex2_scale_uv,
+                emitter.tex2_scroll_uv,
+                emitter.tex2_pat_frame_count,
+                &emitter.tex2_pat_frame_table,
+                emitter.tex2_pat_frequency,
+                emitter.tex2_offset_uv,
+                None,
+                t,
+                dt,
+                p.pat_phase_offset,
+                None,
+            );
+            for i in 0..3 {
+                if !extra_tex_slot_active(emitter, i) {
+                    continue;
+                }
+                let slot = &emitter.tex_extra_slots[i];
+                let mut _scale = [1.0, 1.0];
+                let mut _angle = 0.0f32;
+                advance_uv_slot(
+                    &mut p.tex_extra_offsets[i],
+                    &mut _scale,
+                    &mut _angle,
+                    &emitter.tex_anims_extra[i],
+                    slot.scale_uv,
+                    slot.scroll_uv,
+                    slot.pat_frame_count,
+                    &slot.pat_frame_table,
+                    slot.pat_frequency,
+                    slot.offset_uv,
+                    None,
+                    t,
+                    dt,
+                    p.pat_phase_offset,
+                    None,
+                );
+            }
+            if p.is_dead() {
+                died_particles.push(p.clone());
+            }
+        }
+
+        // Second pass: each-frame alpha inheritance uses parent alphas updated this frame.
+        let parent_alpha_lookup: HashMap<(u64, usize, usize), (f32, f32)> = self
+            .particles
+            .iter()
+            .map(|p| ((p.seed, p.emitter_set_idx, p.emitter_idx), (p.alpha0_live, p.alpha1_live)))
+            .collect();
+        for p in &mut self.particles {
+            let needs_refresh = p
+                .inherit
+                .as_ref()
+                .is_some_and(|inh| inh.alpha0_each_frame || inh.alpha1_each_frame);
+            if !needs_refresh {
+                continue;
+            }
+            let Some(set) = ptcl.emitter_sets.get(p.emitter_set_idx) else { continue };
+            let Some(emitter) = set.emitters.get(p.emitter_idx) else { continue };
+            update_particle_color_channels(p, emitter, Some(&parent_alpha_lookup), true);
+        }
+
+        // Spawn child-emitter particles from parent deaths before removing corpses.
+        if !skip_emission && !died_particles.is_empty() {
+            for dead in &died_particles {
+                let Some(set) = ptcl.emitter_sets.get(dead.emitter_set_idx) else { continue };
+                let parent_idx = dead.emitter_idx;
+                let children: Vec<(usize, EmitterDef)> = child_emitters_for_parent(set, parent_idx)
+                    .map(|(idx, e)| (idx, e.clone()))
+                    .collect();
+                if children.is_empty() {
+                    continue;
+                }
+                let inst = instance_for_child_spawn(dead, &self.active_emitters);
+                let bone_mat = bone_matrices
+                    .get(inst.bone_name())
+                    .or_else(|| bone_matrices.get(&inst.bone_name().to_lowercase()))
+                    .or_else(|| bone_matrices.get("top"))
+                    .or_else(|| bone_matrices.get("Trans"))
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY);
+                let f = target_frame - inst.start_frame();
+                for (child_idx, child_emitter) in children {
+                    let effect_t = emitter_effect_t(&child_emitter, f);
+                    let seed = self.particles.len().wrapping_add(child_idx).wrapping_add(dead.seed as usize);
+                    self.particles.push(build_spawned_particle(
+                        &child_emitter,
+                        &inst,
+                        dead.emitter_set_idx,
+                        child_idx,
+                        bone_mat,
+                        effect_t,
+                        seed,
+                        0,
+                        1,
+                        Some(dead.position),
+                        Some(dead),
+                        Some(&SpawnMeshContext {
+                            primitives: &ptcl.primitives,
+                            bfres_models: &ptcl.bfres_models,
+                        }),
+                        Vec3::ZERO,
+                    ));
+                }
             }
         }
 
@@ -1980,6 +5145,7 @@ impl ParticleSystem {
 
         // Now emit new particles — they start at age=0 and live until next frame
         if !skip_emission { for inst in &mut self.active_emitters {
+            if inst.death_only { continue; }
             if target_frame < inst.start_frame || target_frame > inst.end_frame { continue; }
 
             let Some(set) = ptcl.emitter_sets.get(inst.emitter_set_idx) else { continue };
@@ -1993,7 +5159,7 @@ impl ParticleSystem {
                 && (emitter.emission_duration == 0
                     || f < (emitter.emission_timing + emitter.emission_duration) as f32);
 
-            // Get bone world position for spawn origin
+            // Get bone world transform for spawn origin
             let bone_mat = bone_matrices.get(&inst.bone_name)
                 .or_else(|| bone_matrices.get(&inst.bone_name.to_lowercase()))
                 // Common fallbacks when the exact bone isn't in the skeleton
@@ -2001,23 +5167,44 @@ impl ParticleSystem {
                 .or_else(|| bone_matrices.get("Trans"))
                 .copied()
                 .unwrap_or(Mat4::IDENTITY);
-            // Apply bone-local offset transformed into world space,
-            // plus the emitter's own Trans offset (also in bone-local space)
-            let origin = bone_mat.transform_point3(emitter.emitter_offset)
-                + bone_mat.transform_vector3(inst.offset);
+
+            let effect_t = emitter_effect_t(emitter, f);
+            let (_, emitter_rot_quat, _) =
+                build_emitter_trs_at(emitter, effect_t).to_scale_rotation_translation();
+            let _emitter_rot_mat = Mat4::from_quat(emitter_rot_quat);
+
+            let mesh_ctx = SpawnMeshContext {
+                primitives: &ptcl.primitives,
+                bfres_models: &ptcl.bfres_models,
+            };
+            let curr_world_pos = compute_emitter_world_mat(emitter, inst, bone_mat, effect_t)
+                .transform_point3(Vec3::ZERO);
+
+            let emitter_motion_velocity = if inst.prev_world_pos_set && dt > 0.0 {
+                (curr_world_pos - inst.prev_world_pos) / dt
+            } else {
+                Vec3::ZERO
+            };
+            inst.prev_world_pos = curr_world_pos;
+            inst.prev_world_pos_set = true;
+
             if crate::fx_debug_enabled() {
+                let spawn_origin = compute_particle_spawn_world_pos(
+                    emitter, inst, bone_mat, effect_t, 0, 0, 1, Some(&mesh_ctx),
+                );
                 let bone_pos = bone_mat.col(3).truncate();
                 let is_fallback = !bone_matrices.contains_key(&inst.bone_name)
                     && !bone_matrices.contains_key(&inst.bone_name.to_lowercase());
-                eprintln!("[EMIT] bone='{}' (fallback={}) bone_pos=({:.2},{:.2},{:.2}) offset=({:.2},{:.2},{:.2}) inst_offset=({:.2},{:.2},{:.2}) origin=({:.2},{:.2},{:.2})",
+                eprintln!("[EMIT] bone='{}' (fallback={}) bone_pos=({:.2},{:.2},{:.2}) follow={:?} effect_t={:.3} origin=({:.2},{:.2},{:.2})",
                     inst.bone_name, is_fallback,
                     bone_pos.x, bone_pos.y, bone_pos.z,
-                    emitter.emitter_offset.x, emitter.emitter_offset.y, emitter.emitter_offset.z,
-                    inst.offset.x, inst.offset.y, inst.offset.z,
-                    origin.x, origin.y, origin.z);
+                    emitter.follow_type, effect_t,
+                    spawn_origin.x, spawn_origin.y, spawn_origin.z);
             }
 
-            let to_emit = if emitter.is_one_time {
+            let to_emit = if emitter.is_emit_dist_enabled {
+                0
+            } else if emitter.is_one_time {
                 // One-time burst: fire exactly once on the burst frame (Req 7.1–7.4)
                 // Use >= instead of == to handle cases where emission_timing > 0
                 // and we might skip the exact frame due to frame stepping.
@@ -2049,116 +5236,60 @@ impl ParticleSystem {
                 0
             };
 
-            // Sample base color using the NintendoWare color combiner at t=0
-            let c0_spawn = sample_color(&emitter.color0, 0.0);
-            let c1_spawn = if !emitter.color1.is_empty() { sample_color(&emitter.color1, 0.0) } else { Vec4::ONE };
-            let a0_spawn = if !emitter.alpha0_keys.is_empty() { sample_color_or_white(&emitter.alpha0_keys, 0.0).x } else { emitter.alpha0.sample(0.0) };
-            let a1_spawn = if !emitter.alpha1_keys.is_empty() { sample_color_or_white(&emitter.alpha1_keys, 0.0).x } else { emitter.alpha1.sample(0.0) };
-            let combined = crate::combiner::combine_particle_rgba(
-                [c0_spawn.x, c0_spawn.y, c0_spawn.z, c0_spawn.w],
-                [c1_spawn.x, c1_spawn.y, c1_spawn.z, c1_spawn.w],
-                a0_spawn,
-                a1_spawn,
-                &emitter.combiner,
-            );
-            let base_color = Vec4::new(combined[0], combined[1], combined[2], combined[3]);
-
-            // Extract rotation matrix from emitter TRS for velocity direction rotation (Task 4.2)
-            let emitter_rot_mat = Mat4::from_euler(glam::EulerRot::ZYX,
-                emitter.emitter_rotation.x,
-                emitter.emitter_rotation.y,
-                emitter.emitter_rotation.z,
-            );
+            if emitter.is_emit_dist_enabled && in_window {
+                let dist_positions = emit_dist_spawn_batch(emitter, inst, curr_world_pos);
+                for (i, world_pos) in dist_positions.into_iter().enumerate() {
+                    let seed = self.particles.len() + i;
+                    let (set_idx, em_idx) = inst.emitter_key();
+                    self.particles.push(build_spawned_particle(
+                        emitter,
+                        inst,
+                        set_idx,
+                        em_idx,
+                        bone_mat,
+                        effect_t,
+                        seed,
+                        i,
+                        1,
+                        Some(world_pos),
+                        None,
+                        Some(&mesh_ctx),
+                        emitter_motion_velocity,
+                    ));
+                }
+            }
 
             for i in 0..to_emit {
-                // Spherical spread using golden-angle fibonacci distribution
-                let seed = (self.particles.len() + i) as f32;
-                let dir = match emitter.emit_type {
-                    EmitType::Sphere
-                    | EmitType::SphereSameDivide
-                    | EmitType::SphereSameDivide64
-                    | EmitType::FillSphere => {
-                        let theta = seed * 2.399;
-                        let phi = (1.0 - 2.0 * ((seed + 0.5) / to_emit.max(1) as f32)).acos();
-                        Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
-                    }
-                    EmitType::Point => {
-                        // Forward-facing hemisphere: phi in [0, π/2]
-                        let theta = seed * 2.399;
-                        let phi = (1.0 - ((i as f32 + 0.5) / to_emit.max(1) as f32)).acos();
-                        Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
-                    }
-                    EmitType::Circle | EmitType::CircleSameDivide | EmitType::FillCircle => {
-                        let theta = i as f32 * std::f32::consts::TAU / to_emit.max(1) as f32;
-                        Vec3::new(theta.cos(), 0.0, theta.sin())
-                    }
-                    EmitType::Cylinder | EmitType::FillCylinder => {
-                        let theta = i as f32 * std::f32::consts::TAU / to_emit.max(1) as f32;
-                        let y = (seed * 0.37).sin() * 0.5;
-                        Vec3::new(theta.cos(), y, theta.sin()).normalize()
-                    }
-                    EmitType::Box | EmitType::FillBox => {
-                        let rx = (seed * 0.13).sin() * 2.0 - 1.0;
-                        let ry = (seed * 0.17).sin() * 2.0 - 1.0;
-                        let rz = (seed * 0.19).sin() * 2.0 - 1.0;
-                        Vec3::new(rx, ry, rz).normalize_or_zero()
-                    }
-                    EmitType::Rectangle => {
-                        let rx = (seed * 0.13).sin() * 2.0 - 1.0;
-                        let rz = (seed * 0.19).sin() * 2.0 - 1.0;
-                        Vec3::new(rx, 0.0, rz).normalize_or_zero()
-                    }
-                    EmitType::Line | EmitType::LineSameDivide => {
-                        Vec3::new(0.0, 0.0, 1.0)
-                    }
-                    EmitType::Primitive => {
-                        // Forward direction along emitter Z axis
-                        Vec3::new((seed * 0.11).sin() * 0.5, (seed * 0.13).sin() * 0.5, 1.0).normalize_or_zero()
-                    }
-                    _ => {
-                        let theta = seed * 2.399;
-                        let phi = (1.0 - 2.0 * ((seed + 0.5) / to_emit.max(1) as f32)).acos();
-                        Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
-                    }
-                };
-                // Rotate velocity direction by emitter rotation (Req 2.2)
-                let rotated_dir = emitter_rot_mat.transform_vector3(dir);
-                let speed = emitter.initial_speed
-                    * (1.0 + (seed * 0.37).sin() * emitter.speed_random.min(0.5));
-                let velocity = rotated_dir * speed;
-
-                self.particles.push(Particle {
-                    position: origin,
-                    velocity,
-                    age: 0.0,
-                    lifetime: {
-                        let rf = rand_factor((self.particles.len() + i).wrapping_add(1));
-                        let lf = 1.0 + rf * emitter.lifetime_random;
-                        emitter.lifetime * lf.max(0.0)
-                    },
-                    color: base_color,
-                    size: {
-                        // Apply scale_anim at t=0 and scale_random at spawn
-                        let base_size = emitter.scale * emitter.scale_anim.sample(0.0);
-                        let rf = rand_factor((self.particles.len() + i).wrapping_add(7));
-                        (base_size * (1.0 + rf * emitter.scale_random)).max(0.01)
-                    },
-                    rotation: emitter.rotation_init + seed * emitter.rotation_init_random,
-                    rotation_speed: emitter.rotation_speed,
-                    emitter_set_idx: inst.emitter_set_idx,
-                    emitter_idx: inst.emitter_idx,
-                    texture_idx: 0,
-                    blend_type: emitter.blend_type,
-                    tex_offset: emitter.tex_offset_uv,
-                    seed: i as u64,
-                });
+                let seed = self.particles.len() + i;
+                let (set_idx, em_idx) = inst.emitter_key();
+                self.particles.push(build_spawned_particle(
+                    emitter,
+                    inst,
+                    set_idx,
+                    em_idx,
+                    bone_mat,
+                    effect_t,
+                    seed,
+                    i,
+                    to_emit,
+                    None,
+                    None,
+                    Some(&mesh_ctx),
+                    emitter_motion_velocity,
+                ));
             }
         } } // end skip_emission guard
 
         // Remove emitters that have passed their full lifecycle (emission window + max particle lifetime).
-        // This prevents the simulation from running indefinitely after all effects have expired.
+        // Keep instances while they still have live particles so child death chains can resolve context.
         self.active_emitters.retain(|inst| {
             let f = target_frame - inst.start_frame;
+            let has_live_particles = self.particles.iter().any(|p| {
+                p.emitter_set_idx == inst.emitter_set_idx && p.emitter_idx == inst.emitter_idx
+            });
+            if has_live_particles {
+                return true;
+            }
             let Some(set) = ptcl.emitter_sets.get(inst.emitter_set_idx) else { return false };
             let Some(emitter) = set.emitters.get(inst.emitter_idx) else { return false };
             let emit_end = emitter.emission_timing as f32 + (emitter.emission_duration as f32).max(1.0);
@@ -2188,6 +5319,8 @@ pub struct SwordTrail {
     pub effect_name: String,
     pub tip_bone: String,
     pub base_bone: String,
+    /// NVN `EmitterInfo.DrawPath` for this trail (composited with matching particle path).
+    pub draw_path: u32,
     pub samples: Vec<TrailSample>,
     pub max_samples: usize,
     pub active: bool,
@@ -2197,11 +5330,19 @@ pub struct SwordTrail {
 }
 
 impl SwordTrail {
-    pub fn new(effect_name: &str, tip_bone: &str, base_bone: &str, color: [f32; 4], blend_type: BlendType) -> Self {
+    pub fn new(
+        effect_name: &str,
+        tip_bone: &str,
+        base_bone: &str,
+        draw_path: u32,
+        color: [f32; 4],
+        blend_type: BlendType,
+    ) -> Self {
         Self {
             effect_name: effect_name.to_string(),
             tip_bone: tip_bone.to_string(),
             base_bone: base_bone.to_string(),
+            draw_path,
             samples: Vec::new(),
             max_samples: 20,
             active: true,
@@ -2243,10 +5384,25 @@ pub struct TrailSystem {
 impl TrailSystem {
     pub fn reset(&mut self) { self.trails.clear(); }
 
-    pub fn start_trail(&mut self, effect_name: &str, tip_bone: &str, base_bone: &str, color: [f32; 4], blend_type: BlendType) {
+    pub fn start_trail(
+        &mut self,
+        effect_name: &str,
+        tip_bone: &str,
+        base_bone: &str,
+        draw_path: u32,
+        color: [f32; 4],
+        blend_type: BlendType,
+    ) {
         // Remove any existing trail for this effect
         self.trails.retain(|t| t.effect_name != effect_name);
-        self.trails.push(SwordTrail::new(effect_name, tip_bone, base_bone, color, blend_type));
+        self.trails.push(SwordTrail::new(
+            effect_name,
+            tip_bone,
+            base_bone,
+            draw_path,
+            color,
+            blend_type,
+        ));
     }
 
     pub fn stop_trail(&mut self, effect_name: &str) {
@@ -2256,6 +5412,1662 @@ impl TrailSystem {
     pub fn step(&mut self, bone_matrices: &HashMap<String, Mat4>) {
         for trail in &mut self.trails { trail.record(bone_matrices); }
         self.trails.retain(|t| t.active || !t.samples.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod uv_tests {
+    use super::*;
+
+    #[test]
+    fn fix_tex_scale_uv_infers_grid_from_texture_dims() {
+        let mut emitter = EmitterDef {
+            texture_index: 0,
+            tex_scale_uv: [1.0, 1.0],
+            tex_pat_frame_count: 4,
+            ..Default::default()
+        };
+        let textures = vec![TextureRes {
+            tex_name: "sheet".into(),
+            width: 256,
+            height: 64,
+            ..Default::default()
+        }];
+        fix_tex_scale_uv(&mut emitter, &textures);
+        assert_eq!(emitter.tex_scale_uv, [0.25, 1.0]);
+    }
+
+    #[test]
+    fn pattern_frame_index_uses_frequency_and_table() {
+        let emitter = EmitterDef {
+            tex_pat_frame_count: 3,
+            tex_pat_frame_table: vec![2, 0, 1],
+            tex_pat_frequency: 2.0,
+            ..Default::default()
+        };
+        assert_eq!(pattern_frame_index(&emitter, 0.0), 2);
+        assert_eq!(pattern_frame_index(&emitter, 0.25), 0);
+        assert_eq!(pattern_frame_index(&emitter, 0.5), 2);
+    }
+
+    #[test]
+    fn emitter_uses_tex_pattern_vs_scroll() {
+        let pat = EmitterDef {
+            tex_pat_frame_count: 3,
+            ..Default::default()
+        };
+        assert!(emitter_uses_tex_pattern(&pat));
+        assert!(!emitter_uses_tex_scroll(&pat));
+
+        let scroll = EmitterDef {
+            tex_is_scroll: true,
+            tex_scroll_uv: [0.1, 0.0],
+            ..Default::default()
+        };
+        assert!(!emitter_uses_tex_pattern(&scroll));
+        assert!(emitter_uses_tex_scroll(&scroll));
+    }
+
+    #[test]
+    fn pattern_anim_type_random_picks_fixed_frame() {
+        let anim = TextureAnimFlags {
+            pattern_anim_type: pattern_anim_type::RANDOM,
+            ..Default::default()
+        };
+        let (frame, blend) = pattern_frame_at_life(&anim, 4, &[], 1.0, 0.5, 0.0, Some(2));
+        assert_eq!(frame, 2);
+        assert_eq!(blend, 0.0);
+    }
+
+    #[test]
+    fn pattern_anim_type_loop_wraps() {
+        let anim = TextureAnimFlags {
+            pattern_anim_type: pattern_anim_type::LOOP,
+            ..Default::default()
+        };
+        let (frame, _) = pattern_frame_at_life(&anim, 4, &[], 1.0, 0.99, 0.0, None);
+        assert_eq!(frame, 3);
+    }
+
+    #[test]
+    fn pattern_anim_type_clamp_holds_last_frame() {
+        let anim = TextureAnimFlags {
+            pattern_anim_type: pattern_anim_type::CLAMP,
+            ..Default::default()
+        };
+        let (frame, _) = pattern_frame_at_life(&anim, 4, &[], 1.0, 1.0, 0.0, None);
+        assert_eq!(frame, 3);
+    }
+
+    #[test]
+    fn pattern_crossfade_blend_is_fractional() {
+        let anim = TextureAnimFlags {
+            pattern_anim_type: pattern_anim_type::LOOP,
+            crossfade: true,
+            ..Default::default()
+        };
+        let (_, _, blend) = pattern_frame_with_crossfade(&anim, 4, &[], 1.0, 0.125, 0.0, None);
+        assert!(blend > 0.0 && blend < 1.0);
+    }
+
+    #[test]
+    fn extra_tex_slot_active_when_texture_present() {
+        let mut emitter = EmitterDef::default();
+        emitter.textures = vec![
+            TextureRes::default(),
+            TextureRes::default(),
+            TextureRes::default(),
+            TextureRes::default(),
+        ];
+        assert!(extra_tex_slot_active(&emitter, 0));
+        assert!(!extra_tex_slot_active(&emitter, 1));
+    }
+
+    #[test]
+    fn effective_tex_scale_respects_is_scale_and_easl() {
+        let anim = TextureAnimFlags {
+            is_scale: true,
+            ..Default::default()
+        };
+        let track = EmitterAnimDef {
+            enable: true,
+            loop_: false,
+            randomize_start_frame: false,
+            loop_count: 0,
+            key_frames: vec![
+                AnimKeyframe { x: 2.0, y: 0.5, z: 0.0, time: 0.0 },
+                AnimKeyframe { x: 2.0, y: 0.5, z: 0.0, time: 1.0 },
+            ],
+        };
+        let scale = effective_tex_scale_uv([0.25, 0.5], &anim, Some(&track), 0.0);
+        assert!((scale[0] - 0.5).abs() < 0.001);
+        assert!((scale[1] - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn scroll_uv_angle_not_particle_rotation() {
+        let anim = TextureAnimFlags {
+            is_rotate: true,
+            scroll_rotation: 0.5,
+            scroll_rotation_add: 0.1,
+            ..Default::default()
+        };
+        let angle = scroll_uv_angle_at_life(&anim, 0.5, 10.0);
+        assert!((angle - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn inv_rand_u_flips_offset_for_odd_seed() {
+        let anim = TextureAnimFlags {
+            inv_rand_u: true,
+            ..Default::default()
+        };
+        let (scale, offset) = apply_inv_rand_uv([0.25, 1.0], [0.1, 0.2], &anim, 1);
+        assert!(scale[0] < 0.0);
+        assert!((offset[0] - 0.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn build_emitter_trs_applies_ea_translate_at_time() {
+        let mut emitter = EmitterDef::default();
+        emitter.emitter_offset = Vec3::new(1.0, 0.0, 0.0);
+        emitter.anim_translate = Some(EmitterAnimDef {
+            enable: true,
+            loop_: false,
+            randomize_start_frame: false,
+            loop_count: 0,
+            key_frames: vec![
+                AnimKeyframe { x: 0.0, y: 0.0, z: 0.0, time: 0.0 },
+                AnimKeyframe { x: 2.0, y: 0.0, z: 0.0, time: 1.0 },
+            ],
+        });
+        let trs = build_emitter_trs_at(&emitter, 0.5);
+        let pos = trs.transform_point3(Vec3::ZERO);
+        assert!((pos.x - 2.0).abs() < 0.01, "expected x≈2, got {pos:?}");
+    }
+
+    #[test]
+    fn spawn_world_pos_includes_emitter_offset_and_inst_offset() {
+        let mut emitter = EmitterDef::default();
+        emitter.emitter_offset = Vec3::new(3.0, 0.0, 0.0);
+        let inst = EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::new(0.0, 2.0, 0.0),
+            rotation: Vec3::ZERO,
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        };
+        let pos = compute_particle_spawn_world_pos(
+            &emitter, &inst, Mat4::IDENTITY, 0.0, 0, 0, 1, None,
+        );
+        assert!((pos.x - 3.0).abs() < 0.01 && (pos.y - 2.0).abs() < 0.01,
+            "expected (3,2,0), got {pos:?}");
+    }
+
+    #[test]
+    fn spawn_applies_acmd_instance_rotation() {
+        let emitter = EmitterDef::default();
+        let inst = EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::new(5.0, 0.0, 0.0),
+            rotation: Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2),
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        };
+        let pos = compute_particle_spawn_world_pos(
+            &emitter, &inst, Mat4::IDENTITY, 0.0, 0, 0, 1, None,
+        );
+        let expected = (mat_from_euler_zyx(inst.rotation()) * Mat4::from_translation(inst.offset()))
+            .transform_point3(Vec3::ZERO);
+        assert!(
+            (pos - expected).length() < 0.01,
+            "spawn pos {pos:?} should match inst R*T {expected:?}"
+        );
+        assert!(
+            expected.y.abs() > 0.01,
+            "sanity: Z rotation should move +X offset off the X axis, got {expected:?}"
+        );
+    }
+
+    #[test]
+    fn fill_box_volume_spawns_inside_axes() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::FillBox;
+        emitter.volume_radius = Vec3::new(10.0, 2.0, 3.0);
+        for seed in 0..32 {
+            let p = volume_local_spawn_pos(&emitter, seed, 0, 1, None);
+            assert!(p.x.abs() <= 10.0 + 0.001);
+            assert!(p.y.abs() <= 2.0 + 0.001);
+            assert!(p.z.abs() <= 3.0 + 0.001);
+        }
+    }
+
+    #[test]
+    fn designated_dir_used_when_not_omnidirectional() {
+        let mut emitter = EmitterDef::default();
+        emitter.use_omnidirectional = false;
+        emitter.designated_dir = Vec3::new(0.0, 1.0, 0.0);
+        let dir = emit_velocity_direction(&emitter, 0, 0, 1, Mat4::IDENTITY, Vec3::ZERO);
+        assert!((dir.y - 1.0).abs() < 0.001, "expected +Y, got {dir:?}");
+    }
+
+    #[test]
+    fn diffusion_dir_angle_zero_preserves_axis() {
+        let mut emitter = EmitterDef::default();
+        emitter.use_omnidirectional = false;
+        emitter.designated_dir = Vec3::new(0.0, 0.0, 1.0);
+        emitter.diffusion_dir_angle = 0.0;
+        let dir = emit_velocity_direction(&emitter, 5, 0, 1, Mat4::IDENTITY, Vec3::ZERO);
+        assert!((dir.z - 1.0).abs() < 0.001, "expected +Z, got {dir:?}");
+    }
+
+    #[test]
+    fn diffusion_cone_spreads_off_axis() {
+        let axis = Vec3::Z;
+        let spread = sample_cone_direction(axis, 90.0_f32.to_radians(), 42);
+        assert!(spread.z < 0.99, "90-deg cone should deviate from +Z, got {spread:?}");
+        assert!(spread.length() > 0.99);
+    }
+
+    #[test]
+    fn world_oriented_velocity_ignores_emitter_rotation() {
+        let mut emitter = EmitterDef::default();
+        emitter.use_omnidirectional = false;
+        emitter.designated_dir = Vec3::new(1.0, 0.0, 0.0);
+        emitter.is_world_oriented_velocity = true;
+        let rot = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let dir = emit_velocity_direction(&emitter, 0, 0, 1, rot, Vec3::ZERO);
+        assert!((dir.x - 1.0).abs() < 0.001, "world-oriented should stay +X, got {dir:?}");
+    }
+
+    #[test]
+    fn xz_diffusion_biases_toward_spawn_quadrant() {
+        let base = Vec3::Z;
+        let biased = apply_xz_diffusion(base, Vec3::new(1.0, 0.0, 0.0), 2.0);
+        assert!(biased.x > 0.5, "XZ diffusion should add +X component, got {biased:?}");
+    }
+
+    #[test]
+    fn child_inheritance_applies_velocity_scale_and_color() {
+        let parent = Particle {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            velocity: Vec3::new(0.0, 4.0, 0.0),
+            age: 10.0,
+            lifetime: 20.0,
+            color: Vec4::new(0.5, 0.5, 0.5, 0.5),
+            color0_rgb: [0.5, 0.5, 0.5],
+            color1_rgb: [1.0, 1.0, 1.0],
+            alpha0_live: 0.5,
+            alpha1_live: 1.0,
+            color_scale_live: 1.0,
+            draw_path: 2,
+            pre_draw: false,
+            parent_emitter_idx: None,
+            inst_start_frame: 0.0,
+            inherit: None,
+            size: 2.0,
+            rotation: 1.5,
+            rotation_speed: 0.0,
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            local_offset: Vec3::ZERO,
+            bone_name: "Trans".to_string(),
+            inst_offset: Vec3::ZERO,
+            inst_rotation: Vec3::ZERO,
+            texture_idx: 0,
+            blend_type: BlendType::Add,
+            tex_offset: [0.0, 0.0],
+            indirect_tex_offset: [0.0, 0.0],
+            tex2_tex_offset: [0.0, 0.0],
+            tex_scale_live: [1.0, 1.0],
+            tex_scroll_angle: 0.0,
+            pat_phase_offset: 0.0,
+            pat_fixed_frame: None,
+            pat_blend: 0.0,
+            pat_next_uv_delta: [0.0, 0.0],
+            tex_extra_offsets: [[0.0, 0.0]; 3],
+            seed: 42,
+            rotation_rand: Vec3::ZERO,
+        };
+        let inh = ChildInheritanceDef {
+            inherit_velocity: true,
+            inherit_scale: true,
+            inherit_rotate: true,
+            inherit_color0: true,
+            inherit_alpha0: true,
+            velocity_rate: 0.5,
+            scale_rate: 2.0,
+            ..Default::default()
+        };
+        let (size, rotation, velocity, inherit) = apply_child_inheritance(
+            &inh,
+            &parent,
+            1.0,
+            0.0,
+            Vec3::ZERO,
+        );
+        assert!((velocity.y - 2.0).abs() < 0.001);
+        assert!((size - 4.0).abs() < 0.001);
+        assert!((rotation - 1.5).abs() < 0.001);
+        let (c0, c1, a0, a1) = apply_inherit_channels(
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+            1.0,
+            inherit.as_ref(),
+            None,
+            true,
+        );
+        assert!((c0[0] - 0.5).abs() < 0.001 && (a0 - 0.5).abs() < 0.001);
+        assert!((c1[0] - 1.0).abs() < 0.001, "color1 channel untouched");
+    }
+
+    #[test]
+    fn child_inheritance_color1_channel_separate_from_color0() {
+        let parent = Particle {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            age: 0.0,
+            lifetime: 10.0,
+            color: Vec4::ONE,
+            color0_rgb: [1.0, 0.0, 0.0],
+            color1_rgb: [0.0, 0.0, 1.0],
+            alpha0_live: 1.0,
+            alpha1_live: 1.0,
+            color_scale_live: 1.0,
+            draw_path: 0,
+            pre_draw: false,
+            parent_emitter_idx: None,
+            inst_start_frame: 0.0,
+            inherit: None,
+            size: 1.0,
+            rotation: 0.0,
+            rotation_speed: 0.0,
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            local_offset: Vec3::ZERO,
+            bone_name: "Trans".to_string(),
+            inst_offset: Vec3::ZERO,
+            inst_rotation: Vec3::ZERO,
+            texture_idx: 0,
+            blend_type: BlendType::Add,
+            tex_offset: [0.0, 0.0],
+            indirect_tex_offset: [0.0, 0.0],
+            tex2_tex_offset: [0.0, 0.0],
+            tex_scale_live: [1.0, 1.0],
+            tex_scroll_angle: 0.0,
+            pat_phase_offset: 0.0,
+            pat_fixed_frame: None,
+            pat_blend: 0.0,
+            pat_next_uv_delta: [0.0, 0.0],
+            tex_extra_offsets: [[0.0, 0.0]; 3],
+            seed: 1,
+            rotation_rand: Vec3::ZERO,
+        };
+        let inh = ChildInheritanceDef {
+            inherit_color1: true,
+            ..Default::default()
+        };
+        let (_, _, _, inherit) = apply_child_inheritance(&inh, &parent, 1.0, 0.0, Vec3::ZERO);
+        let (c0, c1, _, _) = apply_inherit_channels(
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+            1.0,
+            inherit.as_ref(),
+            None,
+            true,
+        );
+        assert!((c0[2] - 1.0).abs() < 0.001, "color0 should stay white");
+        assert!((c1[2] - 1.0).abs() < 0.001, "color1 B should inherit parent blue");
+        assert!((c1[0] - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn em_vel_inherit_adds_emitter_motion_to_spawn_velocity() {
+        let mut emitter = EmitterDef::default();
+        emitter.use_omnidirectional = false;
+        emitter.designated_dir = Vec3::Z;
+        emitter.initial_speed = 0.0;
+        emitter.em_vel_inherit = 1.0;
+        let vel = compute_particle_velocity(
+            &emitter,
+            0,
+            0,
+            1,
+            Mat4::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 10.0),
+        );
+        assert!(
+            (vel.z - 10.0).abs() < 0.001,
+            "EmVelInherit should add emitter motion, got {vel:?}"
+        );
+
+        let mut sys = ParticleSystem::default();
+        emitter.emission_rate = 1.0;
+        emitter.lifetime = 30.0;
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "fx".into(),
+                emitters: vec![emitter],
+            }],
+            ..Default::default()
+        };
+        sys.active_emitters.push(EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: true,
+            death_only: false,
+        });
+        let mut bone_mats = HashMap::new();
+        bone_mats.insert("Trans".to_string(), Mat4::from_translation(Vec3::new(0.0, 0.0, 10.0)));
+        sys.step(1.0, &bone_mats, &ptcl);
+        assert!(
+            sys.particles.iter().any(|p| p.velocity.z > 5.0),
+            "step path should inherit bone motion, got {:?}",
+            sys.particles.iter().map(|p| p.velocity).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn birth_spawn_child_emitter_emits_at_effect_start() {
+        let parent = EmitterDef {
+            emission_rate: 0.0,
+            lifetime: 30.0,
+            ..Default::default()
+        };
+        let child = EmitterDef {
+            emission_rate: 1.0,
+            lifetime: 30.0,
+            child_inheritance: ChildInheritanceDef {
+                parent_emitter_idx: 0,
+                spawn_from_parent_particle: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "fx".into(),
+                emitters: vec![parent, child],
+            }],
+            ..Default::default()
+        };
+        let mut sys = ParticleSystem::default();
+        sys.spawn_effect("fx", "Trans", Vec3::ZERO, Vec3::ZERO, 0.0, 9999.0, &EffIndex {
+            handles: [("fx".to_string(), 0i32)].into_iter().collect(),
+            ..Default::default()
+        }, &ptcl);
+        assert_eq!(sys.active_emitters.len(), 2, "birth child should register at effect start");
+        let mut bone_mats = HashMap::new();
+        bone_mats.insert("Trans".to_string(), Mat4::IDENTITY);
+        sys.step(1.0, &bone_mats, &ptcl);
+        assert!(
+            sys.particles.iter().any(|p| p.emitter_idx == 1),
+            "child emitter should spawn particles at effect start"
+        );
+    }
+
+    #[test]
+    fn child_death_spawn_works_after_parent_instance_removed() {
+        let parent = EmitterDef {
+            emission_rate: 1.0,
+            lifetime: 20.0,
+            ..Default::default()
+        };
+        let child = EmitterDef {
+            lifetime: 10.0,
+            child_inheritance: ChildInheritanceDef {
+                spawn_from_parent_particle: true,
+                parent_emitter_idx: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "fx".into(),
+                emitters: vec![parent, child],
+            }],
+            ..Default::default()
+        };
+        let mut sys = ParticleSystem::default();
+        sys.spawn_effect("fx", "Trans", Vec3::ZERO, Vec3::ZERO, 0.0, 9999.0, &EffIndex {
+            handles: [("fx".to_string(), 0i32)].into_iter().collect(),
+            ..Default::default()
+        }, &ptcl);
+        let mut bone_mats = HashMap::new();
+        bone_mats.insert("Trans".to_string(), Mat4::IDENTITY);
+        sys.step(1.0, &bone_mats, &ptcl);
+        assert!(
+            sys.particles.iter().any(|p| p.emitter_idx == 0),
+            "parent particle should spawn"
+        );
+        sys.active_emitters.retain(|i| i.emitter_idx != 0);
+        sys.step(25.0, &bone_mats, &ptcl);
+        assert!(
+            sys.particles.iter().any(|p| p.emitter_idx == 1),
+            "child particle should spawn from dead parent without parent instance"
+        );
+    }
+
+    #[test]
+    fn bone_follow_reattaches_when_emitter_moves() {
+        let mut emitter = EmitterDef::default();
+        emitter.is_update_matrix_by_emit = true;
+        emitter.emission_rate = 1.0;
+        emitter.lifetime = 30.0;
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "fx".into(),
+                emitters: vec![emitter],
+            }],
+            ..Default::default()
+        };
+        let inst = EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        };
+        let mut sys = ParticleSystem::default();
+        sys.active_emitters.push(inst);
+        let mut bone_mats = HashMap::new();
+        bone_mats.insert("Trans".to_string(), Mat4::IDENTITY);
+        sys.step(0.0, &bone_mats, &ptcl);
+        sys.step(1.0, &bone_mats, &ptcl);
+        assert_eq!(sys.particles.len(), 1, "expected one spawned particle");
+        let pos_a = sys.particles[0].position;
+        bone_mats.insert("Trans".to_string(), Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)));
+        sys.step(2.0, &bone_mats, &ptcl);
+        let pos_b = sys.particles[0].position;
+        assert!(
+            (pos_b.x - pos_a.x - 10.0).abs() < 0.1,
+            "expected +10 X follow, {pos_a:?} -> {pos_b:?}"
+        );
+    }
+
+    #[test]
+    fn follow_type_srt_does_not_reparent_particles_without_update_matrix_by_emit() {
+        let mut emitter = EmitterDef::default();
+        emitter.follow_type = FollowType::Srt;
+        emitter.is_update_matrix_by_emit = false;
+        emitter.emission_rate = 1.0;
+        emitter.lifetime = 60.0;
+        emitter.initial_speed = 0.0;
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "fx".into(),
+                emitters: vec![emitter],
+            }],
+            ..Default::default()
+        };
+        let inst = EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        };
+        let mut sys = ParticleSystem::default();
+        sys.active_emitters.push(inst);
+        let mut bone_mats = HashMap::new();
+        bone_mats.insert("Trans".to_string(), Mat4::IDENTITY);
+        sys.step(0.0, &bone_mats, &ptcl);
+        sys.step(1.0, &bone_mats, &ptcl);
+        let pos_a = sys.particles[0].position;
+        bone_mats.insert("Trans".to_string(), Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)));
+        sys.step(2.0, &bone_mats, &ptcl);
+        let pos_b = sys.particles[0].position;
+        assert!(
+            (pos_b.x - pos_a.x).abs() < 0.01,
+            "SRT follow should not re-parent particles: {pos_a:?} -> {pos_b:?}"
+        );
+    }
+
+    #[test]
+    fn rotate_billboard_corner_applies_z_spin() {
+        let axes = RotAxisMask { x: false, y: false, z: true };
+        let c = rotate_billboard_corner(
+            [1.0, 0.0],
+            std::f32::consts::FRAC_PI_2,
+            1,
+            axes,
+        );
+        assert!((c[0]).abs() < 0.001 && (c[1] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn tilt_billboard_basis_applies_x_axis() {
+        let axes = RotAxisMask { x: true, y: false, z: false };
+        let (right, up) = tilt_billboard_basis(
+            Vec3::X,
+            Vec3::Y,
+            Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0),
+            axes,
+        );
+        assert!((right.x - 1.0).abs() < 0.001);
+        assert!((up.y).abs() < 0.001 && (up.z - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn billboard_pivot_bias_covers_offset_types() {
+        assert_eq!(billboard_pivot_bias(0), [0.0, 0.0]);
+        assert_eq!(billboard_pivot_bias(1), [0.0, -0.5]);
+        assert_eq!(billboard_pivot_bias(3), [0.0, 0.5]);
+        assert_eq!(billboard_pivot_bias(8), [0.5, 0.5]);
+    }
+
+    #[test]
+    fn billboard_pivot_cbuf47_maps_xy_to_yz() {
+        let v = billboard_pivot_cbuf47(1);
+        assert_eq!(v[0], 0.0);
+        assert_eq!(v[1], -0.5);
+        assert_eq!(v[2], 0.0);
+    }
+
+    #[test]
+    fn billboard_basis_stripe_uses_velocity() {
+        let vel = Vec3::new(0.0, 0.0, 10.0);
+        let (right, up) = billboard_basis(
+            BillboardType::Stripe,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            vel,
+        );
+        assert!((up.z - 1.0).abs() < 0.001);
+        assert!(right.length() > 0.5);
+    }
+
+    #[test]
+    fn stripe_corner_half_extents_scales_width_only() {
+        let c = stripe_corner_half_extents(
+            BillboardType::Stripe,
+            [0.5, 0.5],
+            2.0,
+            Vec3::new(0.0, 0.0, 10.0),
+        );
+        assert!((c[0] - 0.25).abs() < 0.001, "width scaled by 1/aspect");
+        assert!((c[1] - 0.5).abs() < 0.001, "length unchanged");
+    }
+
+    #[test]
+    fn stripe_corner_complex_stretches_trailing_edge() {
+        let c = stripe_corner_half_extents(
+            BillboardType::ComplexStripe,
+            [0.0, -0.5],
+            1.0,
+            Vec3::new(0.0, 0.0, 100.0),
+        );
+        assert!(c[1] < -0.5, "trailing Y corner extends backward, got {}", c[1]);
+    }
+
+    #[test]
+    fn primitive_mesh_basis_from_triangle() {
+        let prim = PrimitiveData {
+            id: 0,
+            vertices: vec![
+                MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+                MeshVertex { position: [1.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+                MeshVertex { position: [0.0, 0.0, 1.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let (right, up) = primitive_mesh_basis(&prim);
+        assert!(right.length() > 0.5);
+        assert!(up.length() > 0.5);
+        assert!(right.dot(up).abs() < 0.01);
+    }
+
+    #[test]
+    fn primitive_corner_half_extents_match_bbox() {
+        let prim = PrimitiveData {
+            id: 0,
+            vertices: vec![
+                MeshVertex { position: [-1.0, -2.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MeshVertex { position: [1.0, 2.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            ],
+            indices: vec![0, 1, 0],
+        };
+        let (min_c, max_c, _) = primitive_corner_half_extents(&prim);
+        assert!((min_c[0] + max_c[0]).abs() < 0.01);
+        assert!((min_c[1] + max_c[1]).abs() < 0.01);
+        let span = (max_c[0] - min_c[0]).hypot(max_c[1] - min_c[1]);
+        assert!(
+            (span - 20.0_f32.sqrt()).abs() < 0.05,
+            "min-area rect spans diagonal segment, got span={span}"
+        );
+        assert!(
+            (max_c[1] - min_c[1]).abs() >= 0.4,
+            "degenerate line gets minimum quad thickness"
+        );
+    }
+
+    #[test]
+    fn billboard_basis_primitive_uses_mesh_when_loaded() {
+        let prim = PrimitiveData {
+            id: 0,
+            vertices: vec![
+                MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MeshVertex { position: [1.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MeshVertex { position: [0.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.billboard_type = BillboardType::Primitive;
+        emitter.particle_primitive_id = 0;
+        let (right, up) = billboard_basis_for_emitter(
+            &emitter,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::ZERO,
+            None,
+            &[prim],
+        );
+        assert!(right.x.abs() > 0.9);
+        assert!(up.y.abs() > 0.9);
+    }
+
+    #[test]
+    fn billboard_basis_primitive_prefers_bfres_draw_mesh() {
+        let prma = PrimitiveData {
+            id: 1,
+            vertices: vec![
+                MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MeshVertex { position: [1.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+                MeshVertex { position: [0.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let prims = [prma];
+        let bfres = BfresModel {
+            source_id: 99,
+            meshes: vec![BfresMesh {
+                vertices: vec![
+                    MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+                    MeshVertex { position: [1.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+                    MeshVertex { position: [0.0, 0.0, 1.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+                ],
+                indices: vec![0, 1, 2],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let ctx = SpawnMeshContext {
+            primitives: &prims,
+            bfres_models: &[bfres],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.billboard_type = BillboardType::Primitive;
+        emitter.mesh_type = 2;
+        emitter.particle_primitive_id = 99;
+        emitter.primitive_index = 0;
+        let (right, up) = draw_mesh_basis(&ctx, &emitter).expect("bfres draw mesh");
+        assert!(right.x.abs() > 0.9, "BFRES XZ triangle right along X, got {right:?}");
+        assert!(up.z.abs() > 0.9, "BFRES XZ triangle up along Z, got {up:?}");
+        let (br, bu) = billboard_basis_for_emitter(
+            &emitter,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::ZERO,
+            Some(&ctx),
+            &prims,
+        );
+        assert!((br - right).length() < 0.01);
+        assert!((bu - up).length() < 0.01);
+    }
+
+    #[test]
+    fn mesh_corner_half_extents_centers_on_mesh_centroid() {
+        let verts = vec![
+            MeshVertex { position: [1.0, 2.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [3.0, 2.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [1.0, 4.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+        ];
+        let (min_c, max_c, _) = mesh_corner_half_extents(&verts, &[0, 1, 2]);
+        assert!((min_c[0] + max_c[0]).abs() < 0.01, "corners centered on mesh X");
+        assert!((min_c[1] + max_c[1]).abs() < 0.01, "corners centered on mesh Y");
+        assert!((max_c[0] - min_c[0]).abs() > 0.5);
+        assert!((max_c[1] - min_c[1]).abs() > 0.5);
+    }
+
+    #[test]
+    fn mesh_corner_min_area_rect_tighter_than_fixed_aabb() {
+        let verts = vec![
+            MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [4.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [4.5, 1.5, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [0.5, 0.5, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        let (min_c, max_c, _) = mesh_corner_half_extents(&verts, &indices);
+        let area = (max_c[0] - min_c[0]) * (max_c[1] - min_c[1]);
+        let fixed_aabb_area = 4.5 * 1.5;
+        assert!(
+            area < fixed_aabb_area * 0.85,
+            "min-area rect should beat world-axis AABB for rotated quad, area={area}"
+        );
+    }
+
+    #[test]
+    fn mesh_per_triangle_quads_one_quad_per_face() {
+        let verts = vec![
+            MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [1.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [0.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+        ];
+        let indices = vec![0u16, 1, 2];
+        let (quads, _) = mesh_per_triangle_quads(&verts, &indices);
+        assert_eq!(quads.len(), 1);
+    }
+
+    #[test]
+    fn mesh_silhouette_quads_splits_concave_l_shape() {
+        let verts = vec![
+            MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [3.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [3.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [1.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [1.0, 3.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [0.0, 3.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5];
+        let (quads, _) = mesh_silhouette_quads(&verts, &indices);
+        assert!(
+            quads.len() >= 2,
+            "concave L should split into multiple quads, got {}",
+            quads.len()
+        );
+        let split_area: f32 = quads
+            .iter()
+            .map(|(a, b)| (b[0] - a[0]) * (b[1] - a[1]))
+            .sum();
+        let (min_c, max_c, _) = mesh_corner_half_extents(&verts, &indices);
+        let single_area = (max_c[0] - min_c[0]) * (max_c[1] - min_c[1]);
+        assert!(
+            split_area < single_area * 0.85,
+            "split quads should beat single rect (split={split_area} single={single_area})"
+        );
+    }
+
+    #[test]
+    fn mesh_corner_non_convex_looser_than_true_silhouette() {
+        // L-shaped non-convex quad: one enclosing rectangle must cover the concavity.
+        let verts = vec![
+            MeshVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [3.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [3.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [1.0, 1.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [1.0, 3.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+            MeshVertex { position: [0.0, 3.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0] },
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5];
+        let (min_c, max_c, _) = mesh_corner_half_extents(&verts, &indices);
+        let area = (max_c[0] - min_c[0]) * (max_c[1] - min_c[1]);
+        let mesh_area = 3.0 + 2.0;
+        assert!(
+            area > mesh_area * 1.05,
+            "single quad must over-fill concave L (area={area} vs mesh={mesh_area})"
+        );
+        assert!((min_c[0] + max_c[0]).abs() < 0.01);
+        assert!((min_c[1] + max_c[1]).abs() < 0.01);
+    }
+
+    #[test]
+    fn silhouette_atlas_uv_maps_sub_quads_into_envelope() {
+        let quads = vec![([0.0, 0.0], [3.0, 1.0]), ([0.0, 1.0], [1.0, 3.0])];
+        let env = silhouette_envelope(&quads);
+        assert_eq!(env, ([0.0, 0.0], [3.0, 3.0]));
+        let uv00 = silhouette_atlas_uv([0.0, 0.0], quads[0], env);
+        let uv11 = silhouette_atlas_uv([1.0, 1.0], quads[1], env);
+        assert!((uv00[0] - 0.0).abs() < 1e-5 && (uv00[1] - 0.0).abs() < 1e-5);
+        assert!((uv11[0] - 1.0 / 3.0).abs() < 1e-4 && (uv11[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn billboard_basis_primitive_is_world_xy() {
+        let (right, up) = billboard_basis(
+            BillboardType::Primitive,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::ZERO,
+        );
+        assert_eq!(right, Vec3::X);
+        assert_eq!(up, Vec3::Y);
+    }
+
+    #[test]
+    fn same_divide_sphere_uses_volume_table() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::SphereSameDivide;
+        emitter.volume_tbl_index = 0;
+        emitter.volume_radius = Vec3::ONE;
+        let p0 = volume_local_spawn_pos(&emitter, 0, 0, 2, None);
+        let p1 = volume_local_spawn_pos(&emitter, 1, 1, 2, None);
+        assert!((p0.y - 1.0).abs() < 0.001, "table[0] should be +Y, got {p0:?}");
+        assert!((p1.y + 1.0).abs() < 0.001, "table[1] should be -Y, got {p1:?}");
+    }
+
+    #[test]
+    fn sweep_arc_limits_circle_spawn() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::Circle;
+        emitter.volume_radius = Vec3::new(1.0, 1.0, 1.0);
+        emitter.sweep_start = 0.0;
+        emitter.sweep_longitude = std::f32::consts::FRAC_PI_2;
+        emitter.sweep_start_random = false;
+        for seed in 0..16 {
+            let p = volume_local_spawn_pos(&emitter, seed, 0, 1, None);
+            let theta = p.z.atan2(p.x);
+            assert!(theta >= -0.01 && theta <= std::f32::consts::FRAC_PI_2 + 0.01,
+                "theta {theta} out of arc range for pos {p:?}");
+        }
+    }
+
+    #[test]
+    fn primitive_vertex_emit_picks_mesh_vertices() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::Primitive;
+        emitter.prim_emit_type = 0;
+        let prim = PrimitiveData {
+            id: 0,
+            vertices: vec![
+                MeshVertex { position: [1.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+                MeshVertex { position: [0.0, 2.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+            ],
+            indices: vec![0, 1, 0],
+        };
+        let ctx = SpawnMeshContext {
+            primitives: &[prim],
+            bfres_models: &[],
+        };
+        emitter.shape_primitive_index = 0;
+        let p0 = volume_local_spawn_pos(&emitter, 0, 0, 2, Some(&ctx));
+        let p1 = volume_local_spawn_pos(&emitter, 1, 1, 2, Some(&ctx));
+        assert!((p0.x - 1.0).abs() < 0.001 && (p0.y - 0.0).abs() < 0.001);
+        assert!((p1.y - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn same_divide_sphere64_uses_nw4f_table() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::SphereSameDivide64;
+        emitter.volume_tbl_index64 = 0; // 2-point table
+        emitter.volume_radius = Vec3::ONE;
+        let p0 = volume_local_spawn_pos(&emitter, 0, 0, 2, None);
+        let p1 = volume_local_spawn_pos(&emitter, 1, 1, 2, None);
+        let n0 = p0.normalize_or_zero();
+        let n1 = p1.normalize_or_zero();
+        assert!((n0.x - 0.975795).abs() < 0.001, "unexpected p0 {p0:?}");
+        assert!((n1.x - 0.550744).abs() < 0.001, "unexpected p1 {p1:?}");
+    }
+
+    #[test]
+    fn arc_type_fixed_pins_circle_angle() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::Circle;
+        emitter.arc_type = ArcType::Fixed;
+        emitter.sweep_start = std::f32::consts::FRAC_PI_4;
+        emitter.sweep_longitude = std::f32::consts::FRAC_PI_2;
+        for seed in 0..8 {
+            let p = volume_local_spawn_pos(&emitter, seed, 0, 1, None);
+            let theta = p.z.atan2(p.x);
+            assert!(
+                (theta - std::f32::consts::FRAC_PI_4).abs() < 0.01,
+                "fixed arc should pin theta, seed {seed} got {theta}"
+            );
+        }
+    }
+
+    #[test]
+    fn arc_type_from_u8_maps_known_and_unknown() {
+        assert_eq!(ArcType::from(0), ArcType::Random);
+        assert_eq!(ArcType::from(1), ArcType::EquallyDivided);
+        assert_eq!(ArcType::from(2), ArcType::Fixed);
+        assert_eq!(ArcType::from(7), ArcType::Unknown(7));
+        assert_eq!(ArcType::Unknown(7).as_u8(), 7);
+    }
+
+    #[test]
+    fn arc_type_unknown_spreads_like_random() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::Circle;
+        emitter.arc_type = ArcType::Unknown(5);
+        emitter.sweep_start = 0.0;
+        emitter.sweep_longitude = std::f32::consts::PI;
+        let mut thetas = Vec::new();
+        for seed in 0..16 {
+            let p = volume_local_spawn_pos(&emitter, seed, 0, 1, None);
+            thetas.push(p.z.atan2(p.x));
+        }
+        let first = thetas[0];
+        assert!(
+            thetas.iter().any(|t| (t - first).abs() > 0.05),
+            "unknown arc type should spread within sweep, got {thetas:?}"
+        );
+    }
+
+    fn test_mesh_vertex(x: f32, y: f32, z: f32) -> MeshVertex {
+        MeshVertex {
+            position: [x, y, z],
+            uv: [0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn resolve_prma_slot_maps_descriptor_id() {
+        let prims = vec![
+            PrimitiveData {
+                id: 100,
+                vertices: vec![test_mesh_vertex(1.0, 0.0, 0.0)],
+                indices: vec![0, 0, 0],
+            },
+            PrimitiveData {
+                id: 200,
+                vertices: vec![test_mesh_vertex(2.0, 0.0, 0.0)],
+                indices: vec![0, 0, 0],
+            },
+        ];
+        assert_eq!(resolve_prma_slot(&prims, 200), 1);
+        assert_eq!(resolve_prma_slot(&prims, 100), 0);
+    }
+
+    #[test]
+    fn resolve_spawn_mesh_bfres_by_source_id_when_index_mismatch() {
+        let prma = PrimitiveData {
+            id: 42,
+            vertices: vec![test_mesh_vertex(1.0, 0.0, 0.0)],
+            indices: vec![0, 0, 0],
+        };
+        let bfres = BfresModel {
+            source_id: 42,
+            meshes: vec![BfresMesh {
+                vertices: vec![test_mesh_vertex(77.0, 0.0, 0.0)],
+                indices: vec![0, 0, 0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let ctx = SpawnMeshContext {
+            primitives: &[prma],
+            bfres_models: &[bfres],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.mesh_type = 2;
+        emitter.primitive_index = 99;
+        emitter.shape_primitive_index = 42;
+        emitter.prim_emit_type = 0;
+        let p = sample_primitive_surface_pos(&ctx, &emitter, 0, 0, 1);
+        assert!(
+            (p.x - 77.0).abs() < 0.001,
+            "expected BFRES matched by source_id, got {p:?}"
+        );
+    }
+
+    #[test]
+    fn mesh_basis_prefers_vertex_normals_when_triangles_degenerate() {
+        let verts = vec![
+            MeshVertex {
+                position: [0.0, 0.0, 0.0],
+                uv: [0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+            },
+            MeshVertex {
+                position: [1.0, 0.0, 0.0],
+                uv: [0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+            },
+            MeshVertex {
+                position: [2.0, 0.0, 0.0],
+                uv: [0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+            },
+        ];
+        let (right, up) = mesh_basis(&verts, &[0, 1, 2]);
+        assert!(
+            right.x.abs() < 0.01,
+            "right should be perpendicular to +X normal, got {right:?}"
+        );
+        assert!(up.length() > 0.5);
+    }
+
+    #[test]
+    fn resolve_spawn_mesh_prefers_bfres_over_prma() {
+        let prma = PrimitiveData {
+            id: 0,
+            vertices: vec![test_mesh_vertex(1.0, 0.0, 0.0)],
+            indices: vec![0, 0, 0],
+        };
+        let bfres = BfresModel {
+            meshes: vec![BfresMesh {
+                vertices: vec![test_mesh_vertex(99.0, 0.0, 0.0)],
+                indices: vec![0, 0, 0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let ctx = SpawnMeshContext {
+            primitives: &[prma],
+            bfres_models: &[bfres],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.mesh_type = 2;
+        emitter.primitive_index = 0;
+        emitter.shape_primitive_index = 0;
+        emitter.prim_emit_type = 0;
+        let p = sample_primitive_surface_pos(&ctx, &emitter, 0, 0, 1);
+        assert!((p.x - 99.0).abs() < 0.001, "expected BFRES mesh, got {p:?}");
+    }
+
+    #[test]
+    fn resolve_spawn_mesh_falls_back_to_prma_when_bfres_missing() {
+        let prma = PrimitiveData {
+            id: 0,
+            vertices: vec![test_mesh_vertex(2.0, 0.0, 0.0)],
+            indices: vec![0, 0, 0],
+        };
+        let ctx = SpawnMeshContext {
+            primitives: &[prma],
+            bfres_models: &[],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.mesh_type = 2;
+        emitter.primitive_index = 0;
+        emitter.shape_primitive_index = 0;
+        emitter.prim_emit_type = 0;
+        let p = sample_primitive_surface_pos(&ctx, &emitter, 0, 0, 1);
+        assert!((p.x - 2.0).abs() < 0.001, "expected PRMA fallback, got {p:?}");
+    }
+
+    #[test]
+    fn resolve_spawn_mesh_falls_back_to_prma_when_bfres_empty() {
+        let prma = PrimitiveData {
+            id: 0,
+            vertices: vec![test_mesh_vertex(3.0, 0.0, 0.0)],
+            indices: vec![0, 0, 0],
+        };
+        let bfres = BfresModel {
+            meshes: vec![BfresMesh::default()],
+            ..Default::default()
+        };
+        let ctx = SpawnMeshContext {
+            primitives: &[prma],
+            bfres_models: &[bfres],
+        };
+        let mut emitter = EmitterDef::default();
+        emitter.mesh_type = 2;
+        emitter.primitive_index = 0;
+        emitter.shape_primitive_index = 0;
+        emitter.prim_emit_type = 0;
+        let p = sample_primitive_surface_pos(&ctx, &emitter, 0, 0, 1);
+        assert!((p.x - 3.0).abs() < 0.001, "expected PRMA fallback for empty BFRES, got {p:?}");
+    }
+
+    #[test]
+    fn num_divide_circle_overrides_same_divide_stepping() {
+        let mut emitter = EmitterDef::default();
+        emitter.emit_type = EmitType::CircleSameDivide;
+        emitter.num_divide_circle = 4;
+        emitter.sweep_start = 0.0;
+        let mut thetas = Vec::new();
+        for i in 0..4 {
+            let p = volume_local_spawn_pos(&emitter, 0, i, 99, None);
+            thetas.push(p.z.atan2(p.x));
+        }
+        assert!((thetas[1] - std::f32::consts::FRAC_PI_2).abs() < 0.05);
+        assert!((thetas[2] - std::f32::consts::PI).abs() < 0.05
+            || (thetas[2] + std::f32::consts::PI).abs() < 0.05);
+        assert!((thetas[3] + std::f32::consts::FRAC_PI_2).abs() < 0.05);
+    }
+
+    #[test]
+    fn particle_rotation_euler_applies_xyz_rand() {
+        let mut emitter = EmitterDef::default();
+        emitter.rot_type = 4;
+        emitter.rot_axis_x = true;
+        emitter.rot_axis_y = true;
+        emitter.rot_axis_z = true;
+        let particle = Particle {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            age: 0.0,
+            lifetime: 1.0,
+            color: Vec4::ONE,
+            color0_rgb: [1.0, 1.0, 1.0],
+            color1_rgb: [1.0, 1.0, 1.0],
+            alpha0_live: 1.0,
+            alpha1_live: 1.0,
+            color_scale_live: 1.0,
+            draw_path: 0,
+            pre_draw: false,
+            parent_emitter_idx: None,
+            inst_start_frame: 0.0,
+            inherit: None,
+            size: 1.0,
+            rotation: 0.5,
+            rotation_speed: 0.0,
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            local_offset: Vec3::ZERO,
+            bone_name: String::new(),
+            inst_offset: Vec3::ZERO,
+            inst_rotation: Vec3::ZERO,
+            texture_idx: 0,
+            blend_type: BlendType::Normal,
+            tex_offset: [0.0, 0.0],
+            indirect_tex_offset: [0.0, 0.0],
+            tex2_tex_offset: [0.0, 0.0],
+            tex_scale_live: [1.0, 1.0],
+            tex_scroll_angle: 0.0,
+            pat_phase_offset: 0.0,
+            pat_fixed_frame: None,
+            pat_blend: 0.0,
+            pat_next_uv_delta: [0.0, 0.0],
+            tex_extra_offsets: [[0.0, 0.0]; 3],
+            seed: 0,
+            rotation_rand: Vec3::new(0.1, 0.2, 0.3),
+        };
+        let e = particle_rotation_euler(&particle, &emitter);
+        assert!((e.x - 0.6).abs() < 0.001);
+        assert!((e.y - 0.7).abs() < 0.001);
+        assert!((e.z - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn spawn_rotation_rand_scales_by_emitter_fields() {
+        let mut emitter = EmitterDef::default();
+        emitter.rotate_rand = Vec3::new(1.0, 1.0, 1.0);
+        let r = spawn_rotation_rand(&emitter, 42);
+        assert!(r.x.abs() <= 1.0 && r.x.abs() > 0.0);
+        assert!(r.y.abs() <= 1.0 && r.y.abs() > 0.0);
+        assert!(r.z.abs() <= 1.0 && r.z.abs() > 0.0);
+    }
+
+    #[test]
+    fn emit_dist_spawns_along_motion_path() {
+        let mut emitter = EmitterDef::default();
+        emitter.is_emit_dist_enabled = true;
+        emitter.emitter_dist_unit = 1.0;
+        emitter.emitter_dist_min = 1.0;
+        let mut inst = EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: true,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        };
+        let batch = emit_dist_spawn_batch(&emitter, &mut inst, Vec3::new(3.0, 0.0, 0.0));
+        assert!(!batch.is_empty(), "3-unit move with unit=1 should spawn particles");
+        assert!(batch[0].x >= 0.0 && batch[0].x <= 3.0);
+    }
+
+    #[test]
+    fn mat4_to_cbuf_rows_extracts_translation() {
+        let rows = mat4_to_cbuf_rows_3x4(Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(rows[0][3], 1.0);
+        assert_eq!(rows[1][3], 2.0);
+        assert_eq!(rows[2][3], 3.0);
+    }
+
+    fn stub_particle(draw_path: u32, pre_draw: bool, set: usize, idx: usize) -> Particle {
+        stub_particle_with_parent(draw_path, pre_draw, set, idx, None)
+    }
+
+    fn stub_particle_with_parent(
+        draw_path: u32,
+        pre_draw: bool,
+        set: usize,
+        idx: usize,
+        parent_emitter_idx: Option<usize>,
+    ) -> Particle {
+        Particle {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            age: 0.0,
+            lifetime: 1.0,
+            color: Vec4::ONE,
+            color0_rgb: [1.0, 1.0, 1.0],
+            color1_rgb: [1.0, 1.0, 1.0],
+            alpha0_live: 1.0,
+            alpha1_live: 1.0,
+            color_scale_live: 1.0,
+            draw_path,
+            pre_draw,
+            parent_emitter_idx,
+            inst_start_frame: 0.0,
+            inherit: None,
+            size: 1.0,
+            rotation: 0.0,
+            rotation_speed: 0.0,
+            emitter_set_idx: set,
+            emitter_idx: idx,
+            local_offset: Vec3::ZERO,
+            bone_name: String::new(),
+            inst_offset: Vec3::ZERO,
+            inst_rotation: Vec3::ZERO,
+            texture_idx: 0,
+            blend_type: BlendType::Normal,
+            tex_offset: [0.0, 0.0],
+            indirect_tex_offset: [0.0, 0.0],
+            tex2_tex_offset: [0.0, 0.0],
+            tex_scale_live: [1.0, 1.0],
+            tex_scroll_angle: 0.0,
+            pat_phase_offset: 0.0,
+            pat_fixed_frame: None,
+            pat_blend: 0.0,
+            pat_next_uv_delta: [0.0, 0.0],
+            tex_extra_offsets: [[0.0, 0.0]; 3],
+            seed: 0,
+            rotation_rand: Vec3::ZERO,
+        }
+    }
+
+    #[test]
+    fn particle_draw_sort_orders_draw_path_pre_draw_emitter() {
+        let particles = vec![
+            stub_particle(2, false, 0, 1),
+            stub_particle(1, true, 0, 0),
+            stub_particle(1, false, 0, 0),
+            stub_particle(1, false, 1, 0),
+        ];
+        let keys = ordered_particle_batch_keys(&particles);
+        assert_eq!(
+            keys,
+            vec![
+                (1, true, 0, 0),
+                (1, false, 0, 0),
+                (1, false, 1, 0),
+                (2, false, 0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn pre_draw_child_sorts_before_parent_not_globally_first() {
+        let particles = vec![
+            stub_particle_with_parent(0, true, 0, 5, Some(2)),
+            stub_particle(0, false, 0, 0),
+            stub_particle(0, false, 0, 1),
+            stub_particle(0, false, 0, 2),
+            stub_particle(0, false, 0, 3),
+        ];
+        let keys = ordered_particle_batch_keys(&particles);
+        assert_eq!(
+            keys,
+            vec![
+                (0, false, 0, 0),
+                (0, false, 0, 1),
+                (0, true, 0, 5),
+                (0, false, 0, 2),
+                (0, false, 0, 3),
+            ],
+            "pre_draw child of emitter 2 should draw after 0/1 and before parent 2"
+        );
+    }
+
+    #[test]
+    fn distinct_draw_paths_sorted_ascending() {
+        let particles = vec![
+            stub_particle(2, false, 0, 0),
+            stub_particle(0, false, 0, 1),
+            stub_particle(1, false, 0, 2),
+            stub_particle(2, false, 0, 3),
+        ];
+        assert_eq!(distinct_particle_draw_paths(&particles), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ordered_batches_grouped_by_draw_path() {
+        let particles = vec![
+            stub_particle(1, false, 0, 0),
+            stub_particle(0, true, 0, 1),
+            stub_particle(0, false, 0, 0),
+            stub_particle(1, false, 0, 1),
+        ];
+        assert_eq!(
+            ordered_particle_batch_keys_by_draw_path(&particles),
+            vec![
+                (0, vec![(0, true, 0, 1), (0, false, 0, 0)]),
+                (1, vec![(1, false, 0, 0), (1, false, 0, 1)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_path_compositing_order_matches_distinct_draw_paths() {
+        use crate::particle_renderer::{editor_composite_steps, EditorCompositeStep};
+
+        let particles = vec![
+            stub_particle(2, false, 0, 0),
+            stub_particle(0, false, 0, 1),
+            stub_particle(1, false, 0, 2),
+        ];
+        let paths = distinct_particle_draw_paths(&particles);
+        assert_eq!(paths, vec![0, 1, 2]);
+        assert_eq!(
+            editor_composite_steps(&paths),
+            vec![
+                EditorCompositeStep::BlitDrawPath(0),
+                EditorCompositeStep::SubDrawPath(0),
+                EditorCompositeStep::BlitDrawPath(1),
+                EditorCompositeStep::SubDrawPath(1),
+                EditorCompositeStep::BlitDrawPath(2),
+                EditorCompositeStep::SubDrawPath(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn distinct_draw_paths_includes_trail_paths() {
+        let particles = vec![stub_particle(1, false, 0, 0)];
+        let trails = vec![SwordTrail::new("t", "tip", "base", 2, [1.0; 4], BlendType::Add)];
+        assert_eq!(distinct_draw_paths(&particles, &trails), vec![1, 2]);
+    }
+
+    #[test]
+    fn particle_clip_depth_orders_farther_particles_first_within_batch() {
+        use glam::{Mat4, Vec3};
+        let view_proj = Mat4::IDENTITY;
+        let mut near = stub_particle(0, false, 0, 0);
+        near.position = Vec3::new(0.0, 0.0, -1.0);
+        let mut far = stub_particle(0, false, 0, 0);
+        far.position = Vec3::new(0.0, 0.0, -5.0);
+        assert!(
+            particle_clip_depth(view_proj, &far) < particle_clip_depth(view_proj, &near),
+            "farther particles have smaller clip depth in this setup"
+        );
+        let mut particles = vec![near, far];
+        particles.sort_by(|a, b| {
+            particle_draw_sort_key(a)
+                .cmp(&particle_draw_sort_key(b))
+                .then_with(|| {
+                    particle_clip_depth(view_proj, a)
+                        .partial_cmp(&particle_clip_depth(view_proj, b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        assert!(
+            particle_clip_depth(view_proj, &particles[0])
+                < particle_clip_depth(view_proj, &particles[1]),
+            "farther particle should draw first within the same batch"
+        );
+    }
+
+    #[test]
+    fn alpha_each_frame_two_pass_uses_fresh_parent_alpha() {
+        let parent_key = (42u64, 0, 0);
+        let stale_lookup = HashMap::from([(parent_key, (0.25, 1.0))]);
+        let fresh_lookup = HashMap::from([(parent_key, (0.75, 1.0))]);
+        let inherit = ParticleInheritState {
+            color0_mul: [1.0, 1.0, 1.0],
+            color1_mul: [1.0, 1.0, 1.0],
+            alpha0_mul: 1.0,
+            alpha1_mul: 1.0,
+            color_scale: 1.0,
+            alpha0_each_frame: true,
+            alpha1_each_frame: false,
+            parent_seed: 42,
+            parent_set_idx: 0,
+            parent_emitter_idx: 0,
+            draw_path: None,
+            pre_draw: false,
+        };
+
+        let (_, _, a0_pass1, _) = apply_inherit_channels(
+            [1.0; 4],
+            [1.0; 4],
+            1.0,
+            1.0,
+            Some(&inherit),
+            Some(&stale_lookup),
+            false,
+        );
+        assert!(
+            (a0_pass1 - 1.0).abs() < 0.001,
+            "first pass defers each-frame parent alpha"
+        );
+
+        let (_, _, a0_stale, _) = apply_inherit_channels(
+            [1.0; 4],
+            [1.0; 4],
+            1.0,
+            1.0,
+            Some(&inherit),
+            Some(&stale_lookup),
+            true,
+        );
+        assert!((a0_stale - 0.25).abs() < 0.001, "stale parent alpha for comparison");
+
+        let (_, _, a0_fresh, _) = apply_inherit_channels(
+            [1.0; 4],
+            [1.0; 4],
+            1.0,
+            1.0,
+            Some(&inherit),
+            Some(&fresh_lookup),
+            true,
+        );
+        assert!(
+            (a0_fresh - 0.75).abs() < 0.001,
+            "second pass should use same-frame parent alpha"
+        );
+    }
+
+    #[test]
+    fn step_alpha_each_frame_refresh_tracks_parent_after_integration() {
+        let mut emitter = EmitterDef::default();
+        emitter.lifetime = 10.0;
+        emitter.alpha0_keys = vec![
+            ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            ColorKey { frame: 1.0, r: 1.0, g: 1.0, b: 1.0, a: 0.2 },
+        ];
+
+        let mut parent = stub_particle(0, false, 0, 0);
+        parent.seed = 7;
+        parent.age = 5.0;
+        parent.alpha0_live = 0.99;
+
+        let mut child = stub_particle(0, false, 0, 1);
+        child.age = 2.0;
+        child.inherit = Some(ParticleInheritState {
+            color0_mul: [1.0, 1.0, 1.0],
+            color1_mul: [1.0, 1.0, 1.0],
+            alpha0_mul: 1.0,
+            alpha1_mul: 1.0,
+            color_scale: 1.0,
+            alpha0_each_frame: true,
+            alpha1_each_frame: false,
+            parent_seed: 7,
+            parent_set_idx: 0,
+            parent_emitter_idx: 0,
+            draw_path: None,
+            pre_draw: false,
+        });
+
+        update_particle_color_channels(&mut parent, &emitter, None, false);
+        update_particle_color_channels(&mut child, &emitter, None, false);
+
+        let lookup: HashMap<(u64, usize, usize), (f32, f32)> = HashMap::from([(
+            (parent.seed, parent.emitter_set_idx, parent.emitter_idx),
+            (parent.alpha0_live, parent.alpha1_live),
+        )]);
+        update_particle_color_channels(&mut child, &emitter, Some(&lookup), true);
+
+        assert!(
+            (child.alpha0_live - parent.alpha0_live).abs() < 0.001,
+            "child alpha0 {:?} should match parent {:?}",
+            child.alpha0_live,
+            parent.alpha0_live
+        );
     }
 }
 

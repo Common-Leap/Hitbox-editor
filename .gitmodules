@@ -4,9 +4,10 @@
 [submodule "extern/spirv-cross"]
 	path = extern/spirv-cross
 	url = https://github.com/KhronosGroup/SPIRV-Cross.git
-[submodule "extern/EffectLibrary"]
-	path = extern/EffectLibrary
-	url = https://github.com/KillzXGaming/EffectLibrary
 [submodule "extern/effect-library"]
 	path = extern/effect-library
 	url = https://github.com/joobert/EffectLibrary.git
+[submodule "extern/ssbh_wgpu"]
+	path = extern/ssbh_wgpu
+	url = https://github.com/Common-Leap/ssbh_wgpu
+	branch = hitbox-editor

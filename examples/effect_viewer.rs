@@ -1,22 +1,23 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Instant;
 
 use glam::{Mat4, Vec3};
 use hitbox_editor::effects::{EffIndex, PtclFile, ParticleSystem, BlendType, SwordTrail, TrailSystem};
 use hitbox_editor::particle_renderer::ParticleRenderer;
 use hitbox_editor::particle_renderer_bnsh::BnshShaderSet;
+use hitbox_editor::scratch_dirs;
 use wgpu::util::DeviceExt;
 
-const EFFECT_DIR: &str = "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect";
-
 fn load_effect(effect_name: &str) -> (EffIndex, PtclFile) {
-    let candidates = vec![
-        Path::new(EFFECT_DIR).join("fighter").join(effect_name).join(format!("ef_{}.eff", effect_name)),
-        Path::new(EFFECT_DIR).join(format!("ef_{}.eff", effect_name)),
-    ];
-    let path = candidates.into_iter().find(|p| p.exists())
-        .unwrap_or_else(|| panic!("Effect file not found for '{}' in {:?}", effect_name, EFFECT_DIR));
+    let path = scratch_dirs::resolve_fighter_eff(effect_name).or_else(|| {
+        scratch_dirs::effect_export_root()
+            .map(|root| root.join(format!("ef_{effect_name}.eff")))
+            .filter(|p| p.exists())
+    }).unwrap_or_else(|| {
+        panic!(
+            "Effect file not found for '{effect_name}' — set editor data_root or HITBOX_EFFECT_EXPORT"
+        )
+    });
     let eff = EffIndex::from_file(&path)
         .unwrap_or_else(|e| panic!("Failed to parse .eff: {e}"));
     let ptcl = PtclFile::parse(&eff.ptcl_data)

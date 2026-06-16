@@ -1,18 +1,85 @@
 use hitbox_editor::effects::PtclFile;
-use hitbox_editor::particle_renderer_bnsh::BnshShaderSet;
-use hitbox_editor::spirv_to_wgsl::{patch_fragment_wgsl, patch_vertex_wgsl};
-use std::path::Path;
+use hitbox_editor::particle_renderer_bnsh::{bnsh_vertex_layout, prepare_bnsh_wgsl, BnshShaderSet};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
-const EFFECT_DIR: &str = "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect";
+fn test_extra_tex345_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let mut entries = Vec::with_capacity(7);
+    for binding in (0..6).step_by(2) {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: binding + 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+    }
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 6,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: std::num::NonZeroU64::new(64),
+        },
+        count: None,
+    });
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("test_extra_tex345_bgl"),
+        entries: &entries,
+    })
+}
+
+fn test_extra_tex345_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    white_view: &wgpu::TextureView,
+    white_sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let blend_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test_tex_blend"),
+        size: 64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("test_extra_tex345_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(white_view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(white_sampler) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(white_view) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(white_sampler) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(white_view) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(white_sampler) },
+            wgpu::BindGroupEntry { binding: 6, resource: blend_buf.as_entire_binding() },
+        ],
+    })
+}
+
+fn needs_extra_tex_bind_group(prepared: &hitbox_editor::particle_renderer_bnsh::PreparedBnshWgsl) -> bool {
+    prepared.tex_blend_uniform_needed || prepared.extra_tex_slots_needed.iter().any(|&b| b)
+}
+
+fn resolve_effect_eff(effect_name: &str) -> Option<std::path::PathBuf> {
+    hitbox_editor::scratch_dirs::resolve_fighter_eff(effect_name).or_else(|| {
+        hitbox_editor::scratch_dirs::effect_export_root().map(|root| {
+            root.join(format!("ef_{effect_name}.eff"))
+        }).filter(|p| p.exists())
+    })
+}
 
 fn load_effect_ptcl(effect_name: &str) -> Option<PtclFile> {
-    let candidates = vec![
-        Path::new(EFFECT_DIR).join("fighter").join(effect_name).join(format!("ef_{}.eff", effect_name)),
-        Path::new(EFFECT_DIR).join(format!("ef_{}.eff", effect_name)),
-    ];
-    let path = candidates.into_iter().find(|p| p.exists())?;
+    let path = resolve_effect_eff(effect_name)?;
     let eff = hitbox_editor::effects::EffIndex::from_file(&path).ok()?;
     if eff.ptcl_data.is_empty() {
         return None;
@@ -232,21 +299,16 @@ fn test_bnsh_shaders_render() {
     let white_view = white_tex.create_view(&wgpu::TextureViewDescriptor::default());
     let white_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
-    // Patch vertex WGSL: spirv-cross independently renumbered locations in the
-    // vertex (outputs 0-5) and fragment (inputs 0-7).  The vertex needs to
-    // provide all 8 locations the fragment expects.
-    let vs_wgsl = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
-
-    // Create shader modules (validates WGSL compiles)
+    let prepared = prepare_bnsh_wgsl(&vs_wgsl, &fs_wgsl, None);
+    let needs_extra = needs_extra_tex_bind_group(&prepared);
+    let vs_wgsl = prepared.vs_wgsl;
+    let patched_fs = prepared.fs_wgsl;
     let _ = std::fs::write("/tmp/bnsh_vs.wgsl", &vs_wgsl);
     let _ = std::fs::write("/tmp/bnsh_fs.wgsl", &fs_wgsl);
     let vs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bnsh_vs"),
         source: wgpu::ShaderSource::Wgsl(vs_wgsl.into()),
     });
-    // Patch fragment shader to use vertex color attribute instead of
-    // NVN buffer-driven color computation (same as the real renderer).
-    let patched_fs = patch_fragment_wgsl(&fs_wgsl);
     let _ = std::fs::write("/tmp/bnsh_fs_patched.wgsl", &patched_fs);
     let fs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bnsh_fs"),
@@ -461,28 +523,36 @@ fn test_bnsh_shaders_render() {
     });
     let mut bgl_all: Vec<Option<&wgpu::BindGroupLayout>> = bgls.iter().map(|b| Some(b)).collect();
     bgl_all.push(Some(&test_tex_bgl));
+    let extra_tex_bgl = test_extra_tex345_bind_group_layout(&device);
+    let extra_tex_bg = if needs_extra {
+        bgl_all.push(Some(&extra_tex_bgl));
+        Some(test_extra_tex345_bind_group(&device, &extra_tex_bgl, &white_view, &white_sampler))
+    } else {
+        None
+    };
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bnsh_test"),
         bind_group_layouts: &bgl_all,
         immediate_size: 0,
     });
 
-    // Create a vertex buffer with dummy data for 8 attributes (each vec4<f32>)
-    // The vertex shader expects @location(0..7) as vertex attribute inputs.
-    // Provide clip-space positions in attr0 (the position override patch applies
-    // the view-proj matrix, so identity VP + clip-space coords = visible output).
-    // Three vertices forming a triangle visible with identity projection:
-    //   v0: bottom-left,  v1: bottom-right,  v2: top-centre
-    let mut vertex_data: Vec<f32> = vec![0.0f32; 3 * 8 * 4];
+    // Create a vertex buffer matching the production BNSH layout (13 × vec4).
+    let attrs_per_vertex = 13usize;
+    let mut vertex_data: Vec<f32> = vec![0.0f32; 3 * attrs_per_vertex * 4];
     // vertex 0 — attr0 = (-0.5, -0.5, 0.0, 1.0), attr1 = (1, 1, 1, 1)
     vertex_data[0] = -0.5; vertex_data[1] = -0.5; vertex_data[3] = 1.0;
     vertex_data[4..8].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
     // vertex 1 — attr0 = (0.5, -0.5, 0.0, 1.0), attr1 = (1, 1, 1, 1)
-    vertex_data[8*4 + 0] = 0.5; vertex_data[8*4 + 1] = -0.5; vertex_data[8*4 + 3] = 1.0;
-    vertex_data[8*4 + 4..8*4 + 8].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+    vertex_data[attrs_per_vertex * 4 + 0] = 0.5;
+    vertex_data[attrs_per_vertex * 4 + 1] = -0.5;
+    vertex_data[attrs_per_vertex * 4 + 3] = 1.0;
+    vertex_data[attrs_per_vertex * 4 + 4..attrs_per_vertex * 4 + 8]
+        .copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
     // vertex 2 — attr0 = (0.0, 0.5, 0.0, 1.0), attr1 = (1, 1, 1, 1)
-    vertex_data[8*4*2 + 1] = 0.5; vertex_data[8*4*2 + 3] = 1.0;
-    vertex_data[8*4*2 + 4..8*4*2 + 8].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+    vertex_data[attrs_per_vertex * 4 * 2 + 1] = 0.5;
+    vertex_data[attrs_per_vertex * 4 * 2 + 3] = 1.0;
+    vertex_data[attrs_per_vertex * 4 * 2 + 4..attrs_per_vertex * 4 * 2 + 8]
+        .copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
     let vertex_buf = device.create_buffer_init(
         &wgpu::util::BufferInitDescriptor {
             label: Some("vertex_buf"),
@@ -490,21 +560,8 @@ fn test_bnsh_shaders_render() {
             usage: wgpu::BufferUsages::VERTEX,
         }
     );
-    let mut vertex_buf_layouts: Vec<wgpu::VertexBufferLayout> = Vec::new();
-    let mut vertex_attributes: Vec<wgpu::VertexAttribute> = Vec::new();
-    for loc in 0..8i32 {
-        let offset = (loc as u64) * 16;
-        vertex_attributes.push(wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x4,
-            offset,
-            shader_location: loc as u32,
-        });
-    }
-    vertex_buf_layouts.push(wgpu::VertexBufferLayout {
-        array_stride: 8 * 16, // 8 attributes × 4 floats × 4 bytes
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &vertex_attributes,
-    });
+    let vertex_buf_layout = bnsh_vertex_layout();
+    let vertex_buf_layouts = [vertex_buf_layout];
 
     // Create a simple render pipeline
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -599,6 +656,9 @@ fn test_bnsh_shaders_render() {
                 ],
             });
             rp.set_bind_group(tex_set, &test_tex_bg, &[]);
+            if let Some(bg) = &extra_tex_bg {
+                rp.set_bind_group(tex_set + 1, bg, &[]);
+            }
             rp.draw(0..3, 0..1);
         }
         queue.submit(Some(encoder.finish()));
@@ -839,10 +899,10 @@ fn test_render_random_effect_no_fallback() {
     let window_white_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
     // ---------- Build pipeline with proper vertex buffer layout ----------
-    // Patch vertex WGSL — spirv-cross independently renumbers locations
-    // in vertex (outputs 0-5) vs fragment (inputs 0-7).
-    let vs_wgsl = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
-    let fs_wgsl = patch_fragment_wgsl(&fs_wgsl);
+    let prepared = prepare_bnsh_wgsl(&vs_wgsl, &fs_wgsl, None);
+    let needs_extra = needs_extra_tex_bind_group(&prepared);
+    let vs_wgsl = prepared.vs_wgsl;
+    let fs_wgsl = prepared.fs_wgsl;
 
     let vs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bnsh_vs"),
@@ -990,19 +1050,35 @@ fn test_render_random_effect_no_fallback() {
     });
     bind_groups.push(window_tex_bg);
 
+    let extra_tex_bgl = test_extra_tex345_bind_group_layout(&device);
+    let extra_tex_bg = if needs_extra {
+        Some(test_extra_tex345_bind_group(
+            &device,
+            &extra_tex_bgl,
+            &window_white_view,
+            &window_white_sampler,
+        ))
+    } else {
+        None
+    };
+
     let mut bgl_all: Vec<Option<&wgpu::BindGroupLayout>> = bgls.iter().map(|b| Some(b)).collect();
     bgl_all.push(Some(&window_tex_bgl));
+    if extra_tex_bg.is_some() {
+        bgl_all.push(Some(&extra_tex_bgl));
+    }
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bnsh_window_test"),
         bind_group_layouts: &bgl_all,
         immediate_size: 0,
     });
 
-    // Vertex buffer with 8 attributes per vertex
-    let mut vertex_data: Vec<f32> = vec![0.0f32; 3 * 8 * 4];
+    // Vertex buffer matching production BNSH layout (13 × vec4).
+    let attrs_per_vertex = 13usize;
+    let mut vertex_data: Vec<f32> = vec![0.0f32; 3 * attrs_per_vertex * 4];
     vertex_data[0] = -1.0;
-    vertex_data[8*4] = 0.0;
-    vertex_data[8*4*2] = 1.0;
+    vertex_data[attrs_per_vertex * 4] = 0.0;
+    vertex_data[attrs_per_vertex * 4 * 2] = 1.0;
     let vertex_buf = device.create_buffer_init(
         &wgpu::util::BufferInitDescriptor {
             label: Some("vertex_buf"),
@@ -1011,19 +1087,7 @@ fn test_render_random_effect_no_fallback() {
         }
     );
 
-    let mut vertex_attributes: Vec<wgpu::VertexAttribute> = Vec::new();
-    for loc in 0..8i32 {
-        vertex_attributes.push(wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x4,
-            offset: (loc as u64) * 16,
-            shader_location: loc as u32,
-        });
-    }
-    let vertex_buf_layouts = [wgpu::VertexBufferLayout {
-        array_stride: 8 * 16,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &vertex_attributes,
-    }];
+    let vertex_buf_layouts = [bnsh_vertex_layout()];
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("bnsh_window_test"),
@@ -1098,6 +1162,9 @@ fn test_render_random_effect_no_fallback() {
         rp.set_vertex_buffer(0, vertex_buf.slice(..));
         for (set_idx, bg) in bind_groups.iter().enumerate() {
             rp.set_bind_group(set_idx as u32, bg, &[]);
+        }
+        if let Some(bg) = &extra_tex_bg {
+            rp.set_bind_group(bind_groups.len() as u32, bg, &[]);
         }
         rp.draw(0..3, 0..1);
     }

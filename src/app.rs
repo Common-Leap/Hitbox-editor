@@ -724,11 +724,47 @@ impl HitboxEditorApp {
                                         emitter_offset: glam::Vec3::ZERO,
                                         emitter_rotation: glam::Vec3::ZERO,
                                         emitter_scale: glam::Vec3::ONE,
+                                        trans_rand: glam::Vec3::ZERO,
+                                        position_random: 0.0,
+                                        follow_type: crate::effects::FollowType::Srt,
+                                        is_update_matrix_by_emit: false,
+                                        billboard_type: crate::effects::BillboardType::Billboard,
+                                        rot_type: 0,
+                                        rot_axis_x: false,
+                                        rot_axis_y: false,
+                                        rot_axis_z: false,
+                                        offset_type: 0,
+                                        volume_radius: glam::Vec3::ONE,
+                                        volume_form_scale: glam::Vec3::ONE,
+                                        line_length: 1.0,
+                                        line_center: 0.0,
+                                        volume_surface_pos_rand: 0.0,
+                                        designated_dir: glam::Vec3::Z,
+                                        use_omnidirectional: true,
                                         tex_scale_uv: [1.0, 1.0],
                                         tex_offset_uv: [0.0, 0.0],
                                         tex_scroll_uv: [0.0, 0.0],
                                         tex_pat_frame_count: 1,
                                         tex_pat_frame_table: Vec::new(),
+                                        tex_pat_frequency: 1.0,
+                                        tex_pattern_anim_type: 0,
+                                        tex_is_scroll: false,
+                                        tex_is_rotate: false,
+                                        tex_is_scale: false,
+                                        tex_scroll_rotation: 0.0,
+                                        tex_scroll_rotation_add: 0.0,
+                                        tex_inv_rand_u: false,
+                                        tex_inv_rand_v: false,
+                                        tex_pat_loop_random: false,
+                                        tex_crossfade: false,
+                                        indirect_anim: crate::effects::TextureAnimFlags::default(),
+                                        indirect_pat_frame_count: 1,
+                                        indirect_pat_frame_table: Vec::new(),
+                                        indirect_pat_frequency: 1.0,
+                                        tex2_anim: crate::effects::TextureAnimFlags::default(),
+                                        tex2_pat_frequency: 1.0,
+                                        tex_anims_extra: [crate::effects::TextureAnimFlags::default(); 3],
+                                        tex_extra_slots: std::array::from_fn(|_| crate::effects::TexExtraSlotDef::default()),
                                         is_one_time: true,
                                         emission_timing: 0,
                                         emission_duration: 1,
@@ -759,6 +795,7 @@ impl HitboxEditorApp {
                                         shader_key: 0,
                                         combiner: crate::shader_registry::CombinerState::default(),
                                         particle_color: crate::shader_registry::ParticleColorState::default(),
+                                        ..Default::default()
                                     }],
                                  });
                             }
@@ -1154,15 +1191,15 @@ impl HitboxEditorApp {
                 let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                     .cloned()
                     .unwrap_or_else(|| ec.bone_name.clone());
-                let (color, blend) = eff_index.handles.get(&ec.effect_name)
+                let (color, blend, draw_path) = eff_index.handles.get(&ec.effect_name)
                     .or_else(|| eff_index.handles.get(&name_lower))
                     .and_then(|&idx| if idx >= 0 { ptcl.emitter_sets.get(idx as usize) } else { None })
                     .and_then(|set| set.emitters.first())
                     .map(|emitter| {
                         let c = crate::effects::sample_color_pub(&emitter.color0, 0.0);
-                        ([c[0], c[1], c[2], c[3]], emitter.blend_type)
+                        ([c[0], c[1], c[2], c[3]], emitter.blend_type, emitter.draw_path)
                     })
-                    .unwrap_or(([1.0, 1.0, 1.0, 1.0], crate::effects::BlendType::Add));
+                    .unwrap_or(([1.0, 1.0, 1.0, 1.0], crate::effects::BlendType::Add, 0));
                 let bone_lower = canonical_bone.to_lowercase();
                 let tip_bone = self.bone_names.iter()
                     .find(|b| {
@@ -1172,7 +1209,14 @@ impl HitboxEditorApp {
                     })
                     .cloned()
                     .unwrap_or_else(|| canonical_bone.clone());
-                self.state.trail_system.start_trail(&ec.effect_name, &tip_bone, &canonical_bone, color, blend);
+                self.state.trail_system.start_trail(
+                    &ec.effect_name,
+                    &tip_bone,
+                    &canonical_bone,
+                    draw_path,
+                    color,
+                    blend,
+                );
             }
         }
         // Particle effects are NOT spawned here — they will be spawned by the
@@ -1184,6 +1228,7 @@ impl HitboxEditorApp {
         let mut remove_move: Option<(String, String)> = None;
         let mut remove_fighter: Option<String> = None;
         let mut export_move: Option<(String, String)> = None;
+        let mut export_all = false;
 
         let mut open = self.show_edit_log;
         egui::Window::new("Edit Log")
@@ -1269,7 +1314,7 @@ impl HitboxEditorApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Export All").on_hover_text("Export every logged edit to a folder").clicked() {
-                        self.export_all_edits();
+                        export_all = true;
                     }
                 });
             });
@@ -1277,6 +1322,9 @@ impl HitboxEditorApp {
         self.show_edit_log = open;
 
         // Apply deferred actions
+        if export_all {
+            self.export_all_edits();
+        }
         if let Some((f, m)) = remove_move {
             self.state.edit_log.remove_move(&f, &m);
         }
@@ -2421,6 +2469,17 @@ impl eframe::App for HitboxEditorApp {
                 // Paint the ssbh_wgpu scene via callback.
                 let n_particles = self.state.particle_system.particles.len();
                 let n_trails = self.state.trail_system.trails.len();
+                let active_emitters = self.state.particle_system.active_emitters.clone();
+                let bone_matrices = frame
+                    .wgpu_render_state()
+                    .and_then(|ws| {
+                        ws.renderer
+                            .read()
+                            .callback_resources
+                            .get::<HitboxRenderState>()
+                            .map(|rs| rs.bone_world_matrices())
+                    })
+                    .unwrap_or_default();
                 if n_particles > 0 || n_trails > 0 {
                 }
                 let callback = egui_wgpu::Callback::new_paint_callback(
@@ -2439,6 +2498,8 @@ impl eframe::App for HitboxEditorApp {
                         bfres_models: self.state.ptcl.as_ref()
                             .map(|p| p.bfres_models.clone())
                             .unwrap_or_default(),
+                        bone_matrices,
+                        active_emitters,
                     },
                 );
                 ui.painter().add(callback);

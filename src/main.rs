@@ -19,7 +19,9 @@ mod nvn_chain;
 mod combiner;
 mod shader_registry;
 mod scratch_dirs;
-pub(crate) use hitbox_editor::{fx_debug_enabled, fx_native_fs_enabled};
+mod sphere_volume_tables;
+mod fx_env;
+pub(crate) use fx_env::{fx_debug_enabled, fx_native_fs_enabled, fx_native_vs_pos_enabled};
 
 #[cfg(test)]
 mod integration_tests;

@@ -4,13 +4,54 @@
 # Lockfile — reproducible from Cargo.toml
 Cargo.lock
 
-#Copyrighted files
-input
+# ── Copyrighted / proprietary game assets (Smash Ultimate extracts) ─────────
+# Never commit ripped shaders, effects, models, textures, or dump output.
+
+# EffectConverter local dumps (P_*/Shader.bnsh, *.bntx, Base.ptcl, …)
+/input/
+
+# Local test fixture copies (README/docs under fixtures/ are OK to commit)
+/tests/fixtures/**/*
+!/tests/fixtures/**/
+!/tests/fixtures/**/*.md
+
+# Accidental export-tree copies in the repo root
+/export/
+/effect/
+/fighter/
+
+# Editor / EffectConverter cache (PTCL dumps embed game binaries)
+/.hitbox-editor-cache/
+/ptcl-dumps/
+
+# Local build / toolchain caches (must not be committed)
+/.nuget-packages/
+/.dotnet-tmp/
+/.cargo-home/
+/target/effect-converter/
+
+# Common Nintendo / Smash asset extensions (anywhere in this repo)
+*.bnsh
+*.bntx
+*.nutexb
+*.numatb
+*.numshb
+*.numdlb
+*.nusktb
+*.nuanmb
+*.nufx
+*.eff
+*.ptcl
+*.vfxb
+*.bfres
+*.msbf
+*.arc
+*.szs
+*.prc
 
 # Editor/IDE
 .vscode/
 .kiro/
 
-
-# Mess
-/tools
+# Vendored EffectConverter publish output (build via build.rs or dotnet publish)
+/tools/effect-converter/

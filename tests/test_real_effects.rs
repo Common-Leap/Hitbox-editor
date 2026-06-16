@@ -1,10 +1,15 @@
 /// Integration tests: Load 328 real SSBU effect files
 /// Validates batch_loader, shader extraction, and PTCL parsing
 /// 
-/// Data source: /home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/
+/// Data source: editor data_root or `HITBOX_EFFECT_EXPORT` (see `scratch_dirs::effect_export_root`).
 
-use std::path::{Path, PathBuf};
+use hitbox_editor::scratch_dirs;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+fn effect_root() -> Option<PathBuf> {
+    scratch_dirs::effect_export_root()
+}
 
 /// Metadata for a loaded effect
 #[derive(Debug, Clone)]
@@ -31,14 +36,10 @@ struct LoadStats {
 /// Test: Can we find and enumerate all effect files?
 #[test]
 fn test_enumerate_all_real_effects() {
-    let effect_root = PathBuf::from(
-        "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
-    );
-    
-    if !effect_root.exists() {
-        eprintln!("⚠ Effect directory not found: {:?}", effect_root);
+    let Some(effect_root) = effect_root() else {
+        eprintln!("⚠ Effect directory not configured (set data_root or HITBOX_EFFECT_EXPORT)");
         return;
-    }
+    };
 
     let mut effect_files = Vec::new();
     
@@ -89,14 +90,10 @@ fn test_enumerate_all_real_effects() {
 /// Test: Can we read basic file metadata?
 #[test]
 fn test_read_effect_file_metadata() {
-    let effect_root = PathBuf::from(
-        "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
-    );
-    
-    if !effect_root.exists() {
-        eprintln!("⚠ Effect directory not found");
+    let Some(effect_root) = effect_root() else {
+        eprintln!("⚠ Effect directory not configured (set data_root or HITBOX_EFFECT_EXPORT)");
         return;
-    }
+    };
 
     let mut effect_files = Vec::new();
     fn walk_dir(path: &Path, results: &mut Vec<PathBuf>) {
@@ -167,13 +164,9 @@ fn test_read_effect_file_metadata() {
 /// Test: Verify effect files have expected binary structure
 #[test]
 fn test_effect_file_binary_structure() {
-    let effect_root = PathBuf::from(
-        "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
-    );
-    
-    if !effect_root.exists() {
+    let Some(effect_root) = effect_root() else {
         return;
-    }
+    };
 
     // Test a few specific fighter effects as representative samples
     let test_cases = vec![
@@ -236,14 +229,10 @@ fn test_effect_file_binary_structure() {
 /// and verify they return real data (not synthetic fallback).
 #[test]
 fn test_ptcl_parser_on_real_effects() {
-    let effect_root = PathBuf::from(
-        "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
-    );
-
-    if !effect_root.exists() {
-        eprintln!("⚠ Effect directory not found, skipping PtclFile::parse test");
+    let Some(effect_root) = effect_root() else {
+        eprintln!("⚠ Effect directory not configured, skipping PtclFile::parse test");
         return;
-    }
+    };
 
     // Test a representative sample of fighter effects
     let test_cases = vec![
@@ -345,14 +334,10 @@ fn test_batch_loader_real_effects() {
     // This would use the real batch_loader module
     // For now, validate the path structure
     
-    let effect_root = PathBuf::from(
-        "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
-    );
-    
-    if !effect_root.exists() {
-        eprintln!("⚠ Effect directory not found, skipping batch_loader test");
+    let Some(effect_root) = effect_root() else {
+        eprintln!("⚠ Effect directory not configured, skipping batch_loader test");
         return;
-    }
+    };
     
     println!("\n✓ Batch loader test framework ready");
     println!("  Effect root: {:?}", effect_root);
@@ -370,13 +355,9 @@ fn test_batch_loader_real_effects() {
 /// Test: Verify shader extraction feasibility
 #[test]
 fn test_shader_extraction_from_effects() {
-    let effect_root = PathBuf::from(
-        "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/"
-    );
-    
-    if !effect_root.exists() {
+    let Some(effect_root) = effect_root() else {
         return;
-    }
+    };
     
     let test_files = vec![
         effect_root.join("fighter/mario/ef_mario.eff"),
