@@ -1,9 +1,6 @@
 # Rust build output
 /target/
 
-# Lockfile — reproducible from Cargo.toml
-Cargo.lock
-
 # ── Copyrighted / proprietary game assets (Smash Ultimate extracts) ─────────
 # Never commit ripped shaders, effects, models, textures, or dump output.
 
