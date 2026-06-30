@@ -391,6 +391,8 @@ pub struct HitboxEditorApp {
     /// Monotonic wall-clock accumulator for the particle simulation (seconds since last respawn).
     /// Used as fallback when active_effects is empty but emitters are present.
     particle_clock: f32,
+    /// Set by respawn/load so the next sim pass runs integer catch-up 0..=current_frame.
+    particles_need_catchup: bool,
     /// Instant of the last particle simulation step — used to compute dt independently
     /// of the hitbox scrub frame timer.
     particle_step_time: std::time::Instant,
@@ -434,6 +436,7 @@ impl HitboxEditorApp {
             last_simulated_frame: u32::MAX,
             active_effects: Vec::new(),
             particle_clock: 0.0,
+            particles_need_catchup: false,
             particle_step_time: std::time::Instant::now(),
         };
 
@@ -617,17 +620,15 @@ impl HitboxEditorApp {
         }
         if let Some(eff_path) = eff_path.filter(|p| p.exists()) {
             self.load_eff_file(&eff_path);
-            // Also load ef_common.eff (system-wide effects: sys_smash_flash, sys_attack_arc, etc.)
+            // Merge ef_sys.eff for sys_* handles. ef_common is merged inside load_eff_file.
             if let Some(root) = &self.state.data_root.clone() {
-                // Try known locations for the common/sys eff file
                 let sys_candidates = [
-                    root.join("effect").join("system").join("common").join("ef_common.eff"),
                     root.join("effect").join("fighter").join("sys").join("ef_sys.eff"),
                     root.join("effect").join("sys").join("ef_sys.eff"),
                     root.join("effect").join("common").join("ef_sys.eff"),
                     root.join("effect").join("ef_sys.eff"),
                 ];
-                // Also scan effect/ subdirs for any ef_sys.eff
+                // Scan effect/ subdirs for ef_sys.eff
                 let mut found_sys = false;
                 for p in &sys_candidates {
                     if p.exists() {
@@ -635,25 +636,23 @@ impl HitboxEditorApp {
                         if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
                             let _ = eff_index.merge_from_file_with_ptcl(p, ptcl);
                         }
-                        self.queue_bnsh_reload_from_ptcl("ef_common.eff");
+                        self.maybe_queue_bnsh_after_sys_merge(p);
                         found_sys = true;
                         break;
                     }
                 }
                 if !found_sys {
-                    // Scan effect/ subdirs for ef_sys.eff or ef_common.eff one level deep
                     if let Ok(entries) = std::fs::read_dir(root.join("effect")) {
                         for entry in entries.flatten() {
-                            let p1 = entry.path().join("ef_sys.eff");
-                            let p2 = entry.path().join("ef_common.eff");
-                            let p = if p1.exists() { p1 } else if p2.exists() { p2 } else { continue };
+                            let p = entry.path().join("ef_sys.eff");
+                            if !p.exists() {
+                                continue;
+                            }
                             eprintln!("[EFF] scanning for sys: {:?} exists=true", p);
                             if let (Some(eff_index), Some(ptcl)) = (&mut self.state.eff_index, &mut self.state.ptcl) {
                                 let _ = eff_index.merge_from_file_with_ptcl(&p, ptcl);
                             }
-                            self.queue_bnsh_reload_from_ptcl(
-                                p.file_name().and_then(|n| n.to_str()).unwrap_or("ef_sys.eff"),
-                            );
+                            self.maybe_queue_bnsh_after_sys_merge(&p);
                             found_sys = true;
                             break;
                         }
@@ -766,6 +765,7 @@ impl HitboxEditorApp {
                                         tex_anims_extra: [crate::effects::TextureAnimFlags::default(); 3],
                                         tex_extra_slots: std::array::from_fn(|_| crate::effects::TexExtraSlotDef::default()),
                                         is_one_time: true,
+                                        emission_start: 0,
                                         emission_timing: 0,
                                         emission_duration: 1,
                                         is_indirect_slot1: false,
@@ -795,6 +795,7 @@ impl HitboxEditorApp {
                                         shader_key: 0,
                                         combiner: crate::shader_registry::CombinerState::default(),
                                         particle_color: crate::shader_registry::ParticleColorState::default(),
+                                        particle_scale: crate::shader_registry::ParticleScaleState::default(),
                                         ..Default::default()
                                     }],
                                  });
@@ -915,17 +916,38 @@ impl HitboxEditorApp {
                             }
                         }
                     }
-                    if let Some(first) = hitboxes.first() {
-                        if first.active_start > 0 {
-                            self.state.current_frame = first.active_start;
-                        }
-                    }
                     self.state.hitboxes = hitboxes;
                     self.state.script = script;
 
                     // Store effect data
                     self.state.effects = effect_script.to_effect_calls();
                     self.state.effect_script = effect_script;
+
+                    // Jump the timeline to the earliest active window (hitbox or effect).
+                    if let Some(first) = self.state.hitboxes.first() {
+                        if first.active_start > self.state.current_frame {
+                            self.state.current_frame = first.active_start;
+                        }
+                    }
+                    if let Some(min_effect_start) =
+                        self.state.effects.iter().map(|e| e.active_start).min()
+                    {
+                        if min_effect_start > self.state.current_frame {
+                            self.state.current_frame = min_effect_start;
+                        }
+                    }
+                    if let (Some(eff_index), Some(ptcl)) =
+                        (&self.state.eff_index, &self.state.ptcl)
+                    {
+                        if let Some(emit_frame) = Self::compute_first_particle_frame(
+                            &self.state.effects,
+                            self.state.current_frame,
+                            eff_index,
+                            ptcl,
+                        ) {
+                            self.state.current_frame = emit_frame;
+                        }
+                    }
 
                     // Spawn effects into particle/trail systems
                     self.respawn_effects();
@@ -957,14 +979,29 @@ impl HitboxEditorApp {
             }
             Err(e) => {
                 eprintln!("[BNSH] Shader reload failed: {e}");
-                self.state.bnsh_shaders = None;
-                self.state.pending_texture_upload = false;
+                // Keep a previously decoded set — a failed ef_common re-merge must not wipe fighter shaders.
+                if self.state.bnsh_shaders.is_none() {
+                    self.state.pending_texture_upload = false;
+                }
                 if crate::effect_converter::is_effect_io_error(&e) {
                     self.state.status =
                         "BNSH decode failed: disk full (export HITBOX_EFFECT_TMP=...)".to_string();
                 }
             }
         }
+    }
+
+    /// After merging a supplemental .eff, reload BNSH only when new shader data may have been added.
+    fn maybe_queue_bnsh_after_sys_merge(&mut self, merged_path: &std::path::Path) {
+        let file_name = merged_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("sys.eff");
+        if file_name.eq_ignore_ascii_case("ef_common.eff") {
+            // load_eff_file already merged ef_common and queued BNSH reload.
+            return;
+        }
+        self.queue_bnsh_reload_from_ptcl(file_name);
     }
 
     /// Create or refresh the GPU particle renderer and upload PTCL textures.
@@ -1012,6 +1049,16 @@ impl HitboxEditorApp {
                         );
                         // Clear it so we don't re-apply every frame
                         self.state.bnsh_shaders = None;
+                        // GPU renderer was unavailable until now — re-spawn emitters and catch up sim.
+                        if !self.state.effects.is_empty() {
+                            self.respawn_effects();
+                        }
+                    } else {
+                        eprintln!(
+                            "[BNSH] GPU particle pipeline init failed — not retrying every frame. \
+                             Fix stderr errors and reload the fighter/effect."
+                        );
+                        self.state.bnsh_shaders = None;
                     }
                 } else {
                     eprintln!("[BNSH] HitboxRenderState not ready — deferring BNSH apply");
@@ -1032,10 +1079,22 @@ impl HitboxEditorApp {
                             // BNSH pipelines are compiled lazily per emitter shader on first use
                             // (see ensure_bnsh_pipeline). Eagerly warming every variant blocks the
                             // UI for a long time on effects with many shaders (e.g. mario ≈ 92).
-                            // Create material texture bind groups from BFRES models with shader-resolved slots
-                            pr.create_material_texture_bind_groups(&wgpu_state.device, &wgpu_state.queue, ptcl, saved_shader_reflection.as_ref());
-                            eprintln!("[TEX] texture upload and material texture bind group creation complete");
+                            if ptcl.needs_mesh_material_pass() {
+                                pr.create_material_texture_bind_groups(
+                                    &wgpu_state.device,
+                                    &wgpu_state.queue,
+                                    ptcl,
+                                    saved_shader_reflection.as_ref(),
+                                );
+                            } else {
+                                eprintln!("[MAT_TEX] skipped (no BFRES material textures)");
+                            }
+                            eprintln!("[TEX] texture upload complete");
                             self.state.pending_texture_upload = false;
+                            // Textures arrive after BNSH init — re-spawn so sim/viewport see a live system.
+                            if !self.state.effects.is_empty() {
+                                self.respawn_effects();
+                            }
                         }
                         // else: particle_renderer not yet initialized, retry next frame
                     }
@@ -1109,10 +1168,11 @@ impl HitboxEditorApp {
                                 eprintln!("[EFF] FATAL: effect PTCL parse failed — {e}");
                                 eprintln!(
                                     "[EFF] EffectConverter needs scratch space on disk (not /tmp). \
-                                     Free space or set: export HITBOX_EFFECT_TMP=$HOME/.cache/hitbox-editor"
+                                     Free space or set: export HITBOX_EFFECT_TMP=$PWD/target/hitbox-editor-cache"
                                 );
                                 self.state.status =
-                                    "Effect load failed: disk full (set HITBOX_EFFECT_TMP)".to_string();
+                                    "Effect load failed: disk full (set HITBOX_EFFECT_TMP to target/hitbox-editor-cache)"
+                                        .to_string();
                                 self.state.ptcl = None;
                                 self.state.pending_texture_upload = false;
                             } else {
@@ -1155,22 +1215,185 @@ impl HitboxEditorApp {
         }
     }
 
+    /// ACMD `active_start` / `active_end` for emitter lifecycle (local emission frame = target − start).
+    fn effect_spawn_window(
+        ec: &crate::data::EffectCall,
+        eff_index: &crate::effects::EffIndex,
+        ptcl: &crate::effects::PtclFile,
+    ) -> (f32, f32) {
+        crate::effects::acmd_spawn_window(
+            &ec.effect_name,
+            ec.active_start,
+            ec.active_end,
+            eff_index,
+            ptcl,
+        )
+    }
+
+    fn is_trail_effect(name_lower: &str, follows_bone: bool) -> bool {
+        follows_bone && (
+            name_lower.contains("sword") || name_lower.contains("trail") ||
+            name_lower.contains("after") || name_lower.contains("tex_") ||
+            name_lower.contains("katana") || name_lower.contains("blade") ||
+            name_lower.contains("slash") || name_lower.contains("arc") ||
+            name_lower.contains("swing") || name_lower.contains("energy") ||
+            name_lower.contains("aura") || name_lower.contains("ribbon")
+        )
+    }
+
+    /// Earliest global frame where any due effect would first emit (for timeline preview).
+    fn compute_first_particle_frame(
+        effects: &[crate::data::EffectCall],
+        current_frame: u32,
+        eff_index: &crate::effects::EffIndex,
+        ptcl: &crate::effects::PtclFile,
+    ) -> Option<u32> {
+        let mut best: Option<u32> = None;
+        for ec in effects {
+            if ec.active_start > current_frame {
+                continue;
+            }
+            let name_lower = ec.effect_name.to_lowercase();
+            if Self::is_trail_effect(&name_lower, ec.follows_bone) {
+                continue;
+            }
+            let Some(global) = crate::effects::earliest_particle_frame_for_spawn(
+                &ec.effect_name,
+                ec.active_start,
+                eff_index,
+                ptcl,
+            ) else {
+                continue;
+            };
+            best = Some(best.map(|b| b.min(global)).unwrap_or(global));
+        }
+        best.filter(|&f| f > current_frame)
+    }
+
+    /// Spawn every non-trail ACMD effect whose active_start is at or before the current frame.
+    fn spawn_active_particle_effects(&mut self) {
+        let current_frame = self.state.current_frame;
+        let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
+            .iter()
+            .map(|n| (n.to_lowercase(), n.clone()))
+            .collect();
+        let Some(eff_index) = &self.state.eff_index else { return };
+        let Some(ptcl) = &self.state.ptcl else { return };
+        let mut spawned: std::collections::HashSet<(String, String, u32)> =
+            std::collections::HashSet::new();
+        for ec in &self.state.effects.clone() {
+            if ec.active_start > current_frame {
+                continue;
+            }
+            let name_lower = ec.effect_name.to_lowercase();
+            if Self::is_trail_effect(&name_lower, ec.follows_bone) {
+                continue;
+            }
+            let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| ec.bone_name.clone());
+            let dedupe_key = (name_lower.clone(), canonical_bone.clone(), ec.active_start);
+            if !spawned.insert(dedupe_key) {
+                continue;
+            }
+            let set_idx_opt = eff_index.handles.get(&ec.effect_name)
+                .or_else(|| eff_index.handles.get(&name_lower))
+                .copied()
+                .filter(|&idx| idx >= 0)
+                .map(|idx| idx as usize)
+                .filter(|&idx| idx < ptcl.emitter_sets.len());
+            let (start_frame, end_frame) = Self::effect_spawn_window(ec, eff_index, ptcl);
+            self.state.particle_system.spawn_effect(
+                &ec.effect_name,
+                &canonical_bone,
+                glam::Vec3::from(ec.offset),
+                glam::Vec3::from(ec.rotation),
+                start_frame,
+                end_frame,
+                eff_index,
+                ptcl,
+            );
+            if let Some(set_idx) = set_idx_opt {
+                let max_lifetime = ptcl.emitter_sets[set_idx].emitters.iter()
+                    .map(|e| {
+                        let emit_end = e.emission_timing as f32 + e.emission_duration as f32;
+                        emit_end + e.lifetime + e.lifetime_random
+                    })
+                    .fold(0.0f32, f32::max)
+                    .max(1.0);
+                self.active_effects.push(ActiveEffect {
+                    anim_clock: 0.0,
+                    max_lifetime,
+                    emitter_set_idx: set_idx,
+                });
+            }
+        }
+    }
+
+    /// Re-spawn particle emitters due at `frame` and queue integer catch-up 0..=frame.
+    fn queue_particle_resimulate_to_frame(&mut self, frame: u32) {
+        self.state.particle_system.reset();
+        self.active_effects.clear();
+        self.particle_clock = 0.0;
+        self.particle_step_time = std::time::Instant::now();
+        self.spawn_active_particle_effects();
+        if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index, &self.state.ptcl) {
+            for ec in &self.state.effects.clone() {
+                if ec.active_start > frame {
+                    continue;
+                }
+                let name_lower = ec.effect_name.to_lowercase();
+                if Self::is_trail_effect(&name_lower, ec.follows_bone) {
+                    continue;
+                }
+                let set_idx_opt = eff_index
+                    .handles
+                    .get(&ec.effect_name)
+                    .or_else(|| eff_index.handles.get(&name_lower))
+                    .copied()
+                    .filter(|&idx| idx >= 0)
+                    .map(|idx| idx as usize)
+                    .filter(|&idx| idx < ptcl.emitter_sets.len());
+                if let Some(set_idx) = set_idx_opt {
+                    let max_lifetime = ptcl.emitter_sets[set_idx]
+                        .emitters
+                        .iter()
+                        .map(|e| {
+                            let burst = crate::effects::emitter_first_burst_local_frame(e) as f32;
+                            let emit_end = e.emission_start as f32 + e.emission_duration as f32;
+                            emit_end.max(burst) + e.lifetime + e.lifetime_random
+                        })
+                        .fold(0.0f32, f32::max)
+                        .max(1.0);
+                    self.active_effects.push(ActiveEffect {
+                        anim_clock: 0.0,
+                        max_lifetime,
+                        emitter_set_idx: set_idx,
+                    });
+                }
+            }
+        }
+        self.last_simulated_frame = u32::MAX;
+        self.particles_need_catchup = true;
+    }
+
     fn respawn_effects(&mut self) {
         self.state.particle_system.reset();
         self.state.trail_system.reset();
         self.active_effects.clear();
-        self.particle_clock = 0.0;
+        self.particle_clock = self.state.current_frame as f32;
         self.particle_step_time = std::time::Instant::now();
-        // Reset to frame 0 and auto-play — the forward-play path will spawn effects
-        // at the correct active_start frame as the timeline advances.
-        self.state.current_frame = 0;
+        // Keep the timeline position (Fetch ACMD may have jumped to active_start).
         self.last_simulated_frame = u32::MAX;
         self.state.playing = true;
         self.last_frame_time = std::time::Instant::now();
-        eprintln!("[RESPAWN] effects={} eff_index={} ptcl={}", 
+        eprintln!(
+            "[RESPAWN] effects={} eff_index={} ptcl={} frame={}",
             self.state.effects.len(),
             self.state.eff_index.is_some(),
-            self.state.ptcl.is_some());
+            self.state.ptcl.is_some(),
+            self.state.current_frame,
+        );
         // Set up trail effects (these follow bones continuously, not frame-triggered)
         let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
             .iter()
@@ -1179,14 +1402,7 @@ impl HitboxEditorApp {
         if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index, &self.state.ptcl) {
             for ec in &self.state.effects {
                 let name_lower = ec.effect_name.to_lowercase();
-                let is_trail = ec.follows_bone && (
-                    name_lower.contains("sword") || name_lower.contains("trail") ||
-                    name_lower.contains("after") || name_lower.contains("tex_") ||
-                    name_lower.contains("katana") || name_lower.contains("blade") ||
-                    name_lower.contains("slash") || name_lower.contains("arc") ||
-                    name_lower.contains("swing") || name_lower.contains("energy") ||
-                    name_lower.contains("aura") || name_lower.contains("ribbon")
-                );
+                let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone);
                 if !is_trail { continue; }
                 let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                     .cloned()
@@ -1219,8 +1435,10 @@ impl HitboxEditorApp {
                 );
             }
         }
-        // Particle effects are NOT spawned here — they will be spawned by the
-        // forward-play path when the timeline crosses their active_start frame.
+        // Spawn particle effects active at the current timeline frame and step on the next sim pass.
+        self.spawn_active_particle_effects();
+        self.particles_need_catchup = true;
+        // Particle effects are also re-spawned when the timeline crosses active_start while playing.
     }
 
     fn draw_edit_log_window(&mut self, ctx: &egui::Context) {
@@ -1997,10 +2215,19 @@ impl eframe::App for HitboxEditorApp {
 
                     if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
                         rs.load_model(device, queue, &model_dir);
-                        // Eagerly load skeleton so bone_world_matrices() returns valid
-                        // bone data from the very first particle simulation frame.
-                        if let Some(skel_path) = &self.current_skel_path {
-                            rs.load_skeleton(skel_path);
+                        // Eagerly load skeleton + anim so bone_world_matrices_at() is valid before
+                        // the viewport prepare() pass (sim runs earlier in the same frame).
+                        let skel_path = self.current_skel_path.as_deref();
+                        if let Some(path) = skel_path {
+                            rs.load_skeleton(path);
+                        }
+                        if let Some(anim_path) = &self.current_anim_path {
+                            rs.apply_animation(
+                                queue,
+                                Some(anim_path.as_path()),
+                                skel_path,
+                                self.state.current_frame as f32,
+                            );
                         }
                         let weapon_count = rs.weapon_skel_count();
                         if weapon_count > 0 {
@@ -2008,6 +2235,9 @@ impl eframe::App for HitboxEditorApp {
                                 weapon_count, if weapon_count == 1 { "" } else { "s" });
                         }
                         // bone_names already populated from skel file in select_fighter — don't overwrite
+                    }
+                    if !self.state.effects.is_empty() && self.state.ptcl.is_some() {
+                        self.respawn_effects();
                     }
                 } else {
                     self.state.status = "GPU lacks required features for 3D rendering (missing BC texture compression or similar).".to_string();
@@ -2054,307 +2284,6 @@ impl eframe::App for HitboxEditorApp {
             // Always schedule next repaint while playing (particles need to animate)
             let next = std::time::Duration::from_secs_f32((1.0 / 24.0 - elapsed).max(0.0));
             ctx.request_repaint_after(next);
-        }
-
-        // Step particle simulation and trail recording each frame
-        if self.state.ptcl.is_some() {
-            if hitbox_editor::fx_debug_enabled() {
-                eprintln!("[SIM] ptcl present, active_emitters={} particles={} current_frame={}", 
-                    self.state.particle_system.active_emitters.len(),
-                    self.state.particle_system.particles.len(),
-                    self.state.current_frame);
-            }
-            // Get bone matrices from the render state at a given simulation frame.
-            let current_frame = self.state.current_frame;
-            let get_bone_matrices = |sim_frame: u32| -> std::collections::HashMap<String, glam::Mat4> {
-                if let Some(wgpu_state) = frame.wgpu_render_state() {
-                    let renderer = wgpu_state.renderer.read();
-                    renderer.callback_resources.get::<crate::renderer::HitboxRenderState>()
-                        .map(|rs| rs.bone_world_matrices_at(sim_frame as f32))
-                        .unwrap_or_default()
-                } else {
-                    std::collections::HashMap::new()
-                }
-            };
-            let bone_matrices = get_bone_matrices(current_frame);
-            if crate::fx_debug_enabled() {
-                eprintln!("[SIM] bone_matrices count: {} (frame={})", bone_matrices.len(), current_frame);
-            }
-
-
-            // Detect scrub-frame change (including backwards scrub / loop)
-            let frame_changed = current_frame != self.last_simulated_frame;
-            let scrub_backwards = self.last_simulated_frame != u32::MAX
-                && current_frame < self.last_simulated_frame;
-
-            if frame_changed {
-                if scrub_backwards {
-                    // Check if this is an animation loop (small backwards jump from near end to 0)
-                    // vs a manual scrub backwards. For loops, only reset if effects have expired.
-                    let is_loop = self.state.playing
-                        && self.last_simulated_frame != u32::MAX
-                        && current_frame == 0
-                        && self.state.total_frames > 0
-                        && self.last_simulated_frame >= self.state.total_frames.saturating_sub(2);
-                    let effects_still_alive = !self.active_effects.is_empty()
-                        && self.active_effects.iter().any(|e| e.anim_clock < e.max_lifetime);
-
-                    if is_loop && effects_still_alive {
-                        // Animation looped but effects are still running — don't reset,
-                        // let the particle clock continue advancing.
-                        // The effects will naturally expire when max_lifetime is reached.
-                    } else {
-                        // Manual scrub backwards or loop after effects expired — reset.
-                        self.state.particle_system.reset();
-                        self.state.trail_system.reset();
-                        self.active_effects.clear();
-                        self.particle_clock = 0.0;
-                        self.particle_step_time = std::time::Instant::now();
-                    }
-                } else {
-                    // Forward scrub — spawn any effects whose active_start frame was just crossed.
-                    // This makes effects trigger each time the timeline passes their frame.
-                    let prev_frame = self.last_simulated_frame;
-                    if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
-                        let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
-                            .iter()
-                            .map(|n| (n.to_lowercase(), n.clone()))
-                            .collect();
-                        for ec in &self.state.effects.clone() {
-                            // Fire if active_start was crossed in this frame step
-                            let crossed = if prev_frame == u32::MAX {
-                                ec.active_start == current_frame
-                            } else {
-                                ec.active_start > prev_frame && ec.active_start <= current_frame
-                            };
-                            if !crossed { continue; }
-
-                            let name_lower = ec.effect_name.to_lowercase();
-                            let _canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
-                                .cloned()
-                                .unwrap_or_else(|| ec.bone_name.clone());
-                            let is_trail = ec.follows_bone && (
-                                name_lower.contains("sword") || name_lower.contains("trail") ||
-                                name_lower.contains("after") || name_lower.contains("tex_") ||
-                                name_lower.contains("katana") || name_lower.contains("blade") ||
-                                name_lower.contains("slash") || name_lower.contains("arc") ||
-                                name_lower.contains("swing") || name_lower.contains("energy") ||
-                                name_lower.contains("aura") || name_lower.contains("ribbon")
-                            );
-                            if is_trail { continue; } // trails handled separately
-
-                            let _set_idx_opt = eff_index.handles.get(&ec.effect_name)
-                                .or_else(|| eff_index.handles.get(&name_lower))
-                                .copied()
-                                .filter(|&idx| idx >= 0)
-                                .map(|idx| idx as usize)
-                                .filter(|&idx| idx < ptcl.emitter_sets.len());
-
-                            // Reset particle system and clocks for a fresh burst
-                            self.state.particle_system.reset();
-                            self.active_effects.clear();
-                            self.particle_clock = 0.0;
-                            self.particle_step_time = std::time::Instant::now();
-
-                            // Re-spawn all effects that are active at this frame
-                            for ec2 in &self.state.effects.clone() {
-                                if ec2.active_start > current_frame { continue; }
-                                let name_lower2 = ec2.effect_name.to_lowercase();
-                                let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
-                                    .cloned()
-                                    .unwrap_or_else(|| ec2.bone_name.clone());
-                                let is_trail2 = ec2.follows_bone && (
-                                    name_lower2.contains("sword") || name_lower2.contains("trail") ||
-                                    name_lower2.contains("after") || name_lower2.contains("tex_") ||
-                                    name_lower2.contains("katana") || name_lower2.contains("blade") ||
-                                    name_lower2.contains("slash") || name_lower2.contains("arc") ||
-                                    name_lower2.contains("swing") || name_lower2.contains("energy") ||
-                                    name_lower2.contains("aura") || name_lower2.contains("ribbon")
-                                );
-                                if is_trail2 { continue; }
-                                let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
-                                    .or_else(|| eff_index.handles.get(&name_lower2))
-                                    .copied()
-                                    .filter(|&idx| idx >= 0)
-                                    .map(|idx| idx as usize)
-                                    .filter(|&idx| idx < ptcl.emitter_sets.len());
-                                self.state.particle_system.spawn_effect(
-                                    &ec2.effect_name, &canonical_bone2,
-                                    glam::Vec3::from(ec2.offset),
-                                    glam::Vec3::from(ec2.rotation),
-                                    0.0, 9999.0,
-                                    eff_index, ptcl,
-                                );
-                                if let Some(set_idx2) = set_idx_opt2 {
-                                    // max_lifetime must cover the latest emitter's full lifecycle:
-                                    // emission_timing + emission_duration + particle_lifetime
-                                    let max_lifetime2 = ptcl.emitter_sets[set_idx2].emitters.iter()
-                                        .map(|e| {
-                                            let emit_end = e.emission_timing as f32 + e.emission_duration as f32;
-                                            emit_end + e.lifetime + e.lifetime_random
-                                        })
-                                        .fold(0.0f32, f32::max)
-                                        .max(1.0);
-                                    self.active_effects.push(ActiveEffect {
-                                        anim_clock: 0.0,
-                                        max_lifetime: max_lifetime2,
-                                        emitter_set_idx: set_idx2,
-                                    });
-                                }
-                            }
-                            break; // only need to trigger once per frame step
-                        }
-                    }
-
-                    // When scrubbing forward (not playing), advance the simulation to match the
-                    // current frame. Three cases:
-                    // 1. is_reset(): active_start handler just did reset+respawn — step 0..=current_frame
-                    // 2. No emitters: first scrub, no prior playback — reset, respawn, then step
-                    // 3. Has emitters: system is alive — step delta (last_frame+1..=current_frame)
-                    if !self.state.playing && !scrub_backwards {
-                        if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
-                            let is_reset = self.state.particle_system.is_reset();
-                            let has_emitters = !self.state.particle_system.active_emitters.is_empty();
-                            if !is_reset && !has_emitters {
-                                // Case 2: no prior playback — full reset+respawn from frame 0
-                                let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
-                                    .iter()
-                                    .map(|n| (n.to_lowercase(), n.clone()))
-                                    .collect();
-                                self.state.particle_system.reset();
-                                self.active_effects.clear();
-                                self.particle_clock = 0.0;
-                                for ec2 in &self.state.effects.clone() {
-                                    if ec2.active_start > current_frame { continue; }
-                                    let name_lower2 = ec2.effect_name.to_lowercase();
-                                    let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
-                                        .cloned()
-                                        .unwrap_or_else(|| ec2.bone_name.clone());
-                                    let is_trail2 = ec2.follows_bone && (
-                                        name_lower2.contains("sword") || name_lower2.contains("trail") ||
-                                        name_lower2.contains("after") || name_lower2.contains("tex_") ||
-                                        name_lower2.contains("katana") || name_lower2.contains("blade") ||
-                                        name_lower2.contains("slash") || name_lower2.contains("arc") ||
-                                        name_lower2.contains("swing") || name_lower2.contains("energy") ||
-                                        name_lower2.contains("aura") || name_lower2.contains("ribbon")
-                                    );
-                                    if is_trail2 { continue; }
-                                    let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
-                                        .or_else(|| eff_index.handles.get(&name_lower2))
-                                        .copied()
-                                        .filter(|&idx| idx >= 0)
-                                        .map(|idx| idx as usize)
-                                        .filter(|&idx| idx < ptcl.emitter_sets.len());
-                                    self.state.particle_system.spawn_effect(
-                                        &ec2.effect_name, &canonical_bone2,
-                                        glam::Vec3::from(ec2.offset),
-                                        glam::Vec3::from(ec2.rotation),
-                                        0.0, 9999.0,
-                                        eff_index, ptcl,
-                                    );
-                                    if let Some(set_idx2) = set_idx_opt2 {
-                                        let max_lifetime2 = ptcl.emitter_sets[set_idx2].emitters.iter()
-                                            .map(|e| {
-                                                let emit_end = e.emission_timing as f32 + e.emission_duration as f32;
-                                                emit_end + e.lifetime + e.lifetime_random
-                                            })
-                                            .fold(0.0f32, f32::max)
-                                            .max(1.0);
-                                        self.active_effects.push(ActiveEffect {
-                                            anim_clock: 0.0,
-                                            max_lifetime: max_lifetime2,
-                                            emitter_set_idx: set_idx2,
-                                        });
-                                    }
-                                }
-                            }
-
-                            if is_reset || !has_emitters {
-                                // Full simulation from frame 0 (system was just reset or has no emitters).
-                                // Compute bone matrices at each step's frame so early-spawning particles
-                                // get the correct skeleton pose for their spawn frame.
-                                for f in 0..=current_frame {
-                                    let frame_bone_matrices = get_bone_matrices(f);
-                                    self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
-                                }
-                            } else {
-                                // Delta simulation: only step frames not yet simulated
-                                let last_sim = self.state.particle_system.last_frame() as u32;
-                                if current_frame > last_sim {
-                                    for f in (last_sim + 1)..=current_frame {
-                                        let frame_bone_matrices = get_bone_matrices(f);
-                                        self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
-                                    }
-                                }
-                            }
-
-                            self.particle_clock = current_frame as f32;
-                            for effect in &mut self.active_effects {
-                                effect.anim_clock = (current_frame as f32).min(effect.max_lifetime);
-                            }
-                        }
-                    }
-                }
-
-                self.last_simulated_frame = current_frame;
-                // Step trail system on frame change
-                self.state.trail_system.step(&bone_matrices);
-            }
-
-            // Advance per-effect animation clocks and step the particle simulation.
-            // Clocks are in FRAMES (game runs at 60fps), so multiply wall-clock dt by 60.
-            // Use particle_step_time (reset on each respawn) to avoid large dt spikes
-            // from ACMD fetch latency or other delays.
-            let particle_dt = {
-                let elapsed = self.particle_step_time.elapsed().as_secs_f32();
-                self.particle_step_time = std::time::Instant::now();
-                // Only advance time when playing — pause freezes particles too
-                if self.state.playing {
-                    elapsed.clamp(0.0, 0.05) // cap at 3 frames (50ms) to prevent death-on-first-step
-                } else {
-                    0.0
-                }
-            };
-            let anim_dt_frames = particle_dt * 60.0;
-            let mut any_alive = false;
-            if let Some(ptcl) = &self.state.ptcl.clone() {
-                let has_emitters = !self.state.particle_system.active_emitters.is_empty();
-                let has_particles = !self.state.particle_system.particles.is_empty();
-                if has_emitters || has_particles {
-                    // Advance the shared clock — always step while there's anything to simulate
-                    // Always advance particle_clock so the simulation keeps running
-                    // even after all effects' anim_clock reaches max_lifetime.
-                    // Otherwise existing particles freeze mid-air (dt=0).
-                    self.particle_clock += anim_dt_frames;
-                    let max_clock = if !self.active_effects.is_empty() {
-                        let mut max = 0.0f32;
-                        for effect in &mut self.active_effects {
-                            if effect.anim_clock < effect.max_lifetime {
-                                effect.anim_clock += anim_dt_frames;
-                                if effect.anim_clock > effect.max_lifetime {
-                                    effect.anim_clock = effect.max_lifetime;
-                                }
-                            }
-                            max = max.max(effect.anim_clock);
-                        }
-                        max.max(self.particle_clock)
-                    } else {
-                        self.particle_clock
-                    };
-
-                    self.state.particle_system.step(max_clock, &bone_matrices, ptcl);
-                    // any_alive: true while particles are visible OR effects haven't fully expired
-                    let effects_alive = self.active_effects.iter()
-                        .any(|e| e.anim_clock < e.max_lifetime);
-                    any_alive = !self.state.particle_system.particles.is_empty()
-                        || effects_alive;
-                }
-            }
-
-            // Request continuous repaint while any effect is still animating
-            if any_alive {
-                ctx.request_repaint();
-            }
         }
 
         // Edit log window
@@ -2431,6 +2360,361 @@ impl eframe::App for HitboxEditorApp {
         egui::SidePanel::right("right_panel").min_width(240.0).show(ctx, |ui| {
             self.draw_right_panel(ui);
         });
+
+        // Step particle simulation and trail recording each frame
+        if self.state.ptcl.is_some() {
+            if hitbox_editor::fx_debug_enabled() {
+                eprintln!("[SIM] ptcl present, active_emitters={} particles={} current_frame={}", 
+                    self.state.particle_system.active_emitters.len(),
+                    self.state.particle_system.particles.len(),
+                    self.state.current_frame);
+            }
+            // Get bone matrices from the render state at a given simulation frame.
+            let current_frame = self.state.current_frame;
+            let get_bone_matrices = |sim_frame: u32| -> std::collections::HashMap<String, glam::Mat4> {
+                if let Some(wgpu_state) = frame.wgpu_render_state() {
+                    let renderer = wgpu_state.renderer.read();
+                    renderer.callback_resources.get::<crate::renderer::HitboxRenderState>()
+                        .map(|rs| rs.bone_world_matrices_at(sim_frame as f32))
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                }
+            };
+            let bone_matrices = get_bone_matrices(current_frame);
+            if crate::fx_debug_enabled() {
+                eprintln!("[SIM] bone_matrices count: {} (frame={})", bone_matrices.len(), current_frame);
+            }
+
+            if self.particles_need_catchup {
+                let mut catchup_frame = current_frame;
+                if let Some(ptcl) = &self.state.ptcl {
+                    for f in 0..=catchup_frame {
+                        let frame_bone_matrices = get_bone_matrices(f);
+                        self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
+                    }
+                    self.particle_clock = catchup_frame as f32;
+                    for effect in &mut self.active_effects {
+                        effect.anim_clock = (catchup_frame as f32).min(effect.max_lifetime);
+                    }
+                }
+                self.particles_need_catchup = false;
+                self.last_simulated_frame = catchup_frame;
+                self.state.trail_system.step(&bone_matrices);
+                eprintln!(
+                    "[SIM] catchup: {} particles, {} emitters at frame {}",
+                    self.state.particle_system.particles.len(),
+                    self.state.particle_system.active_emitters.len(),
+                    catchup_frame,
+                );
+                ctx.request_repaint();
+            } else {
+            // Detect scrub-frame change (including backwards scrub / loop)
+            let frame_changed = current_frame != self.last_simulated_frame;
+            let scrub_backwards = self.last_simulated_frame != u32::MAX
+                && current_frame < self.last_simulated_frame;
+
+            if frame_changed {
+                if scrub_backwards {
+                    // Check if this is an animation loop (small backwards jump from near end to 0)
+                    // vs a manual scrub backwards. For loops, only reset if effects have expired.
+                    let is_loop = self.state.playing
+                        && self.last_simulated_frame != u32::MAX
+                        && current_frame == 0
+                        && self.state.total_frames > 0
+                        && self.last_simulated_frame >= self.state.total_frames.saturating_sub(2);
+                    let effects_still_alive = !self.active_effects.is_empty()
+                        && self.active_effects.iter().any(|e| e.anim_clock < e.max_lifetime);
+
+                    if is_loop && effects_still_alive {
+                        // Animation looped but effects are still running — don't reset,
+                        // let the particle clock continue advancing.
+                        // The effects will naturally expire when max_lifetime is reached.
+                    } else {
+                        // Manual scrub backwards or loop after effects expired — reset.
+                        self.state.particle_system.reset();
+                        self.state.trail_system.reset();
+                        self.active_effects.clear();
+                        self.particle_clock = 0.0;
+                        self.particle_step_time = std::time::Instant::now();
+                        if !self.state.playing {
+                            self.queue_particle_resimulate_to_frame(current_frame);
+                        }
+                    }
+                } else {
+                    // Forward scrub — spawn any effects whose active_start frame was just crossed.
+                    // This makes effects trigger each time the timeline passes their frame.
+                    let prev_frame = self.last_simulated_frame;
+                    if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
+                        let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
+                            .iter()
+                            .map(|n| (n.to_lowercase(), n.clone()))
+                            .collect();
+                        let mut active_start_respawn = false;
+                        for ec in &self.state.effects.clone() {
+                            // Fire if active_start was crossed in this frame step
+                            let crossed = if prev_frame == u32::MAX {
+                                // After respawn last_simulated is MAX — spawn every effect already due.
+                                ec.active_start <= current_frame
+                            } else {
+                                ec.active_start > prev_frame && ec.active_start <= current_frame
+                            };
+                            if !crossed { continue; }
+
+                            let name_lower = ec.effect_name.to_lowercase();
+                            let _canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
+                                .cloned()
+                                .unwrap_or_else(|| ec.bone_name.clone());
+                            let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone);
+                            if is_trail { continue; } // trails handled separately
+
+                            let _set_idx_opt = eff_index.handles.get(&ec.effect_name)
+                                .or_else(|| eff_index.handles.get(&name_lower))
+                                .copied()
+                                .filter(|&idx| idx >= 0)
+                                .map(|idx| idx as usize)
+                                .filter(|&idx| idx < ptcl.emitter_sets.len());
+
+                            // Reset particle system and clocks for a fresh burst
+                            self.state.particle_system.reset();
+                            self.active_effects.clear();
+                            self.particle_clock = 0.0;
+                            self.particle_step_time = std::time::Instant::now();
+                            active_start_respawn = true;
+
+                            // Re-spawn all effects that are active at this frame
+                            for ec2 in &self.state.effects.clone() {
+                                if ec2.active_start > current_frame { continue; }
+                                let name_lower2 = ec2.effect_name.to_lowercase();
+                                let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
+                                    .cloned()
+                                    .unwrap_or_else(|| ec2.bone_name.clone());
+                                let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone);
+                                if is_trail2 { continue; }
+                                let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
+                                    .or_else(|| eff_index.handles.get(&name_lower2))
+                                    .copied()
+                                    .filter(|&idx| idx >= 0)
+                                    .map(|idx| idx as usize)
+                                    .filter(|&idx| idx < ptcl.emitter_sets.len());
+                                let (start_frame, end_frame) = Self::effect_spawn_window(ec2, eff_index, ptcl);
+                                self.state.particle_system.spawn_effect(
+                                    &ec2.effect_name, &canonical_bone2,
+                                    glam::Vec3::from(ec2.offset),
+                                    glam::Vec3::from(ec2.rotation),
+                                    start_frame, end_frame,
+                                    eff_index, ptcl,
+                                );
+                                if let Some(set_idx2) = set_idx_opt2 {
+                                    // max_lifetime must cover the latest emitter's full lifecycle:
+                                    // emission_timing + emission_duration + particle_lifetime
+                                    let max_lifetime2 = ptcl.emitter_sets[set_idx2].emitters.iter()
+                                        .map(|e| {
+                                            let emit_end = e.emission_timing as f32 + e.emission_duration as f32;
+                                            emit_end + e.lifetime + e.lifetime_random
+                                        })
+                                        .fold(0.0f32, f32::max)
+                                        .max(1.0);
+                                    self.active_effects.push(ActiveEffect {
+                                        anim_clock: 0.0,
+                                        max_lifetime: max_lifetime2,
+                                        emitter_set_idx: set_idx2,
+                                    });
+                                }
+                            }
+                            break; // only need to trigger once per frame step
+                        }
+
+                        // Playing skips the paused scrub block below — integer catch-up after respawn.
+                        if active_start_respawn && self.state.playing {
+                            for f in 0..=current_frame {
+                                let frame_bone_matrices = get_bone_matrices(f);
+                                self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
+                            }
+                            self.particle_clock = current_frame as f32;
+                            for effect in &mut self.active_effects {
+                                effect.anim_clock = (current_frame as f32).min(effect.max_lifetime);
+                            }
+                        }
+                    }
+
+                    // When scrubbing forward (not playing), advance the simulation to match the
+                    // current frame. Three cases:
+                    // 1. is_reset(): active_start handler just did reset+respawn — step 0..=current_frame
+                    // 2. No emitters: first scrub, no prior playback — reset, respawn, then step
+                    // 3. Has emitters: system is alive — step delta (last_frame+1..=current_frame)
+                    if !self.state.playing && !scrub_backwards {
+                        if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index.clone(), &self.state.ptcl.clone()) {
+                            let mut is_reset = self.state.particle_system.is_reset();
+                            let mut has_emitters = !self.state.particle_system.active_emitters.is_empty();
+                            if !is_reset && !has_emitters {
+                                // Case 2: no prior playback — full reset+respawn from frame 0
+                                let bone_name_map: std::collections::HashMap<String, String> = self.bone_names
+                                    .iter()
+                                    .map(|n| (n.to_lowercase(), n.clone()))
+                                    .collect();
+                                self.state.particle_system.reset();
+                                self.active_effects.clear();
+                                self.particle_clock = 0.0;
+                                for ec2 in &self.state.effects.clone() {
+                                    if ec2.active_start > current_frame { continue; }
+                                    let name_lower2 = ec2.effect_name.to_lowercase();
+                                    let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
+                                        .cloned()
+                                        .unwrap_or_else(|| ec2.bone_name.clone());
+                                    let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone);
+                                    if is_trail2 { continue; }
+                                    let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
+                                        .or_else(|| eff_index.handles.get(&name_lower2))
+                                        .copied()
+                                        .filter(|&idx| idx >= 0)
+                                        .map(|idx| idx as usize)
+                                        .filter(|&idx| idx < ptcl.emitter_sets.len());
+                                    let (start_frame, end_frame) = Self::effect_spawn_window(ec2, eff_index, ptcl);
+                                    self.state.particle_system.spawn_effect(
+                                        &ec2.effect_name, &canonical_bone2,
+                                        glam::Vec3::from(ec2.offset),
+                                        glam::Vec3::from(ec2.rotation),
+                                        start_frame, end_frame,
+                                        eff_index, ptcl,
+                                    );
+                                    if let Some(set_idx2) = set_idx_opt2 {
+                                        let max_lifetime2 = ptcl.emitter_sets[set_idx2].emitters.iter()
+                                            .map(|e| {
+                                                let emit_end = e.emission_timing as f32 + e.emission_duration as f32;
+                                                emit_end + e.lifetime + e.lifetime_random
+                                            })
+                                            .fold(0.0f32, f32::max)
+                                            .max(1.0);
+                                        self.active_effects.push(ActiveEffect {
+                                            anim_clock: 0.0,
+                                            max_lifetime: max_lifetime2,
+                                            emitter_set_idx: set_idx2,
+                                        });
+                                    }
+                                }
+                            }
+
+                            is_reset = self.state.particle_system.is_reset();
+                            has_emitters = !self.state.particle_system.active_emitters.is_empty();
+                            if is_reset || !has_emitters {
+                                // Full simulation from frame 0 (system was just reset or has no emitters).
+                                // Compute bone matrices at each step's frame so early-spawning particles
+                                // get the correct skeleton pose for their spawn frame.
+                                for f in 0..=current_frame {
+                                    let frame_bone_matrices = get_bone_matrices(f);
+                                    self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
+                                }
+                            } else {
+                                // Delta simulation: only step frames not yet simulated
+                                let last_sim = self.state.particle_system.last_frame() as u32;
+                                if current_frame > last_sim {
+                                    for f in (last_sim + 1)..=current_frame {
+                                        let frame_bone_matrices = get_bone_matrices(f);
+                                        self.state.particle_system.step(f as f32, &frame_bone_matrices, ptcl);
+                                    }
+                                }
+                            }
+
+                            self.particle_clock = current_frame as f32;
+                            for effect in &mut self.active_effects {
+                                effect.anim_clock = (current_frame as f32).min(effect.max_lifetime);
+                            }
+                        }
+                    }
+                }
+
+                self.last_simulated_frame = current_frame;
+                // Step trail system on frame change
+                self.state.trail_system.step(&bone_matrices);
+            }
+
+            // Advance per-effect animation clocks and step the particle simulation.
+            // Clocks are in FRAMES (game runs at 60fps), so multiply wall-clock dt by 60.
+            // Use particle_step_time (reset on each respawn) to avoid large dt spikes
+            // from ACMD fetch latency or other delays.
+            let particle_dt = {
+                let elapsed = self.particle_step_time.elapsed().as_secs_f32();
+                self.particle_step_time = std::time::Instant::now();
+                // Only advance time when playing — pause freezes particles too
+                if self.state.playing {
+                    elapsed.clamp(0.0, 0.05) // cap at 3 frames (50ms) to prevent death-on-first-step
+                } else {
+                    0.0
+                }
+            };
+            let anim_dt_frames = particle_dt * 60.0;
+            let mut any_alive = false;
+            if let Some(ptcl) = &self.state.ptcl.clone() {
+                let has_emitters = !self.state.particle_system.active_emitters.is_empty();
+                let has_particles = !self.state.particle_system.particles.is_empty();
+                if has_emitters || has_particles {
+                    // Advance the shared clock — always step while there's anything to simulate
+                    // Always advance particle_clock so the simulation keeps running
+                    // even after all effects' anim_clock reaches max_lifetime.
+                    // Otherwise existing particles freeze mid-air (dt=0).
+                    self.particle_clock += anim_dt_frames;
+                    let max_clock = if !self.active_effects.is_empty() {
+                        let mut max = 0.0f32;
+                        for effect in &mut self.active_effects {
+                            if effect.anim_clock < effect.max_lifetime {
+                                effect.anim_clock += anim_dt_frames;
+                                if effect.anim_clock > effect.max_lifetime {
+                                    effect.anim_clock = effect.max_lifetime;
+                                }
+                            }
+                            max = max.max(effect.anim_clock);
+                        }
+                        max.max(self.particle_clock)
+                    } else {
+                        self.particle_clock
+                    };
+
+                    // Never step backwards — ParticleSystem::step clears particles when
+                    // target_frame < last_frame (scrub rewind), which also triggers when
+                    // wall-clock max_clock lags integer catch-up last_frame.
+                    let sim_target = max_clock
+                        .max(self.state.particle_system.last_frame());
+                    // Fixed 60 Hz timestep: advance the simulation only on whole-frame
+                    // boundaries so the integrator always sees dt = 1.0, exactly like the
+                    // game, independent of the render frame rate. particle_clock and
+                    // anim_clock stay fractional accumulators for the UI/render clocks.
+                    let last_frame_f = self.state.particle_system.last_frame();
+                    let target_int = sim_target.floor() as i64;
+                    if last_frame_f < 0.0 {
+                        // First step after a (re)spawn: initialise at frame 0 (dt = 1).
+                        self.state.particle_system.step(0.0, &bone_matrices, ptcl);
+                    }
+                    let last_int = last_frame_f.floor() as i64;
+                    for f in (last_int.max(0) + 1)..=target_int {
+                        self.state.particle_system.step(f as f32, &bone_matrices, ptcl);
+                    }
+                    // any_alive: true while particles are visible OR effects haven't fully expired
+                    let effects_alive = self.active_effects.iter()
+                        .any(|e| e.anim_clock < e.max_lifetime);
+                    any_alive = !self.state.particle_system.particles.is_empty()
+                        || effects_alive;
+                    static SIM_EMPTY_DIAG: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !SIM_EMPTY_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed)
+                        && has_emitters
+                        && self.state.particle_system.particles.is_empty()
+                    {
+                        eprintln!(
+                            "[SIM] {} emitters active but 0 particles at frame {} (check active_start / emission window)",
+                            self.state.particle_system.active_emitters.len(),
+                            self.state.current_frame,
+                        );
+                    }
+                }
+            }
+
+            // Request continuous repaint while any effect is still animating
+            if any_alive {
+                ctx.request_repaint();
+            }
+            } // particles_need_catchup else
+        }
 
         // Commit any edits made this frame to the log
         self.commit_current_edits();

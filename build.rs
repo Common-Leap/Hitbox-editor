@@ -1,4 +1,147 @@
+// The EffectConverter C# build path (build_effect_converter and its helpers) is
+// retained but no longer invoked: effect parsing is now in-process via the
+// `effect_library` crate. Suppress dead-code warnings for that self-contained,
+// now-unused cluster rather than deleting it outright.
+#![allow(dead_code)]
+
+use std::path::PathBuf;
 use wgsl_to_wgpu::{create_shader_module, MatrixVectorTypes, WriteOptions};
+
+// Shader / particle cache (runtime storage: scratch_dirs.rs)
+//
+//   CLEAN_SHADERS=1 cargo build
+//     — wipe {manifest}/tmp/hitbox_*.wgsl dumps, {target}/hitbox-editor-cache/, and force
+//       bnsh-decoder + spirv-cross cmake rebuilds.
+//   CARGO_TARGET_DIR=./target cargo build
+//     — keeps scratch + PTCL cache under target/hitbox-editor-cache (not /tmp).
+//
+// Runtime FX_* toggles (fx_env.rs) use OnceLock — restart the editor after changing
+// them. GPU pipeline caches are also in-memory; cargo build alone does not refresh
+// a process that is already running.
+
+const SHADER_PIPELINE_SOURCES: &[&str] = &[
+    "src/spirv_to_wgsl.rs",
+    "src/bnsh_shader_integration.rs",
+    "src/particle_renderer_bnsh.rs",
+    "src/particle_renderer.rs",
+    "src/bnsh_reflection.rs",
+    "src/bnsh_ffi/mod.rs",
+    "src/shader_registry.rs",
+    "src/nvn_chain.rs",
+    "src/fx_env.rs",
+    "src/trail.wgsl",
+    "src/blit.wgsl",
+];
+
+fn hitbox_editor_cache_root() -> PathBuf {
+    std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("target"))
+        .join("hitbox-editor-cache")
+}
+
+fn clean_shaders_requested() -> bool {
+    std::env::var("CLEAN_SHADERS").is_ok()
+}
+
+fn register_shader_rerun_directives() {
+    println!("cargo:rerun-if-env-changed=CLEAN_SHADERS");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+    for path in SHADER_PIPELINE_SOURCES {
+        println!("cargo:rerun-if-changed={path}");
+    }
+}
+
+fn is_legacy_hitbox_wgsl_dump(name: &str) -> bool {
+    name.starts_with("hitbox_") && name.ends_with(".wgsl")
+}
+
+fn workshop_tmp_root() -> PathBuf {
+    std::env::var("HITBOX_WORKSHOP_TMP")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp"))
+}
+
+/// Remove stale BNSH WGSL debug dumps from the workshop tmp dir (see scratch_dirs.rs).
+fn clear_legacy_wgsl_dumps() {
+    let root = workshop_tmp_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if is_legacy_hitbox_wgsl_dump(name) && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        println!(
+            "cargo:warning=cleared {removed} legacy hitbox_*.wgsl dump(s) from {}",
+            root.display()
+        );
+    }
+}
+
+fn clear_hitbox_editor_cache(full: bool) {
+    let root = hitbox_editor_cache_root();
+    let subdirs: &[&str] = if full {
+        &["ptcl-dumps", "scratch", "wgsl-dumps"]
+    } else {
+        &["wgsl-dumps"]
+    };
+    for sub in subdirs {
+        let path = root.join(sub);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => println!("cargo:warning=cleared shader cache {}", path.display()),
+            Err(e) => println!("cargo:warning=failed to clear {}: {e}", path.display()),
+        }
+    }
+}
+
+fn maybe_wipe_cmake_tool_build(out_subdir: &str) {
+    if !clean_shaders_requested() {
+        return;
+    }
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let build_dir = out_dir.join(out_subdir);
+    if build_dir.exists() {
+        match std::fs::remove_dir_all(&build_dir) {
+            Ok(()) => println!(
+                "cargo:warning=CLEAN_SHADERS: removed cmake build {}",
+                build_dir.display()
+            ),
+            Err(e) => println!(
+                "cargo:warning=CLEAN_SHADERS: failed to remove {}: {e}",
+                build_dir.display()
+            ),
+        }
+    }
+}
+
+fn manage_shader_caches() {
+    register_shader_rerun_directives();
+    println!("cargo:rerun-if-env-changed=HITBOX_WORKSHOP_TMP");
+    clear_legacy_wgsl_dumps();
+    if clean_shaders_requested() {
+        clear_hitbox_editor_cache(true);
+        println!(
+            "cargo:warning=CLEAN_SHADERS=1 — disk caches cleared; restart a running editor \
+             to drop in-memory GPU pipelines and fx_env OnceLock state"
+        );
+    }
+}
 
 fn process_shader(src_path: &str, out_path: &str) {
     let src = match std::fs::read_to_string(src_path) {
@@ -6,13 +149,21 @@ fn process_shader(src_path: &str, out_path: &str) {
         Err(e) => { eprintln!("cargo:warning=wgsl_to_wgpu: cannot read {src_path}: {e}"); return; }
     };
     let opts = WriteOptions {
-        derive_bytemuck_vertex: true,
+        derive_bytemuck_vertex: false,
         derive_encase_host_shareable: true,
-        matrix_vector_types: MatrixVectorTypes::Glam,
+        matrix_vector_types: MatrixVectorTypes::Rust,
         ..Default::default()
     };
     match create_shader_module(&src, src_path, opts) {
-        Ok(text) => {
+        Ok(mut text) => {
+            // Generated include_str paths are relative to the output .rs file in src/.
+            if src_path.starts_with("src/") {
+                let leaf = &src_path[4..];
+                text = text.replace(
+                    &format!(r#"include_str!("{src_path}")"#),
+                    &format!(r#"include_str!("{leaf}")"#),
+                );
+            }
             if let Err(e) = std::fs::write(out_path, text.as_bytes()) {
                 eprintln!("cargo:warning=wgsl_to_wgpu: cannot write {out_path}: {e}");
             }
@@ -26,7 +177,10 @@ fn process_shader(src_path: &str, out_path: &str) {
 }
 
 fn main() {
+    manage_shader_caches();
+
     process_shader("src/trail.wgsl",    "src/trail_shader.rs");
+    process_shader("src/blit.wgsl",     "src/blit_shader.rs");
 
     // Build the bnsh-decoder CLI tool from git submodule
     build_bnsh_decoder_cli();
@@ -34,15 +188,16 @@ fn main() {
     // Build the spirv-cross library from git submodule
     build_spirv_cross_library();
 
-    // Build the EffectConverter CLI from git submodule
-    build_effect_converter();
+    // EffectConverter C# CLI build removed: parsing is now in-process via the
+    // `effect_library` crate (see src/effect_converter.rs). No `dotnet` needed.
+    // build_effect_converter();
 }
 
-fn cmake_build_command(build_dir: &std::path::Path) -> std::process::Command {
+fn cmake_command(build_dir: &std::path::Path) -> std::process::Command {
     let tmp_dir = build_dir.join("compiler-tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
     let mut cmd = std::process::Command::new("cmake");
-    // gcc/clang write large .s files to TMPDIR; /tmp is often a small tmpfs.
+    // gcc/clang + CMake compiler probes write to TMPDIR; /tmp is often a small tmpfs.
     cmd.env("TMPDIR", &tmp_dir);
     cmd.env("TEMP", &tmp_dir);
     cmd.env("TMP", &tmp_dir);
@@ -412,9 +567,10 @@ fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io:
 }
 
 fn build_bnsh_decoder_cli() {
-    use std::path::PathBuf;
     use std::process::Command;
-    
+
+    maybe_wipe_cmake_tool_build("bnsh-decoder-build");
+
     let bnsh_dir = PathBuf::from("extern/bnsh-decoder");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let build_dir = out_dir.join("bnsh-decoder-build");
@@ -450,7 +606,7 @@ fn build_bnsh_decoder_cli() {
     
     // Run CMake to configure bnsh-decoder
     println!("cargo:warning=Configuring bnsh-decoder with CMake...");
-    let cmake_status = Command::new("cmake")
+    let cmake_status = cmake_command(&build_dir)
         .arg("-B").arg(&build_dir)
         .arg("-S").arg(&bnsh_dir)
         .arg("-DCMAKE_BUILD_TYPE=Release")
@@ -466,7 +622,7 @@ fn build_bnsh_decoder_cli() {
     
     // Build bnsh-decoder CLI
     println!("cargo:warning=Building bnsh-decoder CLI...");
-    let build_status = cmake_build_command(&build_dir)
+    let build_status = cmake_command(&build_dir)
         .arg("--build").arg(&build_dir)
         .arg("--config").arg("Release")
         .status()
@@ -517,9 +673,10 @@ fn build_bnsh_decoder_cli() {
 }
 
 fn build_spirv_cross_library() {
-    use std::path::PathBuf;
     use std::process::Command;
-    
+
+    maybe_wipe_cmake_tool_build("spirv-cross-build");
+
     let spirv_cross_dir = PathBuf::from("extern/spirv-cross");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let build_dir = out_dir.join("spirv-cross-build");
@@ -556,7 +713,7 @@ fn build_spirv_cross_library() {
     // Run CMake to configure spirv-cross
     // Note: CLI requires static libraries to be built
     println!("cargo:warning=Configuring spirv-cross with CMake...");
-    let cmake_status = Command::new("cmake")
+    let cmake_status = cmake_command(&build_dir)
         .arg("-B").arg(&build_dir)
         .arg("-S").arg(&spirv_cross_dir)
         .arg("-DCMAKE_BUILD_TYPE=Release")
@@ -575,7 +732,7 @@ fn build_spirv_cross_library() {
     
     // Build spirv-cross
     println!("cargo:warning=Building spirv-cross CLI...");
-    let build_status = cmake_build_command(&build_dir)
+    let build_status = cmake_command(&build_dir)
         .arg("--build").arg(&build_dir)
         .arg("--config").arg("Release")
         .status()

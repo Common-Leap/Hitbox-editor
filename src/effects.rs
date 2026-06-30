@@ -86,6 +86,19 @@ impl EffIndex {
             }
         }
 
+        // Merge embedded BNSH shaders (ef_common carries the shared particle shader library).
+        let merged_shaders = other_ptcl.shader_registry.len();
+        ptcl.shader_registry.merge_from(&other_ptcl.shader_registry);
+        if !other_ptcl.shader_binary_1.is_empty() {
+            ptcl.shader_registry.register(other_ptcl.shader_binary_1.clone());
+        }
+        if !other_ptcl.shader_binary_2.is_empty() {
+            ptcl.shader_registry.register(other_ptcl.shader_binary_2.clone());
+        }
+        let (b1, b2) = ptcl.shader_registry.legacy_pair();
+        ptcl.shader_binary_1 = b1;
+        ptcl.shader_binary_2 = b2;
+
         // Append the emitter sets, offsetting texture indices by the current bntx count
         let bntx_base_idx = ptcl.bntx_textures.len() as u32;
         let merged_count = other_ptcl.emitter_sets.len();
@@ -110,8 +123,15 @@ impl EffIndex {
             ptcl.bntx_textures.push(tex);
         }
         ptcl.texture_section.extend_from_slice(&other_ptcl.texture_section);
-        eprintln!("[EFF] merged {} emitter sets from {:?}, total now {} sets, {} bntx textures", 
-            merged_count, path.file_name().unwrap_or_default(), ptcl.emitter_sets.len(), ptcl.bntx_textures.len());
+        eprintln!(
+            "[EFF] merged {} emitter sets from {:?}, total now {} sets, {} bntx textures, +{} shaders ({} total)",
+            merged_count,
+            path.file_name().unwrap_or_default(),
+            ptcl.emitter_sets.len(),
+            ptcl.bntx_textures.len(),
+            merged_shaders,
+            ptcl.shader_registry.len(),
+        );
         Ok(())
     }
 
@@ -222,6 +242,9 @@ pub struct EmitterDef {
     pub speed_random: f32,
     /// Gravity / acceleration
     pub accel: Vec3,
+    /// Per-frame velocity damping (nw::eft `EmitterStatic.AirRes`). 1.0 = no drag;
+    /// values < 1.0 decay velocity geometrically each frame (`v *= air_res`).
+    pub air_res: f32,
     /// Particle lifetime in frames
     pub lifetime: f32,
     pub lifetime_random: f32,
@@ -242,8 +265,11 @@ pub struct EmitterDef {
     /// Full alpha key tables for accurate multi-key interpolation
     pub alpha0_keys: Vec<ColorKey>,
     pub alpha1_keys: Vec<ColorKey>,
-    /// Scale animation (3v4k)
+    /// Scale animation (3v4k approximation — fallback when [`scale_keys`] is empty)
     pub scale_anim: AnimKey3v4k,
+    /// Full scale key table (up to 8 keys); value stored in each key's channels.
+    /// Sampled with [`sample_alpha`] for accurate multi-key scale curves.
+    pub scale_keys: Vec<ColorKey>,
     /// Textures (up to 3)
     pub textures: Vec<TextureRes>,
     /// Mesh type: 0=billboard quad, 1=primitive mesh
@@ -258,6 +284,8 @@ pub struct EmitterDef {
     pub tex_offset_uv: [f32; 2],
     /// UV scroll speed (from TexScrollAnim[0], default [0.0, 0.0])
     pub tex_scroll_uv: [f32; 2],
+    /// Atlas grid division from TexScrollAnim UVDivX/Y (0 = unknown).
+    pub tex_uv_div: [u32; 2],
     /// Number of animation frames in the sprite sheet (from TexPatAnim PatternCount)
     pub tex_pat_frame_count: usize,
     /// Per-frame sprite-sheet indices from TexPatAnim[0].Table.
@@ -323,6 +351,11 @@ pub struct EmitterDef {
     /// Render pass id (EmitterInfo.DrawPath). On NVN each path may target a separate RT;
     /// the editor composites paths via sequential wgpu passes into one offscreen texture.
     pub draw_path: u32,
+    /// EmitterStatic.Flags1–4 from VFXB export (NVN render-flag mask components).
+    pub flags1: u32,
+    pub flags2: u32,
+    pub flags3: u32,
+    pub flags4: u32,
     /// ParticleData.ColorScale multiplier.
     pub color_scale: f32,
     /// Emitter volume radii (ShapeInfo VolumeRadius*)
@@ -395,9 +428,11 @@ pub struct EmitterDef {
     pub child_inheritance: ChildInheritanceDef,
     /// Whether this emitter fires a one-shot burst (from VFXB Emission.isOneTime)
     pub is_one_time: bool,
-    /// Emission timing offset in frames (from VFXB Emission.Timing)
+    /// Emission window start in effect-local frames (VFXB Emission.Start)
+    pub emission_start: u32,
+    /// One-shot burst frame, or legacy timing field (VFXB Emission.Timing)
     pub emission_timing: u32,
-    /// Emission duration in frames
+    /// Emission window length in frames (VFXB Emission.Duration)
     pub emission_duration: u32,
     /// true when textures[1].tex_name contains "indirect" (case-insensitive)
     pub is_indirect_slot1: bool,
@@ -453,6 +488,8 @@ pub struct EmitterDef {
     pub combiner: crate::shader_registry::CombinerState,
     /// Soft-particle / fresnel / decal flags from EmitterData.json.
     pub particle_color: crate::shader_registry::ParticleColorState,
+    /// Camera-distance scale references from `ParticleScale` (distortion + future scale).
+    pub particle_scale: crate::shader_registry::ParticleScaleState,
 }
 
 /// Child emitter inheritance flags from EFT2 `EmitterInheritance` + `Action.ActionIndex`.
@@ -747,6 +784,7 @@ impl Default for EmitterDef {
             initial_speed: 0.3,
             speed_random: 0.3,
             accel: Vec3::ZERO,
+            air_res: 1.0,
             lifetime: 30.0,
             lifetime_random: 0.0,
             scale: 1.0,
@@ -761,6 +799,7 @@ impl Default for EmitterDef {
             alpha0_keys: vec![],
             alpha1_keys: vec![],
             scale_anim: AnimKey3v4k::default(),
+            scale_keys: vec![],
             textures: Vec::new(),
             mesh_type: 0,
             primitive_index: 0,
@@ -768,6 +807,7 @@ impl Default for EmitterDef {
             tex_scale_uv: [1.0, 1.0],
             tex_offset_uv: [0.0, 0.0],
             tex_scroll_uv: [0.0, 0.0],
+            tex_uv_div: [0, 0],
             tex_pat_frame_count: 1,
             tex_pat_frame_table: Vec::new(),
             tex_pat_frequency: 1.0,
@@ -803,6 +843,10 @@ impl Default for EmitterDef {
             rot_axis_z: false,
             offset_type: 0,
             draw_path: 0,
+            flags1: 0,
+            flags2: 0,
+            flags3: 0,
+            flags4: 0,
             color_scale: 1.0,
             volume_radius: Vec3::ONE,
             volume_form_scale: Vec3::ONE,
@@ -842,6 +886,7 @@ impl Default for EmitterDef {
             em_vel_inherit: 0.0,
             child_inheritance: ChildInheritanceDef::default(),
             is_one_time: false,
+            emission_start: 0,
             emission_timing: 0,
             emission_duration: 9999,
             is_indirect_slot1: false,
@@ -871,6 +916,7 @@ impl Default for EmitterDef {
             shader_key: 0,
             combiner: crate::shader_registry::CombinerState::default(),
             particle_color: crate::shader_registry::ParticleColorState::default(),
+            particle_scale: crate::shader_registry::ParticleScaleState::default(),
         }
     }
 }
@@ -1004,8 +1050,14 @@ pub fn compute_emitter_world_mat(
 /// Only [`EmitterDef::is_update_matrix_by_emit`] re-parents particles each frame.
 /// [`FollowType`] affects emitter spawn origin via [`compute_emitter_world_mat`], not
 /// per-particle motion after spawn (explosions/sparks integrate velocity in world space).
-fn particle_follows_emitter(emitter: &EmitterDef) -> bool {
-    emitter.is_update_matrix_by_emit
+///
+/// Stationary particles on SRT-following emitters also re-parent so attached auras
+/// (fair aerial slashes, glows) stay on the moving bone without `IsUpdateMatrixByEmit`.
+pub fn particle_follows_emitter(emitter: &EmitterDef) -> bool {
+    if emitter.is_update_matrix_by_emit {
+        return true;
+    }
+    emitter.follow_type == FollowType::Srt && emitter.initial_speed.abs() < 1e-3
 }
 
 /// Pack a `Mat4` as the three row vectors written to NVN `cbuf_8[12..14]`.
@@ -1895,6 +1947,28 @@ pub fn silhouette_atlas_uv(
     let cx = sub_min[0] + (sub_max[0] - sub_min[0]) * unit_uv[0];
     let cy = sub_min[1] + (sub_max[1] - sub_min[1]) * unit_uv[1];
     [(cx - env_min[0]) / ew, (cy - env_min[1]) / eh]
+}
+
+/// Map a mesh-tangent silhouette rect to billboard attr4 size/aspect and center offset.
+///
+/// Corners uploaded to attr6 stay at ±0.5; mesh half-extents fold into `size` and `aspect`.
+pub fn silhouette_billboard_metrics(
+    min_c: [f32; 2],
+    max_c: [f32; 2],
+    particle_size: f32,
+    tex_aspect: f32,
+    bb: BillboardType,
+) -> ([f32; 2], f32, f32) {
+    let half_w = (max_c[0] - min_c[0]) * 0.5;
+    let half_h = (max_c[1] - min_c[1]) * 0.5;
+    let center = [(min_c[0] + max_c[0]) * 0.5, (min_c[1] + max_c[1]) * 0.5];
+    let mesh_aspect = if half_h > 1e-6 { half_w / half_h } else { 1.0 };
+    let size = particle_size * 2.0 * half_h.max(1e-6);
+    let aspect = match bb {
+        BillboardType::Stripe | BillboardType::ComplexStripe => 1.0,
+        _ => tex_aspect * mesh_aspect,
+    };
+    (center, size, aspect)
 }
 
 /// Velocity-aligned ribbon corner scaling for Stripe / ComplexStripe billboard modes.
@@ -2989,7 +3063,8 @@ pub fn child_emitters_for_parent<'a>(
 /// Normalized effect-local time for emitter animation tracks.
 pub fn emitter_effect_t(emitter: &EmitterDef, local_frame: f32) -> f32 {
     let dur = emitter.emission_duration.max(1) as f32;
-    ((local_frame - emitter.emission_timing as f32) / dur).clamp(0.0, 1.0)
+    let t0 = emitter.emission_start as f32;
+    ((local_frame - t0) / dur).clamp(0.0, 1.0)
 }
 
 /// Texture resource parsed from the emitter data block.
@@ -3077,6 +3152,20 @@ pub struct PtclFile {
     pub shader_binary_1: Vec<u8>,
     /// Legacy: second unique BNSH (compat — prefer shader_registry).
     pub shader_binary_2: Vec<u8>,
+}
+
+impl PtclFile {
+    /// True when embedded BFRES meshes carry material textures (_col/_emi/_prm).
+    /// Particle billboards use emitter BNTX slots instead; skip the mesh material pass otherwise.
+    pub fn needs_mesh_material_pass(&self) -> bool {
+        self.bfres_models.iter().any(|model| {
+            model.meshes.iter().any(|mesh| {
+                mesh.texture_index != u32::MAX
+                    || mesh.emissive_tex_index != u32::MAX
+                    || mesh.prm_tex_index != u32::MAX
+            })
+        })
+    }
 }
 
 /// Returns (r, g, b, blend_type, scale, lifetime) defaults based on effect name keywords.
@@ -4219,7 +4308,14 @@ pub fn init_particle_uv_at_spawn(p: &mut Particle, emitter: &EmitterDef) {
             p.pat_phase_offset,
             p.pat_fixed_frame,
         );
-        frame_uv_offset(frame, p.tex_scale_live, offset)
+        frame_uv_offset(
+            frame,
+            [
+                emitter.tex_scale_uv[0].abs().max(0.001),
+                emitter.tex_scale_uv[1].abs().max(0.001),
+            ],
+            offset,
+        )
     } else {
         offset
     };
@@ -4318,8 +4414,10 @@ pub fn frame_uv_offset(
     tex_scale_uv: [f32; 2],
     tex_offset_uv: [f32; 2],
 ) -> [f32; 2] {
-    let cols = (1.0 / tex_scale_uv[0].max(0.001)).round() as usize;
-    let rows = (1.0 / tex_scale_uv[1].max(0.001)).round() as usize;
+    let su = tex_scale_uv[0].abs().max(0.001);
+    let sv = tex_scale_uv[1].abs().max(0.001);
+    let cols = (1.0 / su).round() as usize;
+    let rows = (1.0 / sv).round() as usize;
     let total_slots = (cols * rows).max(1);
     let slot = frame % total_slots;
     let col = slot % cols.max(1);
@@ -4342,9 +4440,34 @@ pub fn frame_uv_offset(
 ///
 /// Also fixes `tex2_scale_uv` (slot-2 texture) using the same heuristic.
 pub fn fix_tex_scale_uv(emitter: &mut EmitterDef, bntx_textures: &[TextureRes]) {
+    let apply_uv_div = |scale_uv: &mut [f32; 2], fc: usize| -> bool {
+        let div_x = emitter.tex_uv_div[0];
+        let div_y = emitter.tex_uv_div[1];
+        if div_x <= 1 || div_y <= 1 {
+            return false;
+        }
+        let cols = div_x as usize;
+        let rows = div_y as usize;
+        if cols * rows < fc.max(1) {
+            return false;
+        }
+        let su = 1.0 / div_x as f32;
+        let sv = 1.0 / div_y as f32;
+        if (scale_uv[0] - su).abs() > 0.001 || (scale_uv[1] - sv).abs() > 0.001 {
+            eprintln!(
+                "[FIX_UV] tex_uv_div {}×{} fc={}: tex_scale_uv=[{}, {}] (was [{}, {}])",
+                cols, rows, fc, su, sv, scale_uv[0], scale_uv[1]
+            );
+            *scale_uv = [su, sv];
+        }
+        true
+    };
     let fix_one = |scale_uv: &mut [f32; 2], pat_frame_count: usize| {
         let fc = pat_frame_count;
         if fc <= 1 { return; }
+        if apply_uv_div(scale_uv, fc) {
+            return;
+        }
         let Some(tex) = bntx_textures.get(emitter.texture_index as usize) else { return; };
         let cur_cols = (1.0 / scale_uv[0].max(0.001)).round() as usize;
         let cur_rows = (1.0 / scale_uv[1].max(0.001)).round() as usize;
@@ -4361,6 +4484,18 @@ pub fn fix_tex_scale_uv(emitter: &mut EmitterDef, bntx_textures: &[TextureRes]) 
     };
     fix_one(&mut emitter.tex_scale_uv, emitter.tex_pat_frame_count);
     fix_one(&mut emitter.tex2_scale_uv, emitter.tex2_pat_frame_count);
+    if emitter.tex_pat_frame_count > 1
+        && (emitter.tex_scale_uv[0] - 1.0).abs() < 0.001
+        && (emitter.tex_scale_uv[1] - 1.0).abs() < 0.001
+        && crate::fx_env::fx_viewport_log_enabled()
+    {
+        eprintln!(
+            "[ATLAS-UV] emitter '{}' fc={} tex_scale_uv still [1,1] after fix_tex_scale_uv (uv_div={:?})",
+            emitter.name,
+            emitter.tex_pat_frame_count,
+            emitter.tex_uv_div,
+        );
+    }
 }
 
 impl PtclFile {
@@ -4799,6 +4934,94 @@ fn build_spawned_particle(
     particle
 }
 
+/// Local effect frame when this emitter first spawns particles.
+pub fn emitter_first_burst_local_frame(emitter: &EmitterDef) -> u32 {
+    if emitter.is_one_time && emitter.emission_timing > 0 {
+        emitter.emission_timing
+    } else {
+        emitter.emission_start
+    }
+}
+
+/// True when `local_frame` is inside the emitter's emission window.
+pub fn emission_window_contains(emitter: &EmitterDef, local_frame: f32) -> bool {
+    let start = emitter.emission_start as f32;
+    if local_frame < start {
+        return false;
+    }
+    if emitter.emission_duration == 0 {
+        return true;
+    }
+    local_frame < start + emitter.emission_duration as f32
+}
+
+/// Earliest global timeline frame where any root emitter would emit for a spawn call.
+pub fn earliest_particle_frame_for_spawn(
+    effect_name: &str,
+    active_start: u32,
+    eff_index: &EffIndex,
+    ptcl: &PtclFile,
+) -> Option<u32> {
+    let name_lower = effect_name.to_lowercase();
+    let set_idx = eff_index
+        .handles
+        .get(effect_name)
+        .or_else(|| eff_index.handles.get(&name_lower))
+        .copied()
+        .filter(|&idx| idx >= 0)? as usize;
+    let set = ptcl.emitter_sets.get(set_idx)?;
+    let local = set
+        .emitters
+        .iter()
+        .filter(|e| !e.child_inheritance.spawn_from_parent_particle)
+        .map(emitter_first_burst_local_frame)
+        .min()?;
+    Some(active_start.saturating_add(local))
+}
+
+/// ACMD spawn/end frames for particle emitters.
+///
+/// Non-following `Effect()` calls set `active_end == active_start` (the script frame only).
+/// PTCL emission continues for `emission_timing + duration + particle lifetime` after that.
+pub fn acmd_spawn_window(
+    effect_name: &str,
+    active_start: u32,
+    active_end: u32,
+    eff_index: &EffIndex,
+    ptcl: &PtclFile,
+) -> (f32, f32) {
+    let start = active_start as f32;
+    let mut end = if active_end >= 9999 {
+        9999.0
+    } else {
+        active_end as f32
+    };
+    if end <= start {
+        let name_lower = effect_name.to_lowercase();
+        let runtime = eff_index
+            .handles
+            .get(effect_name)
+            .or_else(|| eff_index.handles.get(&name_lower))
+            .copied()
+            .filter(|&idx| idx >= 0)
+            .and_then(|idx| ptcl.emitter_sets.get(idx as usize))
+            .map(|set| {
+                set.emitters
+                    .iter()
+                    .filter(|e| !e.child_inheritance.spawn_from_parent_particle)
+                    .map(|e| {
+                        let burst = emitter_first_burst_local_frame(e) as f32;
+                        burst + e.emission_duration as f32 + e.lifetime + e.lifetime_random
+                    })
+                    .fold(0.0f32, f32::max)
+                    .max(1.0)
+            })
+            .unwrap_or(9999.0);
+        end = start + runtime;
+    }
+    (start, end)
+}
+
 /// The full CPU particle system state.
 #[derive(Debug, Default)]
 pub struct ParticleSystem {
@@ -4894,9 +5117,9 @@ impl ParticleSystem {
         bone_matrices: &HashMap<String, Mat4>,
         ptcl: &PtclFile,
     ) {
-        // If scrubbing backwards, we can't easily rewind — just clear and re-simulate
-        // from scratch (caller handles re-spawning effects from frame 0).
-        if target_frame < self.last_frame {
+        // Scrub rewind: caller resets/re-spawns before stepping backwards. Ignore tiny
+        // float drift (wall clock vs integer catch-up) so we don't wipe live particles.
+        if target_frame + 0.5 < self.last_frame {
             self.particles.clear();
         }
 
@@ -4916,7 +5139,10 @@ impl ParticleSystem {
 
         // Skip emission when dt=0 (paused or duplicate step) — only integrate existing particles.
         // This prevents continuous emitters from over-firing when the simulation is stalled.
-        let skip_emission = dt <= 0.0;
+        // Still emit when emitters are active but no particles exist yet (initial burst after spawn).
+        let needs_initial_emit = self.particles.is_empty()
+            && self.active_emitters.iter().any(|i| !i.death_only);
+        let skip_emission = dt <= 0.0 && !needs_initial_emit;
 
         // Integrate existing particles first, so newly spawned particles this frame
         // start at age=0 and survive until the next frame (fixes lifetime=1 particles
@@ -4933,6 +5159,15 @@ impl ParticleSystem {
                 Vec3::ZERO
             };
             p.velocity += safe_accel * dt;
+            // Air resistance (nw::eft): geometric per-frame velocity damping applied
+            // after gravity. dt is normally 1.0 (fixed 60 Hz step); powf keeps it correct
+            // for any non-unit step. air_res == 1.0 is a no-op.
+            if emitter.air_res.is_finite()
+                && emitter.air_res > 0.0
+                && (emitter.air_res - 1.0).abs() > 1e-5
+            {
+                p.velocity *= emitter.air_res.powf(dt);
+            }
             if !emitter.is_update_matrix_by_emit && p.velocity.is_finite() {
                 p.position += p.velocity * dt;
             }
@@ -4960,7 +5195,15 @@ impl ParticleSystem {
             let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
 
             update_particle_color_channels(p, emitter, None, false);
-            p.size = (emitter.scale * emitter.scale_anim.sample(t)).max(0.01);
+            let scale_rand =
+                1.0 + rand_factor(p.seed.wrapping_add(7) as usize) * emitter.scale_random;
+            // Prefer the full 8-key scale table; fall back to the 3v4k approximation.
+            let scale_curve = if !emitter.scale_keys.is_empty() {
+                sample_alpha(&emitter.scale_keys, t)
+            } else {
+                emitter.scale_anim.sample(t)
+            };
+            p.size = (emitter.scale * scale_curve * scale_rand).max(0.01);
             if pi < 2 && crate::fx_debug_enabled() {
                 let raw = emitter.scale * emitter.scale_anim.sample(t);
                 eprintln!("[SIM] pi={} a={:.1}/{:.0} t={:.4} p=({:.2},{:.2},{:.2}) vel=({:.2},{:.2},{:.2}) sz={:.4} e.sc={:.4} raw={:.4}",
@@ -5155,9 +5398,7 @@ impl ParticleSystem {
             let f = target_frame - inst.start_frame;
 
             // Emission window gating (Req 6.1–6.5)
-            let in_window = f >= emitter.emission_timing as f32
-                && (emitter.emission_duration == 0
-                    || f < (emitter.emission_timing + emitter.emission_duration) as f32);
+            let in_window = emission_window_contains(emitter, f);
 
             // Get bone world transform for spawn origin
             let bone_mat = bone_matrices.get(&inst.bone_name)
@@ -5206,15 +5447,14 @@ impl ParticleSystem {
                 0
             } else if emitter.is_one_time {
                 // One-time burst: fire exactly once on the burst frame (Req 7.1–7.4)
-                // Use >= instead of == to handle cases where emission_timing > 0
-                // and we might skip the exact frame due to frame stepping.
-                if f >= emitter.emission_timing as f32 && !inst.burst_fired {
+                let burst_at = emitter_first_burst_local_frame(emitter) as f32;
+                if f >= burst_at && !inst.burst_fired {
                     inst.burst_fired = true;
                     // Treat emission_rate <= 0.0 as 1.0 (Req 11.3 / 7.4)
                     let rate = if emitter.emission_rate <= 0.0 { 1.0 } else { emitter.emission_rate };
                     let n = rate.floor().max(1.0) as usize;
                     if crate::fx_debug_enabled() {
-                        eprintln!("[EMIT] one_time burst: f={f} timing={} rate={rate} spawning={n}", emitter.emission_timing);
+                        eprintln!("[EMIT] one_time burst: f={f} burst_at={burst_at} rate={rate} spawning={n}");
                     }
                     n
                 } else {
@@ -5292,8 +5532,10 @@ impl ParticleSystem {
             }
             let Some(set) = ptcl.emitter_sets.get(inst.emitter_set_idx) else { return false };
             let Some(emitter) = set.emitters.get(inst.emitter_idx) else { return false };
-            let emit_end = emitter.emission_timing as f32 + (emitter.emission_duration as f32).max(1.0);
-            let full_end = emit_end + emitter.lifetime + emitter.lifetime_random;
+            let emit_end = emitter.emission_start as f32
+                + (emitter.emission_duration as f32).max(1.0);
+            let burst_end = emitter_first_burst_local_frame(emitter) as f32 + 1.0;
+            let full_end = emit_end.max(burst_end) + emitter.lifetime + emitter.lifetime_random;
             f < full_end
         });
 
@@ -5435,6 +5677,38 @@ mod uv_tests {
         }];
         fix_tex_scale_uv(&mut emitter, &textures);
         assert_eq!(emitter.tex_scale_uv, [0.25, 1.0]);
+    }
+
+    #[test]
+    fn fix_tex_scale_uv_prefers_uv_div_from_export() {
+        let mut emitter = EmitterDef {
+            texture_index: 0,
+            tex_scale_uv: [1.0, 1.0],
+            tex_uv_div: [4, 4],
+            tex_pat_frame_count: 8,
+            ..Default::default()
+        };
+        let textures = vec![TextureRes {
+            tex_name: "sheet".into(),
+            width: 256,
+            height: 256,
+            ..Default::default()
+        }];
+        fix_tex_scale_uv(&mut emitter, &textures);
+        assert_eq!(emitter.tex_scale_uv, [0.25, 0.25]);
+    }
+
+    #[test]
+    fn fix_tex_scale_uv_keeps_valid_uv_div_scale() {
+        let mut emitter = EmitterDef {
+            texture_index: 0,
+            tex_scale_uv: [0.25, 0.25],
+            tex_uv_div: [4, 4],
+            tex_pat_frame_count: 16,
+            ..Default::default()
+        };
+        fix_tex_scale_uv(&mut emitter, &[]);
+        assert_eq!(emitter.tex_scale_uv, [0.25, 0.25]);
     }
 
     #[test]
@@ -5984,6 +6258,235 @@ mod uv_tests {
     }
 
     #[test]
+    fn samus_bomb_ptcl_emits_before_explosion_frame() {
+        let Some(path) = crate::scratch_dirs::resolve_fighter_eff("samus") else {
+            return;
+        };
+        let eff = EffIndex::from_file(&path).expect("eff");
+        let ptcl = PtclFile::parse(&eff.ptcl_data).expect("ptcl");
+        let spawn = ["samus_cshot_bomb", "samus_atk_bomb"]
+            .iter()
+            .find(|name| eff.handles.contains_key(**name))
+            .map(|s| (*s).to_string())
+            .or_else(|| {
+                eff.handles
+                    .keys()
+                    .find(|k| k.contains("bomb") || k.contains("Bomb"))
+                    .cloned()
+            })
+            .unwrap_or_else(|| "samus_atk_bomb".to_string());
+        let active_start = 4u32;
+        let (start, end) = acmd_spawn_window(&spawn, active_start, active_start, &eff, &ptcl);
+        let bone: HashMap<String, Mat4> = [("Trans".to_string(), Mat4::IDENTITY)].into();
+
+        let mut sys = ParticleSystem::default();
+        sys.spawn_effect(
+            &spawn,
+            "Trans",
+            Vec3::ZERO,
+            Vec3::ZERO,
+            start,
+            end,
+            &eff,
+            &ptcl,
+        );
+        for f in 0..=10u32 {
+            sys.step(f as f32, &bone, &ptcl);
+        }
+        let early = sys.particles.len();
+        assert!(
+            early > 0,
+            "samus bomb should emit throw/smoke particles by local frame 6 (global ~10), got 0"
+        );
+
+        sys.step(64.0, &bone, &ptcl);
+        sys.particles.retain(|p| !p.is_dead());
+        assert!(
+            !sys.particles.is_empty(),
+            "samus bomb should still have particles at explosion frame 64"
+        );
+    }
+
+    #[test]
+    fn bomb_early_emitters_use_emission_start_not_timing_as_window() {
+        let mut impact = EmitterDef::default();
+        impact.is_one_time = true;
+        impact.emission_start = 0;
+        impact.emission_timing = 0;
+        impact.emission_duration = 2;
+        impact.emission_rate = 2.0;
+
+        let mut ring = EmitterDef::default();
+        ring.is_one_time = true;
+        ring.emission_start = 1;
+        ring.emission_timing = 60;
+        ring.emission_duration = 1;
+
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "bomb".into(),
+                emitters: vec![impact, ring],
+            }],
+            ..Default::default()
+        };
+        let mut eff = EffIndex::default();
+        eff.handles.insert("samus_atk_bomb".into(), 0);
+        let (start, end) = acmd_spawn_window("samus_atk_bomb", 4, 4, &eff, &ptcl);
+        let bone: HashMap<String, Mat4> = [("Trans".to_string(), Mat4::IDENTITY)].into();
+
+        let mut sys = ParticleSystem::default();
+        sys.spawn_effect(
+            "samus_atk_bomb",
+            "Trans",
+            Vec3::ZERO,
+            Vec3::ZERO,
+            start,
+            end,
+            &eff,
+            &ptcl,
+        );
+        for f in 0..=10u32 {
+            sys.step(f as f32, &bone, &ptcl);
+        }
+        assert!(
+            !sys.particles.is_empty(),
+            "impact/smoke (Start=0 Timing=0) should emit near effect spawn, not wait for Timing=60"
+        );
+        assert_eq!(
+            earliest_particle_frame_for_spawn("samus_atk_bomb", 4, &eff, &ptcl),
+            Some(4),
+            "first visible burst should be at effect spawn (active_start + Start=0), not frame 64"
+        );
+    }
+
+    #[test]
+    fn acmd_one_shot_spawn_window_covers_late_emission_timing() {
+        let mut emitter = EmitterDef::default();
+        emitter.is_one_time = true;
+        emitter.emission_timing = 60;
+        emitter.emission_duration = 1;
+        emitter.lifetime = 20.0;
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "bomb".into(),
+                emitters: vec![emitter],
+            }],
+            ..Default::default()
+        };
+        let mut eff = EffIndex::default();
+        eff.handles.insert("samus_atk_bomb".into(), 0);
+
+        let (start, end) = acmd_spawn_window("samus_atk_bomb", 4, 4, &eff, &ptcl);
+        assert!(
+            end > start + 60.0,
+            "one-shot ACMD window must extend past emission_timing=60 (got {start}..{end})"
+        );
+
+        let bone: HashMap<String, Mat4> = [("Trans".to_string(), Mat4::IDENTITY)].into();
+        let mut sys = ParticleSystem::default();
+        sys.spawn_effect(
+            "samus_atk_bomb",
+            "Trans",
+            Vec3::ZERO,
+            Vec3::ZERO,
+            start,
+            end,
+            &eff,
+            &ptcl,
+        );
+        for f in 0..=64u32 {
+            sys.step(f as f32, &bone, &ptcl);
+        }
+        assert!(
+            !sys.particles.is_empty(),
+            "burst at local frame 60 (global 64) should spawn particles with extended window"
+        );
+
+        let mut closed = ParticleSystem::default();
+        closed.spawn_effect(
+            "samus_atk_bomb",
+            "Trans",
+            Vec3::ZERO,
+            Vec3::ZERO,
+            4.0,
+            4.0,
+            &eff,
+            &ptcl,
+        );
+        for f in 0..=64u32 {
+            closed.step(f as f32, &bone, &ptcl);
+        }
+        assert!(
+            closed.particles.is_empty(),
+            "raw ACMD one-frame window (4..4) must not emit at global frame 64"
+        );
+    }
+
+    #[test]
+    fn emitter_start_frame_aligns_emission_window_at_spawn_frame() {
+        let mut emitter = EmitterDef::default();
+        emitter.emission_rate = 4.0;
+        emitter.emission_duration = 5;
+        emitter.lifetime = 30.0;
+        let ptcl = PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "fx".into(),
+                emitters: vec![emitter],
+            }],
+            ..Default::default()
+        };
+        let bone: HashMap<String, Mat4> = [("Trans".to_string(), Mat4::IDENTITY)].into();
+
+        let mut late = ParticleSystem::default();
+        late.active_emitters.push(EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            start_frame: 45.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        });
+        late.step(45.0, &bone, &ptcl);
+        assert!(
+            !late.particles.is_empty(),
+            "start_frame=45 at target=45 should emit (local f=0 inside window)"
+        );
+
+        let mut wrong = ParticleSystem::default();
+        wrong.active_emitters.push(EmitterInstance {
+            emitter_set_idx: 0,
+            emitter_idx: 0,
+            bone_name: "Trans".to_string(),
+            offset: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            start_frame: 0.0,
+            end_frame: 9999.0,
+            emit_accum: 0.0,
+            burst_fired: false,
+            emit_dist_prev_pos: Vec3::ZERO,
+            emit_dist_prev_pos_set: false,
+            emit_dist_vessel: 0.0,
+            prev_world_pos: Vec3::ZERO,
+            prev_world_pos_set: false,
+            death_only: false,
+        });
+        wrong.step(45.0, &bone, &ptcl);
+        assert!(
+            wrong.particles.is_empty(),
+            "start_frame=0 at target=45 should miss emission window (local f=45)"
+        );
+    }
+
+    #[test]
     fn bone_follow_reattaches_when_emitter_moves() {
         let mut emitter = EmitterDef::default();
         emitter.is_update_matrix_by_emit = true;
@@ -6019,7 +6522,10 @@ mod uv_tests {
         bone_mats.insert("Trans".to_string(), Mat4::IDENTITY);
         sys.step(0.0, &bone_mats, &ptcl);
         sys.step(1.0, &bone_mats, &ptcl);
-        assert_eq!(sys.particles.len(), 1, "expected one spawned particle");
+        assert!(
+            !sys.particles.is_empty(),
+            "expected at least one spawned particle"
+        );
         let pos_a = sys.particles[0].position;
         bone_mats.insert("Trans".to_string(), Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)));
         sys.step(2.0, &bone_mats, &ptcl);
@@ -6031,13 +6537,14 @@ mod uv_tests {
     }
 
     #[test]
-    fn follow_type_srt_does_not_reparent_particles_without_update_matrix_by_emit() {
+    fn follow_type_srt_reparents_stationary_particles_without_update_matrix_by_emit() {
         let mut emitter = EmitterDef::default();
         emitter.follow_type = FollowType::Srt;
         emitter.is_update_matrix_by_emit = false;
         emitter.emission_rate = 1.0;
         emitter.lifetime = 60.0;
         emitter.initial_speed = 0.0;
+        emitter.speed_random = 0.0;
         let ptcl = PtclFile {
             emitter_sets: vec![EmitterSet {
                 name: "fx".into(),
@@ -6073,8 +6580,8 @@ mod uv_tests {
         sys.step(2.0, &bone_mats, &ptcl);
         let pos_b = sys.particles[0].position;
         assert!(
-            (pos_b.x - pos_a.x).abs() < 0.01,
-            "SRT follow should not re-parent particles: {pos_a:?} -> {pos_b:?}"
+            (pos_b.x - pos_a.x - 10.0).abs() < 0.1,
+            "stationary SRT-following particles should re-parent with the bone: {pos_a:?} -> {pos_b:?}"
         );
     }
 

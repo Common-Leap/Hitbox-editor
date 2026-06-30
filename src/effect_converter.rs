@@ -1,13 +1,12 @@
-/// EffectConverter CLI wrapper — replaces the hand-rolled VFXB/EFTF binary parser.
+/// Effect loader — parses VFXB/EFTF `.eff`/`.ptcl` files into the Rust types in
+/// `effects.rs`.
 ///
-/// At build time, Cargo's build.rs compiles the C# EffectConverter tool from
-/// extern/effect-library and exposes its path via `EFFECT_CONVERTER_CLI`.
-/// This module invokes the CLI to dump an `.eff` or `.ptcl` file to a folder
-/// of JSON + binary files, then re-assembles them into the existing Rust types
-/// defined in `effects.rs`.
+/// Parsing is done in-process by the `effect_library` crate (a Rust port of the
+/// C# EffectLibrary). The crate dumps an `.eff`/`.ptcl` into a folder of JSON +
+/// binary assets, and [`load_dump`] re-assembles that tree. This replaces the old
+/// `dotnet`-built EffectConverter CLI subprocess.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -19,29 +18,9 @@ use crate::effects::{
 fn default_color_scale() -> f32 {
     1.0
 }
-use crate::shader_registry::{CombinerState, ParticleColorState, ShaderRegistry, audit_ptcl};
-
-// ── CLI discovery ─────────────────────────────────────────────────────────────
-
-fn get_cli_path() -> anyhow::Result<PathBuf> {
-    // Use compile-time embedded path from build.rs
-    if let Some(p) = option_env!("EFFECT_CONVERTER_CLI") {
-        let p = PathBuf::from(p);
-        if p.exists() {
-            return Ok(p);
-        }
-        eprintln!("[EC] EFFECT_CONVERTER_CLI path does not exist: {}", p.display());
-    }
-    // Fallback: search PATH
-    if let Ok(output) = Command::new("EffectConverter").arg("--help").output() {
-        if output.status.success() {
-            return Ok(PathBuf::from("EffectConverter"));
-        }
-    }
-    anyhow::bail!(
-        "EffectConverter CLI not found. Rebuild with .NET 6.0+ SDK available."
-    );
-}
+use crate::shader_registry::{
+    CombinerState, ParticleColorState, ParticleScaleState, ShaderRegistry, audit_ptcl,
+};
 
 // ── Temp / cache (avoid /tmp tmpfs quota exhaustion) ─────────────────────────
 
@@ -52,11 +31,11 @@ fn effect_scratch_dir() -> anyhow::Result<tempfile::TempDir> {
 }
 
 fn effect_dump_cache_root() -> PathBuf {
-    effect_storage_root().join("ptcl-dumps")
+    crate::scratch_dirs::effect_dump_cache_root()
 }
 
 /// Bump when dump parsing or post-load emitter fixes change (invalidates stale caches).
-pub const EFFECT_DUMP_CACHE_VERSION: u32 = 2;
+pub const EFFECT_DUMP_CACHE_VERSION: u32 = 3;
 
 fn cache_key_for_bytes(data: &[u8]) -> String {
     let hash = format!("{:x}", Sha256::digest(data));
@@ -74,8 +53,26 @@ fn fix_all_emitter_tex_scales(ptcl: &mut PtclFile) {
             if emitter.tex_scale_uv != [1.0, 1.0] {
                 continue;
             }
+            if emitter.tex_uv_div[0] > 1 || emitter.tex_uv_div[1] > 1 {
+                if crate::fx_env::fx_viewport_log_enabled() {
+                    eprintln!(
+                        "[ATLAS-UV] emitter '{}' fc={} still tex_scale_uv=[1,1] despite uv_div={:?}",
+                        emitter.name,
+                        emitter.tex_pat_frame_count,
+                        emitter.tex_uv_div,
+                    );
+                }
+                continue;
+            }
             let u = 1.0 / emitter.tex_pat_frame_count as f32;
             emitter.tex_scale_uv = [u, 1.0];
+            if crate::fx_env::fx_viewport_log_enabled() {
+                eprintln!(
+                    "[ATLAS-UV] emitter '{}' fc={}: vertical-strip fallback tex_scale_uv=[{u}, 1]",
+                    emitter.name,
+                    emitter.tex_pat_frame_count,
+                );
+            }
         }
     }
 }
@@ -84,14 +81,38 @@ fn dump_dir_is_usable(dump_dir: &Path) -> bool {
     if !dump_dir.is_dir() {
         return false;
     }
-    if let Ok(rd) = std::fs::read_dir(dump_dir) {
-        for entry in rd.flatten() {
-            if entry.path().is_dir() {
-                return true;
-            }
+    let eset_info_path = dump_dir.join("EmitterSetInfo.txt");
+    if !eset_info_path.exists() {
+        return false;
+    }
+    let text = match std::fs::read_to_string(&eset_info_path) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let info: EmitterSetInfo = serde_json::from_str(&text).unwrap_or_default();
+    !info.order.is_empty()
+}
+
+fn discover_emitter_set_dirs(dump_dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dump_dir) else {
+        return names;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".ptcl") || name.starts_with('.') {
+            continue;
+        }
+        if path.join("EmitterOrder.txt").exists() {
+            names.push(name);
         }
     }
-    false
+    names.sort();
+    names
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
@@ -128,58 +149,34 @@ fn byte_unit_str(n: u64) -> String {
     }
 }
 
-/// Run EffectConverter on `input_path` with CWD = `work_dir` (expects `./input/` dump).
-fn run_effect_converter(cli: &Path, input_path: &Path, work_dir: &Path) -> anyhow::Result<()> {
-    use std::io::Read;
-    eprint!("  >> Converting effect");
-    let mut child = Command::new(cli)
-        .arg(input_path)
-        .current_dir(work_dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("EffectConverter execution failed: {e}"))?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        let mut count = 0usize;
-        let mut reader = std::io::BufReader::new(stdout);
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            for &b in &buf[..n] {
-                if b == b'\n' {
-                    count += 1;
-                }
-            }
-        }
-        count
-    });
-    let spinner = ['|', '/', '-', '\\'];
-    let mut frame = 0usize;
-    while !reader.is_finished() {
-        eprint!("\r  >> {} Converting effect", spinner[frame % 4]);
-        frame += 1;
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
-    let line_count = reader.join().unwrap();
-    let status = child.wait().map_err(|e| anyhow::anyhow!("EffectConverter wait failed: {e}"))?;
-    let stderr_text = std::io::read_to_string(stderr).unwrap_or_default();
-    eprintln!("\r  >> Converted effect ({line_count} sections)                ");
+/// Dump an `.eff` (EFFN) byte buffer to `dump_dir` using the in-process
+/// `effect_library` crate. Produces the same JSON + asset tree the old C#
+/// EffectConverter CLI emitted, so [`load_dump`] consumes it unchanged.
+fn dump_namco_in_process(data: &[u8], dump_dir: &Path) -> anyhow::Result<()> {
+    eprint!("  >> Converting effect (in-process)");
+    let namco = effect_library::NamcoEffectFile::load(data)
+        .map_err(|e| anyhow::anyhow!("effect_library failed to parse .eff: {e}"))?;
+    let out = dump_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("dump path is not valid UTF-8: {dump_dir:?}"))?;
+    effect_library::Dumper::dump_namco(&namco, out)
+        .map_err(|e| anyhow::anyhow!("effect_library dump_namco failed: {e}"))?;
+    eprintln!("\r  >> Converted effect                          ");
+    Ok(())
+}
 
-    if !status.success() {
-        anyhow::bail!(
-            "EffectConverter CLI exited with status {:?}{}",
-            status.code(),
-            if stderr_text.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr_text}")
-            }
-        );
-    }
+/// Dump a standalone `.ptcl` byte buffer (e.g. the resource embedded in an `.eff`)
+/// to `dump_dir` using the in-process `effect_library` crate.
+fn dump_ptcl_in_process(data: &[u8], dump_dir: &Path) -> anyhow::Result<()> {
+    eprint!("  >> Converting effect (in-process)");
+    let ptcl = effect_library::PtclFile::load(data)
+        .map_err(|e| anyhow::anyhow!("effect_library failed to parse .ptcl: {e}"))?;
+    let out = dump_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("dump path is not valid UTF-8: {dump_dir:?}"))?;
+    effect_library::Dumper::dump_ptcl(&ptcl, out)
+        .map_err(|e| anyhow::anyhow!("effect_library dump_ptcl failed: {e}"))?;
+    eprintln!("\r  >> Converted effect                          ");
     Ok(())
 }
 
@@ -202,16 +199,13 @@ pub fn parse_embedded_ptcl(data: &[u8]) -> anyhow::Result<PtclFile> {
         return load_dump(&cached_input);
     }
 
-    let cli = get_cli_path()?;
     let scratch = effect_scratch_dir()?;
-    let input_path = scratch.path().join("input.ptcl");
-    std::fs::write(&input_path, data)?;
-
-    run_effect_converter(&cli, &input_path, scratch.path())?;
-
     let dump_dir = scratch.path().join("input");
+
+    dump_ptcl_in_process(data, &dump_dir)?;
+
     if !dump_dir_is_usable(&dump_dir) {
-        anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
+        anyhow::bail!("effect_library did not produce a usable dump directory at {:?}", dump_dir);
     }
     eprintln!("[EC] Dump dir: {:?}", dump_dir);
 
@@ -233,16 +227,14 @@ pub fn is_effect_io_error(err: &anyhow::Error) -> bool {
 
 /// Load a `.eff` file by dumping it via EffectConverter and reading back the dump.
 pub fn load_ptcl_from_eff(path: &Path) -> anyhow::Result<PtclFile> {
-    let cli = get_cli_path()?;
+    let data = std::fs::read(path)?;
 
     let scratch = effect_scratch_dir()?;
-    let tmp_input = scratch.path().join("input.eff");
-    std::fs::copy(path, &tmp_input)?;
-
-    run_effect_converter(&cli, &tmp_input, scratch.path())?;
     let dump_dir = scratch.path().join("input");
+
+    dump_namco_in_process(&data, &dump_dir)?;
     if !dump_dir.is_dir() {
-        anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
+        anyhow::bail!("effect_library did not produce a dump directory at {:?}", dump_dir);
     }
 
     let ptcl = load_dump(&dump_dir)?;
@@ -251,17 +243,15 @@ pub fn load_ptcl_from_eff(path: &Path) -> anyhow::Result<PtclFile> {
 
 /// Load a standalone `.ptcl` file by dumping it via EffectConverter.
 pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
-    let cli = get_cli_path()?;
+    let data = std::fs::read(path)?;
 
     let scratch = effect_scratch_dir()?;
-    let tmp_input = scratch.path().join("input.ptcl");
-    std::fs::copy(path, &tmp_input)?;
-
-    run_effect_converter(&cli, &tmp_input, scratch.path())?;
-
     let dump_dir = scratch.path().join("input");
+
+    dump_ptcl_in_process(&data, &dump_dir)?;
+
     if !dump_dir.is_dir() {
-        anyhow::bail!("EffectConverter did not produce dump directory at {:?}", dump_dir);
+        anyhow::bail!("effect_library did not produce a dump directory at {:?}", dump_dir);
     }
 
     let ptcl = load_dump(&dump_dir)?;
@@ -272,12 +262,21 @@ pub fn load_ptcl_from_ptcl(path: &Path) -> anyhow::Result<PtclFile> {
 
 pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
     let eset_info_path = dump_dir.join("EmitterSetInfo.txt");
-    let eset_info: EmitterSetInfo = if eset_info_path.exists() {
+    let mut eset_info: EmitterSetInfo = if eset_info_path.exists() {
         let text = std::fs::read_to_string(&eset_info_path)?;
         serde_json::from_str(&text).unwrap_or_default()
     } else {
         EmitterSetInfo { order: vec![] }
     };
+    if eset_info.order.is_empty() {
+        eset_info.order = discover_emitter_set_dirs(dump_dir);
+        if !eset_info.order.is_empty() {
+            eprintln!(
+                "[EC] EmitterSetInfo missing/empty; discovered {} emitter set dirs",
+                eset_info.order.len()
+            );
+        }
+    }
 
     let mut emitter_sets: Vec<EmitterSet> = Vec::new();
     let mut bntx_textures: Vec<TextureRes> = Vec::new();
@@ -428,6 +427,13 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
             emitter.shader_key = emitter_shader_key;
             if emitter.shader_index >= 0 {
                 shader_registry.register_library_index(emitter.shader_index, emitter_shader_key);
+            }
+            if emitter_shader_key != 0 {
+                shader_registry.note_emitter_native_color(
+                    emitter_shader_key,
+                    &emitter.combiner,
+                    &emitter.particle_color,
+                );
             }
 
             // Attach EA*.json animation data
@@ -1276,6 +1282,7 @@ fn convert_emitter_data(
     let emission_rate = json.emission.as_ref().map(|e| e.rate).unwrap_or(8.0);
     let emission_rate_random = json.emission.as_ref().map(|e| e.rate_random).unwrap_or(0.0);
     let is_one_time = json.emission.as_ref().map(|e| e.is_one_time).unwrap_or(false);
+    let emission_start = json.emission.as_ref().map(|e| e.start).unwrap_or(0);
     let emission_timing = json.emission.as_ref().map(|e| e.timing).unwrap_or(0);
     let emission_duration = json.emission.as_ref().map(|e| e.duration).unwrap_or(9999);
 
@@ -1343,12 +1350,25 @@ fn convert_emitter_data(
         }
     }).unwrap_or(glam::Vec3::ZERO);
 
+    // ── Air resistance (per-frame velocity damping) ────────────────────────
+    // 1.0 = no drag. Guard against a missing/zero field zeroing all velocity.
+    let air_res = json
+        .emitter_static
+        .as_ref()
+        .map(|s| s.air_res)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1.0);
+
     // ── Color / alpha / scale animation keys ───────────────────────────────
     let (color0, _color0_keys) = extract_color_keys(json.emitter_static.as_ref().and_then(|s| s.color0.as_ref()));
     let (color1, _color1_keys) = extract_color_keys(json.emitter_static.as_ref().and_then(|s| s.color1.as_ref()));
-    let (alpha0_anim, alpha0_keys) = extract_alpha_keys(json.emitter_static.as_ref().and_then(|s| s.alpha0.as_ref()));
-    let (alpha1_anim, alpha1_keys) = extract_alpha_keys(json.emitter_static.as_ref().and_then(|s| s.alpha1.as_ref()));
-    let scale_anim = extract_scale_anim(json.emitter_static.as_ref().and_then(|s| s.scale_anim.as_ref()));
+    let (alpha0_anim, alpha0_keys) =
+        extract_alpha_keys(json.emitter_static.as_ref().and_then(|s| s.alpha0.as_ref()), lifetime);
+    let (alpha1_anim, alpha1_keys) =
+        extract_alpha_keys(json.emitter_static.as_ref().and_then(|s| s.alpha1.as_ref()), lifetime);
+    let scale_table = json.emitter_static.as_ref().and_then(|s| s.scale_anim.as_ref());
+    let scale_anim = extract_scale_anim(scale_table, lifetime);
+    let scale_keys = extract_scale_keys(scale_table, lifetime);
 
     // Use EmitterInfo base colors as fallback
     let color0 = if color0.is_empty() {
@@ -1403,6 +1423,11 @@ fn convert_emitter_data(
         .as_ref()
         .map(|i| i.draw_path)
         .unwrap_or(0);
+    let (flags1, flags2, flags3, flags4) = json
+        .emitter_static
+        .as_ref()
+        .map(|s| (s.flags1, s.flags2, s.flags3, s.flags4))
+        .unwrap_or((0, 0, 0, 0));
     let color_scale = json
         .emitter_static
         .as_ref()
@@ -1582,6 +1607,13 @@ fn convert_emitter_data(
         || !tex_pat_frame_table.is_empty()
         || tex_pattern_anim_type > 0;
 
+    let tex_uv_div = scroll0
+        .map(|s| {
+            let x = s.uv_div_x.round().max(0.0) as u32;
+            let y = s.uv_div_y.round().max(0.0) as u32;
+            [x, y]
+        })
+        .unwrap_or([0, 0]);
     let tex_scale_uv = {
         // Prefer UVScale/UVDiv from TexScrollAnim (describes frame layout in atlas)
         let (su, sv) = if let Some(s) = scroll0 {
@@ -1844,6 +1876,7 @@ fn convert_emitter_data(
         initial_speed,
         speed_random,
         accel,
+        air_res,
         lifetime,
         lifetime_random,
         scale,
@@ -1858,6 +1891,7 @@ fn convert_emitter_data(
         alpha0_keys,
         alpha1_keys,
         scale_anim,
+        scale_keys,
         textures,
         mesh_type,
         primitive_index,
@@ -1865,6 +1899,7 @@ fn convert_emitter_data(
         tex_scale_uv,
         tex_offset_uv,
         tex_scroll_uv,
+        tex_uv_div,
         tex_pat_frame_count,
         tex_pat_frame_table,
         tex_pat_frequency,
@@ -1900,6 +1935,10 @@ fn convert_emitter_data(
         rot_axis_z,
         offset_type,
         draw_path,
+        flags1,
+        flags2,
+        flags3,
+        flags4,
         color_scale,
         volume_radius,
         volume_form_scale,
@@ -1984,6 +2023,7 @@ fn convert_emitter_data(
             })
             .unwrap_or_default(),
         is_one_time,
+        emission_start,
         emission_timing,
         emission_duration,
         is_indirect_slot1,
@@ -2015,7 +2055,8 @@ fn convert_emitter_data(
         ],
         shader_key: 0,
         combiner: combiner_state,
-        particle_color: json.particle_color.as_ref().map(particle_color_from_json).unwrap_or_default(),
+        particle_color: particle_color_from_emitter_json(json),
+        particle_scale: particle_scale_from_json(json.particle_scale.as_ref()),
         ..Default::default()
     }
 }
@@ -2099,13 +2140,65 @@ fn v50_extra_tex_blends_from_json(
     )
 }
 
-fn particle_color_from_json(p: &ParticleColorJson) -> ParticleColorState {
+fn particle_color_from_emitter_json(json: &EmitterDataJson) -> ParticleColorState {
+    let mut state = json
+        .particle_color
+        .as_ref()
+        .map(particle_color_flags_from_json)
+        .unwrap_or_default();
+    if let Some(s) = json.emitter_static.as_ref() {
+        if s.soft_particle_volume != 0.0 {
+            state.soft_particle_volume = s.soft_particle_volume;
+        }
+        if s.soft_edge_param1 != 0.0 || s.soft_edge_param2 != 0.0 {
+            state.soft_edge_param1 = s.soft_edge_param1;
+            state.soft_edge_param2 = s.soft_edge_param2;
+        }
+        if s.soft_partcile_dist != 0.0 {
+            state.soft_particle_dist = s.soft_partcile_dist;
+        }
+        if s.fresnel_alpha_param1 != 0.0 {
+            state.fresnel_alpha_param1 = s.fresnel_alpha_param1;
+        }
+        if s.fresnel_alpha_param2 != 0.0 {
+            state.fresnel_alpha_param2 = s.fresnel_alpha_param2;
+        }
+        if s.near_dist_alpha_param1 != 0.0 {
+            state.near_dist_alpha_param1 = s.near_dist_alpha_param1;
+        }
+        if s.near_dist_alpha_param2 != 0.0 {
+            state.near_dist_alpha_param2 = s.near_dist_alpha_param2;
+        }
+        if s.far_dist_alpha_param1 != 0.0 {
+            state.far_dist_alpha_param1 = s.far_dist_alpha_param1;
+        }
+        if s.far_dist_alpha_param2 != 0.0 {
+            state.far_dist_alpha_param2 = s.far_dist_alpha_param2;
+        }
+    }
+    state
+}
+
+fn particle_scale_from_json(json: Option<&ParticleScaleJson>) -> ParticleScaleState {
+    json.map(|s| {
+        ParticleScaleState::from_fields(
+            s.enable_scaling_by_camera_dist_near,
+            s.enable_scaling_by_camera_dist_far,
+            s.scale_min,
+            s.scale_max,
+        )
+    })
+    .unwrap_or_default()
+}
+
+fn particle_color_flags_from_json(p: &ParticleColorJson) -> ParticleColorState {
     ParticleColorState {
         is_soft_particle: p.is_soft_particle != 0,
         is_fresnel_alpha: p.is_fresnel_alpha != 0,
         is_near_dist_alpha: p.is_near_dist_alpha != 0,
         is_far_dist_alpha: p.is_far_dist_alpha != 0,
         is_decal: p.is_decal != 0,
+        ..Default::default()
     }
 }
 
@@ -2128,16 +2221,17 @@ fn extract_color_keys(table: Option<&AnimKeyTableJson>) -> (Vec<ColorKey>, Vec<C
     (keys.clone(), keys)
 }
 
-fn extract_alpha_keys(table: Option<&AnimKeyTableJson>) -> (AnimKey3v4k, Vec<ColorKey>) {
+fn extract_alpha_keys(table: Option<&AnimKeyTableJson>, lifetime: f32) -> (AnimKey3v4k, Vec<ColorKey>) {
     let Some(table) = table else {
         return (AnimKey3v4k::default(), vec![]);
     };
-    let pairs: Vec<(f32, f32)> = table
+    let mut pairs: Vec<(f32, f32)> = table
         .keys
         .iter()
         .filter(|k| k.time != 0.0 || k.x != 0.0)
         .map(|k| (k.time, k.x))
         .collect();
+    normalize_anim_key_pairs(&mut pairs, lifetime);
     let anim = build_anim_key_3v4k(&pairs);
     let keys: Vec<ColorKey> = pairs
         .iter()
@@ -2152,7 +2246,44 @@ fn extract_alpha_keys(table: Option<&AnimKeyTableJson>) -> (AnimKey3v4k, Vec<Col
     (anim, keys)
 }
 
-fn extract_scale_anim(table: Option<&AnimKeyTableJson>) -> AnimKey3v4k {
+fn normalize_anim_key_pairs(pairs: &mut [(f32, f32)], lifetime: f32) {
+    if pairs.is_empty() {
+        return;
+    }
+    let max_t = pairs.iter().map(|p| p.0).fold(0.0f32, f32::max);
+    let denom = if max_t > 1.0 + 1e-3 {
+        max_t.max(lifetime.max(1.0))
+    } else {
+        1.0
+    };
+    for (t, _) in pairs.iter_mut() {
+        *t = (*t / denom).clamp(0.0, 1.0);
+    }
+}
+
+/// Full scale key table (up to 8 keys), normalized to [0,1] time, value in every
+/// channel so [`crate::effects::sample_alpha`] (reads `.x`) works. Mirrors
+/// [`extract_alpha_keys`]. Empty when the table is absent so the sim falls back to
+/// the 3v4k approximation.
+fn extract_scale_keys(table: Option<&AnimKeyTableJson>, lifetime: f32) -> Vec<ColorKey> {
+    let Some(table) = table else { return vec![] };
+    let mut pairs: Vec<(f32, f32)> = table
+        .keys
+        .iter()
+        .filter(|k| k.time != 0.0 || k.x != 0.0)
+        .map(|k| (k.time, k.x))
+        .collect();
+    if pairs.is_empty() {
+        return vec![];
+    }
+    normalize_anim_key_pairs(&mut pairs, lifetime);
+    pairs
+        .iter()
+        .map(|&(t, v)| ColorKey { frame: t, r: v, g: v, b: v, a: v })
+        .collect()
+}
+
+fn extract_scale_anim(table: Option<&AnimKeyTableJson>, lifetime: f32) -> AnimKey3v4k {
     let Some(table) = table else {
         return AnimKey3v4k {
             start_value: 1.0,
@@ -2171,30 +2302,9 @@ fn extract_scale_anim(table: Option<&AnimKeyTableJson>) -> AnimKey3v4k {
             time3: 0.8,
         };
     }
-    let k0 = &table.keys[0];
-    let start_value = k0.x;
-    let (start_diff, time2) = if table.keys.len() > 1 {
-        (
-            table.keys[1].x - start_value,
-            table.keys[1].time,
-        )
-    } else {
-        (0.0, 0.5)
-    };
-    let (end_diff, time3) = if table.keys.len() > 2 {
-        let last = table.keys.last().unwrap();
-        let prev = &table.keys[table.keys.len() - 2];
-        (last.x - prev.x, last.time)
-    } else {
-        (0.0, 0.8)
-    };
-    AnimKey3v4k {
-        start_value,
-        start_diff,
-        end_diff,
-        time2,
-        time3,
-    }
+    let mut pairs: Vec<(f32, f32)> = table.keys.iter().map(|k| (k.time, k.x)).collect();
+    normalize_anim_key_pairs(&mut pairs, lifetime);
+    build_anim_key_3v4k(&pairs)
 }
 
 fn build_anim_key_3v4k(pairs: &[(f32, f32)]) -> AnimKey3v4k {
@@ -2409,6 +2519,36 @@ mod tests {
         assert_eq!(emitter.tex_extra_slots[1].wrap_u, 2);
         assert_eq!(emitter.tex_extra_slots[2].wrap_u, 2);
         assert_eq!(emitter.tex_extra_slots[2].wrap_v, 0);
+    }
+
+    #[test]
+    fn maps_emitter_static_flags_to_emitter_def() {
+        let json = EmitterDataJson {
+            name: Some("flags".to_string()),
+            emitter_static: Some(EmitterStaticJson {
+                flags1: 0x40,
+                flags2: 0x80,
+                flags3: 0x01,
+                flags4: 0x02,
+                ..Default::default()
+            }),
+            emitter_info: Some(EmitterInfoJson {
+                draw_path: 3,
+                ..Default::default()
+            }),
+            render_state: Some(RenderStateJson {
+                display_side: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let emitter = convert_emitter_data(&json, "flags", &[], &[]);
+        assert_eq!(emitter.flags1, 0x40);
+        assert_eq!(emitter.flags2, 0x80);
+        assert_eq!(emitter.flags3, 0x01);
+        assert_eq!(emitter.flags4, 0x02);
+        assert_eq!(emitter.draw_path, 3);
+        assert_eq!(emitter.display_side, DisplaySide::Front);
     }
 
     #[test]
@@ -2681,5 +2821,29 @@ mod tests {
         assert_eq!(prim.vertices[0].position, [1.0, 0.0, 0.0]);
         assert_eq!(prim.vertices[1].position[1], 2.0);
         assert_eq!(prim.indices, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn maps_particle_scale_and_distortion_by_camera_distance() {
+        let json = EmitterDataJson {
+            name: Some("cam_dist_distort".to_string()),
+            combiner: Some(CombinerJson {
+                is_distortion_by_camera_distance: 1,
+                ..Default::default()
+            }),
+            particle_scale: Some(ParticleScaleJson {
+                scale_min: 50.0,
+                scale_max: 120.0,
+                enable_scaling_by_camera_dist_near: 1,
+                enable_scaling_by_camera_dist_far: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let emitter = convert_emitter_data(&json, "cam_dist_distort", &[], &[]);
+        assert_eq!(emitter.combiner.is_distortion_by_camera_distance, 1);
+        assert_eq!(emitter.particle_scale.enable_scaling_by_camera_dist_near, 1);
+        assert!((emitter.particle_scale.scale_min - 50.0).abs() < f32::EPSILON);
+        assert!((emitter.particle_scale.scale_max - 120.0).abs() < f32::EPSILON);
     }
 }
