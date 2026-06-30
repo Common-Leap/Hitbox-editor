@@ -2181,11 +2181,72 @@ impl HitboxEditorApp {
             }
         }
     }
+
+    /// One-shot effect test: if `HITBOX_AUTOLOAD_FIGHTER` (+ optional
+    /// `HITBOX_AUTOLOAD_EFFECT`) env vars are set, load that fighter and spawn the
+    /// named emitter set at origin, then play. Runs once. Lets a single shell command
+    /// open the editor straight onto a specific effect.
+    fn maybe_autoload(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Ok(fighter) = std::env::var("HITBOX_AUTOLOAD_FIGHTER") else { return };
+        let Some(idx) = self
+            .state
+            .fighters
+            .iter()
+            .position(|f| f.name.eq_ignore_ascii_case(fighter.trim()))
+        else {
+            eprintln!(
+                "[AUTOLOAD] fighter '{fighter}' not found among {} fighters",
+                self.state.fighters.len()
+            );
+            return;
+        };
+        eprintln!("[AUTOLOAD] loading fighter '{fighter}' (idx {idx})");
+        self.select_fighter(idx);
+
+        let Ok(effect) = std::env::var("HITBOX_AUTOLOAD_EFFECT") else { return };
+        let effect = effect.trim().to_string();
+        // Alias the emitter-set name to a handle so spawn_effect resolves it.
+        if let (Some(eff_index), Some(ptcl)) =
+            (self.state.eff_index.as_mut(), self.state.ptcl.as_ref())
+        {
+            match ptcl.emitter_sets.iter().position(|s| s.name.eq_ignore_ascii_case(&effect)) {
+                Some(set_idx) => {
+                    eff_index.handles.entry(effect.clone()).or_insert(set_idx as i32);
+                    eff_index.handles.entry(effect.to_lowercase()).or_insert(set_idx as i32);
+                }
+                None => eprintln!(
+                    "[AUTOLOAD] effect set '{effect}' not found; first sets: {:?}",
+                    ptcl.emitter_sets.iter().map(|s| &s.name).take(10).collect::<Vec<_>>()
+                ),
+            }
+        }
+        let crate::data::AppState { particle_system, eff_index, ptcl, .. } = &mut self.state;
+        if let (Some(eff_index), Some(ptcl)) = (eff_index.as_ref(), ptcl.as_ref()) {
+            particle_system.spawn_effect(
+                &effect,
+                "top",
+                glam::Vec3::ZERO,
+                glam::Vec3::ZERO,
+                0.0,
+                9999.0,
+                eff_index,
+                ptcl,
+            );
+        }
+        self.state.playing = true;
+        eprintln!("[AUTOLOAD] spawned '{effect}' at origin, playing");
+    }
 }
 
 impl eframe::App for HitboxEditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx();
+        self.maybe_autoload();
         // Poll background move list loader
         if let Some(rx) = &self.move_list_receiver {
             if let Ok(moves) = rx.try_recv() {
