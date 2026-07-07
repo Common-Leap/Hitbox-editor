@@ -1,4 +1,9 @@
 //! NintendoWare emitter combiner — maps `CombinerState` to CPU particle color
+//! and GPU cbuf_8/cbuf_16 + `_fx_tex_blend` uniforms for native FS.
+//!
+//! GPU path status (native FS): primary + tex1/tex2 (`@group(1)`) + TextureAnim3–5
+//! use `_fx_tex_blend` and `@group(2)` extra textures; tex1 is skipped when slot-1
+//! is indirect (distortion map).
 //! and GPU NVN chain coefficient slots (cbuf_8[6-7], cbuf_16[1-3]).
 //!
 //! Blend / process values follow PTCL / Eft conventions (see NSMBU PTCL wiki):
@@ -70,6 +75,19 @@ fn fs_cbuf_16_slot_2(op: CombinerBlendOp, table_threshold: f32) -> [f32; 4] {
     [1.0, y, table_threshold, 0.0]
 }
 
+/// Native FS cbuf_16[0]: `.x` scales all three RGB GPR outputs before `frag_color0_`.
+pub fn fs_cbuf_16_slot_0(color_scale: f32) -> [f32; 4] {
+    let s = color_scale.max(0.0);
+    [s, s, s, 1.0]
+}
+
+/// Native FS cbuf_16[4]: branch threshold (`.y`), fma bias (`.z`), and weight (`.w`).
+/// Bomb-style FS compares `gpr_9 >= .y` to enable the colour chain; a large negative
+/// threshold keeps the branch enabled for typical non-negative GPR values.
+pub fn fs_cbuf_16_slot_4() -> [f32; 4] {
+    [0.0, -1.0e6, 0.0, 0.0]
+}
+
 /// Native FS cbuf_16[3]: `.z` is the fma bias on the primitive-colour branch.
 fn fs_cbuf_16_slot_3(op: CombinerBlendOp) -> [f32; 4] {
     match op {
@@ -109,6 +127,17 @@ fn color_process_coeffs(process: u32) -> ([f32; 4], [f32; 4]) {
 fn alpha_process_coeffs(process: u32) -> ([f32; 4], [f32; 4]) {
     // Alpha combiner uses the same process encoding as color in most emitters.
     color_process_coeffs(process)
+}
+
+/// cbuf_9[59]: colour Hermite pair-1 blend weights (native FS global colour multiplier).
+pub fn cbuf_9_slot_59_blend(combiner: &CombinerState) -> [f32; 4] {
+    let coeffs = eval_combiner_gpu_coeffs(combiner);
+    [
+        coeffs.cbuf_8_slot_6[0],
+        coeffs.cbuf_8_slot_6[1],
+        coeffs.cbuf_8_slot_6[2],
+        coeffs.cbuf_8_slot_7[3],
+    ]
 }
 
 /// Build GPU coefficient vectors from emitter combiner state.
@@ -297,11 +326,11 @@ pub fn combiner_extra_tex_blend(
 }
 
 fn combiner_phys_slot_blend_raw(combiner: &CombinerState, phys_slot: u32) -> (u32, u32) {
-    let cbuf_slot = combiner_cbuf16_slot_for_phys_texture(combiner, phys_slot).unwrap_or(1);
-    if combiner.has_v50_extra_tex_blend && (3..=5).contains(&phys_slot) {
-        extra_tex_blend_raw(combiner, phys_slot as usize - 3, cbuf_slot)
-    } else {
-        match cbuf_slot {
+    if let Some(cbuf_slot) = combiner_cbuf16_slot_for_phys_texture(combiner, phys_slot) {
+        if combiner.has_v50_extra_tex_blend && (3..=5).contains(&phys_slot) {
+            return extra_tex_blend_raw(combiner, phys_slot as usize - 3, cbuf_slot);
+        }
+        return match cbuf_slot {
             1 => (
                 combiner.texture1_color_blend,
                 combiner.texture1_alpha_blend,
@@ -314,14 +343,42 @@ fn combiner_phys_slot_blend_raw(combiner: &CombinerState, phys_slot: u32) -> (u3
                 combiner.primitive_color_blend,
                 combiner.primitive_alpha_blend,
             ),
+        };
+    }
+    match phys_slot {
+        0 => (combiner.texture1_color_blend, combiner.texture1_alpha_blend),
+        1 => (combiner.texture1_color_blend, combiner.texture1_alpha_blend),
+        2 => (combiner.texture2_color_blend, combiner.texture2_alpha_blend),
+        _ => (
+            combiner.primitive_color_blend,
+            combiner.primitive_alpha_blend,
+        ),
+    }
+}
+
+/// FS cbuf_16 coeff for a physical texture slot (0..5) routed through combiner channels.
+pub fn combiner_phys_slot_cbuf16_coeff(combiner: &CombinerState, phys_slot: u32) -> [f32; 4] {
+    let cbuf_slot = combiner_cbuf16_slot_for_phys_texture(combiner, phys_slot).unwrap_or_else(|| {
+        match phys_slot {
+            0 => 1,
+            1 => 2,
+            _ => 3,
         }
+    });
+    let (color_raw, _) = combiner_phys_slot_blend_raw(combiner, phys_slot);
+    let color_op = blend_op_from_raw(color_raw);
+    let table_threshold = color_table_chain_threshold(combiner.color_combiner_process)
+        .min(color_table_chain_threshold(combiner.alpha_combiner_process));
+    match cbuf_slot {
+        1 => fs_cbuf_16_slot_1(color_op),
+        2 => fs_cbuf_16_slot_2(color_op, table_threshold),
+        _ => fs_cbuf_16_slot_3(color_op),
     }
 }
 
 /// FS cbuf_16[1]-format coeff for primary `@group(1)` color_tex (physical slot 0).
 pub fn combiner_primary_tex_cbuf16_coeff(combiner: &CombinerState) -> [f32; 4] {
-    let (color_raw, _) = combiner_phys_slot_blend_raw(combiner, 0);
-    fs_cbuf_16_slot_1(blend_op_from_raw(color_raw))
+    combiner_phys_slot_cbuf16_coeff(combiner, 0)
 }
 
 /// FS cbuf_16 coeff for injected extra tex `extra_idx` (0=tex3 … 2=tex5).
@@ -340,15 +397,30 @@ pub fn combiner_injected_extra_tex_cbuf16_coeff(
     }
 }
 
-/// Per-draw `@group(2)` uniform: primary + tex3–5 blend coeff vec4s (64 bytes).
-pub fn combiner_draw_tex_blend_uniform(combiner: &CombinerState) -> [f32; 16] {
-    let mut out = [0.0f32; 16];
+/// Per-draw `@group(2)` uniform: primary + tex1/tex2 + tex3–5 blend coeff vec4s (96 bytes).
+pub fn combiner_draw_tex_blend_uniform(combiner: &CombinerState) -> [f32; 24] {
+    let mut out = [0.0f32; 24];
     out[0..4].copy_from_slice(&combiner_primary_tex_cbuf16_coeff(combiner));
+    out[4..8].copy_from_slice(&combiner_phys_slot_cbuf16_coeff(combiner, 1));
+    out[8..12].copy_from_slice(&combiner_phys_slot_cbuf16_coeff(combiner, 2));
     for i in 0..3 {
         let coeff = combiner_injected_extra_tex_cbuf16_coeff(combiner, i);
-        out[(1 + i) * 4..(2 + i) * 4].copy_from_slice(&coeff);
+        out[(3 + i) * 4..(4 + i) * 4].copy_from_slice(&coeff);
     }
     out
+}
+
+/// True when combiner references physical texture slot `phys_slot` (color or alpha input).
+pub fn combiner_references_phys_texture(combiner: &CombinerState, phys_slot: u32) -> bool {
+    let channels = [
+        (combiner.tex_color0_input_type, combiner.tex_alpha0_input_type),
+        (combiner.tex_color1_input_type, combiner.tex_alpha1_input_type),
+        (combiner.tex_color2_input_type, combiner.tex_alpha2_input_type),
+    ];
+    channels.iter().any(|&(color_in, alpha_in)| {
+        combiner_input_phys_slot(color_in) == Some(phys_slot)
+            || combiner_input_phys_slot(alpha_in) == Some(phys_slot)
+    })
 }
 
 /// Returns which combiner texture input slots (0=color, 1=alpha/indirect, 2=tertiary) are active.
@@ -579,5 +651,33 @@ mod tests {
         c.texture5_color_blend = 2;
         let (_, color_op, _) = combiner_extra_tex_blend(&c, 2);
         assert_eq!(color_op, CombinerBlendOp::Subtract);
+    }
+
+    #[test]
+    fn test_combiner_draw_tex_blend_uniform_includes_tex1_tex2() {
+        let mut c = CombinerState::default();
+        c.texture1_color_blend = 1;
+        c.texture2_color_blend = 2;
+        let uniform = combiner_draw_tex_blend_uniform(&c);
+        assert!((uniform[5] - 1.0).abs() < 0.001, "tex1 add sets ch12 .y");
+        assert!((uniform[10] - -1.0).abs() < 0.001, "tex2 subtract sets ch3 .z");
+        assert_eq!(uniform.len(), 24);
+    }
+
+    #[test]
+    fn test_combiner_phys_slot_cbuf16_coeff_routes_channel2() {
+        let mut c = CombinerState::default();
+        c.texture2_color_blend = 1;
+        c.tex_color1_input_type = 3; // Texture2
+        let coeff = combiner_phys_slot_cbuf16_coeff(&c, 2);
+        assert!((coeff[1] - 1.0).abs() < 0.001, "phys slot 2 on channel2 uses add via .y");
+    }
+
+    #[test]
+    fn test_combiner_references_phys_texture() {
+        let mut c = CombinerState::default();
+        c.tex_color1_input_type = 2; // Texture1
+        assert!(combiner_references_phys_texture(&c, 1));
+        assert!(!combiner_references_phys_texture(&c, 2));
     }
 }

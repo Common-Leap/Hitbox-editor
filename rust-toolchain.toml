@@ -1,0 +1,6 @@
+[toolchain]
+# The repo's Cargo.lock is version 4, which needs cargo >= 1.78. The rustup default
+# here (nightly-2024-01-01 / cargo 1.77) is too old and fails with
+# "lock file version 4 requires -Znext-lockfile-bump". Pin the working toolchain so
+# plain `cargo run` / `cargo build` use it automatically.
+channel = "nightly-2026-02-14"

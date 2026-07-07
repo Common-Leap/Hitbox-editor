@@ -41,6 +41,10 @@ tegra_swizzle = "0.4"
 bntx = { git = "https://github.com/ScanMountGoat/bntx" }
 binrw = "0.15"
 image_dds = { version = "0.6", default-features = false }
+# PNG encode/decode for the regression harness (src/regression.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Decompress Ryujinx capture frame dumps (frames/*.rgba.gz).
+flate2 = "1"
 
 # Async + HTTP (for ACMD fetch)
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
@@ -59,8 +63,8 @@ tempfile = "3"
 winit = "0.30"
 
 [dev-dependencies]
+naga = "29"
 proptest = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 wgsl_to_wgpu = "0.18"

@@ -21,6 +21,8 @@ mod shader_registry;
 mod scratch_dirs;
 mod sphere_volume_tables;
 mod fx_env;
+mod trail_shader;
+mod blit_shader;
 pub(crate) use fx_env::{fx_debug_enabled, fx_native_fs_enabled, fx_native_vs_pos_enabled};
 
 #[cfg(test)]
@@ -37,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     // Native FS (NVN colour chain + texture enhance) is the default.
     // Set FX_PATCHED_FS=1 or FX_NATIVE_FS=0 for legacy patch_fragment_wgsl.
 
+    scratch_dirs::dev_refresh_storage_on_startup();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SSBU Hitbox Editor")
@@ -67,11 +70,7 @@ fn main() -> anyhow::Result<()> {
                     wgpu::DeviceDescriptor {
                         label: Some("hitbox_editor"),
                         required_features: features,
-                        required_limits: {
-                            let mut limits = wgpu::Limits::default();
-                            limits.max_sampled_textures_per_shader_stage = 32;
-                            limits
-                        },
+                        required_limits: crate::particle_renderer_bnsh::wgpu_device_limits(adapter),
                         memory_hints: wgpu::MemoryHints::default(),
                         ..Default::default()
                     }

@@ -7,6 +7,80 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
+/// Driver jump-table indirection buffer size (2^5) per bnsh-decoder README.
+pub const STR_INDEX_BUFFER_SIZE: usize = 32;
+
+/// README `getConstantBufferBindingIndices`: map GPU slot → cbuffer dictionary index.
+pub fn get_constant_buffer_binding_indices(slt: &[u32]) -> Vec<u32> {
+    if slt.is_empty() {
+        return Vec::new();
+    }
+    let size = slt
+        .iter()
+        .copied()
+        .max()
+        .map(|m| (m as usize + 1).max(slt.len()))
+        .unwrap_or(slt.len())
+        .min(STR_INDEX_BUFFER_SIZE);
+    let mut out = vec![u32::MAX; size];
+    for (ii, &slot) in slt.iter().enumerate() {
+        let idx = slot as usize;
+        if idx < size {
+            out[idx] = ii as u32;
+        }
+    }
+    out
+}
+
+/// README `getSamplerBindingIndices`: resolve texture binding per sampler via strIndexBuffer.
+pub fn get_sampler_binding_indices(str: &[u32], slt: &[u32], smp: &[u32]) -> Vec<u32> {
+    let size = str.len();
+    if size == 0 {
+        return Vec::new();
+    }
+    debug_assert_eq!(slt.len(), size);
+    debug_assert_eq!(smp.len(), size);
+
+    let mut str_index_buffer = vec![0u32; STR_INDEX_BUFFER_SIZE];
+    for ii in 0..size {
+        let idx = slt[ii] as usize;
+        if idx < STR_INDEX_BUFFER_SIZE {
+            str_index_buffer[idx] = str[ii];
+        }
+    }
+    let mut out = vec![0u32; size];
+    for ii in 0..size {
+        let idx = smp[ii] as usize;
+        if idx < STR_INDEX_BUFFER_SIZE {
+            out[ii] = str_index_buffer[idx];
+        }
+    }
+    out
+}
+
+/// Match material slot keys (`_col`, `_emi`, …) to shader sampler dictionary names (`tex_col`, …).
+pub fn match_material_sampler_name<'a>(
+    material_key: &str,
+    sampler_names: &'a [String],
+) -> Option<&'a String> {
+    for name in sampler_names {
+        if name.eq_ignore_ascii_case(material_key) {
+            return Some(name);
+        }
+    }
+    let key = material_key.trim_start_matches('_').to_ascii_lowercase();
+    for name in sampler_names {
+        let lower = name.to_ascii_lowercase();
+        if lower == key
+            || lower == format!("tex_{key}")
+            || lower.ends_with(&format!("_{key}"))
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
 /// Parsed reflection data from a single shader stage (vertex, fragment, compute, etc.)
 #[derive(Debug, Clone, Default)]
 pub struct ShaderStageReflection {
@@ -46,17 +120,60 @@ impl ShaderStageReflection {
         table
     }
 
-    /// Build the driver jump table for constant buffers
+    /// Build the driver jump table for constant buffers (README `getConstantBufferBindingIndices`).
     pub fn build_cbuffer_jump_table(&self) -> HashMap<String, u32> {
-        let mut table = HashMap::new();
-        for (cbuf_idx, cbuf_name) in self.constant_buffer_names.iter().enumerate() {
-            let slot_idx = self.index_constant_buffer as usize + cbuf_idx;
-            if slot_idx < self.shader_slots.len() {
-                let gpu_slot = self.shader_slots[slot_idx];
-                table.insert(cbuf_name.clone(), gpu_slot);
+        self.build_cbuffer_binding_pairs()
+            .into_iter()
+            .collect()
+    }
+
+    /// slt slice used by README cbuffer/sampler jump-table resolution.
+    pub fn cbuffer_slt_slice(&self) -> Vec<u32> {
+        self.shader_slot_slice(self.index_shader_output, self.index_image)
+    }
+
+    /// Per-cbuffer (name, gpu_binding_slot) via driver jump table, with direct-slot fallback.
+    pub fn build_cbuffer_binding_pairs(&self) -> Vec<(String, u32)> {
+        let cbuf_count = self.constant_buffer_names.len();
+        if cbuf_count == 0 {
+            return Vec::new();
+        }
+
+        let slt = self.cbuffer_slt_slice();
+        if !slt.is_empty() {
+            let indices = get_constant_buffer_binding_indices(&slt);
+            let mut pairs = Vec::new();
+            for (gpu_slot, &dict_idx) in indices.iter().enumerate() {
+                if dict_idx == u32::MAX {
+                    continue;
+                }
+                let dict_idx = dict_idx as usize;
+                if dict_idx >= cbuf_count {
+                    continue;
+                }
+                pairs.push((
+                    self.constant_buffer_names[dict_idx].clone(),
+                    gpu_slot as u32,
+                ));
+            }
+            if !pairs.is_empty() {
+                return pairs;
             }
         }
-        table
+
+        let start = self.index_constant_buffer as usize;
+        self.constant_buffer_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let gpu_slot = self
+                    .shader_slots
+                    .get(start + i)
+                    .copied()
+                    .unwrap_or(i as u32);
+                (name.clone(), gpu_slot)
+            })
+            .collect()
     }
 
     /// Build the driver jump table for texture/image resources.
@@ -72,19 +189,102 @@ impl ShaderStageReflection {
         table
     }
 
-    /// Ordered (texture_binding, sampler_binding) pairs for emitter slots 0/1/2.
-    ///
-    /// NVN reflection stores sampler GPU slots; on desktop the texture binding is
-    /// typically the sampler slot and the paired sampler is at slot+1 (same layout
-    /// used by material texture bind groups).
-    pub fn build_ordered_texture_pairs(&self) -> Vec<(u32, u32)> {
-        let mut entries: Vec<(String, u32)> = self.build_sampler_jump_table().into_iter().collect();
-        entries.sort_by_key(|(_, slot)| *slot);
-        entries
-            .into_iter()
-            .take(3)
-            .map(|(_, tex_binding)| (tex_binding, tex_binding.saturating_add(1)))
+    fn shader_slot_slice(&self, start: u32, end: u32) -> Vec<u32> {
+        let s = start as usize;
+        let e = end as usize;
+        if s <= e && e <= self.shader_slots.len() {
+            self.shader_slots[s..e].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// str / slt / smp slices for README bindless resolution.
+    pub fn sampler_texture_binding_arrays(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let str_ = self.shader_slot_slice(self.index_image, self.index_sampler);
+        let mut slt = self.shader_slot_slice(self.index_shader_output, self.index_image);
+        let smp = self.shader_slot_slice(self.index_sampler, self.index_constant_buffer);
+        let size = str_.len();
+        if slt.len() != size {
+            if slt.is_empty() && size > 0 {
+                slt = (0..size as u32).collect();
+            } else if slt.len() > size {
+                slt.truncate(size);
+            }
+        }
+        let mut smp_aligned = smp;
+        if smp_aligned.len() > size {
+            smp_aligned.truncate(size);
+        }
+        while smp_aligned.len() < size {
+            smp_aligned.push(0);
+        }
+        (str_, slt, smp_aligned)
+    }
+
+    /// Per-sampler (texture_binding, sampler_binding) using README jump-table resolution.
+    pub fn build_sampler_texture_pairs(&self) -> Vec<(String, u32, u32)> {
+        let (str_, slt, smp) = self.sampler_texture_binding_arrays();
+        if str_.is_empty() || smp.is_empty() || self.sampler_names.is_empty() {
+            return self.build_sampler_texture_pairs_fallback();
+        }
+        let tex_bindings = get_sampler_binding_indices(&str_, &slt, &smp);
+        self.sampler_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let sampler_binding = self.shader_slots
+                    .get(self.index_sampler as usize + i)
+                    .copied()
+                    .unwrap_or(0);
+                let tex_binding = tex_bindings
+                    .get(i)
+                    .copied()
+                    .unwrap_or(sampler_binding);
+                (name.clone(), tex_binding, sampler_binding)
+            })
             .collect()
+    }
+
+    fn build_sampler_texture_pairs_fallback(&self) -> Vec<(String, u32, u32)> {
+        self.sampler_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let sampler_binding = self.shader_slots
+                    .get(self.index_sampler as usize + i)
+                    .copied()
+                    .unwrap_or(0);
+                (name.clone(), sampler_binding, sampler_binding.saturating_add(1))
+            })
+            .collect()
+    }
+
+    /// Ordered (texture_binding, sampler_binding) pairs for emitter slots 0/1/2.
+    pub fn build_ordered_texture_pairs(&self) -> Vec<(u32, u32)> {
+        let mut entries: Vec<(u32, u32)> = self
+            .build_sampler_texture_pairs()
+            .into_iter()
+            .map(|(_, tex, smp)| (tex, smp))
+            .collect();
+        entries.sort_by_key(|(tex, _)| *tex);
+        entries.into_iter().take(3).collect()
+    }
+
+    /// Material texture WGSL binding slots for _col / _emi / _prm.
+    pub fn material_texture_slots(&self) -> (u32, u32, u32) {
+        let tex_by_sampler: HashMap<String, u32> = self
+            .build_sampler_texture_pairs()
+            .into_iter()
+            .map(|(name, tex, _)| (name, tex))
+            .collect();
+        let slot = |key: &str, default: u32| -> u32 {
+            match_material_sampler_name(key, &self.sampler_names)
+                .and_then(|n| tex_by_sampler.get(n))
+                .copied()
+                .unwrap_or(default)
+        };
+        (slot("_col", 0), slot("_emi", 2), slot("_prm", 4))
     }
 }
 
@@ -171,7 +371,8 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
     // +0x34: index_unordered_access_buffer (u4)
     // +0x38: ofs_shader_slot_array (u4)
     // +0x3C: compute_workgroup_size_x/y/z (u4 x3)
-    // +0x48: index_image (u4) - for texture bindless resolution (unused for now)
+    // +0x48: index_image (u4)
+    // +0x4C: ofs_image_dictionary (u4)
 
     let read_u8 = |off: usize| -> u64 {
         if off + 8 > data.len() {
@@ -190,7 +391,7 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
     let ofs_input_dict = read_u8(ofs_reflection + 0x00) as usize;
     let ofs_sampler_dict = read_u8(ofs_reflection + 0x10) as usize;
     let ofs_cbuffer_dict = read_u8(ofs_reflection + 0x18) as usize;
-    let ofs_image_dict = read_u8(ofs_reflection + 0x20) as usize;
+    let ofs_image_dict = read_u4(ofs_reflection + 0x4C) as usize;
     let index_shader_output = read_u4(ofs_reflection + 0x28);
     let index_sampler = read_u4(ofs_reflection + 0x2C);
     let index_constant_buffer = read_u4(ofs_reflection + 0x30);
@@ -204,11 +405,11 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
     let constant_buffer_names = parse_dictionary(data, ofs_cbuffer_dict).unwrap_or_default();
     let texture_names = parse_dictionary(data, ofs_image_dict).unwrap_or_default();
 
-    // Parse shader slot array (array of u32 indices)
-    let mut shader_slots = Vec::new();
+    // Parse shader slot array (length = index_unordered_access_buffer per BNSH.ksy)
+    let slot_count = index_unordered_access_buffer as usize;
+    let mut shader_slots = Vec::with_capacity(slot_count);
     let mut slot_offset = ofs_shader_slot_array;
-    for _ in 0..256 {
-        // Reasonable upper limit
+    for _ in 0..slot_count {
         if slot_offset + 4 > data.len() {
             break;
         }
@@ -216,21 +417,23 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
         slot_offset += 4;
     }
 
-    eprintln!(
-        "[BNSH_REFL] Stage reflection: {} samplers, {} cbuffers, {} textures, {} slots",
-        sampler_names.len(),
-        constant_buffer_names.len(),
-        texture_names.len(),
-        shader_slots.len()
-    );
-    if !sampler_names.is_empty() {
+    if crate::fx_debug_enabled() {
         eprintln!(
-            "[BNSH_REFL]   Samplers: {:?}",
-            &sampler_names[..sampler_names.len().min(3)]
+            "[BNSH_REFL] Stage reflection: {} samplers, {} cbuffers, {} textures, {} slots",
+            sampler_names.len(),
+            constant_buffer_names.len(),
+            texture_names.len(),
+            shader_slots.len()
         );
+        if !sampler_names.is_empty() {
+            eprintln!(
+                "[BNSH_REFL]   Samplers: {:?}",
+                &sampler_names[..sampler_names.len().min(3)]
+            );
+        }
     }
 
-    Ok(ShaderStageReflection {
+    Ok(finalize_stage_reflection(ShaderStageReflection {
         input_names,
         sampler_names,
         constant_buffer_names,
@@ -241,7 +444,21 @@ pub fn parse_shader_stage_reflection(data: &[u8], ofs_reflection: usize) -> Resu
         index_shader_output,
         index_unordered_access_buffer,
         index_image,
-    })
+    }))
+}
+
+/// Post-process parsed stage reflection: fill missing sampler names from image dict when needed.
+fn finalize_stage_reflection(mut reflection: ShaderStageReflection) -> ShaderStageReflection {
+    if reflection.sampler_names.is_empty() && !reflection.texture_names.is_empty() {
+        reflection.sampler_names = reflection.texture_names.clone();
+        if crate::fx_debug_enabled() {
+            eprintln!(
+                "[BNSH_REFL] Sampler dict empty — using {} image dict name(s) as samplers",
+                reflection.sampler_names.len()
+            );
+        }
+    }
+    reflection
 }
 
 /// Resolve bindless texture samplers using the driver jump table
@@ -252,26 +469,22 @@ pub fn resolve_material_sampler_bindings(
 ) -> HashMap<String, u32> {
     let mut bindings = HashMap::new();
 
-    // Build the jump table: sampler_name -> gpu_slot
-    let sampler_table = stage_reflection.build_sampler_jump_table();
+    let tex_by_sampler: HashMap<String, u32> = stage_reflection
+        .build_sampler_texture_pairs()
+        .into_iter()
+        .map(|(name, tex, _)| (name, tex))
+        .collect();
 
     for (material_tex_name, bntx_index) in material_textures {
-        // Try to find a matching sampler for this texture
-        // Common patterns: _col, _emi, _prm, etc.
-        for (sampler_name, gpu_slot) in sampler_table.iter() {
-            // Check if sampler name matches texture name (case-insensitive suffix match)
-            if sampler_name.to_lowercase().contains(&material_tex_name.to_lowercase())
-                || material_tex_name
-                    .to_lowercase()
-                    .contains(&sampler_name.to_lowercase())
-            {
-                bindings.insert(material_tex_name.clone(), *gpu_slot);
-                eprintln!(
-                    "[BNSH_BINDLESS] Material texture '{}' (bntx {}) -> GPU slot {}",
-                    material_tex_name, bntx_index, gpu_slot
-                );
-                break;
-            }
+        let gpu_slot = match_material_sampler_name(material_tex_name, &stage_reflection.sampler_names)
+            .and_then(|n| tex_by_sampler.get(n))
+            .copied();
+        if let Some(gpu_slot) = gpu_slot {
+            bindings.insert(material_tex_name.clone(), gpu_slot);
+            eprintln!(
+                "[BNSH_BINDLESS] Material texture '{}' (bntx {}) -> GPU slot {}",
+                material_tex_name, bntx_index, gpu_slot
+            );
         }
     }
 
@@ -297,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_texture_pairs() {
+    fn test_ordered_texture_pairs_fallback() {
         let reflection = ShaderStageReflection {
             sampler_names: vec!["a".into(), "b".into(), "c".into()],
             shader_slots: vec![4, 8, 12],
@@ -309,18 +522,147 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_material_bindings() {
+    fn test_get_constant_buffer_binding_indices() {
+        let slt = vec![5u32, 2, 7];
+        let out = get_constant_buffer_binding_indices(&slt);
+        assert_eq!(out[5], 0);
+        assert_eq!(out[2], 1);
+        assert_eq!(out[7], 2);
+    }
+
+    #[test]
+    fn test_get_sampler_binding_indices_readme() {
+        let str_ = vec![10u32, 14, 18];
+        let slt = vec![0u32, 1, 2];
+        let smp = vec![1u32, 0, 2];
+        let out = get_sampler_binding_indices(&str_, &slt, &smp);
+        assert_eq!(out, vec![14, 10, 18]);
+    }
+
+    #[test]
+    fn test_build_sampler_texture_pairs_with_jump_table() {
+        // index_shader_output=0, index_image=0, index_sampler=3, index_constant_buffer=6
+        // slots[0..3] = texture bindings, slots[3..6] = sampler indirection indices
         let reflection = ShaderStageReflection {
-            sampler_names: vec!["tex_col".to_string(), "tex_emi".to_string()],
-            shader_slots: vec![0, 1, 2],
-            index_sampler: 0,
+            sampler_names: vec!["tex_col".into(), "tex_emi".into(), "tex_prm".into()],
+            index_shader_output: 0,
+            index_image: 0,
+            index_sampler: 3,
+            index_constant_buffer: 6,
+            index_unordered_access_buffer: 6,
+            shader_slots: vec![0, 2, 4, 1, 0, 2],
             ..Default::default()
         };
+        let pairs = reflection.build_sampler_texture_pairs();
+        assert_eq!(pairs[0], ("tex_col".into(), 2, 1));
+        assert_eq!(pairs[1], ("tex_emi".into(), 0, 0));
+        assert_eq!(pairs[2], ("tex_prm".into(), 4, 2));
+    }
 
-        let materials = vec![("col".to_string(), 10), ("emi".to_string(), 11)];
-        let bindings = resolve_material_sampler_bindings(&reflection, &materials);
+    #[test]
+    fn test_match_material_sampler_name() {
+        let names = vec!["tex_col".into(), "tex_emi".into()];
+        assert_eq!(
+            match_material_sampler_name("_col", &names).map(String::as_str),
+            Some("tex_col")
+        );
+        assert_eq!(
+            match_material_sampler_name("emi", &names).map(String::as_str),
+            Some("tex_emi")
+        );
+    }
 
-        assert!(bindings.contains_key("col"));
-        assert!(bindings.contains_key("emi"));
+    #[test]
+    fn test_material_texture_slots() {
+        let reflection = ShaderStageReflection {
+            sampler_names: vec!["tex_col".into(), "tex_emi".into(), "tex_prm".into()],
+            index_shader_output: 0,
+            index_image: 0,
+            index_sampler: 3,
+            index_constant_buffer: 6,
+            index_unordered_access_buffer: 6,
+            shader_slots: vec![0, 2, 4, 1, 0, 2],
+            ..Default::default()
+        };
+        assert_eq!(reflection.material_texture_slots(), (2, 0, 4));
+    }
+
+    #[test]
+    fn test_build_cbuffer_binding_pairs_jump_table() {
+        // slt maps gpu slots 5,2,7 -> cbuffer dict indices 0,1,2
+        let reflection = ShaderStageReflection {
+            constant_buffer_names: vec!["cb0".into(), "cb1".into(), "cb2".into()],
+            index_shader_output: 0,
+            index_image: 3,
+            index_constant_buffer: 3,
+            index_unordered_access_buffer: 3,
+            shader_slots: vec![5, 2, 7],
+            ..Default::default()
+        };
+        let pairs = reflection.build_cbuffer_binding_pairs();
+        assert_eq!(pairs.len(), 3);
+        let map: HashMap<&str, u32> = pairs.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        assert_eq!(map.get("cb0"), Some(&5));
+        assert_eq!(map.get("cb1"), Some(&2));
+        assert_eq!(map.get("cb2"), Some(&7));
+    }
+
+    #[test]
+    fn test_build_cbuffer_binding_pairs_direct_fallback() {
+        let reflection = ShaderStageReflection {
+            constant_buffer_names: vec!["Global".into(), "Material".into()],
+            index_constant_buffer: 2,
+            index_unordered_access_buffer: 4,
+            shader_slots: vec![0, 0, 13, 6],
+            ..Default::default()
+        };
+        let pairs = reflection.build_cbuffer_binding_pairs();
+        assert_eq!(pairs, vec![("Global".into(), 13), ("Material".into(), 6)]);
+    }
+
+    #[test]
+    fn test_finalize_stage_reflection_image_fallback() {
+        let reflection = finalize_stage_reflection(ShaderStageReflection {
+            texture_names: vec!["sysTexture0".into()],
+            ..Default::default()
+        });
+        assert_eq!(reflection.sampler_names, vec!["sysTexture0"]);
+    }
+
+    #[test]
+    fn test_parse_stage_reflection_synthetic() {
+        // Minimal in-memory layout for shader_reflection_stage_data + _DIC sampler dict.
+        let mut data = vec![0u8; 0x600];
+        let stage = 0x200usize;
+        let sampler_dict = 0x300usize;
+        let slot_array = 0x400usize;
+
+        // sampler dictionary entry (dictionary_entry.ofs_entry u8)
+        data[stage + 0x10..stage + 0x18]
+            .copy_from_slice(&(sampler_dict as u64).to_le_bytes());
+        // index_sampler = 0, index_unordered_access_buffer = 2
+        data[stage + 0x2C..stage + 0x30].copy_from_slice(&0u32.to_le_bytes());
+        data[stage + 0x34..stage + 0x38].copy_from_slice(&2u32.to_le_bytes());
+        data[stage + 0x38..stage + 0x3C].copy_from_slice(&(slot_array as u32).to_le_bytes());
+        // ofs_image_dictionary unused (0)
+        data[stage + 0x4C..stage + 0x50].copy_from_slice(&0u32.to_le_bytes());
+
+        data[slot_array..slot_array + 4].copy_from_slice(&7u32.to_le_bytes());
+        data[slot_array + 4..slot_array + 8].copy_from_slice(&9u32.to_le_bytes());
+
+        data[sampler_dict..sampler_dict + 4].copy_from_slice(b"_DIC");
+        data[sampler_dict + 4..sampler_dict + 8].copy_from_slice(&1u32.to_le_bytes());
+        let str_entry = sampler_dict + 0x20;
+        let str_body = sampler_dict + 0x40;
+        data[str_entry..str_entry + 4].copy_from_slice(&(str_body as u32).to_le_bytes());
+        let name = b"tex0";
+        data[str_body..str_body + 2].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        data[str_body + 2..str_body + 2 + name.len()].copy_from_slice(name);
+
+        let reflection = parse_shader_stage_reflection(&data, stage).expect("parse synthetic stage");
+        assert_eq!(reflection.sampler_names, vec!["tex0".to_string()]);
+        assert_eq!(reflection.shader_slots, vec![7, 9]);
+        assert_eq!(reflection.index_unordered_access_buffer, 2);
+        assert_eq!(reflection.build_sampler_jump_table().get("tex0"), Some(&7));
     }
 }

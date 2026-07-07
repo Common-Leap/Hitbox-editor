@@ -11,8 +11,8 @@
 use anyhow::Result;
 use crate::bnsh_ffi::BnshDecoder;
 use crate::bnsh_reflection;
-use crate::effects::{BlendType, EmitterDef, EmitterSet, PtclFile, TextureRes};
-use crate::shader_registry::{ShaderKey, ShaderRegistry, ShaderVsProfile};
+use crate::effects::{BlendType, ColorKey, EmitterDef, EmitterSet, PtclFile, TextureRes};
+use crate::shader_registry::{CombinerState, ShaderKey, ShaderRegistry, ShaderVsProfile};
 use crate::spirv_to_wgsl::{BindingClass, DescriptorInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -102,11 +102,48 @@ pub fn find_bnsh_bytecode_offsets(bnsh: &[u8]) -> Vec<usize> {
     offsets
 }
 
-fn decode_single_bnsh_blob(bnsh_data: &[u8], index: u32) -> Result<Option<(DecodedShader, bool)>> {
-    match BnshDecoder::decode_wgsl_with_index(bnsh_data, index) {
+/// Build a BNSH container where `section_index` is the sole bytecode section.
+///
+/// bnsh-decoder only reads the first `0x12345678` section; dual-section registry blobs
+/// store the shared VS in section 0 and the per-key FS variant in section 1.
+fn synthetic_bnsh_for_bytecode_section(full: &[u8], section_index: usize) -> Option<Vec<u8>> {
+    let offsets = find_bnsh_bytecode_offsets(full);
+    let (&first, section_start) = offsets.first().zip(offsets.get(section_index))?;
+    let section_end = offsets
+        .get(section_index + 1)
+        .copied()
+        .unwrap_or(full.len());
+    Some(
+        [full.get(..first)?, full.get(*section_start..section_end)?]
+            .concat(),
+    )
+}
+
+fn decode_bnsh_bytecode_section(
+    full: &[u8],
+    section_index: usize,
+    quiet_failures: bool,
+) -> Result<Option<(DecodedShader, bool)>> {
+    let Some(synthetic) = synthetic_bnsh_for_bytecode_section(full, section_index) else {
+        return Ok(None);
+    };
+    decode_single_bnsh_blob(&synthetic, full, 0, quiet_failures)
+}
+
+fn decode_single_bnsh_blob(
+    bytecode_slice: &[u8],
+    reflection_container: &[u8],
+    index: u32,
+    quiet_failures: bool,
+) -> Result<Option<(DecodedShader, bool)>> {
+    match BnshDecoder::decode_wgsl_with_index(bytecode_slice, index) {
         Ok(wgsl_result) => {
-            let is_fragment = wgsl_result.is_fragment;
-            let reflection = extract_shader_reflection(bnsh_data, is_fragment).ok().flatten();
+            // SPIR-V OpEntryPoint is authoritative; BNSH JSON often mislabels FS-only registry blobs as VS.
+            let is_fragment = crate::spirv_to_wgsl::spirv_is_fragment(&wgsl_result.spirv)
+                .unwrap_or(wgsl_result.is_fragment || wgsl_result.sampler_count > 0);
+            let reflection = extract_shader_reflection(reflection_container, is_fragment)
+                .ok()
+                .flatten();
             Ok(Some((
                 DecodedShader {
                     spirv: wgsl_result.spirv,
@@ -120,8 +157,41 @@ fn decode_single_bnsh_blob(bnsh_data: &[u8], index: u32) -> Result<Option<(Decod
             )))
         }
         Err(e) => {
-            eprintln!("[BNSH] decode failed (index={index}): {e}");
+            if !quiet_failures {
+                eprintln!("[BNSH] decode failed (index={index}): {e}");
+            } else if crate::fx_debug_enabled() {
+                eprintln!("[BNSH] decode skipped (index={index}): {e}");
+            }
             Ok(None)
+        }
+    }
+}
+
+/// Attach stage reflection from the full BNSH container when a stage was decoded without it.
+pub fn enrich_pair_reflection_from_container(pair: &mut EffectShaderPair, container: &[u8]) {
+    if container.len() < 0x30 {
+        return;
+    }
+    if pair
+        .vertex
+        .as_ref()
+        .is_some_and(|s| s.reflection.is_none())
+    {
+        if let Ok(Some(r)) = extract_shader_reflection(container, false) {
+            if let Some(vs) = &mut pair.vertex {
+                vs.reflection = Some(r);
+            }
+        }
+    }
+    if pair
+        .fragment
+        .as_ref()
+        .is_some_and(|s| s.reflection.is_none())
+    {
+        if let Ok(Some(r)) = extract_shader_reflection(container, true) {
+            if let Some(fs) = &mut pair.fragment {
+                fs.reflection = Some(r);
+            }
         }
     }
 }
@@ -133,8 +203,23 @@ fn assign_stage(pair: &mut EffectShaderPair, shader: DecodedShader, is_fragment:
         }
     } else if pair.vertex.is_none() {
         pair.vertex = Some(shader);
-    } else if pair.fragment.is_none() {
-        pair.fragment = Some(shader);
+    }
+}
+
+/// Move a fragment SPIR-V blob out of the vertex slot when JSON stage inference was wrong.
+fn reconcile_misassigned_stages(pair: &mut EffectShaderPair) {
+    if pair.fragment.is_some() {
+        return;
+    }
+    let Some(vs) = pair.vertex.take() else {
+        return;
+    };
+    let is_fragment = crate::spirv_to_wgsl::spirv_is_fragment(&vs.spirv)
+        .unwrap_or(vs.sampler_count > 0);
+    if is_fragment {
+        pair.fragment = Some(vs);
+    } else {
+        pair.vertex = Some(vs);
     }
 }
 
@@ -150,55 +235,37 @@ pub fn decode_bnsh_bytes(bnsh_data: &[u8]) -> Result<EffectShaderPair> {
         return Ok(pair);
     }
 
-    let section_offsets = find_bnsh_bytecode_offsets(bnsh_data);
-    if section_offsets.is_empty() {
-        if let Some((shader, is_frag)) = decode_single_bnsh_blob(bnsh_data, 0)? {
-            assign_stage(&mut pair, shader, is_frag);
-        }
-    } else {
-        for (i, &off) in section_offsets.iter().enumerate() {
-            if pair.vertex.is_some() && pair.fragment.is_some() {
-                break;
+    let section_count = find_bnsh_bytecode_offsets(bnsh_data).len();
+    match section_count {
+        0 => {
+            if let Some((shader, is_frag)) = decode_single_bnsh_blob(bnsh_data, bnsh_data, 0, false)? {
+                assign_stage(&mut pair, shader, is_frag);
             }
-            let slice = &bnsh_data[off..];
-            if let Some((shader, is_frag)) = decode_single_bnsh_blob(slice, i as u32)? {
+        }
+        1 => {
+            if let Some((shader, is_frag)) = decode_bnsh_bytecode_section(bnsh_data, 0, false)? {
+                assign_stage(&mut pair, shader, is_frag);
+            }
+        }
+        _ => {
+            // Dual-section registry blobs: section 1 is the per-key FS variant.
+            if let Some((shader, is_frag)) = decode_bnsh_bytecode_section(bnsh_data, 1, false)? {
                 assign_stage(&mut pair, shader, is_frag);
             }
         }
     }
 
-    // Fallback: full BNSH container (bnsh-decoder scans for first bytecode section).
-    if pair.vertex.is_none() || pair.fragment.is_none() {
-        if let Some((shader, is_frag)) = decode_single_bnsh_blob(bnsh_data, 0)? {
-            assign_stage(&mut pair, shader, is_frag);
-        }
-    }
-
-    // NintendoWare convention on a single container: index 1 = VS, 0/2 = FS.
-    if pair.vertex.is_none() {
-        if let Some((shader, is_frag)) = decode_single_bnsh_blob(bnsh_data, 1)? {
-            if !is_frag {
-                pair.vertex = Some(shader);
-            }
-        }
-    }
-    if pair.fragment.is_none() {
-        for idx in [0u32, 2] {
-            if let Some((shader, is_frag)) = decode_single_bnsh_blob(bnsh_data, idx)? {
-                if is_frag {
-                    pair.fragment = Some(shader);
-                    break;
-                }
-            }
-        }
-    }
+    reconcile_misassigned_stages(&mut pair);
+    enrich_pair_reflection_from_container(&mut pair, bnsh_data);
 
     if pair.vertex.is_none() || pair.fragment.is_none() {
-        eprintln!(
-            "[BNSH] Warning: incomplete pair (vs={}, fs={})",
-            pair.vertex.is_some(),
-            pair.fragment.is_some()
-        );
+        if crate::fx_debug_enabled() {
+            eprintln!(
+                "[BNSH] Warning: incomplete pair after decode (vs={}, fs={})",
+                pair.vertex.is_some(),
+                pair.fragment.is_some()
+            );
+        }
     }
 
     Ok(pair)
@@ -222,29 +289,40 @@ fn fill_pairs_from_legacy(pairs: &mut HashMap<ShaderKey, EffectShaderPair>, lega
     }
 }
 
-/// Attach the effect-wide particle vertex shader to FS-only registry entries.
-///
-/// Each embedded `Shader.bnsh` is typically a fragment variant; the shared
-/// effect vertex shader (binary_1) is paired with it — not a fallback, this is
-/// how NintendoWare stores per-emitter FS variants.
+/// Attach the shared effect vertex shader to FS-only registry entries.
 pub fn pair_registry_shaders(
     pairs: &mut HashMap<ShaderKey, EffectShaderPair>,
     effect_stages: &EffectShaderPair,
 ) {
-    let effect_vs = effect_stages.vertex.as_ref();
-    for pair in pairs.values_mut() {
-        if pair.vertex.is_none() {
-            pair.vertex = effect_vs.cloned();
-        }
-    }
+    finalize_shader_pairs(pairs, effect_stages);
 }
 
-#[allow(dead_code)]
+/// Fill missing vertex stages from the effect-wide legacy pair (`shader_binary_1`).
+///
+/// Registry entries are FS-only variants; each key keeps its own decoded fragment shader.
+/// Missing fragment stages are not pooled — a failed FS decode stays incomplete.
 pub fn finalize_shader_pairs(
     pairs: &mut HashMap<ShaderKey, EffectShaderPair>,
     effect_stages: &EffectShaderPair,
 ) {
-    pair_registry_shaders(pairs, effect_stages);
+    let Some(legacy_vs) = effect_stages.vertex.clone() else {
+        return;
+    };
+
+    let mut filled_vs = 0usize;
+    for pair in pairs.values_mut() {
+        if pair.vertex.is_none() {
+            pair.vertex = Some(legacy_vs.clone());
+            filled_vs += 1;
+        }
+    }
+
+    if filled_vs > 0 {
+        eprintln!(
+            "[BNSH] finalize_shader_pairs: filled {} missing VS from effect legacy pair",
+            filled_vs
+        );
+    }
 }
 
 /// Fill missing stages by borrowing from other decoded variants in the same effect.
@@ -313,14 +391,13 @@ pub fn decode_legacy_stage_pair(ptcl: &PtclFile) -> EffectShaderPair {
 
     if !b1.is_empty() {
         if let Ok(wgsl) = BnshDecoder::decode_wgsl_with_index(&b1, 1) {
-            let is_vertex = !wgsl.is_fragment;
             pair.vertex = Some(DecodedShader {
                 spirv: wgsl.spirv,
                 wgsl_source: wgsl.wgsl,
                 entry_point: wgsl.entry_point,
                 sampler_count: wgsl.sampler_count,
                 uniform_buffer_count: wgsl.uniform_buffer_count,
-                reflection: extract_shader_reflection(&b1, !is_vertex).ok().flatten(),
+                reflection: extract_shader_reflection(&b1, false).ok().flatten(),
             });
         }
     }
@@ -336,16 +413,51 @@ pub fn decode_legacy_stage_pair(ptcl: &PtclFile) -> EffectShaderPair {
                 reflection: extract_shader_reflection(&b2, true).ok().flatten(),
             });
         }
-    } else if pair.fragment.is_none() {
-        if let Ok(wgsl) = BnshDecoder::decode_wgsl_with_index(&b1, 2) {
-            pair.fragment = Some(DecodedShader {
-                spirv: wgsl.spirv,
-                wgsl_source: wgsl.wgsl,
-                entry_point: wgsl.entry_point,
-                sampler_count: wgsl.sampler_count,
-                uniform_buffer_count: wgsl.uniform_buffer_count,
-                reflection: extract_shader_reflection(&b1, true).ok().flatten(),
-            });
+    } else if pair.fragment.is_none() && !b1.is_empty() {
+        for idx in [2u32, 0] {
+            if let Ok(wgsl) = BnshDecoder::decode_wgsl_with_index(&b1, idx) {
+                if wgsl.is_fragment || wgsl.sampler_count > 0 {
+                    pair.fragment = Some(DecodedShader {
+                        spirv: wgsl.spirv,
+                        wgsl_source: wgsl.wgsl,
+                        entry_point: wgsl.entry_point,
+                        sampler_count: wgsl.sampler_count,
+                        uniform_buffer_count: wgsl.uniform_buffer_count,
+                        reflection: extract_shader_reflection(&b1, true).ok().flatten(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    enrich_pair_reflection_from_container(&mut pair, &b1);
+    if !b2.is_empty() && b2 != b1 {
+        enrich_pair_reflection_from_container(&mut pair, &b2);
+    }
+
+    if pair.fragment.is_none() {
+        for (_key, bytes) in ptcl.shader_registry.iter() {
+            if bytes.is_empty() {
+                continue;
+            }
+            if let Ok(wgsl) = BnshDecoder::decode_wgsl_with_index(bytes, 0) {
+                if wgsl.is_fragment || wgsl.sampler_count > 0 {
+                    pair.fragment = Some(DecodedShader {
+                        spirv: wgsl.spirv,
+                        wgsl_source: wgsl.wgsl,
+                        entry_point: wgsl.entry_point,
+                        sampler_count: wgsl.sampler_count,
+                        uniform_buffer_count: wgsl.uniform_buffer_count,
+                        reflection: extract_shader_reflection(bytes, true).ok().flatten(),
+                    });
+                    eprintln!(
+                        "[BNSH] legacy pair: found fragment stage in registry ({} samplers)",
+                        pair.fragment.as_ref().map(|s| s.sampler_count).unwrap_or(0)
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -356,12 +468,14 @@ pub fn decode_legacy_stage_pair(ptcl: &PtclFile) -> EffectShaderPair {
 pub fn decode_all_effect_shaders(ptcl: &PtclFile) -> Result<HashMap<ShaderKey, EffectShaderPair>> {
     let legacy = decode_legacy_stage_pair(ptcl);
     let mut out = HashMap::new();
+    let mut decode_failures = 0usize;
     for (key, bytes) in ptcl.shader_registry.iter() {
         match decode_bnsh_bytes(bytes) {
             Ok(pair) => {
                 out.insert(key, pair);
             }
             Err(e) => {
+                decode_failures += 1;
                 eprintln!("[BNSH] Failed to decode shader {key:#x}: {e}");
             }
         }
@@ -375,7 +489,36 @@ pub fn decode_all_effect_shaders(ptcl: &PtclFile) -> Result<HashMap<ShaderKey, E
             }
         }
     }
+    let unique_pipelines: std::collections::HashSet<ShaderKey> =
+        out.values().map(spirv_pipeline_key).collect();
+    if out.len() > unique_pipelines.len() {
+        eprintln!(
+            "[BNSH] deduped {} SPIR-V pipeline(s) from {} registry keys ({} unique)",
+            out.len() - unique_pipelines.len(),
+            out.len(),
+            unique_pipelines.len()
+        );
+    }
+    if decode_failures > 0 {
+        eprintln!(
+            "[BNSH] decode_all_effect_shaders: {} registry key(s) failed to decode",
+            decode_failures
+        );
+    }
     Ok(out)
+}
+
+/// Content hash of the decoded VS+FS SPIR-V pair (diagnostics only — GPU cache uses registry keys).
+pub fn spirv_pipeline_key(pair: &EffectShaderPair) -> ShaderKey {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    if let Some(vs) = &pair.vertex {
+        h.update(&vs.spirv);
+    }
+    if let Some(fs) = &pair.fragment {
+        h.update(&fs.spirv);
+    }
+    u64::from_le_bytes(h.finalize()[0..8].try_into().unwrap())
 }
 
 /// Synthetic registry key when the PTCL has legacy VS/FS blobs but no embedded Shader.bnsh entries.
@@ -444,16 +587,18 @@ pub fn extract_shader_reflection(
         return Ok(None);
     }
 
-    // Read ofs_first_block from header offset 0x10 (u2)
-    if bnsh_binary.len() < 0x12 {
+    // Read ofs_first_block from header offset 0x16 (u2); 0x10 is ofs_file_name (u4).
+    if bnsh_binary.len() < 0x18 {
         return Ok(None);
     }
     let ofs_first_block = u16::from_le_bytes([
-        bnsh_binary[0x10],
-        bnsh_binary[0x11],
+        bnsh_binary[0x16],
+        bnsh_binary[0x17],
     ]) as usize;
 
-    eprintln!("[BNSH_REFL] BNSH file detected, ofs_first_block = {:#x}", ofs_first_block);
+    if crate::fx_debug_enabled() {
+        eprintln!("[BNSH_REFL] BNSH file detected, ofs_first_block = {:#x}", ofs_first_block);
+    }
 
     // Find GRSC block by scanning blocks
     let mut block_pos = ofs_first_block;
@@ -470,7 +615,13 @@ pub fn extract_shader_reflection(
             bnsh_binary[block_pos + 7],
         ]) as usize;
 
-        eprintln!("[BNSH_REFL] Found block at {:#x}: {:?}", block_pos, std::str::from_utf8(magic).unwrap_or("?????"));
+        if crate::fx_debug_enabled() {
+            eprintln!(
+                "[BNSH_REFL] Found block at {:#x}: {:?}",
+                block_pos,
+                std::str::from_utf8(magic).unwrap_or("?????")
+            );
+        }
 
         if magic == b"grsc" || magic == b"GRSC" {
             grsc_found = true;
@@ -485,39 +636,50 @@ pub fn extract_shader_reflection(
     }
 
     if !grsc_found {
-        eprintln!("[BNSH_REFL] GRSC block not found");
+        if crate::fx_debug_enabled() {
+            eprintln!("[BNSH_REFL] GRSC block not found");
+        }
         return Ok(None);
     }
 
-    eprintln!("[BNSH_REFL] Found GRSC block at {:#x}", grsc_pos);
+    if crate::fx_debug_enabled() {
+        eprintln!("[BNSH_REFL] Found GRSC block at {:#x}", grsc_pos);
+    }
 
     // Parse GRSC block:
     // +0x00: target_api_type (u2)
-    // +0x08: shader_variation_count (u4)
-    // +0x0C: ofs_shader_variation_array (u8)
-    if grsc_pos + 0x14 > bnsh_binary.len() {
+    // +0x08: compiler_version (4)
+    // +0x0C: shader_variation_count (u4)
+    // +0x10: ofs_shader_variation_array (u8)
+    if grsc_pos + 0x18 > bnsh_binary.len() {
         return Ok(None);
     }
 
     let shader_variation_count = u32::from_le_bytes([
-        bnsh_binary[grsc_pos + 0x08],
-        bnsh_binary[grsc_pos + 0x09],
-        bnsh_binary[grsc_pos + 0x0A],
-        bnsh_binary[grsc_pos + 0x0B],
-    ]) as usize;
-
-    let ofs_shader_variation_array = u64::from_le_bytes([
         bnsh_binary[grsc_pos + 0x0C],
         bnsh_binary[grsc_pos + 0x0D],
         bnsh_binary[grsc_pos + 0x0E],
         bnsh_binary[grsc_pos + 0x0F],
+    ]) as usize;
+
+    let ofs_shader_variation_array = u64::from_le_bytes([
         bnsh_binary[grsc_pos + 0x10],
         bnsh_binary[grsc_pos + 0x11],
         bnsh_binary[grsc_pos + 0x12],
         bnsh_binary[grsc_pos + 0x13],
+        bnsh_binary[grsc_pos + 0x14],
+        bnsh_binary[grsc_pos + 0x15],
+        bnsh_binary[grsc_pos + 0x16],
+        bnsh_binary[grsc_pos + 0x17],
     ]) as usize;
 
-    eprintln!("[BNSH_REFL] GRSC: {} shader variations at {:#x}", shader_variation_count, ofs_shader_variation_array);
+    if crate::fx_debug_enabled() {
+        eprintln!(
+            "[BNSH_REFL] GRSC: {} shader variations at {:#x}",
+            shader_variation_count,
+            ofs_shader_variation_array
+        );
+    }
 
     if shader_variation_count == 0 || ofs_shader_variation_array + 64 > bnsh_binary.len() {
         return Ok(None);
@@ -542,28 +704,34 @@ pub fn extract_shader_reflection(
         bnsh_binary[shader_var_pos + 0x17],
     ]) as usize;
 
-    eprintln!("[BNSH_REFL] Binary program at {:#x}", ofs_binary_program);
+    if crate::fx_debug_enabled() {
+        eprintln!("[BNSH_REFL] Binary program at {:#x}", ofs_binary_program);
+    }
 
-    if ofs_binary_program + 0x48 > bnsh_binary.len() {
+    if ofs_binary_program + 0x80 > bnsh_binary.len() {
         return Ok(None);
     }
 
     // Parse shader_program_data:
     // +0x00: shader_info_data (0x60 bytes)
     // +0x60: object_size (u4)
-    // +0x68: ofs_shader_reflection (u8)
+    // +0x68: ofs_object (u8)
+    // +0x70: ofs_parent (u8)
+    // +0x78: ofs_shader_reflection (u8)
     let ofs_shader_reflection = u64::from_le_bytes([
-        bnsh_binary[ofs_binary_program + 0x68],
-        bnsh_binary[ofs_binary_program + 0x69],
-        bnsh_binary[ofs_binary_program + 0x6A],
-        bnsh_binary[ofs_binary_program + 0x6B],
-        bnsh_binary[ofs_binary_program + 0x6C],
-        bnsh_binary[ofs_binary_program + 0x6D],
-        bnsh_binary[ofs_binary_program + 0x6E],
-        bnsh_binary[ofs_binary_program + 0x6F],
+        bnsh_binary[ofs_binary_program + 0x78],
+        bnsh_binary[ofs_binary_program + 0x79],
+        bnsh_binary[ofs_binary_program + 0x7A],
+        bnsh_binary[ofs_binary_program + 0x7B],
+        bnsh_binary[ofs_binary_program + 0x7C],
+        bnsh_binary[ofs_binary_program + 0x7D],
+        bnsh_binary[ofs_binary_program + 0x7E],
+        bnsh_binary[ofs_binary_program + 0x7F],
     ]) as usize;
 
-    eprintln!("[BNSH_REFL] Shader reflection data at {:#x}", ofs_shader_reflection);
+    if crate::fx_debug_enabled() {
+        eprintln!("[BNSH_REFL] Shader reflection data at {:#x}", ofs_shader_reflection);
+    }
 
     if ofs_shader_reflection == 0 || ofs_shader_reflection + 0x48 > bnsh_binary.len() {
         return Ok(None);
@@ -589,52 +757,177 @@ pub fn extract_shader_reflection(
         bnsh_binary[ofs_shader_reflection + stage_offset + 7],
     ]) as usize;
 
-    eprintln!(
-        "[BNSH_REFL] {} reflection at {:#x}",
-        stage_label, ofs_stage_reflection
-    );
+    if crate::fx_debug_enabled() {
+        eprintln!(
+            "[BNSH_REFL] {} reflection at {:#x}",
+            stage_label,
+            ofs_stage_reflection
+        );
+    }
 
     if ofs_stage_reflection == 0 {
-        eprintln!("[BNSH_REFL] No {} reflection data", stage_label);
+        if crate::fx_debug_enabled() {
+            eprintln!("[BNSH_REFL] No {} reflection data", stage_label);
+        }
         return Ok(None);
     }
 
     match bnsh_reflection::parse_shader_stage_reflection(bnsh_binary, ofs_stage_reflection) {
         Ok(reflection) => {
-            eprintln!(
-                "[BNSH_REFL] ✓ Successfully extracted {} reflection",
-                stage_label
-            );
+            if crate::fx_debug_enabled() {
+                eprintln!(
+                    "[BNSH_REFL] ✓ Successfully extracted {} reflection",
+                    stage_label
+                );
+            }
             Ok(Some(reflection))
         }
         Err(e) => {
-            eprintln!(
-                "[BNSH_REFL] ✗ Failed to parse {} reflection: {}",
-                stage_label, e
-            );
+            if crate::fx_debug_enabled() {
+                eprintln!(
+                    "[BNSH_REFL] ✗ Failed to parse {} reflection: {}",
+                    stage_label, e
+                );
+            }
             Ok(None)
         }
     }
 }
 
-/// Map WGSL descriptor (set, binding) → emitter texture slot (0/1/2).
+/// Combined reflection-driven binding map for BNSH draw setup.
+#[derive(Debug, Clone, Default)]
+pub struct ReflectionBindingMap {
+    /// WGSL (set, binding) → emitter texture slot (0/1/2).
+    pub emitter_textures: HashMap<(u32, u32), u32>,
+    /// WGSL storage binding → BNSH cbuffer dictionary name (via jump table).
+    pub storage_cbuf_by_binding: HashMap<u32, String>,
+}
+
+/// Build emitter texture + storage cbuffer maps from fragment reflection and WGSL descriptors.
 ///
-/// Uses BNSH driver jump tables from fragment (preferred) or vertex reflection,
-/// cross-referenced with decoded WGSL descriptor bindings. Emitter slot 0 is the
-/// primary color texture, 1 is alpha/indirect, 2 is tertiary.
-pub fn map_emitter_slots_to_descriptors(
+/// Particle billboards bind emitter BNTX via FS jump tables only. Missing maps indicate a
+/// decode/reflection bug upstream — not something to paper over with VS or binding-order guesses.
+pub fn build_reflection_binding_map(
     fs_refl: Option<&bnsh_reflection::ShaderStageReflection>,
-    vs_refl: Option<&bnsh_reflection::ShaderStageReflection>,
     descriptors: &[DescriptorInfo],
-) -> HashMap<(u32, u32), u32> {
-    let refl = fs_refl.or(vs_refl);
-    if let Some(refl) = refl {
-        let pairs = refl.build_ordered_texture_pairs();
-        if !pairs.is_empty() {
-            return map_pairs_to_descriptors(&pairs, descriptors);
+) -> ReflectionBindingMap {
+    let storage_cbuf_by_binding = map_storage_cbuf_bindings(fs_refl, descriptors);
+    log_unresolved_cbuffer_bindings(fs_refl, descriptors, &storage_cbuf_by_binding);
+    ReflectionBindingMap {
+        emitter_textures: map_emitter_slots_to_descriptors(fs_refl, descriptors),
+        storage_cbuf_by_binding,
+    }
+}
+
+/// Log WGSL storage cbuf bindings that the jump table could not resolve (validation only).
+fn log_unresolved_cbuffer_bindings(
+    fs_refl: Option<&bnsh_reflection::ShaderStageReflection>,
+    descriptors: &[DescriptorInfo],
+    resolved: &HashMap<u32, String>,
+) {
+    if !crate::fx_debug_enabled() {
+        return;
+    }
+    for d in descriptors {
+        if d.class != BindingClass::Storage || !d.name.starts_with("cbuf_") {
+            continue;
+        }
+        if !resolved.contains_key(&d.binding) {
+            let dict_hint = fs_refl
+                .map(|r| r.constant_buffer_names.len())
+                .unwrap_or(0);
+            eprintln!(
+                "[BNSH-BIND] unresolved cbuf storage binding {} ({}) — jump table has {} dict name(s)",
+                d.binding,
+                d.name,
+                dict_hint
+            );
         }
     }
-    map_descriptors_by_binding_order(descriptors)
+}
+
+/// Map WGSL storage-buffer bindings → cbuffer dictionary names using README jump tables.
+pub fn map_storage_cbuf_bindings(
+    fs_refl: Option<&bnsh_reflection::ShaderStageReflection>,
+    descriptors: &[DescriptorInfo],
+) -> HashMap<u32, String> {
+    fs_refl
+        .map(|refl| map_storage_cbuf_bindings_from_reflection(refl, descriptors))
+        .unwrap_or_default()
+}
+
+fn map_storage_cbuf_bindings_from_reflection(
+    refl: &bnsh_reflection::ShaderStageReflection,
+    descriptors: &[DescriptorInfo],
+) -> HashMap<u32, String> {
+    let gpu_to_name: HashMap<u32, String> = refl
+        .build_cbuffer_binding_pairs()
+        .into_iter()
+        .map(|(name, slot)| (slot, name))
+        .collect();
+    let mut out = HashMap::new();
+    for d in descriptors {
+        if d.class != BindingClass::Storage {
+            continue;
+        }
+        if let Some(name) = gpu_to_name.get(&d.binding) {
+            out.insert(d.binding, name.clone());
+        }
+    }
+    if crate::fx_debug_enabled() && !out.is_empty() {
+        eprintln!(
+            "[BNSH-BIND] cbuffer jump table: {} storage binding(s) resolved",
+            out.len()
+        );
+    }
+    out
+}
+
+/// Map WGSL descriptor (set, binding) → emitter texture slot (0/1/2).
+///
+/// Uses BNSH driver jump tables from fragment reflection cross-referenced with decoded
+/// WGSL descriptor bindings. Emitter slot 0 is the primary color texture, 1 is
+/// alpha/indirect, 2 is tertiary.
+pub fn map_emitter_slots_to_descriptors(
+    fs_refl: Option<&bnsh_reflection::ShaderStageReflection>,
+    descriptors: &[DescriptorInfo],
+) -> HashMap<(u32, u32), u32> {
+    fs_refl
+        .map(|refl| map_emitter_slots_from_reflection(refl, descriptors))
+        .unwrap_or_default()
+}
+
+fn map_emitter_slots_from_reflection(
+    refl: &bnsh_reflection::ShaderStageReflection,
+    descriptors: &[DescriptorInfo],
+) -> HashMap<(u32, u32), u32> {
+    let pairs = refl.build_sampler_texture_pairs();
+    if !pairs.is_empty() {
+        return map_named_sampler_pairs_to_descriptors(&pairs, descriptors);
+    }
+    let ordered = refl.build_ordered_texture_pairs();
+    if !ordered.is_empty() {
+        return map_pairs_to_descriptors(&ordered, descriptors);
+    }
+    HashMap::new()
+}
+
+fn map_named_sampler_pairs_to_descriptors(
+    pairs: &[(String, u32, u32)],
+    descriptors: &[DescriptorInfo],
+) -> HashMap<(u32, u32), u32> {
+    let mut out = HashMap::new();
+    for (emitter_slot, (_name, tex_binding, sampler_binding)) in pairs.iter().enumerate() {
+        let emitter_slot = emitter_slot as u32;
+        let set = descriptor_set_for_binding(descriptors, *tex_binding, BindingClass::Texture)
+            .or_else(|| {
+                descriptor_set_for_binding(descriptors, *sampler_binding, BindingClass::Sampler)
+            })
+            .unwrap_or(0);
+        out.insert((set, *tex_binding), emitter_slot);
+        out.insert((set, *sampler_binding), emitter_slot);
+    }
+    out
 }
 
 fn descriptor_set_for_binding(
@@ -660,27 +953,6 @@ fn map_pairs_to_descriptors(
             .unwrap_or(0);
         out.insert((set, tex_binding), emitter_slot);
         out.insert((set, sampler_binding), emitter_slot);
-    }
-    out
-}
-
-fn map_descriptors_by_binding_order(descriptors: &[DescriptorInfo]) -> HashMap<(u32, u32), u32> {
-    let mut out = HashMap::new();
-    let mut textures: Vec<&DescriptorInfo> = descriptors
-        .iter()
-        .filter(|d| d.class == BindingClass::Texture)
-        .collect();
-    textures.sort_by_key(|d| (d.set, d.binding));
-    for (slot, tex) in textures.iter().take(3).enumerate() {
-        let slot = slot as u32;
-        out.insert((tex.set, tex.binding), slot);
-        if let Some(samp) = descriptors.iter().find(|d| {
-            d.set == tex.set
-                && d.binding == tex.binding.saturating_add(1)
-                && d.class == BindingClass::Sampler
-        }) {
-            out.insert((samp.set, samp.binding), slot);
-        }
     }
     out
 }
@@ -922,10 +1194,7 @@ pub fn decode_shader_fixtures(fighter: &str) -> (HashMap<ShaderKey, EffectShader
         }
     }
     if !pairs.is_empty() {
-        #[allow(deprecated)]
-        {
-            complete_shader_pairs(&mut pairs);
-        }
+        finalize_shader_pairs(&mut pairs, &EffectShaderPair::default());
     }
     (pairs, labels)
 }
@@ -966,10 +1235,7 @@ pub fn decode_cached_dump_shaders() -> (HashMap<ShaderKey, EffectShaderPair>, Ha
     };
     crate::scratch_dirs::walk_files_named(&root, "Shader.bnsh", &mut on_shader);
     if !pairs.is_empty() {
-        #[allow(deprecated)]
-        {
-            complete_shader_pairs(&mut pairs);
-        }
+        finalize_shader_pairs(&mut pairs, &EffectShaderPair::default());
     }
     (pairs, labels)
 }
@@ -1186,20 +1452,8 @@ pub fn shader_link_coverage_report(
     }
 }
 
-/// Build a minimal [`PtclFile`] for GPU tests: one billboard emitter bound to a shader
-/// from the configured effect export or PTCL dump cache.
-pub fn synthetic_ptcl_from_shader_key(shader_key: ShaderKey, blend: BlendType) -> Result<PtclFile> {
-    let bnsh = shader_bnsh_bytes_from_export(shader_key)?;
-    let mut shader_registry = ShaderRegistry::default();
-    let registered = shader_registry.register(bnsh);
-    if registered != shader_key {
-        anyhow::bail!(
-            "export shader hash {registered:#x} != expected {shader_key:#x}"
-        );
-    }
-    shader_registry.set_vs_profile(shader_key, ShaderVsProfile::ParticleBillboard);
-
-    let make_tex = |offset: u32| TextureRes {
+fn fixture_texture_res(offset: u32) -> TextureRes {
+    TextureRes {
         tex_name: "fixture_col".to_string(),
         width: 4,
         height: 4,
@@ -1213,17 +1467,124 @@ pub fn synthetic_ptcl_from_shader_key(shader_key: ShaderKey, blend: BlendType) -
         filter_mode: 0,
         mipmap_count: 1,
         channel_swizzle: 0,
-    };
-    let tex = make_tex(0);
-    let emitter = EmitterDef {
-        name: "fixture_emitter".to_string(),
+    }
+}
+
+/// Clone the first emitter in the Samus PTCL whose [`EmitterDef::shader_key`] matches.
+fn clone_emitter_for_shader_key(shader_key: ShaderKey) -> Option<EmitterDef> {
+    let path = crate::scratch_dirs::resolve_fighter_eff("samus")?;
+    let eff = crate::effects::EffIndex::from_file(&path).ok()?;
+    let ptcl = crate::effects::PtclFile::parse(&eff.ptcl_data).ok()?;
+    for set in &ptcl.emitter_sets {
+        for em in &set.emitters {
+            if em.shader_key == shader_key {
+                return Some(em.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Colour/alpha/combiner defaults for Samus `P_SamusAttackBomb/flare1` (shader `BOMB_SHADER_KEY`).
+///
+/// The native FS Hermite tables in cbuf_9[60..71] and combiner cbuf_8/cbuf_16 coeffs require
+/// real emitter keyframes — an empty [`EmitterDef::default`] yields zero fragment colour.
+fn bomb_shader_fixture_emitter(shader_key: ShaderKey, blend: BlendType) -> EmitterDef {
+    if let Some(mut em) = clone_emitter_for_shader_key(shader_key) {
+        em.blend_type = blend;
+        em.textures = vec![fixture_texture_res(0)];
+        em.texture_index = 0;
+        return em;
+    }
+
+    let tex = fixture_texture_res(0);
+    EmitterDef {
+        name: "flare1".to_string(),
         blend_type: blend,
         texture_index: 0,
         textures: vec![tex],
         shader_key,
-        scale: 40.0,
+        scale: 0.4,
+        color_scale: 1.0,
+        lifetime: 21.0,
+        rot_type: 4,
+        offset_type: 2,
+        draw_path: 5,
+        tex_pat_frame_count: 2,
+        tex_pat_frame_table: vec![0, 0],
+        tex_pat_frequency: 1.0,
+        color0: vec![
+            ColorKey { frame: 0.22, r: 1.0, g: 0.7554686, b: 0.2777778, a: 1.0 },
+            ColorKey { frame: 0.51, r: 1.0, g: 0.3307085, b: 0.0, a: 1.0 },
+            ColorKey { frame: 1.0, r: 0.968254, g: 0.0, b: 0.0, a: 1.0 },
+        ],
+        color1: vec![
+            ColorKey { frame: 0.2, r: 1.0, g: 0.3978494, b: 0.0, a: 1.0 },
+            ColorKey { frame: 0.5, r: 0.9365079, g: 0.2654667, b: 0.0, a: 1.0 },
+            ColorKey { frame: 0.8, r: 0.7936508, g: 0.0, b: 0.0, a: 1.0 },
+        ],
+        alpha0_keys: vec![
+            ColorKey { frame: 0.0, r: 0.3412699, g: 0.3412699, b: 0.3412699, a: 0.3412699 },
+            ColorKey { frame: 0.09, r: 0.3968254, g: 0.3968254, b: 0.3968254, a: 0.3968254 },
+            ColorKey { frame: 0.34, r: 0.3730159, g: 0.3730159, b: 0.3730159, a: 0.3730159 },
+            ColorKey { frame: 1.0, r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+        ],
+        alpha1_keys: vec![ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 }],
+        combiner: CombinerState {
+            color_combiner_process: 2,
+            alpha_combiner_process: 0,
+            apply_alpha: 1,
+            ..Default::default()
+        },
+        scale_anim: crate::effects::AnimKey3v4k {
+            start_value: 0.45,
+            start_diff: 0.85,
+            end_diff: -0.7,
+            time2: 0.05,
+            time3: 0.14,
+        },
         ..Default::default()
-    };
+    }
+}
+
+fn synthetic_fixture_emitter(shader_key: ShaderKey, blend: BlendType) -> EmitterDef {
+    if shader_key == BOMB_SHADER_KEY {
+        bomb_shader_fixture_emitter(shader_key, blend)
+    } else {
+        EmitterDef {
+            name: "fixture_emitter".to_string(),
+            blend_type: blend,
+            texture_index: 0,
+            textures: vec![fixture_texture_res(0)],
+            shader_key,
+            scale: 40.0,
+            color0: vec![ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 }],
+            alpha0_keys: vec![ColorKey { frame: 0.0, r: 1.0, g: 1.0, b: 1.0, a: 1.0 }],
+            ..Default::default()
+        }
+    }
+}
+
+/// Build a minimal [`PtclFile`] for GPU tests: one billboard emitter bound to a shader
+/// from the configured effect export or PTCL dump cache.
+pub fn synthetic_ptcl_from_shader_key(shader_key: ShaderKey, blend: BlendType) -> Result<PtclFile> {
+    let bnsh = shader_bnsh_bytes_from_export(shader_key)?;
+    let mut shader_registry = ShaderRegistry::default();
+    let registered = shader_registry.register(bnsh);
+    if registered != shader_key {
+        anyhow::bail!(
+            "export shader hash {registered:#x} != expected {shader_key:#x}"
+        );
+    }
+    shader_registry.set_vs_profile(shader_key, ShaderVsProfile::ParticleBillboard);
+
+    let tex = fixture_texture_res(0);
+    let emitter = synthetic_fixture_emitter(shader_key, blend);
+    shader_registry.note_emitter_native_color(
+        shader_key,
+        &emitter.combiner,
+        &crate::shader_registry::ParticleColorState::default(),
+    );
     Ok(PtclFile {
         emitter_sets: vec![EmitterSet {
             name: "fixture_set".to_string(),
@@ -1231,7 +1592,7 @@ pub fn synthetic_ptcl_from_shader_key(shader_key: ShaderKey, blend: BlendType) -
         }],
         texture_section: vec![0xFFu8; 128],
         texture_section_offset: 0,
-        bntx_textures: vec![make_tex(0)],
+        bntx_textures: vec![fixture_texture_res(0)],
         primitives: vec![],
         bfres_models: vec![],
         shader_registry,
@@ -1274,13 +1635,16 @@ pub fn shader_stage_link_failures(pairs: &HashMap<ShaderKey, EffectShaderPair>) 
             failures.push(format!("{key:#x}: VS SPIR-V→WGSL failed"));
             continue;
         };
-        let Ok((fs_wgsl, _)) = crate::spirv_to_wgsl::spirv_to_wgsl(
+        let fs_wgsl = match crate::spirv_to_wgsl::spirv_to_wgsl(
             &to_bytes(&fs_w),
             naga::ShaderStage::Fragment,
             &format!("link_fs_{label}"),
-        ) else {
-            failures.push(format!("{key:#x}: FS SPIR-V→WGSL failed"));
-            continue;
+        ) {
+            Ok((w, _)) => w,
+            Err(e) => {
+                failures.push(format!("{key:#x}: FS SPIR-V→WGSL failed: {e}"));
+                continue;
+            }
         };
         let patched = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
         for loc in fragment_input_locations(&fs_wgsl) {
@@ -1294,6 +1658,15 @@ pub fn shader_stage_link_failures(pairs: &HashMap<ShaderKey, EffectShaderPair>) 
         }
     }
     failures
+}
+
+/// Sampler count from fragment reflection (authoritative), not bnsh-decoder JSON stats.
+pub fn fragment_sampler_count(pair: &EffectShaderPair) -> u32 {
+    pair.fragment
+        .as_ref()
+        .and_then(|s| s.reflection.as_ref())
+        .map(|r| r.sampler_names.len() as u32)
+        .unwrap_or_else(|| pair.fragment.as_ref().map(|s| s.sampler_count).unwrap_or(0))
 }
 
 /// Get summary stats about decoded shaders
@@ -1439,38 +1812,30 @@ impl MaterialTextureBindings {
         reflection: &bnsh_reflection::ShaderStageReflection,
     ) -> HashMap<String, u32> {
         let mut resolved = HashMap::new();
-        
-        // Build jump table from reflection (sampler_name → GPU slot)
-        let sampler_table = reflection.build_sampler_jump_table();
-        
-        // Map each material texture sampler to its GPU slot
-        for (sampler_name, &(_slot, bntx_idx)) in &self.sampler_bindings {
-            if let Some(&gpu_slot) = sampler_table.get(sampler_name) {
-                resolved.insert(
-                    format!("mat_tex_{}_{}", sampler_name, bntx_idx),
-                    gpu_slot,
-                );
+        let tex_by_sampler: HashMap<String, u32> = reflection
+            .build_sampler_texture_pairs()
+            .into_iter()
+            .map(|(name, tex, _)| (name, tex))
+            .collect();
+
+        let mut resolve_map = |bindings: &HashMap<String, (u32, u32)>| {
+            for (material_key, &(_slot, bntx_idx)) in bindings {
+                if let Some(sampler_name) =
+                    bnsh_reflection::match_material_sampler_name(material_key, &reflection.sampler_names)
+                {
+                    if let Some(&gpu_slot) = tex_by_sampler.get(sampler_name) {
+                        resolved.insert(
+                            format!("mat_tex_{}_{}", material_key, bntx_idx),
+                            gpu_slot,
+                        );
+                    }
+                }
             }
-        }
-        
-        // Add emissive and PBR mappings
-        for (sampler_name, &(_slot, bntx_idx)) in &self.emissive_bindings {
-            if let Some(&gpu_slot) = sampler_table.get(sampler_name) {
-                resolved.insert(
-                    format!("mat_tex_{}_{}", sampler_name, bntx_idx),
-                    gpu_slot,
-                );
-            }
-        }
-        
-        for (sampler_name, &(_slot, bntx_idx)) in &self.pbr_bindings {
-            if let Some(&gpu_slot) = sampler_table.get(sampler_name) {
-                resolved.insert(
-                    format!("mat_tex_{}_{}", sampler_name, bntx_idx),
-                    gpu_slot,
-                );
-            }
-        }
+        };
+
+        resolve_map(&self.sampler_bindings);
+        resolve_map(&self.emissive_bindings);
+        resolve_map(&self.pbr_bindings);
         
         if !resolved.is_empty() {
             eprintln!("[MATERIAL_BINDING] Resolved {} material texture GPU slots", resolved.len());
@@ -1509,6 +1874,90 @@ impl MaterialTextureBindings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_fs_only_registry_blob_assigns_fragment_not_vertex() {
+        let Some(bytes) = read_shader_fixture_bytes(BOMB_SHADER_KEY) else {
+            eprintln!("Skipping: bomb fixture unavailable");
+            return;
+        };
+        let pair = decode_bnsh_bytes(&bytes).expect("decode should succeed");
+        assert!(
+            pair.fragment.is_some(),
+            "registry blob should decode a fragment stage"
+        );
+        assert!(
+            pair.vertex.is_none(),
+            "FS-only registry blob must not populate vertex slot"
+        );
+        let fs = pair.fragment.as_ref().unwrap();
+        assert_eq!(
+            crate::spirv_to_wgsl::spirv_is_fragment(&fs.spirv),
+            Some(true)
+        );
+        assert!(
+            fs.reflection.is_some(),
+            "fragment reflection should be attached via enrich_pair_reflection_from_container"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_misassigned_stages_moves_fragment_out_of_vertex_slot() {
+        let fs = DecodedShader {
+            spirv: vec![0x01, 0x02, 0x03, 0x04],
+            wgsl_source: String::new(),
+            entry_point: "main".into(),
+            sampler_count: 2,
+            uniform_buffer_count: 1,
+            reflection: None,
+        };
+        let mut pair = EffectShaderPair {
+            vertex: Some(fs.clone()),
+            fragment: None,
+            compute: None,
+        };
+        reconcile_misassigned_stages(&mut pair);
+        assert!(pair.vertex.is_none(), "fragment blob must leave vertex slot");
+        assert_eq!(pair.fragment.as_ref().unwrap().spirv, fs.spirv);
+    }
+
+    #[test]
+    fn test_finalize_shader_pairs_does_not_fill_missing_fragment() {
+        let fs = DecodedShader {
+            spirv: vec![0x01, 0x02, 0x03, 0x04],
+            wgsl_source: String::new(),
+            entry_point: "main".into(),
+            sampler_count: 3,
+            uniform_buffer_count: 2,
+            reflection: None,
+        };
+        let vs = DecodedShader {
+            spirv: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            wgsl_source: String::new(),
+            entry_point: "vs".into(),
+            sampler_count: 0,
+            uniform_buffer_count: 4,
+            reflection: None,
+        };
+        let effect = EffectShaderPair {
+            vertex: Some(vs.clone()),
+            fragment: Some(fs),
+            compute: None,
+        };
+        let mut pairs = HashMap::from([(
+            1u64,
+            EffectShaderPair {
+                vertex: Some(vs),
+                fragment: None,
+                compute: None,
+            },
+        )]);
+        finalize_shader_pairs(&mut pairs, &effect);
+        assert!(
+            pairs.get(&1).unwrap().fragment.is_none(),
+            "missing FS must not be mass-filled from legacy pair"
+        );
+    }
 
     #[test]
     fn test_per_emitter_pairing_uses_canonical_vs() {
@@ -1659,6 +2108,36 @@ mod tests {
     }
 
     #[test]
+    fn test_map_storage_cbuf_bindings_from_reflection() {
+        let reflection = bnsh_reflection::ShaderStageReflection {
+            constant_buffer_names: vec!["Global".into(), "Material".into()],
+            index_constant_buffer: 2,
+            index_unordered_access_buffer: 4,
+            shader_slots: vec![0, 0, 13, 6],
+            ..Default::default()
+        };
+        let descriptors = vec![
+            DescriptorInfo {
+                set: 0,
+                binding: 13,
+                name: "cbuf_8_1_".into(),
+                ty_str: "Storage".into(),
+                class: BindingClass::Storage,
+            },
+            DescriptorInfo {
+                set: 0,
+                binding: 6,
+                name: "cbuf_16_1_".into(),
+                ty_str: "Storage".into(),
+                class: BindingClass::Storage,
+            },
+        ];
+        let map = map_storage_cbuf_bindings(Some(&reflection), &descriptors);
+        assert_eq!(map.get(&13), Some(&"Global".to_string()));
+        assert_eq!(map.get(&6), Some(&"Material".to_string()));
+    }
+
+    #[test]
     fn test_map_emitter_slots_to_descriptors_from_reflection() {
         let reflection = bnsh_reflection::ShaderStageReflection {
             sampler_names: vec!["s0".into(), "s1".into()],
@@ -1696,7 +2175,7 @@ mod tests {
                 class: BindingClass::Sampler,
             },
         ];
-        let map = map_emitter_slots_to_descriptors(Some(&reflection), None, &descriptors);
+        let map = map_emitter_slots_to_descriptors(Some(&reflection), &descriptors);
         assert_eq!(map.get(&(0, 2)), Some(&0));
         assert_eq!(map.get(&(0, 3)), Some(&0));
         assert_eq!(map.get(&(0, 6)), Some(&1));
@@ -1704,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_map_emitter_slots_fallback_binding_order() {
+    fn test_map_emitter_slots_empty_without_fragment_reflection() {
         let descriptors = vec![
             DescriptorInfo {
                 set: 0,
@@ -1721,9 +2200,42 @@ mod tests {
                 class: BindingClass::Sampler,
             },
         ];
-        let map = map_emitter_slots_to_descriptors(None, None, &descriptors);
-        assert_eq!(map.get(&(0, 10)), Some(&0));
-        assert_eq!(map.get(&(0, 11)), Some(&0));
+        let map = map_emitter_slots_to_descriptors(None, &descriptors);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_map_storage_cbuf_bindings_empty_without_fragment_reflection() {
+        let descriptors = vec![DescriptorInfo {
+            set: 0,
+            binding: 9,
+            name: "cbuf_8_1_".into(),
+            ty_str: "Storage".into(),
+            class: BindingClass::Storage,
+        }];
+        let map = map_storage_cbuf_bindings(None, &descriptors);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_material_texture_bindings_resolve_with_reflection() {
+        let mut bindings = MaterialTextureBindings::default();
+        bindings
+            .sampler_bindings
+            .insert("_col".to_string(), (0, 10));
+        let reflection = bnsh_reflection::ShaderStageReflection {
+            sampler_names: vec!["tex_col".to_string()],
+            index_shader_output: 0,
+            index_image: 0,
+            index_sampler: 1,
+            index_constant_buffer: 2,
+            index_unordered_access_buffer: 2,
+            shader_slots: vec![5, 0],
+            ..Default::default()
+        };
+
+        let resolved = bindings.resolve_with_reflection(&reflection);
+        assert_eq!(resolved.get("mat_tex__col_10"), Some(&5));
     }
 
     #[test]
@@ -1737,6 +2249,127 @@ mod tests {
         
         let resolved = bindings.resolve_with_reflection(&reflection);
         assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_extract_shader_reflection_from_fixture() {
+        let dir = shader_fixtures_dir();
+        if !dir.is_dir() {
+            eprintln!("Skipping: no tests/fixtures/shaders directory");
+            return;
+        }
+        let mut fixture_path = None;
+        if let Some(bytes) = read_shader_fixture_bytes(BOMB_SHADER_KEY) {
+            fixture_path = dir
+                .read_dir()
+                .ok()
+                .and_then(|rd| {
+                    rd.flatten().find_map(|e| {
+                        let p = e.path();
+                        if p.extension().and_then(|x| x.to_str()) == Some("bnsh")
+                            && std::fs::read(&p).ok().as_deref() == Some(bytes.as_slice())
+                        {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                });
+            let fragment = extract_shader_reflection(&bytes, true)
+                .expect("reflection parse should not error")
+                .expect("fragment reflection should be present");
+            assert!(
+                !fragment.sampler_names.is_empty() || !fragment.constant_buffer_names.is_empty(),
+                "fixture should expose sampler or cbuffer names"
+            );
+            assert_eq!(
+                fragment.shader_slots.len(),
+                fragment.index_unordered_access_buffer as usize
+            );
+            if !fragment.sampler_names.is_empty() {
+                let table = fragment.build_sampler_jump_table();
+                assert!(
+                    table.values().all(|&slot| fragment.shader_slots.contains(&slot)),
+                    "sampler GPU slots must come from shader_slots array"
+                );
+            }
+            eprintln!(
+                "[TEST] reflection from fixture: {} samplers {:?}, {} slots {:?}",
+                fragment.sampler_names.len(),
+                fragment.sampler_names,
+                fragment.shader_slots.len(),
+                fragment.shader_slots
+            );
+            return;
+        }
+        // Any local .bnsh fixture is enough when bomb shader is absent.
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            eprintln!("Skipping: cannot read shader fixtures");
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bnsh") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if bytes.len() < 0x20 || &bytes[0..4] != b"BNSH" {
+                continue;
+            }
+            fixture_path = Some(path.clone());
+            let fragment = extract_shader_reflection(&bytes, true)
+                .expect("reflection parse should not error")
+                .expect("fragment reflection should be present");
+            assert_eq!(
+                fragment.shader_slots.len(),
+                fragment.index_unordered_access_buffer as usize
+            );
+            eprintln!(
+                "[TEST] reflection from {}: samplers={:?} slots={:?}",
+                path.display(),
+                fragment.sampler_names,
+                fragment.shader_slots
+            );
+            return;
+        }
+        eprintln!("Skipping: no readable .bnsh fixtures under {:?}", dir);
+        let _ = fixture_path;
+    }
+
+    #[test]
+    fn test_extract_reflection_uses_full_container_not_bytecode_slice() {
+        let dir = shader_fixtures_dir();
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            eprintln!("Skipping: no shader fixtures");
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bnsh") {
+                continue;
+            }
+            let Ok(full) = std::fs::read(&path) else {
+                continue;
+            };
+            let offsets = find_bnsh_bytecode_offsets(&full);
+            if offsets.is_empty() {
+                continue;
+            }
+            let slice = &full[offsets[0]..];
+            assert!(
+                extract_shader_reflection(slice, true).ok().flatten().is_none(),
+                "bytecode slice alone must not yield reflection"
+            );
+            assert!(
+                extract_shader_reflection(&full, true).ok().flatten().is_some(),
+                "full BNSH container must yield reflection for {:?}",
+                path.file_name()
+            );
+            return;
+        }
+        eprintln!("Skipping: no multi-section BNSH fixture for container-vs-slice test");
     }
 }
 

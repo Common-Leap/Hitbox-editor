@@ -1283,7 +1283,11 @@ fn convert_emitter_data(
     let emission_rate_random = json.emission.as_ref().map(|e| e.rate_random).unwrap_or(0.0);
     let is_one_time = json.emission.as_ref().map(|e| e.is_one_time).unwrap_or(false);
     let emission_start = json.emission.as_ref().map(|e| e.start).unwrap_or(0);
-    let emission_timing = json.emission.as_ref().map(|e| e.timing).unwrap_or(0);
+    // Emission.Timing is authored in 60ths of a frame, not frames: across every dumped
+    // emitter it is exactly 60 (= start at frame 1, 85%) or 0 (= frame 0, 15%). Reading
+    // it as frames delayed most one-time emitters by 59 frames — effects never appeared
+    // during their moves (which is also why arc effects got hijacked to synthetic trails).
+    let emission_timing = json.emission.as_ref().map(|e| e.timing / 60).unwrap_or(0);
     let emission_duration = json.emission.as_ref().map(|e| e.duration).unwrap_or(9999);
 
     // ── Particle lifetime ─────────────────────────────────────────────────
@@ -1292,33 +1296,34 @@ fn convert_emitter_data(
         .as_ref()
         .map(|p| p.life as f32)
         .unwrap_or(60.0);
+    // LifeRandom / VelRandom / ScaleRandom are authored as PERCENTAGES (0..100 — every
+    // dumped value is a round ten ≤ 80). Reading them as raw ± multipliers produced
+    // 60x size swings (fire particles at size 290 next to 0.01-floor siblings) and
+    // 226-frame fires from a 14-frame base.
     let lifetime_random = json
         .particle_data
         .as_ref()
-        .map(|p| p.life_random as f32)
+        .map(|p| p.life_random as f32 / 100.0)
         .unwrap_or(0.0);
 
     // ── Particle velocity ──────────────────────────────────────────────────
-    // Some PTCL files use all_direction=0 and designated_dir_scale for speed
-    // (the actual direction is set via emit_type or the designated_dir_x/y/z).
-    // Use whichever gives non-zero speed; default to 0.3 when both are absent.
+    // nw::eft composes AllDirection (figure-direction speed) and DesignatedDirScale
+    // (speed along DesignatedDir) additively — both zero means no emit velocity
+    // (movement then comes from gravity / emitter matrix only).
     let initial_speed = json
         .particle_velocity
         .as_ref()
-        .map(|v| {
-            if v.all_direction.abs() > 0.001 {
-                v.all_direction
-            } else if v.designated_dir_scale.abs() > 0.001 {
-                v.designated_dir_scale
-            } else {
-                0.5 // conservative fallback so particles actually move
-            }
-        })
-        .unwrap_or(0.3);
+        .map(|v| v.all_direction)
+        .unwrap_or(0.0);
+    let designated_dir_scale = json
+        .particle_velocity
+        .as_ref()
+        .map(|v| v.designated_dir_scale)
+        .unwrap_or(0.0);
     let speed_random = json
         .particle_velocity
         .as_ref()
-        .map(|v| v.vel_random)
+        .map(|v| v.vel_random / 100.0)
         .unwrap_or(0.0);
 
     // ── Particle scale ─────────────────────────────────────────────────────
@@ -1330,8 +1335,18 @@ fn convert_emitter_data(
     let scale_random = json
         .particle_scale
         .as_ref()
-        .map(|s| s.scale_random_x)
+        .map(|s| s.scale_random_x / 100.0)
         .unwrap_or(0.0);
+    // Authored Y/X billboard ratio; 1.0 when uniform, absent, or X is degenerate (zero-width
+    // billboards keep whatever ratio — the extent is zero anyway).
+    let scale_aspect_y = json
+        .particle_scale
+        .as_ref()
+        .map(|s| {
+            let r = s.scale_y / s.scale_x;
+            if r.is_finite() { r } else { 1.0 }
+        })
+        .unwrap_or(1.0);
 
     // ── Rotation speed and initial rotation ────
     // Billboards rotate in the screen plane → use Z-axis values.
@@ -1349,6 +1364,11 @@ fn convert_emitter_data(
             glam::Vec3::ZERO
         }
     }).unwrap_or(glam::Vec3::ZERO);
+
+    // ── Gravity space (world vs emitter-local) ─────────────────────────────
+    // Applied to `accel` per-particle at spawn (effects::build_spawned_particle). Defaults to
+    // world gravity (the common case, and the prior behavior) when emission data is absent.
+    let is_world_gravity = json.emission.as_ref().map(|e| e.is_world_gravity).unwrap_or(true);
 
     // ── Air resistance (per-frame velocity damping) ────────────────────────
     // 1.0 = no drag. Guard against a missing/zero field zeroing all velocity.
@@ -1386,6 +1406,10 @@ fn convert_emitter_data(
     } else {
         color0
     };
+
+    // ── Random seed (per-emitter PRNG stream identity) ─────────────────────
+    let random_seed = json.emitter_info.as_ref().map(|i| i.random_seed).unwrap_or(0);
+    let random_seed_type = json.emitter_info.as_ref().map(|i| i.random_seed_type).unwrap_or(0);
 
     // ── Emitter transform from EmitterInfo ────────────────────────────────
     let emitter_offset = json
@@ -1853,6 +1877,7 @@ fn convert_emitter_data(
     // ── Sampler wrap modes (Texture0–1) ────────────────────────────────────
     let tex_wrap_u = json.sampler0.as_ref().map(|s| sampler_wrap_to_u8(&s.wrap_u)).unwrap_or(def_wrap);
     let tex_wrap_v = json.sampler0.as_ref().map(|s| sampler_wrap_to_u8(&s.wrap_v)).unwrap_or(def_wrap);
+    let tex_filter = json.sampler0.as_ref().map(|s| s.filter as u8).unwrap_or(0);
     let tex2_wrap_u = json
         .sampler2
         .as_ref()
@@ -1876,6 +1901,7 @@ fn convert_emitter_data(
         initial_speed,
         speed_random,
         accel,
+        is_world_gravity,
         air_res,
         lifetime,
         lifetime_random,
@@ -1970,6 +1996,10 @@ fn convert_emitter_data(
         emitter_dist_marg,
         emitter_dist_particles_max,
         designated_dir,
+        designated_dir_scale,
+        scale_aspect_y,
+        random_seed,
+        random_seed_type,
         use_omnidirectional,
         is_world_oriented_velocity: json
             .emission
@@ -2038,6 +2068,7 @@ fn convert_emitter_data(
         tex2_pat_frame_table,
         tex_wrap_u,
         tex_wrap_v,
+        tex_filter,
         tex2_wrap_u,
         tex2_wrap_v,
         anim_translate: None,

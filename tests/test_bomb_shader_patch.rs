@@ -5,9 +5,17 @@ use hitbox_editor::effects::{BlendType, EffIndex, Particle, ParticleSystem, Ptcl
 use hitbox_editor::particle_renderer_bnsh::{
     blend_state_for, bnsh_vertex_layout, load_bnsh_shader_modules, BnshPipelineState, BnshShaderSet,
 };
-use hitbox_editor::spirv_to_wgsl::{patch_vertex_wgsl, vertex_return_wires_fs_inputs};
+use hitbox_editor::spirv_to_wgsl::{
+    fragment_input_locations, patch_vertex_wgsl, vertex_return_wires_fs_inputs,
+};
 
 const BOMB_KEY: u64 = hitbox_editor::bnsh_shader_integration::BOMB_SHADER_KEY;
+
+/// GPU tests mutate process-global `FX_*` env vars; serialize to avoid parallel flake.
+fn gpu_test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn effect_export_file(rel: &str) -> Option<std::path::PathBuf> {
     let root = hitbox_editor::scratch_dirs::effect_export_root()?;
@@ -29,30 +37,55 @@ fn bomb_pair_or_local() -> Option<hitbox_editor::bnsh_shader_integration::Effect
 fn synthetic_bomb_ptcl() -> Option<PtclFile> {
     hitbox_editor::bnsh_shader_integration::synthetic_ptcl_from_shader_key(
         BOMB_KEY,
-        BlendType::Sub,
+        BlendType::Normal,
     )
     .ok()
 }
 
+fn samus_bomb_spawn_handle(eff: &EffIndex) -> String {
+    ["samus_atk_bomb", "samus_cshot_bomb"]
+        .iter()
+        .find(|name| eff.handles.contains_key(**name))
+        .map(|s| (*s).to_string())
+        .or_else(|| {
+            eff.handles
+                .keys()
+                .find(|k| k.contains("bomb") || k.contains("Bomb"))
+                .cloned()
+        })
+        .unwrap_or_else(|| "samus_atk_bomb".to_string())
+}
+
 fn synthetic_bomb_particle(ptcl: &PtclFile) -> Particle {
     let emitter = &ptcl.emitter_sets[0].emitters[0];
+    let lifetime = emitter.lifetime.max(1.0);
+    let age = lifetime * 0.05;
+    let life_t = (age / lifetime).clamp(0.0, 1.0);
+    let c0 = hitbox_editor::effects::sample_color_pub(&emitter.color0, life_t);
+    let c1 = hitbox_editor::effects::sample_color_pub(&emitter.color1, life_t);
+    let a0 = hitbox_editor::effects::sample_color_pub(&emitter.alpha0_keys, life_t)[0];
+    let a1 = hitbox_editor::effects::sample_color_pub(&emitter.alpha1_keys, life_t)[0];
+    let size = (emitter.scale * emitter.scale_anim.sample(life_t)).max(0.01);
+    // GPU fixture camera is far (z≈250); match simulation life/colour but keep quad on-screen.
+    let size = size.max(40.0);
     Particle {
         position: Vec3::ZERO,
         velocity: Vec3::ZERO,
-        age: 0.1,
-        lifetime: 2.0,
-        color: Vec4::new(1.0, 0.2, 0.1, 1.0),
-        color0_rgb: [1.0, 0.2, 0.1],
-        color1_rgb: [1.0, 1.0, 1.0],
-        alpha0_live: 1.0,
-        alpha1_live: 1.0,
-        color_scale_live: 1.0,
-        draw_path: 0,
+        accel_world: Vec3::ZERO,
+        age,
+        lifetime,
+        color: Vec4::new(c0[0], c0[1], c0[2], a0),
+        color0_rgb: [c0[0], c0[1], c0[2]],
+        color1_rgb: [c1[0], c1[1], c1[2]],
+        alpha0_live: a0,
+        alpha1_live: a1,
+        color_scale_live: emitter.color_scale,
+        draw_path: emitter.draw_path,
         pre_draw: false,
         parent_emitter_idx: None,
         inst_start_frame: 0.0,
         inherit: None,
-        size: 50.0,
+        size,
         rotation: 0.0,
         rotation_speed: 0.0,
         emitter_set_idx: 0,
@@ -84,6 +117,7 @@ fn render_particles_visible(
     native_fs: bool,
     native_vs_pos: bool,
 ) -> Option<bool> {
+    let _lock = gpu_test_env_lock();
     std::env::set_var("FX_NATIVE_FS", if native_fs { "1" } else { "0" });
     if native_vs_pos {
         std::env::set_var("FX_NATIVE_VS_POS", "1");
@@ -107,8 +141,9 @@ fn render_particles_visible(
     let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
     let proj = Mat4::perspective_rh(1.0, 1.0, 1.0, 5000.0);
     let view_proj = proj * view;
-    let cam_right = Vec3::new(view.col(0).x, view.col(0).y, view.col(0).z);
-    let cam_up = Vec3::new(view.col(1).x, view.col(1).y, view.col(1).z);
+    let mv_inv = view.inverse();
+    let cam_right = mv_inv.col(0).truncate().normalize();
+    let cam_up = mv_inv.col(1).truncate().normalize();
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("particle_render_target"),
@@ -170,30 +205,18 @@ fn render_particles_visible(
         submission_index: None,
         timeout: None,
     });
-    Some(readback_any_visible(&device, &queue, &target))
+    let max_px = readback_max_pixel(&device, &queue, &target);
+    eprintln!(
+        "[FIXTURE-RENDER] target_max=({},{},{},{})",
+        max_px[0], max_px[1], max_px[2], max_px[3]
+    );
+    Some(readback_particles_on_transparent(&device, &queue, &target))
 }
 
 fn particle_tex_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("particle_tex_bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
+        entries: &hitbox_editor::particle_renderer::emitter_tex_bind_group_layout_entries(),
     })
 }
 
@@ -223,6 +246,16 @@ fn particle_extra_tex345_bind_group_layout(device: &wgpu::Device) -> wgpu::BindG
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
+            min_binding_size: std::num::NonZeroU64::new(96),
+        },
+        count: None,
+    });
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 7,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
             min_binding_size: std::num::NonZeroU64::new(64),
         },
         count: None,
@@ -230,6 +263,41 @@ fn particle_extra_tex345_bind_group_layout(device: &wgpu::Device) -> wgpu::BindG
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("bnsh_extra_tex345_bgl"),
         entries: &entries,
+    })
+}
+
+fn particle_group2_placeholder_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("bnsh_group2_placeholder_bgl"),
+        entries: &[],
+    })
+}
+
+fn particle_soft_particle_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("bnsh_soft_particle_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(32),
+                },
+                count: None,
+            },
+        ],
     })
 }
 
@@ -253,7 +321,7 @@ fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         .block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("bomb_pipeline_test"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: hitbox_editor::wgpu_device_limits(&adapter),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,
@@ -263,7 +331,7 @@ fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 }
 
 #[test]
-fn test_samus_bomb_shader_links_locations_6_and_7() {
+fn test_samus_bomb_shader_links_locations_0_through_5() {
     std::env::set_var("FX_NATIVE_FS", "1");
     let Some(pair) = bomb_pair_or_local() else {
         panic!("bomb shader fixture missing and Samus effect not found");
@@ -290,39 +358,45 @@ fn test_samus_bomb_shader_links_locations_6_and_7() {
     )
     .unwrap();
 
-    let patched = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
-    assert!(
-        patched.contains("@location(6) out_attr6_"),
-        "patched VS must output location 6 for bomb FS"
+    let fs_locs = fragment_input_locations(&fs_wgsl);
+    assert_eq!(
+        fs_locs,
+        vec![0, 1, 2, 3, 4, 5],
+        "real bomb FS uses locations 0-5 only"
     );
+
+    let patched = patch_vertex_wgsl(&vs_wgsl, &fs_wgsl);
+    for loc in &fs_locs {
+        assert!(
+            patched.contains(&format!("@location({loc})")),
+            "patched VS must output location {loc} for bomb FS"
+        );
+    }
     assert!(
-        patched.contains("@location(7) out_attr7_"),
-        "patched VS must output location 7 for bomb FS"
+        patched.contains("@location(5) out_attr5_"),
+        "patched VS must output location 5 for bomb FS"
     );
     assert!(
         vertex_return_wires_fs_inputs(&patched, &fs_wgsl),
         "patched VS return must wire all bomb FS varyings"
     );
     assert!(
-        patched.contains("out_attr6_ = in_attr6_1"),
-        "location 6 must pass through vertex input private copy"
+        hitbox_editor::spirv_to_wgsl::vs_has_native_color_chain(&vs_wgsl),
+        "bomb VS must keep native NVN colour chain"
     );
     assert!(
         !patched.contains("out_attr0_ = in_attr0_"),
         "must not clobber NVN-computed varyings with raw vertex inputs"
     );
-    let return_line = patched
-        .lines()
-        .find(|l| l.contains("return VertexOutput("))
-        .expect("return VertexOutput");
     assert!(
-        return_line.contains("out_attr6_") && return_line.contains("out_attr7_"),
-        "return must wire location 6/7: {return_line}"
+        !patched.contains("out_attr0_ = in_attr1_1"),
+        "must not clobber NVN colour with CPU attr1 passthrough"
     );
     assert!(
-        return_line.matches(',').count() >= 7,
-        "must extend spirv-cross return temps, not replace them: {return_line}"
+        !patched.contains("out_attr1_ = in_attr1_1"),
+        "must not clobber NVN colour with CPU attr1 passthrough"
     );
+    // CPU quad UV (attr2) passthrough is required when the decoded VS omits @location(2).
 }
 
 #[test]
@@ -348,11 +422,16 @@ fn test_samus_bomb_fs_mrt_clamped_to_location_0() {
         hitbox_editor::spirv_to_wgsl::PARTICLE_COMPOSITE_MRT_LOCATIONS,
     );
     assert!(
-        clamped.contains("@location(0) out_attr0_"),
+        clamped.contains("@location(0) frag_color0_"),
         "visible colour must remain at location 0"
     );
+    let frag_out_struct = clamped
+        .split("struct FragmentOutput {")
+        .nth(1)
+        .and_then(|s| s.split('}').next())
+        .unwrap_or("");
     assert!(
-        !clamped.contains("@location(1) out_attr"),
+        !frag_out_struct.contains("@location(1)"),
         "deferred G-buffer outputs must be trimmed for single-target composite"
     );
     let frag_return = clamped
@@ -372,7 +451,7 @@ fn test_samus_bomb_fs_mrt_clamped_to_location_0() {
     assert!(
         enhanced.contains("_fx_native_in.rgb * _fx_ts.rgb")
             || enhanced.contains("_fx_cbuf16_blend_ch12(_fx_native_in, _fx_ts"),
-        "texture must modulate native out_attr0_ chain, not a secondary MRT"
+        "texture must modulate native frag_color0_ chain, not a secondary MRT"
     );
 }
 
@@ -394,15 +473,25 @@ fn test_samus_bomb_sub_pipeline_valid_on_gpu() {
     );
 
     let label = format!("{BOMB_KEY:#x}");
-    let modules = load_bnsh_shader_modules(&device, &pair, &label);
+    let modules = load_bnsh_shader_modules(
+        &device,
+        &pair,
+        &label,
+        hitbox_editor::shader_registry::NativeColorInput::Auto,
+        hitbox_editor::shader_registry::ShaderVsProfile::ParticleBillboard,
+    );
 
     let tex_bg_layout = particle_tex_bind_group_layout(&device);
     let extra_tex345_bg_layout = particle_extra_tex345_bind_group_layout(&device);
+    let group2_placeholder_bg_layout = particle_group2_placeholder_bind_group_layout(&device);
+    let soft_particle_bg_layout = particle_soft_particle_bind_group_layout(&device);
     let state = BnshPipelineState::new(
         &device,
         modules,
         &tex_bg_layout,
         Some(&extra_tex345_bg_layout),
+        &group2_placeholder_bg_layout,
+        Some(&soft_particle_bg_layout),
         wgpu::TextureFormat::Rgba8UnormSrgb,
         &label,
     );
@@ -446,12 +535,103 @@ fn test_samus_bomb_sub_pipeline_valid_on_gpu() {
 }
 
 #[test]
+fn test_samus_attack_shader_depth_pipelines_valid_on_gpu() {
+    std::env::set_var("FX_NATIVE_FS", "1");
+    let (pairs, _) = hitbox_editor::bnsh_shader_integration::decode_effect_export_shaders("samus");
+    let keys = [
+        0x620eb49dad22664a_u64,
+        0x1214b7abe376cc24_u64,
+        0xf83f92d82c51ed75_u64,
+    ];
+    let Some((device, _queue)) = create_test_device() else {
+        eprintln!("No GPU — skipping");
+        return;
+    };
+    let tex_bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("particle_tex_bgl"),
+        entries: &hitbox_editor::particle_renderer::emitter_tex_bind_group_layout_entries(),
+    });
+    let extra_tex345_bg_layout = particle_extra_tex345_bind_group_layout(&device);
+    let group2_placeholder_bg_layout = particle_group2_placeholder_bind_group_layout(&device);
+    let soft_particle_bg_layout = particle_soft_particle_bind_group_layout(&device);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    for key in keys {
+        let Some(pair) = pairs.get(&key) else {
+            continue;
+        };
+        let label = format!("{key:#x}");
+        let modules = load_bnsh_shader_modules(
+            &device,
+            pair,
+            &label,
+            hitbox_editor::shader_registry::NativeColorInput::Auto,
+            hitbox_editor::shader_registry::ShaderVsProfile::ParticleBillboard,
+        );
+        let state = BnshPipelineState::new(
+            &device,
+            modules,
+            &tex_bg_layout,
+            Some(&extra_tex345_bg_layout),
+            &group2_placeholder_bg_layout,
+            Some(&soft_particle_bg_layout),
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            &label,
+        );
+        for (depth_write, tag) in [(false, "depth"), (true, "depth_write")] {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let _pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&format!("bnsh_blend_{label}_Normal_{tag}")),
+                layout: Some(&state.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &state.vs_module,
+                    entry_point: Some(&state.vs_entry),
+                    buffers: &[bnsh_vertex_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: if depth_write {
+                        &state.fs_module_depth_write
+                    } else {
+                        &state.fs_module
+                    },
+                    entry_point: Some(&state.fs_entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        blend: Some(blend_state_for(BlendType::Normal)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(if depth_write {
+                    hitbox_editor::particle_renderer_bnsh::particle_depth_stencil_state_write()
+                } else {
+                    hitbox_editor::particle_renderer_bnsh::particle_depth_stencil_state()
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            let _ = device.poll(wgpu::PollType::Poll);
+            let err = rt.block_on(scope.pop());
+            if let Some(e) = err {
+                panic!("{label} Normal {tag} pipeline invalid: {e:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn test_bomb_fixture_particle_renderer_produces_visible_pixels() {
     let Some(ptcl) = synthetic_bomb_ptcl() else {
         panic!("bomb fixture PTCL build failed");
     };
     let particle = synthetic_bomb_particle(&ptcl);
-    let Some(visible) = render_particles_visible(&ptcl, std::slice::from_ref(&particle), true, true)
+    let Some(visible) = render_particles_visible(&ptcl, std::slice::from_ref(&particle), true, false)
     else {
         eprintln!("No GPU — skipping");
         return;
@@ -532,6 +712,7 @@ fn test_samus_bomb_particle_renderer_produces_visible_pixels() {
     let particle = Particle {
         position: Vec3::ZERO,
         velocity: Vec3::ZERO,
+        accel_world: Vec3::ZERO,
         age: 0.1,
         lifetime: 2.0,
         color: Vec4::new(1.0, 0.2, 0.1, 1.0),
@@ -540,7 +721,7 @@ fn test_samus_bomb_particle_renderer_produces_visible_pixels() {
         alpha0_live: 1.0,
         alpha1_live: 1.0,
         color_scale_live: 1.0,
-        draw_path: 0,
+        draw_path: emitter.draw_path,
         pre_draw: false,
         parent_emitter_idx: None,
         inst_start_frame: 0.0,
@@ -627,15 +808,38 @@ fn test_samus_bomb_particle_renderer_produces_visible_pixels() {
         &merged.bfres_models,
     );
 
+    queue.submit(Some(encoder.finish()));
+
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+
+    let max_px = readback_max_pixel(&device, &queue, &target);
+    let any_visible = readback_particles_on_transparent(&device, &queue, &target);
+    eprintln!(
+        "[BOMB-READBACK] target_max=({},{},{},{}) visible={any_visible}",
+        max_px[0], max_px[1], max_px[2], max_px[3]
+    );
+    assert!(
+        any_visible,
+        "samus bomb ParticleRenderer draw produced no visible pixels on transparent clear"
+    );
+}
+
+fn readback_max_pixel(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> [u8; 4] {
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
+        label: Some("max_readback"),
         size: 256 * 256 * 4,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("max_readback_encoder"),
+    });
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &target,
+            texture: target,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -651,36 +855,31 @@ fn test_samus_bomb_particle_renderer_produces_visible_pixels() {
         wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
     );
     queue.submit(Some(encoder.finish()));
-
-    let _ = device.poll(wgpu::PollType::Wait {
+    device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
     });
-
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::Wait {
+    device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
     });
     let data = slice.get_mapped_range();
-    let pixels: &[u8] = &data;
-    let bg = (63u8, 63u8, 89u8);
-    let mut any_visible = false;
-    let mut vis_count = 0usize;
-    for p in pixels.chunks(4) {
-        if p[0].abs_diff(bg.0) > 8 || p[1].abs_diff(bg.1) > 8 || p[2].abs_diff(bg.2) > 8 {
-            any_visible = true;
-            vis_count += 1;
+    let mut max = [0u8; 4];
+    for px in data.chunks(4) {
+        for i in 0..4 {
+            max[i] = max[i].max(px[i]);
         }
     }
-    eprintln!("[BOMB-READBACK] visible_px={vis_count}/{}", 256 * 256);
     drop(data);
     readback.unmap();
-    assert!(
-        any_visible,
-        "samus bomb ParticleRenderer draw produced no pixels different from clear color"
-    );
+    max
+}
+
+fn readback_particles_on_transparent(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> bool {
+    let max = readback_max_pixel(device, queue, target);
+    max[0] > 8 || max[1] > 8 || max[2] > 8 || max[3] > 8
 }
 
 fn readback_any_visible(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> bool {
@@ -750,6 +949,7 @@ fn simulation_render_visible_opts(
     native_fs: bool,
     native_vs_pos: bool,
 ) -> Option<(usize, bool)> {
+    let _lock = gpu_test_env_lock();
     std::env::set_var("FX_NATIVE_FS", if native_fs { "1" } else { "0" });
     if native_vs_pos {
         std::env::set_var("FX_NATIVE_VS_POS", "1");
@@ -798,8 +998,28 @@ fn simulation_render_visible_opts(
     let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
     let proj = Mat4::perspective_rh(1.0, 1.0, 1.0, 5000.0);
     let view_proj = proj * view;
-    let cam_right = Vec3::new(view.col(0).x, view.col(0).y, view.col(0).z);
-    let cam_up = Vec3::new(view.col(1).x, view.col(1).y, view.col(1).z);
+    let mv_inv = view.inverse();
+    let cam_right = mv_inv.col(0).truncate().normalize();
+    let cam_up = mv_inv.col(1).truncate().normalize();
+
+    renderer.prepare_particle_frame(
+        &device,
+        &queue,
+        view_proj,
+        cam_right,
+        cam_up,
+        cam_pos,
+        &system.particles,
+        &[],
+        &ptcl.emitter_sets,
+        &ptcl.bfres_models,
+        &bone_matrices,
+        &system.active_emitters,
+        target_frame,
+    );
+    if renderer.prepared_draw_paths().is_empty() {
+        return Some((count, false));
+    }
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sim_render_target"),
@@ -816,15 +1036,185 @@ fn simulation_render_visible_opts(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("sim_render_encoder"),
     });
-    {
-        let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("sim_clear"),
+    let paths: Vec<u32> = renderer.prepared_draw_paths().to_vec();
+    for (i, &path) in paths.iter().enumerate() {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(&format!("sim_particles_{path}")),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &target_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }),
+                    load: if i == 0 {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            multiview_mask: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        renderer.draw_prepared_particles_for_path(
+            &device,
+            &mut rpass,
+            path,
+            true,
+            hitbox_editor::particle_renderer::BnshDrawFilter::ExcludeSub,
+            hitbox_editor::particle_renderer::DepthDrawConfig::NONE,
+        );
+        renderer.draw_prepared_particles_for_path(
+            &device,
+            &mut rpass,
+            path,
+            false,
+            hitbox_editor::particle_renderer::BnshDrawFilter::SubOnly,
+            hitbox_editor::particle_renderer::DepthDrawConfig::NONE,
+        );
+    }
+    queue.submit(Some(encoder.finish()));
+    device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    let max_px = readback_max_pixel(&device, &queue, &target);
+    eprintln!(
+        "[SIM-RENDER] {spawn_handle} frame={target_frame} native_fs={native_fs} native_vs={native_vs_pos} target_max=({},{},{},{})",
+        max_px[0], max_px[1], max_px[2], max_px[3]
+    );
+    Some((count, readback_particles_on_transparent(&device, &queue, &target)))
+}
+
+/// Same GPU path as the editor viewport `paint` callback: scene clear, then direct
+/// per-path particle draws (ExcludeSub + SubOnly) onto the viewport target.
+fn editor_viewport_direct_render_visible(
+    effect_rel: &str,
+    spawn_handle: &str,
+    target_frame: f32,
+    native_fs: bool,
+    native_vs_pos: bool,
+) -> Option<(usize, bool)> {
+    let _lock = gpu_test_env_lock();
+    std::env::set_var("FX_NATIVE_FS", if native_fs { "1" } else { "0" });
+    if native_vs_pos {
+        std::env::set_var("FX_NATIVE_VS_POS", "1");
+    } else {
+        std::env::remove_var("FX_NATIVE_VS_POS");
+    }
+    let path = effect_export_file(effect_rel).or_else(|| {
+        hitbox_editor::scratch_dirs::resolve_fighter_eff(
+            effect_rel.rsplit('/').next().unwrap_or(effect_rel)
+                .trim_start_matches("ef_")
+                .trim_end_matches(".eff"),
+        )
+    })?;
+    let eff = EffIndex::from_file(&path).ok()?;
+    let ptcl = PtclFile::parse(&eff.ptcl_data).ok()?;
+    let bnsh_set = BnshShaderSet::from_ptcl_file(&ptcl, path.file_name()?.to_str()?).ok()?;
+    let (device, queue) = create_test_device()?;
+
+    let mut renderer = hitbox_editor::particle_renderer::ParticleRenderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &bnsh_set,
+    );
+    renderer.upload_textures(&device, &queue, &ptcl);
+    renderer.upload_meshes(&device, &queue, &ptcl);
+
+    let mut system = ParticleSystem::default();
+    system.spawn_effect(
+        spawn_handle,
+        "Trans",
+        Vec3::ZERO,
+        Vec3::ZERO,
+        0.0,
+        9999.0,
+        &eff,
+        &ptcl,
+    );
+    let bone_matrices: HashMap<String, Mat4> = [("Trans".to_string(), Mat4::IDENTITY)]
+        .into_iter()
+        .collect();
+    system.step(target_frame, &bone_matrices, &ptcl);
+    system.particles.retain(|p| !p.is_dead());
+    let count = system.particles.len();
+    if std::env::var("FX_VIEWPORT_LOG").is_ok() && count > 0 {
+        for (i, p) in system.particles.iter().take(4).enumerate() {
+            eprintln!(
+                "[EDITOR-VIEWPORT] particle[{i}] pos=({:.2},{:.2},{:.2}) size={:.3}",
+                p.position.x, p.position.y, p.position.z, p.size
+            );
+        }
+    }
+    if count == 0 {
+        return Some((0, false));
+    }
+
+    let cam_pos = Vec3::new(0.0, 50.0, 250.0);
+    let view = Mat4::look_at_rh(cam_pos, Vec3::ZERO, Vec3::Y);
+    let proj = Mat4::perspective_rh(1.0, 1.0, 1.0, 5000.0);
+    let view_proj = proj * view;
+    let mv_inv = view.inverse();
+    let cam_right = mv_inv.col(0).truncate().normalize();
+    let cam_up = mv_inv.col(1).truncate().normalize();
+
+    renderer.prepare_particle_frame(
+        &device,
+        &queue,
+        view_proj,
+        cam_right,
+        cam_up,
+        cam_pos,
+        &system.particles,
+        &[],
+        &ptcl.emitter_sets,
+        &ptcl.bfres_models,
+        &bone_matrices,
+        &system.active_emitters,
+        target_frame,
+    );
+    if renderer.prepared_draw_paths().is_empty() {
+        return Some((count, false));
+    }
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("editor_viewport_target"),
+        size: wgpu::Extent3d {
+            width: 256,
+            height: 256,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("editor_viewport_encoder"),
+    });
+
+    {
+        let _mesh_bg = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("editor_scene_mesh"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.05,
+                        g: 0.05,
+                        b: 0.1,
+                        a: 1.0,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -834,25 +1224,164 @@ fn simulation_render_visible_opts(
             occlusion_query_set: None,
         });
     }
-    renderer.render(
-        &device,
-        &queue,
-        &mut encoder,
-        &target_view,
-        view_proj,
-        cam_right,
-        cam_up,
-        &system.particles,
-        &[],
-        &ptcl.emitter_sets,
-        &ptcl.bfres_models,
-    );
+    let paths: Vec<u32> = renderer.prepared_draw_paths().to_vec();
+    for &path in &paths {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(&format!("editor_viewport_particles_{path}")),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            multiview_mask: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        renderer.draw_prepared_particles_for_path(
+            &device,
+            &mut rpass,
+            path,
+            true,
+            hitbox_editor::particle_renderer::BnshDrawFilter::ExcludeSub,
+            hitbox_editor::particle_renderer::DepthDrawConfig::NONE,
+        );
+        renderer.draw_prepared_particles_for_path(
+            &device,
+            &mut rpass,
+            path,
+            false,
+            hitbox_editor::particle_renderer::BnshDrawFilter::SubOnly,
+            hitbox_editor::particle_renderer::DepthDrawConfig::NONE,
+        );
+    }
     queue.submit(Some(encoder.finish()));
     device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
     });
+    if std::env::var("FX_VIEWPORT_LOG").is_ok() {
+        let final_max = readback_max_pixel(&device, &queue, &target);
+        eprintln!(
+            "[EDITOR-VIEWPORT-READBACK] paths={} final_max=({},{},{},{})",
+            paths.len(),
+            final_max[0], final_max[1], final_max[2], final_max[3],
+        );
+    }
     Some((count, readback_any_visible(&device, &queue, &target)))
+}
+
+#[test]
+fn test_editor_viewport_direct_draw_samus_bomb_visible() {
+    let Some(path) = hitbox_editor::scratch_dirs::resolve_fighter_eff("samus") else {
+        eprintln!("Samus effect not found — skipping");
+        return;
+    };
+    let eff = EffIndex::from_file(&path).expect("eff");
+    let spawn = samus_bomb_spawn_handle(&eff);
+
+    let Some((count, native_vis)) = editor_viewport_direct_render_visible(
+        "fighter/samus/ef_samus.eff",
+        &spawn,
+        30.0,
+        true,
+        true,
+    ) else {
+        eprintln!("No GPU or effect — skipping");
+        return;
+    };
+    let patched_vis = editor_viewport_direct_render_visible(
+        "fighter/samus/ef_samus.eff",
+        &spawn,
+        30.0,
+        false,
+        true,
+    )
+    .map(|(_, v)| v)
+    .unwrap_or(false);
+    eprintln!(
+        "[EDITOR-VIEWPORT] samus bomb frame=30 particles={count} native={native_vis} patched={patched_vis}"
+    );
+    if count == 0 {
+        eprintln!("No particles at frame 30 — simulation may need another frame");
+        return;
+    }
+    assert!(
+        native_vis || patched_vis,
+        "editor viewport direct draw produced no visible pixels at frame 30 (particles={count}, native={native_vis}, patched={patched_vis})"
+    );
+}
+
+#[test]
+fn diag_samus_patched_vs_includes_billboard_override() {
+    let Some(path) = hitbox_editor::scratch_dirs::resolve_fighter_eff("samus") else {
+        return;
+    };
+    std::env::remove_var("FX_NATIVE_VS_POS");
+    let eff = EffIndex::from_file(&path).expect("eff");
+    let ptcl = PtclFile::parse(&eff.ptcl_data).expect("ptcl");
+    let bnsh_set = BnshShaderSet::from_ptcl_file(&ptcl, path.file_name().unwrap().to_str().unwrap())
+        .expect("bnsh");
+    let mut checked = 0usize;
+    for set in &ptcl.emitter_sets {
+        for emitter in &set.emitters {
+            let pair = bnsh_set.pair_for_emitter(emitter);
+            let Some(vs_info) = pair.vertex.as_ref() else {
+                continue;
+            };
+            let Some(fs_info) = pair.fragment.as_ref() else {
+                continue;
+            };
+            let vs_spirv = vs_info.spirv.as_slice();
+            let fs_spirv = fs_info.spirv.as_slice();
+            let (vs_wgsl, _) = hitbox_editor::spirv_to_wgsl::spirv_to_wgsl(
+                vs_spirv,
+                naga::ShaderStage::Vertex,
+                "diag_vs",
+            )
+            .expect("vs wgsl");
+            let (fs_wgsl, _) = hitbox_editor::spirv_to_wgsl::spirv_to_wgsl(
+                fs_spirv,
+                naga::ShaderStage::Fragment,
+                "diag_fs",
+            )
+            .expect("fs wgsl");
+            let vs_prefixed = hitbox_editor::spirv_to_wgsl::wire_vertex_simulation_varyings(&vs_wgsl);
+            let fs_prefixed =
+                hitbox_editor::spirv_to_wgsl::wire_extra_tex_fragment_input(
+                    &hitbox_editor::spirv_to_wgsl::wire_crossfade_fragment_input(&fs_wgsl, &vs_prefixed),
+                    &vs_prefixed,
+                );
+            let patched = hitbox_editor::spirv_to_wgsl::patch_vertex_wgsl_with_hint(
+                &vs_prefixed,
+                &fs_prefixed,
+                None,
+            );
+            let usage = hitbox_editor::nvn_chain::cbuf_slot_usage_from_shaders(
+                Some(vs_spirv),
+                Some(fs_spirv),
+                &patched,
+                &fs_prefixed,
+            );
+            let billboard = hitbox_editor::spirv_to_wgsl::billboard_particle_vs(&patched);
+            let hybrid = patched.contains("_vp0 * _world.x");
+            let c9 = usage.get("cbuf_9_1_").cloned().unwrap_or_default();
+            let c8 = usage.get("cbuf_8_1_").cloned().unwrap_or_default();
+            eprintln!(
+                "[DIAG-VS] key={:#x} blend={:?} billboard={billboard} hybrid={hybrid} c9={c9:?} c8={c8:?}",
+                bnsh_set.pipeline_key_for_emitter(emitter),
+                emitter.blend_type,
+            );
+            checked += 1;
+            if checked >= 8 {
+                return;
+            }
+        }
+    }
 }
 
 #[test]
@@ -887,12 +1416,7 @@ fn test_samus_bomb_simulation_renders_with_native_and_patched_fs() {
         return;
     };
     let eff = hitbox_editor::effects::EffIndex::from_file(&path).expect("eff");
-    let spawn = eff
-        .handles
-        .keys()
-        .find(|k| k.contains("bomb") || k.contains("Bomb"))
-        .cloned()
-        .unwrap_or_else(|| "samus_atk_bomb".to_string());
+    let spawn = samus_bomb_spawn_handle(&eff);
 
     let Some((count, native_vis)) =
         simulation_render_visible("fighter/samus/ef_samus.eff", &spawn, 30.0, true)
@@ -927,12 +1451,7 @@ fn test_samus_bomb_native_vs_and_fs_renders_pixels() {
         return;
     };
     let eff = hitbox_editor::effects::EffIndex::from_file(&path).expect("eff");
-    let spawn = eff
-        .handles
-        .keys()
-        .find(|k| k.contains("bomb") || k.contains("Bomb"))
-        .cloned()
-        .unwrap_or_else(|| "samus_atk_bomb".to_string());
+    let spawn = samus_bomb_spawn_handle(&eff);
 
     let Some((count, visible)) = simulation_render_visible_opts(
         "fighter/samus/ef_samus.eff",
@@ -1072,7 +1591,10 @@ fn diag_render(
     );
     queue.submit(Some(encoder.finish()));
     device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-    let png = format!("/tmp/diag_{handle}_{cam_label}.png");
+    let png = hitbox_editor::scratch_dirs::workshop_tmp_path(&format!(
+        "diag_{handle}_{cam_label}.png"
+    ));
+    let png = png.to_string_lossy().into_owned();
     let (vis, stats) = readback_stats_and_png(&device, &queue, &target, &png);
     eprintln!("[DIAG] {handle} cam={cam_label}: rendered visible={vis} {stats} -> {png}");
     Some(vis)

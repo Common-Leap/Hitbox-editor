@@ -245,6 +245,9 @@ pub struct EmitterDef {
     /// Per-frame velocity damping (nw::eft `EmitterStatic.AirRes`). 1.0 = no drag;
     /// values < 1.0 decay velocity geometrically each frame (`v *= air_res`).
     pub air_res: f32,
+    /// nw::eft `Emission.IsWorldGravity`: when false, `accel` is in the emitter's local frame
+    /// and is rotated into world space per-particle at spawn.
+    pub is_world_gravity: bool,
     /// Particle lifetime in frames
     pub lifetime: f32,
     pub lifetime_random: f32,
@@ -412,6 +415,17 @@ pub struct EmitterDef {
     pub emitter_dist_particles_max: u32,
     /// Fixed emission direction when not omnidirectional (ParticleVelocity DesignatedDir*)
     pub designated_dir: Vec3,
+    /// Speed along [`designated_dir`], added to the figure-direction term
+    /// (`ParticleVelocity.DesignatedDirScale`).
+    pub designated_dir_scale: f32,
+    /// Authored billboard height/width ratio (`ParticleScale.ScaleY / ScaleX`); folded into
+    /// the per-particle aspect (attr4.z) so non-uniform emitter scale is not dropped.
+    pub scale_aspect_y: f32,
+    /// PTCL `EmitterInfo.RandomSeed`: 0 = roll per launch (editor uses a deterministic
+    /// per-emitter hash instead), else a fixed stream seed shared with the game.
+    pub random_seed: u32,
+    /// PTCL `EmitterInfo.RandomSeedType` (kept verbatim for capture-driven tuning).
+    pub random_seed_type: u32,
     /// When false, velocity uses [`designated_dir`] instead of volume spread.
     pub use_omnidirectional: bool,
     /// Velocity direction is world-space (Emission.IsWorldOrientedVelocity).
@@ -476,6 +490,8 @@ pub struct EmitterDef {
     pub tex_wrap_u: u8,
     /// Texture sampler wrap mode V
     pub tex_wrap_v: u8,
+    /// Texture sampler filter (nw::eft: 0=Linear, 1=Near)
+    pub tex_filter: u8,
     /// BNSH shader index (from ShaderReferences.shader_index, -1 = none/default)
     pub shader_index: i32,
     /// BNSH custom shader index (from ShaderReferences.custom_shader_index)
@@ -784,6 +800,7 @@ impl Default for EmitterDef {
             initial_speed: 0.3,
             speed_random: 0.3,
             accel: Vec3::ZERO,
+            is_world_gravity: true,
             air_res: 1.0,
             lifetime: 30.0,
             lifetime_random: 0.0,
@@ -878,6 +895,10 @@ impl Default for EmitterDef {
             emitter_dist_marg: 0.0,
             emitter_dist_particles_max: 0,
             designated_dir: Vec3::Z,
+            designated_dir_scale: 0.0,
+            scale_aspect_y: 1.0,
+            random_seed: 0,
+            random_seed_type: 0,
             use_omnidirectional: true,
             is_world_oriented_velocity: false,
             diffusion_dir_angle: 0.0,
@@ -899,6 +920,7 @@ impl Default for EmitterDef {
             tex2_scroll_uv: [0.0, 0.0],
             tex_wrap_u: 2,
             tex_wrap_v: 2,
+            tex_filter: 0,
             tex2_wrap_u: 2,
             tex2_wrap_v: 2,
             tex2_pat_frame_count: 1,
@@ -2595,9 +2617,16 @@ pub fn compute_particle_spawn_world_pos(
     world_mat.transform_point3(local)
 }
 
+/// Seed as an exactly-representable f32 for sin/golden-angle hashing. Stream seeds are up
+/// to 2^28; converting raw loses low bits (f32 has a 24-bit mantissa) and, worse, breaks
+/// formulas that assume a small per-burst ordinal. 20 bits keeps every value exact.
+fn seed_f(seed: usize) -> f32 {
+    (seed % 0x100000) as f32
+}
+
 /// Deterministic unit vector on the sphere (Fibonacci-style from seed).
 fn rand_unit_vec(seed: usize) -> Vec3 {
-    let theta = seed as f32 * 2.39996323;
+    let theta = seed_f(seed) * 2.39996323;
     let z = 1.0 - 2.0 * ((seed.wrapping_mul(1103515245).wrapping_add(12345) % 10000) as f32 / 10000.0);
     let r = (1.0 - z * z).max(0.0).sqrt();
     Vec3::new(r * theta.cos(), r * theta.sin(), z).normalize_or_zero()
@@ -2679,13 +2708,16 @@ fn emit_velocity_base_direction(
         | EmitType::SphereSameDivide
         | EmitType::SphereSameDivide64
         | EmitType::FillSphere => {
-            let theta = seed as f32 * 2.399;
-            let phi = (1.0 - 2.0 * ((seed as f32 + 0.5) / count as f32)).acos();
+            let theta = seed_f(seed) * 2.399;
+            // Even z-band coverage needs a bounded per-burst ordinal, not the raw stream
+            // seed (acos of an out-of-range argument is NaN → invisible particles).
+            let ordinal = (seed % count) as f32;
+            let phi = ((1.0 - 2.0 * ((ordinal + 0.5) / count as f32)).clamp(-1.0, 1.0)).acos();
             Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
         }
         EmitType::Point => {
-            let theta = seed as f32 * 2.399;
-            let phi = (1.0 - ((index as f32 + 0.5) / count as f32)).acos();
+            let theta = seed_f(seed) * 2.399;
+            let phi = (1.0 - ((index as f32 + 0.5) / count as f32)).clamp(-1.0, 1.0).acos();
             Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
         }
         EmitType::Circle | EmitType::CircleSameDivide | EmitType::FillCircle => {
@@ -2694,32 +2726,33 @@ fn emit_velocity_base_direction(
         }
         EmitType::Cylinder | EmitType::FillCylinder => {
             let theta = index as f32 * std::f32::consts::TAU / count as f32;
-            let y = (seed as f32 * 0.37).sin() * 0.5;
+            let y = (seed_f(seed) * 0.37).sin() * 0.5;
             Vec3::new(theta.cos(), y, theta.sin()).normalize()
         }
         EmitType::Box | EmitType::FillBox => {
-            let rx = (seed as f32 * 0.13).sin() * 2.0 - 1.0;
-            let ry = (seed as f32 * 0.17).sin() * 2.0 - 1.0;
-            let rz = (seed as f32 * 0.19).sin() * 2.0 - 1.0;
+            let rx = (seed_f(seed) * 0.13).sin() * 2.0 - 1.0;
+            let ry = (seed_f(seed) * 0.17).sin() * 2.0 - 1.0;
+            let rz = (seed_f(seed) * 0.19).sin() * 2.0 - 1.0;
             Vec3::new(rx, ry, rz).normalize_or_zero()
         }
         EmitType::Rectangle => {
-            let rx = (seed as f32 * 0.13).sin() * 2.0 - 1.0;
-            let rz = (seed as f32 * 0.19).sin() * 2.0 - 1.0;
+            let rx = (seed_f(seed) * 0.13).sin() * 2.0 - 1.0;
+            let rz = (seed_f(seed) * 0.19).sin() * 2.0 - 1.0;
             Vec3::new(rx, 0.0, rz).normalize_or_zero()
         }
         EmitType::Line | EmitType::LineSameDivide => Vec3::new(0.0, 0.0, 1.0),
         EmitType::Primitive => {
             Vec3::new(
-                (seed as f32 * 0.11).sin() * 0.5,
-                (seed as f32 * 0.13).sin() * 0.5,
+                (seed_f(seed) * 0.11).sin() * 0.5,
+                (seed_f(seed) * 0.13).sin() * 0.5,
                 1.0,
             )
             .normalize_or_zero()
         }
         EmitType::Unknown(_) => {
-            let theta = seed as f32 * 2.399;
-            let phi = (1.0 - 2.0 * ((seed as f32 + 0.5) / count as f32)).acos();
+            let theta = seed_f(seed) * 2.399;
+            let ordinal = (seed % count) as f32;
+            let phi = ((1.0 - 2.0 * ((ordinal + 0.5) / count as f32)).clamp(-1.0, 1.0)).acos();
             Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos())
         }
     }
@@ -2760,9 +2793,23 @@ pub fn compute_particle_velocity(
     emitter_motion_velocity: Vec3,
 ) -> Vec3 {
     let dir = emit_velocity_direction(emitter, seed, index, count, emitter_rot_mat, local_spawn);
-    let speed = emitter.initial_speed
-        * (1.0 + (seed as f32 * 0.37).sin() * emitter.speed_random.min(0.5));
-    let mut velocity = dir * speed;
+    // speed_random is now a proper 0..1 fraction (percent-normalized in the converter);
+    // the old .min(0.5) clamp was a bandaid for raw-percent values.
+    let rand_scale = 1.0 + (seed_f(seed) * 0.37).sin() * emitter.speed_random;
+    let mut velocity = dir * (emitter.initial_speed * rand_scale);
+    // nw::eft composes the figure-direction speed (AllDirection) and the designated-direction
+    // speed additively; when only one is set this reduces to the single-term legacy path.
+    if emitter.designated_dir_scale.abs() > 0.001 {
+        let des = emitter.designated_dir.normalize_or_zero();
+        if des.length_squared() > 0.0 {
+            let world_des = if emitter.is_world_oriented_velocity {
+                des
+            } else {
+                emitter_rot_mat.transform_vector3(des)
+            };
+            velocity += world_des * (emitter.designated_dir_scale * rand_scale);
+        }
+    }
     if emitter.em_vel_inherit.abs() > 0.0 {
         velocity += emitter_motion_velocity * emitter.em_vel_inherit;
     }
@@ -3003,7 +3050,9 @@ pub fn update_particle_color_channels(
     parent_alpha_lookup: Option<&HashMap<(u64, usize, usize), (f32, f32)>>,
     use_live_parent_alpha: bool,
 ) {
-    let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
+    // Curve time uses the particle's own (randomized) lifetime so colour/alpha reach their
+    // endpoints exactly when the particle dies (`is_dead` uses the same lifetime).
+    let t = p.life_t();
     let c0 = sample_color_or_white(&emitter.color0, t);
     let c1 = if !emitter.color1.is_empty() {
         sample_color_or_white(&emitter.color1, t)
@@ -4443,20 +4492,20 @@ pub fn fix_tex_scale_uv(emitter: &mut EmitterDef, bntx_textures: &[TextureRes]) 
     let apply_uv_div = |scale_uv: &mut [f32; 2], fc: usize| -> bool {
         let div_x = emitter.tex_uv_div[0];
         let div_y = emitter.tex_uv_div[1];
-        if div_x <= 1 || div_y <= 1 {
+        // UVDiv (0,0) = unspecified → let the caller infer the grid from texture size.
+        if div_x == 0 || div_y == 0 {
             return false;
         }
-        let cols = div_x as usize;
-        let rows = div_y as usize;
-        if cols * rows < fc.max(1) {
-            return false;
-        }
+        // Otherwise honour the game's explicit atlas layout: cell size = 1/div per axis.
+        // This covers 1×1 (a SINGLE frame — which must NOT be inferred into a fake grid,
+        // or the whole texture tiles), 1×N / N×1 strips, and 2D sheets. It is authoritative
+        // even when div_x*div_y != fc (hold / partial-sheet pattern tables).
         let su = 1.0 / div_x as f32;
         let sv = 1.0 / div_y as f32;
         if (scale_uv[0] - su).abs() > 0.001 || (scale_uv[1] - sv).abs() > 0.001 {
             eprintln!(
                 "[FIX_UV] tex_uv_div {}×{} fc={}: tex_scale_uv=[{}, {}] (was [{}, {}])",
-                cols, rows, fc, su, sv, scale_uv[0], scale_uv[1]
+                div_x, div_y, fc, su, sv, scale_uv[0], scale_uv[1]
             );
             *scale_uv = [su, sv];
         }
@@ -4629,6 +4678,9 @@ pub fn sample_alpha(keys: &[ColorKey], t: f32) -> f32 {
 pub struct Particle {
     pub position: Vec3,
     pub velocity: Vec3,
+    /// World-space acceleration captured at spawn; already accounts for `is_world_gravity`
+    /// (local gravity is rotated by the emitter's world orientation).
+    pub accel_world: Vec3,
     pub age: f32,
     pub lifetime: f32,
     pub color: Vec4,
@@ -4720,11 +4772,39 @@ pub struct EmitterInstance {
     prev_world_pos_set: bool,
     /// Death-only child emitters track bone motion but do not emit continuously.
     death_only: bool,
+    /// Per-emitter PRNG stream (seeded from PTCL `RandomSeed`); each burst draws a fresh
+    /// base so seeds stay consecutive within a burst (preserving even-divide patterns)
+    /// but decorrelate across bursts and emitters.
+    seed_stream: u32,
+}
+
+/// One LCG step for emitter seed streams (constants from the classic rand()).
+fn lcg_next(state: u32) -> u32 {
+    state.wrapping_mul(214013).wrapping_add(2531011)
+}
+
+/// Stream seed for an emitter instance: FNV over the emitter identity, using the authored
+/// PTCL seed as the basis when fixed (emitters of a set often share one RandomSeed — the
+/// identity mix keeps their streams distinct; the game rolls unseeded emitters per launch,
+/// the editor must stay reproducible).
+fn emitter_stream_seed(emitter: &EmitterDef, set_idx: usize, em_idx: usize) -> u32 {
+    let mut h = if emitter.random_seed != 0 { emitter.random_seed } else { 0x811C_9DC5 };
+    for b in [set_idx as u32, em_idx as u32, 0x9E37] {
+        h = (h ^ b).wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 impl EmitterInstance {
     pub fn emitter_key(&self) -> (usize, usize) {
         (self.emitter_set_idx, self.emitter_idx)
+    }
+
+    /// Advance the emitter's seed stream and return a burst-base seed. Particles within a
+    /// burst use `base + i`.
+    fn next_burst_seed(&mut self) -> usize {
+        self.seed_stream = lcg_next(self.seed_stream);
+        (self.seed_stream >> 4) as usize
     }
 
     pub fn bone_name(&self) -> &str {
@@ -4773,6 +4853,7 @@ fn instance_from_particle(dead: &Particle) -> EmitterInstance {
         prev_world_pos: Vec3::ZERO,
         prev_world_pos_set: false,
         death_only: false,
+        seed_stream: lcg_next(dead.seed as u32),
     }
 }
 
@@ -4842,12 +4923,20 @@ fn build_spawned_particle(
         emitter.alpha1.sample(0.0)
     };
     let mut size = {
-        let base_size = emitter.scale * emitter.scale_anim.sample(0.0);
+        // Sample the same scale source the per-frame step uses (full 8-key table when present,
+        // else the 3v4k approximation) so the first frame doesn't pop.
+        let scale_curve = if !emitter.scale_keys.is_empty() {
+            sample_alpha(&emitter.scale_keys, 0.0)
+        } else {
+            emitter.scale_anim.sample(0.0)
+        };
         let rf = rand_factor(seed.wrapping_add(7));
-        (base_size * (1.0 + rf * emitter.scale_random)).max(0.01)
+        (emitter.scale * scale_curve * (1.0 + rf * emitter.scale_random)).max(0.01)
     };
     let rot_rand = spawn_rotation_rand(emitter, seed);
-    let mut rotation = emitter.rotation_init + seed as f32 * emitter.rotation_init_random;
+    // Bounded random initial rotation (`rand_factor` ∈ [-1,1]); previously scaled by the raw
+    // particle index, which grew unbounded and was not random.
+    let mut rotation = emitter.rotation_init + rand_factor(seed.wrapping_add(13)) * emitter.rotation_init_random;
 
     let mut inherit = None;
     if let Some(parent) = inherit_from {
@@ -4889,6 +4978,13 @@ fn build_spawned_particle(
     let mut particle = Particle {
         position,
         velocity,
+        accel_world: if emitter.is_world_gravity {
+            emitter.accel
+        } else {
+            // Local gravity: rotate into world space by the emitter's world orientation.
+            let (_, rot, _) = world_mat.to_scale_rotation_translation();
+            rot * emitter.accel
+        },
         age: 0.0,
         lifetime: {
             let rf = rand_factor(seed.wrapping_add(1));
@@ -5105,6 +5201,7 @@ impl ParticleSystem {
                 prev_world_pos: Vec3::ZERO,
                 prev_world_pos_set: false,
                 death_only,
+                seed_stream: emitter_stream_seed(emitter, set_idx, emitter_idx),
             });
         }
     }
@@ -5153,11 +5250,10 @@ impl ParticleSystem {
             let Some(emitter) = set.emitters.get(p.emitter_idx) else { p.age = p.lifetime; continue };
 
             p.age += dt;
-            let safe_accel = if emitter.accel.is_finite() && emitter.accel.length() < 1000.0 {
-                emitter.accel
-            } else {
-                Vec3::ZERO
-            };
+            // Guard only against NaN/inf; a finite magnitude clamp would suppress legitimately
+            // fast acceleration (some emitters use large gravity_scale). `accel_world` already
+            // accounts for is_world_gravity (local gravity rotated into world space at spawn).
+            let safe_accel = if p.accel_world.is_finite() { p.accel_world } else { Vec3::ZERO };
             p.velocity += safe_accel * dt;
             // Air resistance (nw::eft): geometric per-frame velocity damping applied
             // after gravity. dt is normally 1.0 (fixed 60 Hz step); powf keeps it correct
@@ -5192,7 +5288,8 @@ impl ParticleSystem {
             }
             p.rotation += p.rotation_speed * dt;
 
-            let t = (p.age / emitter.lifetime).clamp(0.0, 1.0);
+            // Randomized per-particle lifetime (matches `is_dead`), not the base emitter lifetime.
+            let t = p.life_t();
 
             update_particle_color_channels(p, emitter, None, false);
             let scale_rand =
@@ -5360,7 +5457,8 @@ impl ParticleSystem {
                 let f = target_frame - inst.start_frame();
                 for (child_idx, child_emitter) in children {
                     let effect_t = emitter_effect_t(&child_emitter, f);
-                    let seed = self.particles.len().wrapping_add(child_idx).wrapping_add(dead.seed as usize);
+                    // Parent-derived child seed: deterministic, decoupled from global particle count.
+                    let seed = (lcg_next(dead.seed as u32) as usize).wrapping_add(child_idx);
                     self.particles.push(build_spawned_particle(
                         &child_emitter,
                         &inst,
@@ -5478,8 +5576,9 @@ impl ParticleSystem {
 
             if emitter.is_emit_dist_enabled && in_window {
                 let dist_positions = emit_dist_spawn_batch(emitter, inst, curr_world_pos);
+                let burst_base = inst.next_burst_seed();
                 for (i, world_pos) in dist_positions.into_iter().enumerate() {
-                    let seed = self.particles.len() + i;
+                    let seed = burst_base.wrapping_add(i);
                     let (set_idx, em_idx) = inst.emitter_key();
                     self.particles.push(build_spawned_particle(
                         emitter,
@@ -5499,8 +5598,9 @@ impl ParticleSystem {
                 }
             }
 
+            let burst_base = if to_emit > 0 { inst.next_burst_seed() } else { 0 };
             for i in 0..to_emit {
-                let seed = self.particles.len() + i;
+                let seed = burst_base.wrapping_add(i);
                 let (set_idx, em_idx) = inst.emitter_key();
                 self.particles.push(build_spawned_particle(
                     emitter,
@@ -5880,6 +5980,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         };
         let pos = compute_particle_spawn_world_pos(
             &emitter, &inst, Mat4::IDENTITY, 0.0, 0, 0, 1, None,
@@ -5907,6 +6008,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         };
         let pos = compute_particle_spawn_world_pos(
             &emitter, &inst, Mat4::IDENTITY, 0.0, 0, 0, 1, None,
@@ -5986,6 +6088,7 @@ mod uv_tests {
         let parent = Particle {
             position: Vec3::new(1.0, 2.0, 3.0),
             velocity: Vec3::new(0.0, 4.0, 0.0),
+            accel_world: Vec3::ZERO,
             age: 10.0,
             lifetime: 20.0,
             color: Vec4::new(0.5, 0.5, 0.5, 0.5),
@@ -6061,6 +6164,7 @@ mod uv_tests {
         let parent = Particle {
             position: Vec3::ZERO,
             velocity: Vec3::ZERO,
+            accel_world: Vec3::ZERO,
             age: 0.0,
             lifetime: 10.0,
             color: Vec4::ONE,
@@ -6164,6 +6268,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: true,
             death_only: false,
+            seed_stream: 1,
         });
         let mut bone_mats = HashMap::new();
         bone_mats.insert("Trans".to_string(), Mat4::from_translation(Vec3::new(0.0, 0.0, 10.0)));
@@ -6299,11 +6404,14 @@ mod uv_tests {
             "samus bomb should emit throw/smoke particles by local frame 6 (global ~10), got 0"
         );
 
-        sys.step(64.0, &bone, &ptcl);
+        // Corrected Emission.Timing units (60ths of a frame, not frames): the explosion
+        // burst fires at local frame ~6-7, not 60+. Verify the burst visuals are alive
+        // shortly after, and everything expires well before the old buggy frame 64+life.
+        sys.step(12.0, &bone, &ptcl);
         sys.particles.retain(|p| !p.is_dead());
         assert!(
             !sys.particles.is_empty(),
-            "samus bomb should still have particles at explosion frame 64"
+            "samus bomb explosion visuals should be alive at local frame ~8 (global 12)"
         );
     }
 
@@ -6454,6 +6562,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         });
         late.step(45.0, &bone, &ptcl);
         assert!(
@@ -6478,6 +6587,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         });
         wrong.step(45.0, &bone, &ptcl);
         assert!(
@@ -6515,6 +6625,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         };
         let mut sys = ParticleSystem::default();
         sys.active_emitters.push(inst);
@@ -6568,6 +6679,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         };
         let mut sys = ParticleSystem::default();
         sys.active_emitters.push(inst);
@@ -7196,6 +7308,7 @@ mod uv_tests {
         let particle = Particle {
             position: Vec3::ZERO,
             velocity: Vec3::ZERO,
+            accel_world: Vec3::ZERO,
             age: 0.0,
             lifetime: 1.0,
             color: Vec4::ONE,
@@ -7271,6 +7384,7 @@ mod uv_tests {
             prev_world_pos: Vec3::ZERO,
             prev_world_pos_set: false,
             death_only: false,
+            seed_stream: 1,
         };
         let batch = emit_dist_spawn_batch(&emitter, &mut inst, Vec3::new(3.0, 0.0, 0.0));
         assert!(!batch.is_empty(), "3-unit move with unit=1 should spawn particles");
@@ -7299,6 +7413,7 @@ mod uv_tests {
         Particle {
             position: Vec3::ZERO,
             velocity: Vec3::ZERO,
+            accel_world: Vec3::ZERO,
             age: 0.0,
             lifetime: 1.0,
             color: Vec4::ONE,

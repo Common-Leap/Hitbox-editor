@@ -23,4 +23,19 @@ mod shader_registry_tests {
         let report = audit_ptcl(&ptcl);
         assert_eq!(report.emitters_total, 0);
     }
+
+    #[test]
+    fn test_shader_registry_merge_from() {
+        let mut a = ShaderRegistry::default();
+        let k_a = a.register(vec![1, 2, 3]);
+        let mut b = ShaderRegistry::default();
+        let k_b = b.register(vec![4, 5, 6]);
+        a.merge_from(&b);
+        assert_eq!(a.len(), 2);
+        assert!(a.get(k_a).is_some());
+        assert!(a.get(k_b).is_some());
+        b.register(vec![1, 2, 3]);
+        a.merge_from(&b);
+        assert_eq!(a.len(), 2);
+    }
 }

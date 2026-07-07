@@ -82,7 +82,7 @@ fn deswizzle_tegra(
     ).unwrap_or_else(|_| data.to_vec())
 }
 
-// ── Camera uniform (matches trail.wgsl) ──────────────────────────────────────
+// ── Camera uniform (matches trail.wgsl / trail_shader::CameraUniforms layout) ──
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -93,6 +93,23 @@ struct CameraUniforms {
     cam_up: [f32; 3],
     _pad1: f32,
 }
+
+type TrailVertex = crate::trail_shader::VertexInput;
+
+// CPU-side mirror of `trail_shader::VertexInput` with bytemuck Pod (same WGSL layout).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TrailVertexPod {
+    position: [f32; 3],
+    uv: [f32; 2],
+    alpha: f32,
+    _pad: f32,
+    color: [f32; 4],
+}
+
+const _: () = assert!(
+    std::mem::size_of::<TrailVertexPod>() == std::mem::size_of::<TrailVertex>()
+);
 
 // ── Per-particle instance data (BNSH vertex buffer layout) ───────────────────
 
@@ -119,17 +136,6 @@ struct ParticleInstance {
     tex_offset: [f32; 2],
 }
 
-// ── Trail vertex (matches trail.wgsl) ────────────────────────────────────────
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct TrailVertex {
-    position: [f32; 3],
-    uv: [f32; 2],
-    alpha: f32,
-    _pad: f32,
-    color: [f32; 4],
-}
 
 // ── Fallback 1×1 white texture ────────────────────────────────────────────────
 
@@ -269,57 +275,8 @@ fn create_texture_from_res(
         decoded_data = &decoded_buf;
     }
     
-    // wgpu alignment
-    const ALIGN: u32 = 256;
-    let aligned_bpr = (final_bpr + ALIGN - 1) & !(ALIGN - 1);
-    let tex_data = if aligned_bpr != final_bpr {
-        let rows = h as usize;
-        let mut padded = Vec::with_capacity(rows * aligned_bpr as usize);
-        for row in 0..rows {
-            let s = row * final_bpr as usize;
-            let e = s + final_bpr as usize;
-            if e <= decoded_data.len() {
-                padded.extend_from_slice(&decoded_data[s..e]);
-            } else {
-                padded.extend(std::iter::repeat(0u8).take(final_bpr as usize));
-            }
-            padded.extend(std::iter::repeat(0u8).take((aligned_bpr - final_bpr) as usize));
-        }
-        padded
-    } else {
-        decoded_data.to_vec()
-    };
-
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu_format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    
-    queue.write_texture(
-        texture.as_image_copy(),
-        &tex_data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(aligned_bpr),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    
+    let texture =
+        create_texture_with_mips(device, queue, label, wgpu_format, w, h, decoded_data, final_bpr);
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some(&format!("{}_sampler", label)),
@@ -335,14 +292,178 @@ fn create_texture_from_res(
 }
 
 /// Map a BNTX wrap mode byte to a wgpu AddressMode.
-/// BNTX values: 0 = Repeat, 1 = MirrorRepeat, 2 = ClampToEdge.
-/// Defaults to Repeat for unknown values (most particle textures tile).
+/// BNTX values: 0 = Repeat, 1 = MirrorRepeat, 2 = ClampToEdge, 3 = MirrorClampToEdge.
 fn address_mode_for(wrap_mode: u8) -> wgpu::AddressMode {
     match wrap_mode {
-        2 => wgpu::AddressMode::ClampToEdge,
+        0 => wgpu::AddressMode::Repeat,
         1 => wgpu::AddressMode::MirrorRepeat,
-        _ => wgpu::AddressMode::Repeat,
+        2 => wgpu::AddressMode::ClampToEdge,
+        // wgpu has no MirrorClampToEdge; ClampToEdge is the closest (mirror-once then clamp —
+        // the clamp dominates the edges particles sample).
+        3 => wgpu::AddressMode::ClampToEdge,
+        other => {
+            eprintln!("[texture] unknown BNTX wrap mode {other}; defaulting to Repeat");
+            wgpu::AddressMode::Repeat
+        }
     }
+}
+
+/// Map a PTCL sampler filter byte to a wgpu FilterMode.
+/// nw::eft values: 0 = Linear, 1 = Near (point).
+fn filter_mode_for(filter: u8) -> wgpu::FilterMode {
+    match filter {
+        0 => wgpu::FilterMode::Linear,
+        1 => wgpu::FilterMode::Nearest,
+        other => {
+            eprintln!("[texture] unknown PTCL sampler filter {other}; defaulting to Linear");
+            wgpu::FilterMode::Linear
+        }
+    }
+}
+
+/// CPU-generate mip levels 1.. from tight-packed level-0 data with a 2×2 box filter.
+///
+/// The game samples BNTX textures with full mip chains (BNTX `mipmap_count` > 1 for most
+/// effect textures); we only deswizzle level 0, so minified particles shimmer without
+/// this. Supports the formats our upload paths produce: 4-byte RGBA8 (sRGB averaged in
+/// encoded space — close enough for effect sprites), 2-byte RG8, 1-byte R8, and R16
+/// (u16 lane). Returns `(data, w, h)` per level; empty when the format is unsupported or
+/// `base` is short (callers then upload mip 0 only, as before).
+fn generate_mip_chain(base: &[u8], w: u32, h: u32, format: wgpu::TextureFormat) -> Vec<(Vec<u8>, u32, u32)> {
+    use wgpu::TextureFormat as F;
+    let (bpp, u16_lane) = match format {
+        F::Rgba8Unorm | F::Rgba8UnormSrgb => (4usize, false),
+        F::Rg8Unorm => (2, false),
+        F::R8Unorm => (1, false),
+        F::R16Unorm => (2, true),
+        _ => return Vec::new(),
+    };
+    let base_len = w as usize * h as usize * bpp;
+    if base.len() < base_len {
+        return Vec::new();
+    }
+    let mut levels: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+    let mut prev = base[..base_len].to_vec();
+    let (mut pw, mut ph) = (w as usize, h as usize);
+    while pw > 1 || ph > 1 {
+        let nw = (pw / 2).max(1);
+        let nh = (ph / 2).max(1);
+        let mut next = vec![0u8; nw * nh * bpp];
+        for y in 0..nh {
+            for x in 0..nw {
+                let sx = (x * 2).min(pw - 1);
+                let sy = (y * 2).min(ph - 1);
+                let x1 = (sx + 1).min(pw - 1);
+                let y1 = (sy + 1).min(ph - 1);
+                let src = [(sx, sy), (x1, sy), (sx, y1), (x1, y1)];
+                let dst = (y * nw + x) * bpp;
+                if u16_lane {
+                    let sum: u32 = src
+                        .iter()
+                        .map(|&(xx, yy)| {
+                            let o = (yy * pw + xx) * bpp;
+                            u16::from_le_bytes([prev[o], prev[o + 1]]) as u32
+                        })
+                        .sum();
+                    next[dst..dst + 2].copy_from_slice(&(((sum + 2) / 4) as u16).to_le_bytes());
+                } else {
+                    for c in 0..bpp {
+                        let sum: u32 = src
+                            .iter()
+                            .map(|&(xx, yy)| prev[(yy * pw + xx) * bpp + c] as u32)
+                            .sum();
+                        next[dst + c] = ((sum + 2) / 4) as u8;
+                    }
+                }
+            }
+        }
+        levels.push((next.clone(), nw as u32, nh as u32));
+        prev = next;
+        pw = nw;
+        ph = nh;
+    }
+    levels
+}
+
+/// Row-pad tight texel data to wgpu's 256-byte row alignment and write it into `texture`
+/// at `mip`. Rows missing from short `tight` data are zero-filled (matches the previous
+/// inline padding behaviour).
+fn write_mip_level(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    mip: u32,
+    tight: &[u8],
+    w: u32,
+    h: u32,
+    tight_bpr: u32,
+) {
+    const ALIGN: u32 = 256;
+    let bpr = (tight_bpr + ALIGN - 1) & !(ALIGN - 1);
+    let padded;
+    let data: &[u8] = if bpr != tight_bpr {
+        let mut v = Vec::with_capacity(h as usize * bpr as usize);
+        for row in 0..h as usize {
+            let s = row * tight_bpr as usize;
+            let e = s + tight_bpr as usize;
+            if e <= tight.len() {
+                v.extend_from_slice(&tight[s..e]);
+            } else {
+                v.extend(std::iter::repeat(0u8).take(tight_bpr as usize));
+            }
+            v.extend(std::iter::repeat(0u8).take((bpr - tight_bpr) as usize));
+        }
+        padded = v;
+        &padded
+    } else {
+        tight
+    };
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: mip,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bpr),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+}
+
+/// Create a texture with a full CPU-generated mip chain and upload every level from
+/// tight-packed level-0 data. Falls back to a single mip when the format is unsupported.
+fn create_texture_with_mips(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    format: wgpu::TextureFormat,
+    w: u32,
+    h: u32,
+    tight_data: &[u8],
+    tight_bpr: u32,
+) -> wgpu::Texture {
+    let mips = generate_mip_chain(tight_data, w, h, format);
+    let mip_level_count = 1 + mips.len() as u32;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_mip_level(queue, &texture, 0, tight_data, w, h, tight_bpr);
+    let bpp = tight_bpr / w.max(1);
+    for (i, (data, mw, mh)) in mips.iter().enumerate() {
+        write_mip_level(queue, &texture, i as u32 + 1, data, *mw, *mh, mw * bpp);
+    }
+    texture
 }
 
 fn cull_mode_for(display_side: DisplaySide) -> Option<wgpu::Face> {
@@ -359,19 +480,7 @@ fn cull_mode_for(display_side: DisplaySide) -> Option<wgpu::Face> {
 
 // ── Indirect texture uniform ──────────────────────────────────────────────────
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct IndirectParams {
-    is_indirect: u32,
-    distortion_strength: f32,
-    indirect_scroll_u: f32,
-    indirect_scroll_v: f32,
-    // TexPatAnim slot-1 UV scale and offset for the indirect texture sample
-    indirect_scale_u: f32,
-    indirect_scale_v: f32,
-    indirect_offset_u: f32,
-    indirect_offset_v: f32,
-}
+pub use crate::shader_registry::{IndirectParams, INDIRECT_PARAMS_UNIFORM_SIZE, indirect_params_from_emitter};
 
 // ── Particle renderer ─────────────────────────────────────────────────────────
 
@@ -382,27 +491,29 @@ pub struct ParticleRenderer {
     // Fullscreen blit pipeline (composites particle_target onto surface)
     blit_pipeline: wgpu::RenderPipeline,
     sub_blit_pipeline: wgpu::RenderPipeline,
-    blit_bg_layout: wgpu::BindGroupLayout,
     blit_sampler: wgpu::Sampler,
     /// One blit bind group per draw_path offscreen target (rebuilt each frame in finish_prepare).
-    blit_bind_groups: Vec<wgpu::BindGroup>,
+    blit_bind_groups: Vec<crate::blit_shader::bind_groups::BindGroup0>,
     /// Sub-blend offscreen targets composited with reverse subtract in `paint`.
-    sub_blit_bind_groups: Vec<wgpu::BindGroup>,
+    sub_blit_bind_groups: Vec<crate::blit_shader::bind_groups::BindGroup0>,
 
     camera_buf: wgpu::Buffer,
     
     // Trail camera bind group (cached, not rebuilt every frame)
-    #[allow(dead_code)]
-    trail_cam_bgl: wgpu::BindGroupLayout,
-    trail_cam_bg: wgpu::BindGroup,
+    trail_cam_bg: crate::trail_shader::bind_groups::BindGroup0,
+    trail_tex_bg: crate::trail_shader::bind_groups::BindGroup1,
 
     tex_bg_layout: wgpu::BindGroupLayout,
     white_tex_bg: wgpu::BindGroup,
 
     // Simple texture+sampler bind group layout for BNSH fragment (set=1)
-    bnsh_tex_bg_layout: wgpu::BindGroupLayout,
     /// TextureAnim3–5 sampler layout for native FS @group(2).
     bnsh_extra_tex345_bg_layout: wgpu::BindGroupLayout,
+    /// Empty layout occupying @group(2) when soft particles need @group(3) but no extra tex binds.
+    bnsh_group2_placeholder_bg_layout: wgpu::BindGroupLayout,
+    bnsh_group2_placeholder_bg: wgpu::BindGroup,
+    /// Mesh depth + soft-particle uniform for `@group(3)`.
+    bnsh_soft_particle_bg_layout: wgpu::BindGroupLayout,
 
     // Material texture bind group (for BFRES model textures)
     mat_tex_bg_layout: wgpu::BindGroupLayout,
@@ -455,6 +566,17 @@ pub struct ParticleRenderer {
     /// Per-draw combiner blend coeffs for native FS `@group(2)` binding 6.
     extra_tex_blend_uniform_pool: wgpu::Buffer,
     extra_tex_blend_pool_offset: u64,
+    /// Per-draw fresnel / distance alpha for native FS `@group(2)` binding 7.
+    particle_alpha_mod_uniform_pool: wgpu::Buffer,
+    particle_alpha_mod_pool_offset: u64,
+    /// Per-draw soft-particle uniforms for `@group(3)` binding 1.
+    soft_particle_uniform_pool: wgpu::Buffer,
+    soft_particle_pool_offset: u64,
+    /// 1×1 depth cleared to 1.0 when mesh depth is unavailable.
+    fallback_depth_tex: wgpu::Texture,
+    fallback_depth_view: wgpu::TextureView,
+    /// Current frame mesh/path depth for soft-particle `@group(3)` binding 0.
+    scene_depth_view: Option<wgpu::TextureView>,
     // Per-BNTX-index emissive texture views and samplers (for mesh _emi slots)
     emissive_view_cache: HashMap<u32, (wgpu::TextureView, wgpu::Sampler)>,
     // Per-BNTX-index emissive TEXTURE objects (must be kept alive)
@@ -514,6 +636,8 @@ pub struct DepthDrawConfig {
     pub test: bool,
     pub write: bool,
     pub opaque_core_only: bool,
+    /// When true, skip draws flagged as opaque-core (after a dedicated opaque pass).
+    pub exclude_opaque_core: bool,
     /// When true, iterate matching draws in reverse (front-to-back for opaque core).
     pub reverse_order: bool,
 }
@@ -523,18 +647,28 @@ impl DepthDrawConfig {
         test: false,
         write: false,
         opaque_core_only: false,
+        exclude_opaque_core: false,
+        reverse_order: false,
+    };
+    pub const TRANSPARENT_ONLY: Self = Self {
+        test: false,
+        write: false,
+        opaque_core_only: false,
+        exclude_opaque_core: true,
         reverse_order: false,
     };
     pub const OPAQUE_CORE: Self = Self {
         test: true,
         write: true,
         opaque_core_only: true,
+        exclude_opaque_core: false,
         reverse_order: true,
     };
     pub const TRANSPARENT: Self = Self {
         test: true,
         write: false,
         opaque_core_only: false,
+        exclude_opaque_core: false,
         reverse_order: false,
     };
 }
@@ -566,14 +700,17 @@ pub enum EditorCompositeStep {
     SubDrawPath(u32),
 }
 
-/// Ordered composite steps for ascending draw_path ids (blit then sub per path).
+/// Ordered composite steps for ascending draw_path ids: premultiplied blit then Sub reverse-subtract per path.
 pub fn editor_composite_steps(draw_paths: &[u32]) -> Vec<EditorCompositeStep> {
-    let mut steps = Vec::with_capacity(draw_paths.len() * 2);
-    for &path in draw_paths {
-        steps.push(EditorCompositeStep::BlitDrawPath(path));
-        steps.push(EditorCompositeStep::SubDrawPath(path));
-    }
-    steps
+    draw_paths
+        .iter()
+        .flat_map(|&path| {
+            [
+                EditorCompositeStep::BlitDrawPath(path),
+                EditorCompositeStep::SubDrawPath(path),
+            ]
+        })
+        .collect()
 }
 
 struct PreparedBnshDraw {
@@ -583,9 +720,10 @@ struct PreparedBnshDraw {
     /// All particles in this batch exceed [`OPAQUE_CORE_ALPHA`].
     opaque_core: bool,
     bind_groups: Vec<wgpu::BindGroup>,
-    extra_tex_bg: Option<wgpu::BindGroup>,
     extra_tex345_bg: Option<wgpu::BindGroup>,
-    /// Full emitter texture bind group (binding 6 uses dynamic offset into [`indirect_uniform_pool`]).
+    soft_particle_bg: Option<wgpu::BindGroup>,
+    /// Full emitter texture bind group @group(1); binding 6 uses dynamic offset into
+    /// [`indirect_uniform_pool`] for per-draw [`IndirectParams`].
     emitter_tex_bg: Option<(wgpu::BindGroup, u32)>,
     vertex_byte_offset: u64,
     vertex_count: u32,
@@ -594,18 +732,76 @@ struct PreparedBnshDraw {
 /// wgpu minimum uniform buffer dynamic offset alignment.
 const INDIRECT_UNIFORM_ALIGN: u64 = 256;
 const INDIRECT_UNIFORM_POOL_DRAWS: u64 = 128;
-const EXTRA_TEX_BLEND_UNIFORM_SIZE: u64 = 64;
+const EXTRA_TEX_BLEND_UNIFORM_SIZE: u64 = 96;
 const EXTRA_TEX_BLEND_POOL_DRAWS: u64 = 128;
+const PARTICLE_ALPHA_MOD_POOL_DRAWS: u64 = 128;
+const SOFT_PARTICLE_UNIFORM_SIZE: u64 = 32;
+const SOFT_PARTICLE_POOL_DRAWS: u64 = 128;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct FxSoftParticleUniform {
+    enabled: u32,
+    volume: f32,
+    edge1: f32,
+    edge2: f32,
+    dist: f32,
+    _pad0: f32,
+    _pad1: [f32; 2],
+}
+
+fn soft_particle_uniform_from_state(pc: &crate::shader_registry::ParticleColorState) -> FxSoftParticleUniform {
+    let volume = if pc.soft_particle_volume > 0.0 {
+        pc.soft_particle_volume
+    } else {
+        1.0
+    };
+    let dist = if pc.soft_particle_dist > 0.0 {
+        pc.soft_particle_dist
+    } else if pc.soft_particle_volume > 0.0 {
+        pc.soft_particle_volume.max(0.001)
+    } else {
+        0.02
+    };
+    FxSoftParticleUniform {
+        enabled: u32::from(pc.is_soft_particle),
+        volume,
+        edge1: pc.soft_edge_param1,
+        edge2: pc.soft_edge_param2,
+        dist,
+        _pad0: 0.0,
+        _pad1: [0.0; 2],
+    }
+}
+
+fn upload_soft_particle_uniform(
+    queue: &wgpu::Queue,
+    pool: &wgpu::Buffer,
+    offset: &mut u64,
+    pc: &crate::shader_registry::ParticleColorState,
+) -> u64 {
+    let slot = *offset;
+    let data = soft_particle_uniform_from_state(pc);
+    queue.write_buffer(pool, slot, bytemuck::bytes_of(&data));
+    *offset += INDIRECT_UNIFORM_ALIGN;
+    slot
+}
+
+fn upload_particle_alpha_mod_uniform(
+    queue: &wgpu::Queue,
+    pool: &wgpu::Buffer,
+    offset: &mut u64,
+    pc: &crate::shader_registry::ParticleColorState,
+    cam_pos: Vec3,
+) -> u64 {
+    let slot = *offset;
+    let data = crate::shader_registry::particle_alpha_mods_uniform(pc, cam_pos);
+    queue.write_buffer(pool, slot, &data);
+    *offset += INDIRECT_UNIFORM_ALIGN;
+    slot
+}
 
 // ── Shader loading helpers ────────────────────────────────────────────────
-
-/// Load default WGSL trail shader
-fn load_default_trail_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("trail_shader_wgsl"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("trail.wgsl").into()),
-    })
-}
 
 fn emitter_texture_for_slot_with_caches<'a>(
     white_view: &'a wgpu::TextureView,
@@ -685,6 +881,142 @@ fn upload_extra_tex_blend_uniform(
     queue.write_buffer(pool, slot, bytemuck::cast_slice(&data));
     *offset += INDIRECT_UNIFORM_ALIGN;
     slot
+}
+
+/// Bind-group layout entries shared by [`ParticleRenderer::tex_bg_layout`] and native FS `@group(1)`.
+pub fn emitter_tex_bind_group_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: std::num::NonZeroU64::new(
+                    crate::shader_registry::INDIRECT_PARAMS_UNIFORM_SIZE as u64,
+                ),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 8,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ]
+}
+
+/// White-fallback emitter texture bind group for integration tests (binding 6 dynamic offset = 0).
+pub fn test_emitter_tex_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    white_view: &wgpu::TextureView,
+    white_sampler: &wgpu::Sampler,
+    indirect_pool: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    build_emitter_tex_bind_group(
+        device,
+        layout,
+        indirect_pool,
+        "test_emitter_tex_bg",
+        (white_view, white_sampler),
+        (white_view, white_sampler),
+        (white_view, white_sampler),
+        (white_view, white_sampler),
+    )
+}
+
+fn build_emitter_tex_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    indirect_pool: &wgpu::Buffer,
+    label: &str,
+    color: (&wgpu::TextureView, &wgpu::Sampler),
+    alpha: (&wgpu::TextureView, &wgpu::Sampler),
+    indirect: (&wgpu::TextureView, &wgpu::Sampler),
+    slot2: (&wgpu::TextureView, &wgpu::Sampler),
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(color.0) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(color.1) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(alpha.0) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(alpha.1) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(indirect.0) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(indirect.1) },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: indirect_pool,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<IndirectParams>() as u64),
+                }),
+            },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(slot2.0) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(slot2.1) },
+        ],
+    })
 }
 
 /// Decode one PTCL embedded texture and upload it to the GPU.
@@ -773,52 +1105,7 @@ fn upload_ptcl_embedded_texture(
     } else {
         (upload.to_vec(), raw_bpr)
     };
-    const ALIGN: u32 = 256;
-    let aligned_bpr = (bpr + ALIGN - 1) & !(ALIGN - 1);
-    let upload_data = if aligned_bpr != bpr {
-        let mut padded = Vec::with_capacity(h as usize * aligned_bpr as usize);
-        for row in 0..h as usize {
-            let s = row * bpr as usize;
-            let e = s + bpr as usize;
-            if e <= decoded.len() {
-                padded.extend_from_slice(&decoded[s..e]);
-            } else {
-                padded.extend(std::iter::repeat(0u8).take(bpr as usize));
-            }
-            padded.extend(std::iter::repeat(0u8).take((aligned_bpr - bpr) as usize));
-        }
-        padded
-    } else {
-        decoded
-    };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu_fmt,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        texture.as_image_copy(),
-        &upload_data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(aligned_bpr),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
+    let texture = create_texture_with_mips(device, queue, label, wgpu_fmt, w, h, &decoded, bpr);
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some(&format!("{label}_sampler")),
@@ -866,15 +1153,26 @@ fn build_bnsh_frame_bind_groups(
     pat_blend: f32,
     tex_extra_avg: [[f32; 2]; 3],
     batch_velocity: glam::Vec3,
+    batch_tex_scale: Option<[f32; 2]>,
     primitives: &[crate::effects::PrimitiveData],
     bfres_models: &[crate::effects::BfresModel],
+    batch_life_min: f32,
+    batch_life_max: f32,
 ) -> Vec<wgpu::BindGroup> {
     let shader_pair = shader_set.pair_for_emitter(emitter);
-    let vs_refl = shader_pair.vertex.as_ref().and_then(|s| s.reflection.as_ref());
-    let fs_refl = shader_pair.fragment.as_ref().and_then(|s| s.reflection.as_ref());
-    let slot_map = crate::bnsh_shader_integration::map_emitter_slots_to_descriptors(
+    let fs_refl = shader_pair
+        .fragment
+        .as_ref()
+        .and_then(|s| s.reflection.as_ref());
+    if fs_refl.is_none() && crate::fx_debug_enabled() {
+        eprintln!(
+            "[BNSH-BIND] emitter ({},{}) missing fragment reflection — fix BNSH decode/enrich",
+            emitter_key.0,
+            emitter_key.1,
+        );
+    }
+    let binding_map = crate::bnsh_shader_integration::build_reflection_binding_map(
         fs_refl,
-        vs_refl,
         &state.descriptors,
     );
     let emitter_textures = [
@@ -908,9 +1206,13 @@ fn build_bnsh_frame_bind_groups(
         pat_blend,
         tex_extra_avg,
         batch_velocity,
+        batch_tex_scale,
         primitives,
         bfres_models,
-        &slot_map,
+        batch_life_min,
+        batch_life_max,
+        &binding_map.emitter_textures,
+        &binding_map.storage_cbuf_by_binding,
         &emitter_textures,
     )
 }
@@ -932,17 +1234,22 @@ fn build_bnsh_frame_bind_groups_inner(
     pat_blend: f32,
     tex_extra_avg: [[f32; 2]; 3],
     batch_velocity: glam::Vec3,
+    batch_tex_scale: Option<[f32; 2]>,
     primitives: &[crate::effects::PrimitiveData],
     bfres_models: &[crate::effects::BfresModel],
+    batch_life_min: f32,
+    batch_life_max: f32,
     slot_map: &HashMap<(u32, u32), u32>,
+    storage_cbuf_by_binding: &HashMap<u32, String>,
     emitter_textures: &[(&wgpu::TextureView, &wgpu::Sampler); 3],
 ) -> Vec<wgpu::BindGroup> {
     if crate::fx_debug_enabled() && !slot_map.is_empty() {
         eprintln!(
-            "[BNSH-BIND] emitter ({},{}) reflection map: {} descriptor bindings",
+            "[BNSH-BIND] emitter ({},{}) reflection map: {} texture + {} cbuffer binding(s)",
             emitter_key.0,
             emitter_key.1,
-            slot_map.len()
+            slot_map.len(),
+            storage_cbuf_by_binding.len()
         );
     }
 
@@ -974,6 +1281,8 @@ fn build_bnsh_frame_bind_groups_inner(
     .with_pat_blend(pat_blend)
     .with_tex_extra_avg(tex_extra_avg)
     .with_batch_velocity(batch_velocity)
+    .with_batch_tex_scale(batch_tex_scale)
+    .with_batch_life_range(batch_life_min, batch_life_max)
     .with_primitives(primitives)
     .with_bfres_models(bfres_models);
     let cbuf_data = crate::nvn_chain::NvnChainEvaluator::evaluate_usage(
@@ -986,22 +1295,68 @@ fn build_bnsh_frame_bind_groups_inner(
                 let buf = state.storage_bufs.get(&d.binding)
                     .expect("Storage buffer should have been created above");
                 match d.name.as_str() {
-                    "cbuf_1_1" => {
-                        let ref_vals: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-                        queue.write_buffer(buf, 0, bytemuck::cast_slice(&ref_vals));
-                    }
                     name if name.starts_with("cbuf_") => {
+                        if crate::fx_debug_enabled() {
+                            if let Some(cbuf_name) = storage_cbuf_by_binding.get(&d.binding) {
+                                eprintln!(
+                                    "[BNSH-BIND] storage binding {} ({}) -> cbuffer '{}'",
+                                    d.binding, name, cbuf_name
+                                );
+                            }
+                        }
                         // naga reflection reports the global var name without the trailing
                         // underscore it adds when emitting WGSL (e.g. `cbuf_8_1`), while the
                         // evaluator keys data by the name parsed from the emitted text
                         // (`cbuf_8_1_`). Match tolerantly so the VP/cbuf data actually lands.
-                        let data = cbuf_data
+                        let mut data = cbuf_data
                             .get(name)
                             .or_else(|| cbuf_data.get(&format!("{name}_")))
-                            .or_else(|| cbuf_data.get(name.trim_end_matches('_')));
-                        if let Some(data) = data {
-                            crate::nvn_chain::write_nvn_buffer(queue, buf, data, 65536);
+                            .or_else(|| cbuf_data.get(name.trim_end_matches('_')))
+                            .cloned()
+                            .unwrap_or_default();
+                        crate::nvn_chain::force_hybrid_billboard_cbuf_defaults(
+                            &mut data,
+                            name,
+                            view_proj,
+                            cam_right,
+                            cam_up,
+                            Some(crate::nvn_chain::FlipbookAtlasCbuf {
+                                emitter,
+                                life_t: particle_life_t,
+                                batch_tex_scale,
+                            }),
+                        );
+                        if crate::fx_env::fx_viewport_log_enabled() {
+                            match crate::nvn_chain::cbuf_descriptor_family(name) {
+                                Some(8) => {
+                                    let s8 = data.slot_data.get(&8).copied().unwrap_or([0.0; 4]);
+                                    let s11 = data.slot_data.get(&11).copied().unwrap_or([0.0; 4]);
+                                    eprintln!(
+                                        "[CBUF-WRITE] {name} vp8=[{:.2},{:.2},{:.2},{:.2}] vp11=[{:.2},{:.2},{:.2},{:.2}]",
+                                        s8[0], s8[1], s8[2], s8[3],
+                                        s11[0], s11[1], s11[2], s11[3],
+                                    );
+                                }
+                                Some(9) => {
+                                    let g = |s: u64| data.slot_data.get(&s).copied().unwrap_or([0.0; 4]);
+                                    eprintln!(
+                                        "[CBUF-WRITE] cbuf_9 [46]={:.2?} [47]={:.2?} [120]={:.2?} [121]={:.2?}",
+                                        g(46), g(47), g(120), g(121),
+                                    );
+                                }
+                                Some(10) => {
+                                    let g = |s: u64| data.slot_data.get(&s).copied().unwrap_or([-9.0; 4]);
+                                    let has = |s: u64| data.slot_data.contains_key(&s);
+                                    eprintln!(
+                                        "[CBUF-WRITE] cbuf_10 em='{}' has8={} has10={} [8]={:.2?} [10]={:.2?} usage10={:?}",
+                                        emitter.name, has(8), has(10), g(8), g(10),
+                                        { let mut u: Vec<u32> = state.cbuf_slot_usage.get("cbuf_10_1_").map(|s| s.iter().copied().collect()).unwrap_or_default(); u.sort_unstable(); u },
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
+                        crate::nvn_chain::write_nvn_buffer(queue, buf, &data, 65536);
                     }
                     _ => {
                         let default_data: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -1082,7 +1437,8 @@ impl ParticleRenderer {
         bnsh_shaders: &BnshShaderSet,
     ) -> Self {
         eprintln!("[ParticleRenderer] BNSH shader set provided: {}", bnsh_shaders.summary());
-        let trail_shader = load_default_trail_shader(device);
+        let trail_shader_module = crate::trail_shader::create_shader_module(device);
+        let trail_pipeline_layout = crate::trail_shader::create_pipeline_layout(device);
 
         // ── Bind group layouts ────────────────────────────────────────────
         let tex_bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1171,30 +1527,6 @@ impl ParticleRenderer {
             ],
         });
 
-        // Simple texture+sampler bind group layout for BNSH fragment (set=1).
-        // Used by patch_fragment_wgsl to add native WGSL texture sampling.
-        let bnsh_tex_bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bnsh_tex_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
         let bnsh_extra_tex345_bg_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("bnsh_extra_tex345_bgl"),
@@ -1254,6 +1586,57 @@ impl ParticleRenderer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: std::num::NonZeroU64::new(EXTRA_TEX_BLEND_UNIFORM_SIZE),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: std::num::NonZeroU64::new(
+                                crate::shader_registry::PARTICLE_ALPHA_MOD_UNIFORM_SIZE,
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        // WGSL @group(3) soft particles require pipeline layout index 2 even when @group(2) is unused.
+        let bnsh_group2_placeholder_bg_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bnsh_group2_placeholder_bgl"),
+                entries: &[],
+            });
+        let bnsh_group2_placeholder_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bnsh_group2_placeholder_bg"),
+            layout: &bnsh_group2_placeholder_bg_layout,
+            entries: &[],
+        });
+
+        let bnsh_soft_particle_bg_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bnsh_soft_particle_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: std::num::NonZeroU64::new(SOFT_PARTICLE_UNIFORM_SIZE),
                         },
                         count: None,
                     },
@@ -1333,21 +1716,6 @@ impl ParticleRenderer {
             ],
         });
 
-        // Trail camera layout (no storage buffer — vertices are in vertex buffer)
-        let trail_camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("trail_camera_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
         // ── Camera uniform buffer ─────────────────────────────────────────
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particle_camera_buf"),
@@ -1371,6 +1739,47 @@ impl ParticleRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let particle_alpha_mod_uniform_pool = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("particle_alpha_mod_uniform_pool"),
+            size: INDIRECT_UNIFORM_ALIGN * PARTICLE_ALPHA_MOD_POOL_DRAWS,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let soft_particle_uniform_pool = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("soft_particle_uniform_pool"),
+            size: INDIRECT_UNIFORM_ALIGN * SOFT_PARTICLE_POOL_DRAWS,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fallback_depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("soft_particle_fallback_depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::particle_renderer_bnsh::SOFT_PARTICLE_DEPTH_SAMPLE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            fallback_depth_tex.as_image_copy(),
+            bytemuck::bytes_of(&1.0f32),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let fallback_depth_view = fallback_depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let white_tex_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("particle_white_tex_bg"),
             layout: &tex_bg_layout,
@@ -1423,33 +1832,7 @@ impl ParticleRenderer {
             ],
         });
 
-        // ── Pipeline layouts ──────────────────────────────────────────────
-        let trail_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("trail_pipeline_layout"),
-            bind_group_layouts: &[Some(&trail_camera_bgl), Some(&tex_bg_layout), Some(&mat_tex_bg_layout)],
-            immediate_size: 0,
-        });
-
-        // ── BNSH: eagerly create default shader pipeline; others created lazily ──
-        let default_modules = load_bnsh_shader_modules(
-            device,
-            &bnsh_shaders.default_pair(),
-            &format!("{:#x}", bnsh_shaders.default_key),
-        );
-        let default_pipeline = BnshPipelineState::new(
-            device,
-            default_modules,
-            &bnsh_tex_bg_layout,
-            Some(&bnsh_extra_tex345_bg_layout),
-            surface_format,
-            &format!("{:#x}", bnsh_shaders.default_key),
-        );
-        let mut bnsh_pipelines = HashMap::new();
-        bnsh_pipelines.insert(bnsh_shaders.default_key, default_pipeline);
-        let bnsh_shader_set = bnsh_shaders.clone();
-
-        // ── Blend states ──────────────────────────────────────────────────
-        // (kept for trail pipeline which is not in the cache)
+        // ── Trail pipelines (wgsl_to_wgpu generated) ────────────────────────
         let additive_blend = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -1458,6 +1841,81 @@ impl ParticleRenderer {
             },
             alpha: wgpu::BlendComponent::OVER,
         };
+        let color_target = wgpu::ColorTargetState {
+            format: surface_format,
+            blend: Some(additive_blend),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let vs_entry = crate::trail_shader::vs_main_entry(wgpu::VertexStepMode::Vertex);
+        let fs_entry = crate::trail_shader::fs_main_entry([Some(color_target.clone())]);
+
+        let trail_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("trail_pipeline"),
+            layout: Some(&trail_pipeline_layout),
+            vertex: crate::trail_shader::vertex_state(&trail_shader_module, &vs_entry),
+            fragment: Some(crate::trail_shader::fragment_state(&trail_shader_module, &fs_entry)),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let trail_pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("trail_pipeline_depth"),
+            layout: Some(&trail_pipeline_layout),
+            vertex: crate::trail_shader::vertex_state(&trail_shader_module, &vs_entry),
+            fragment: Some(crate::trail_shader::fragment_state(&trail_shader_module, &fs_entry)),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: Some(crate::particle_renderer_bnsh::particle_depth_stencil_state()),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let trail_cam_bg = crate::trail_shader::bind_groups::BindGroup0::from_bindings(
+            device,
+            crate::trail_shader::bind_groups::BindGroupLayout0 {
+                camera: camera_buf.as_entire_buffer_binding(),
+            },
+        );
+        let trail_tex_bg = crate::trail_shader::bind_groups::BindGroup1::from_bindings(
+            device,
+            crate::trail_shader::bind_groups::BindGroupLayout1 {
+                tex: &white_view,
+                tex_sampler: &white_sampler,
+                alpha_tex: &white_view,
+                alpha_sampler: &white_sampler,
+            },
+        );
+
+        // ── Emissive bind group layout (used by struct fields) ──────────────
+        let default_modules = load_bnsh_shader_modules(
+            device,
+            &bnsh_shaders.default_pair(),
+            &format!("{:#x}", bnsh_shaders.default_key),
+            bnsh_shaders.native_color_for_key(bnsh_shaders.default_key),
+            bnsh_shaders.vs_profile_for_key(bnsh_shaders.default_key),
+        );
+        let default_pipeline = BnshPipelineState::new(
+            device,
+            default_modules,
+            &tex_bg_layout,
+            Some(&bnsh_extra_tex345_bg_layout),
+            &bnsh_group2_placeholder_bg_layout,
+            Some(&bnsh_soft_particle_bg_layout),
+            surface_format,
+            &format!("{:#x}", bnsh_shaders.default_key),
+        );
+        let mut bnsh_pipelines = HashMap::new();
+        bnsh_pipelines.insert(bnsh_shaders.default_key, default_pipeline);
+        let bnsh_shader_set = bnsh_shaders.clone();
 
         // ── Mesh shader + pipelines ───────────────────────────────────────
         // Emissive bind group layout (used by struct fields)
@@ -1483,150 +1941,10 @@ impl ParticleRenderer {
             ],
         });
 
-        // Trail vertex layout
-        let trail_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<TrailVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32, 3 => Float32, 4 => Float32x4],
-        };
-
-        let trail_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("trail_pipeline"),
-            layout: Some(&trail_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &trail_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[trail_vertex_layout.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &trail_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(additive_blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let trail_pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("trail_pipeline_depth"),
-            layout: Some(&trail_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &trail_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[trail_vertex_layout.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &trail_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(additive_blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(crate::particle_renderer_bnsh::particle_depth_stencil_state()),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // ── Cached trail camera bind group ────────────────────────────────
-        let trail_cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("trail_cam_bgl_cached"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let trail_cam_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("trail_cam_bg_cached"),
-            layout: &trail_cam_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buf.as_entire_binding(),
-            }],
-        });
-
         // ── Fullscreen blit pipeline ──────────────────────────────────────
         // Composites the offscreen particle texture onto the surface render pass.
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("blit_shader"),
-            source: wgpu::ShaderSource::Wgsl(r#"
-@group(0) @binding(0) var t_particle: texture_2d<f32>;
-@group(0) @binding(1) var s_particle: sampler;
-
-struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
-
-@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
-    // Fullscreen triangle
-    var pos = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 3.0, -1.0),
-        vec2<f32>(-1.0,  3.0),
-    );
-    var uv = array<vec2<f32>, 3>(
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(2.0, 1.0),
-        vec2<f32>(0.0, -1.0),
-    );
-    var out: VOut;
-    out.pos = vec4<f32>(pos[vi], 0.0, 1.0);
-    out.uv = uv[vi];
-    return out;
-}
-
-@fragment fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    return textureSample(t_particle, s_particle, in.uv);
-}
-"#.into()),
-        });
-
-        let blit_bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("blit_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+        let blit_shader_module = crate::blit_shader::create_shader_module(device);
+        let blit_pipeline_layout = crate::blit_shader::create_pipeline_layout(device);
 
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit_sampler"),
@@ -1637,46 +1955,20 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             ..Default::default()
         });
 
-        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("blit_pipeline_layout"),
-            bind_group_layouts: &[Some(&blit_bg_layout)],
-            immediate_size: 0,
-        });
+        let blit_color_target = wgpu::ColorTargetState {
+            format: surface_format,
+            // Replace-only blit; empty texels are discarded in blit.wgsl so the mesh pass is preserved.
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let blit_vs_entry = crate::blit_shader::vs_main_entry();
+        let blit_fs_entry = crate::blit_shader::fs_main_entry([Some(blit_color_target)]);
 
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blit_pipeline"),
             layout: Some(&blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blit_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    // Premultiplied alpha over: composite particles rendered on a transparent
-                    // offscreen target onto the scene. The offscreen target stores premultiplied
-                    // RGBA values from each emitter's individual blend mode. Additive particles
-                    // naturally work because they have alpha=0 (One * 1 + Dst * (1-0) = Src + Dst).
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
+            vertex: crate::blit_shader::vertex_state(&blit_shader_module, &blit_vs_entry),
+            fragment: Some(crate::blit_shader::fragment_state(&blit_shader_module, &blit_fs_entry)),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None,
@@ -1687,27 +1979,22 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             multiview_mask: None,
             cache: None,
         });
+        let sub_blit_fs_entry = crate::blit_shader::FragmentEntry {
+            entry_point: crate::blit_shader::ENTRY_FS_SUB_MAIN,
+            targets: [Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(crate::particle_renderer_bnsh::blend_state_for(
+                    BlendType::Sub,
+                )),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            constants: Default::default(),
+        };
         let sub_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sub_blit_pipeline"),
             layout: Some(&blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blit_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(crate::particle_renderer_bnsh::blend_state_for(
-                        BlendType::Sub,
-                    )),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
+            vertex: crate::blit_shader::vertex_state(&blit_shader_module, &blit_vs_entry),
+            fragment: Some(crate::blit_shader::fragment_state(&blit_shader_module, &sub_blit_fs_entry)),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None,
@@ -1724,17 +2011,18 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             trail_pipeline_depth,
             blit_pipeline,
             sub_blit_pipeline,
-            blit_bg_layout,
             blit_sampler,
             blit_bind_groups: Vec::new(),
             sub_blit_bind_groups: Vec::new(),
             camera_buf,
 
-            trail_cam_bgl,
             trail_cam_bg,
+            trail_tex_bg,
             tex_bg_layout,
-            bnsh_tex_bg_layout,
             bnsh_extra_tex345_bg_layout,
+            bnsh_group2_placeholder_bg_layout,
+            bnsh_group2_placeholder_bg,
+            bnsh_soft_particle_bg_layout,
             white_tex_bg,
             mat_tex_bg_layout,
             default_mat_tex_bg,
@@ -1764,6 +2052,13 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             indirect_uniform_pool,
             extra_tex_blend_uniform_pool,
             extra_tex_blend_pool_offset: 0,
+            particle_alpha_mod_uniform_pool,
+            particle_alpha_mod_pool_offset: 0,
+            soft_particle_uniform_pool,
+            soft_particle_pool_offset: 0,
+            fallback_depth_tex,
+            fallback_depth_view,
+            scene_depth_view: None,
             emissive_view_cache: HashMap::new(),
             emissive_texture_cache: HashMap::new(),
             emissive_bg_cache: HashMap::new(),
@@ -1820,6 +2115,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     }
 
     /// Lazily create a BNSH pipeline state for an emitter's resolved shader pair.
+    ///
+    /// Cached by registry shader key ([`BnshShaderSet::pipeline_key_for_emitter`]), not
+    /// [`crate::bnsh_shader_integration::spirv_pipeline_key`]: many registry FS variants share
+    /// identical SPIR-V after VS pairing, but [`PreparedBnshDraw::pipeline_key`] always stores
+    /// the registry key — SPIR-V dedupe would leave draws with no matching `bnsh_pipelines` entry.
     fn ensure_bnsh_pipeline(
         &mut self,
         device: &wgpu::Device,
@@ -1829,12 +2129,20 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         if !self.bnsh_pipelines.contains_key(&pipeline_key) {
             let pair = self.bnsh_shader_set.pair_for_emitter(emitter).clone();
             let label = format!("{pipeline_key:#x}");
-            let modules = load_bnsh_shader_modules(device, &pair, &label);
+            let modules = load_bnsh_shader_modules(
+                device,
+                &pair,
+                &label,
+                self.bnsh_shader_set.native_color_for_key(pipeline_key),
+                self.bnsh_shader_set.vs_profile_for_key(pipeline_key),
+            );
             let state = BnshPipelineState::new(
                 device,
                 modules,
-                &self.bnsh_tex_bg_layout,
+                &self.tex_bg_layout,
                 Some(&self.bnsh_extra_tex345_bg_layout),
+                &self.bnsh_group2_placeholder_bg_layout,
+                Some(&self.bnsh_soft_particle_bg_layout),
                 self.surface_format,
                 &label,
             );
@@ -2076,14 +2384,28 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
                     // Identity swizzle for RGBA = (2,3,4,5); skip if trivial or unset
                     let needs_swizzle = cs != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-                    decoded_buf = if fmt_type == 0x1E {
-                        // BC5 (any) non-indirect or indirect: use G channel as brightness (inverted), R as alpha
-                        let orig_min_r = rgba.chunks_exact(4).map(|p| p[0]).min().unwrap_or(0);
-                        let orig_max_r = rgba.chunks_exact(4).map(|p| p[0]).max().unwrap_or(0);
-                        let orig_min_g = rgba.chunks_exact(4).map(|p| p[1]).min().unwrap_or(0);
-                        let orig_max_g = rgba.chunks_exact(4).map(|p| p[1]).max().unwrap_or(0);
-                        eprintln!("[BC5_DBG] set={} emit={} name='{}': raw BC5 R=[{},{}] G=[{},{}]",
-                            set_idx, emitter_idx, tex_res.tex_name, orig_min_r, orig_max_r, orig_min_g, orig_max_g);
+                    decoded_buf = if fmt_type == 0x1E && !is_bc5_indirect
+                        && crate::fx_env::fx_bc5_swizzle_fix_enabled()
+                    {
+                        // BC5 colour textures: honour the BNTX channel swizzle instead of a fixed
+                        // G→brightness / R→alpha guess. smoke11 etc. are swizzle 0x03020202 =
+                        // RGB←R (luminance), A←G (soft alpha); the old fixed mapping put R (=0xff
+                        // luminance) into alpha → opaque white band. `pick` uses swizzle sources
+                        // (2=R,3=G,4=B,5=A,1=one,0=zero).
+                        let (sr, sg, sb, sa) = (
+                            ((tex_res.channel_swizzle >> 0) & 0xFF) as u8,
+                            ((tex_res.channel_swizzle >> 8) & 0xFF) as u8,
+                            ((tex_res.channel_swizzle >> 16) & 0xFF) as u8,
+                            ((tex_res.channel_swizzle >> 24) & 0xFF) as u8,
+                        );
+                        let pick = |p: &[u8], ch: u8| -> u8 {
+                            match ch { 0 => 0, 1 => 255, 2 => p[0], 3 => p[1], 4 => p[2], 5 => p[3], _ => p[0] }
+                        };
+                        rgba.chunks_exact(4)
+                            .flat_map(|p| [pick(p, sr), pick(p, sg), pick(p, sb), pick(p, sa)])
+                            .collect()
+                    } else if fmt_type == 0x1E {
+                        // Legacy BC5 mapping (G→brightness inverted, R→alpha).
                         rgba.chunks_exact(4).flat_map(|p| {
                             let influence = 255u8.saturating_sub(p[1]); // invert G
                             [influence, influence, influence, p[0]]       // R→alpha
@@ -2156,70 +2478,30 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 }
 
                 // wgpu requires bytes_per_row to be a multiple of 256 (COPY_BYTES_PER_ROW_ALIGNMENT).
-                // If the natural stride is already aligned, use it directly.
-                // Otherwise, pad each row to the aligned stride.
-                const ALIGN: u32 = 256;
-                let aligned_bpr = (bytes_per_row + ALIGN - 1) & !(ALIGN - 1);
-                let (tex_data, bytes_per_row) = if aligned_bpr != bytes_per_row {
-                    let rows = tex_h_full as usize; // before atlas crop
-                    let mut padded = Vec::with_capacity(rows * aligned_bpr as usize);
-                    for row in 0..rows {
-                        let src_start = row * bytes_per_row as usize;
-                        let src_end = src_start + bytes_per_row as usize;
-                        if src_end <= tex_data.len() {
-                            padded.extend_from_slice(&tex_data[src_start..src_end]);
-                        } else {
-                            padded.extend(std::iter::repeat(0u8).take(bytes_per_row as usize));
-                        }
-                        // Pad to aligned stride
-                        let pad = (aligned_bpr - bytes_per_row) as usize;
-                        padded.extend(std::iter::repeat(0u8).take(pad));
-                    }
-                    (padded, aligned_bpr)
-                } else {
-                    (tex_data.to_vec(), bytes_per_row)
-                };
-                let tex_data: &[u8] = &tex_data;
-
                 // Upload the full texture — UV scale/offset in the shader handles atlas sub-regions.
-                let (tex_data, h) = (tex_data.to_vec(), tex_h_full);
-                let tex_data: &[u8] = &tex_data;
-
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(&format!("ptcl_tex_{set_idx}_{emitter_idx}")),
-                    size: wgpu::Extent3d {
-                        width: tex_w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu_format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                queue.write_texture(
-                    texture.as_image_copy(),
+                let h = tex_h_full;
+                let texture = create_texture_with_mips(
+                    device,
+                    queue,
+                    &format!("ptcl_tex_{set_idx}_{emitter_idx}"),
+                    wgpu_format,
+                    tex_w,
+                    h,
                     tex_data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: None,
-                    },
-                    wgpu::Extent3d { width: tex_w, height: h, depth_or_array_layers: 1 },
+                    bytes_per_row,
                 );
-                eprintln!("[GPU_TEX] {set_idx}/{emitter_idx}: uploaded {}x{} to GPU (bpr={} format={:?} data_bytes={})",
-                    tex_w, h, bytes_per_row, wgpu_format, tex_data.len());
+                eprintln!("[GPU_TEX] {set_idx}/{emitter_idx}: uploaded {}x{} to GPU (mips={} bpr={} format={:?} data_bytes={})",
+                    tex_w, h, texture.mip_level_count(), bytes_per_row, wgpu_format, tex_data.len());
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let wrap_u = address_mode_for(emitter.tex_wrap_u);
                 let wrap_v = address_mode_for(emitter.tex_wrap_v);
+                let tex_filter = filter_mode_for(emitter.tex_filter);
                 let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                     label: Some("ptcl_tex_sampler"),
                     address_mode_u: wrap_u,
                     address_mode_v: wrap_v,
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
+                    mag_filter: tex_filter,
+                    min_filter: tex_filter,
                     mipmap_filter: wgpu::MipmapFilterMode::Linear,
                     ..Default::default()
                 });
@@ -2229,8 +2511,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     label: Some("ptcl_color_sampler2"),
                     address_mode_u: wrap_u,
                     address_mode_v: wrap_v,
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
+                    mag_filter: tex_filter,
+                    min_filter: tex_filter,
                     mipmap_filter: wgpu::MipmapFilterMode::Linear,
                     ..Default::default()
                 });
@@ -2660,10 +2942,17 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 let surface = image_dds::Surface { width: w, height: h, depth: 1, layers: 1, mipmaps: 1, image_format: dds_fmt, data: upload_data };
                 let rgba = match surface.decode_rgba8() { Ok(s) => s.data, Err(_) => continue };
                 let cs = tex_res.channel_swizzle;
-                let ch_r = ((cs >>  0) & 0xFF) as u8;
-                let ch_g = ((cs >>  8) & 0xFF) as u8;
-                let ch_b = ((cs >> 16) & 0xFF) as u8;
-                let ch_a = ((cs >> 24) & 0xFF) as u8;
+                // Raw BNTX swizzle channels (2=R,3=G,4=B,5=A,1=one,0=zero) before BC-specific override.
+                let raw_ch = [
+                    ((cs >>  0) & 0xFF) as u8,
+                    ((cs >>  8) & 0xFF) as u8,
+                    ((cs >> 16) & 0xFF) as u8,
+                    ((cs >> 24) & 0xFF) as u8,
+                ];
+                let ch_r = raw_ch[0];
+                let ch_g = raw_ch[1];
+                let ch_b = raw_ch[2];
+                let ch_a = raw_ch[3];
                 let is_bc5_indirect = fmt_type == 0x1E && tex_res.tex_name.to_lowercase().contains("indirect");
                 let (ch_r, ch_g, ch_b, ch_a) = if fmt_type == 0x1D {
                     (1u8, 1u8, 1u8, 2u8)
@@ -2676,14 +2965,19 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     }
                 } else { (ch_r, ch_g, ch_b, ch_a) };
                 let needs_swizzle = cs != 0 && !(ch_r == 2 && ch_g == 3 && ch_b == 4 && ch_a == 5);
-                        decoded_buf = if fmt_type == 0x1E {
-                            // BC5 (any) non-indirect or indirect: G→grayscale brightness (inverted), R→alpha
-                            let orig_min_r = rgba.chunks_exact(4).map(|p| p[0]).min().unwrap_or(0);
-                            let orig_max_r = rgba.chunks_exact(4).map(|p| p[0]).max().unwrap_or(0);
-                            let orig_min_g = rgba.chunks_exact(4).map(|p| p[1]).min().unwrap_or(0);
-                            let orig_max_g = rgba.chunks_exact(4).map(|p| p[1]).max().unwrap_or(0);
-                        eprintln!("[BC5_BNTX_DBG] idx={} name='{}': raw BC5 R=[{},{}] G=[{},{}]",
-                            bntx_idx, tex_res.tex_name, orig_min_r, orig_max_r, orig_min_g, orig_max_g);
+                        decoded_buf = if fmt_type == 0x1E && !is_bc5_indirect
+                            && crate::fx_env::fx_bc5_swizzle_fix_enabled()
+                        {
+                            // Honour the real BNTX swizzle (smoke11 = 0x03020202 → RGB←R, A←G)
+                            // instead of the fixed G→brightness / R→alpha guess.
+                            let pick = |p: &[u8], ch: u8| -> u8 {
+                                match ch { 0 => 0, 1 => 255, 2 => p[0], 3 => p[1], 4 => p[2], 5 => p[3], _ => p[0] }
+                            };
+                            rgba.chunks_exact(4)
+                                .flat_map(|p| [pick(p, raw_ch[0]), pick(p, raw_ch[1]), pick(p, raw_ch[2]), pick(p, raw_ch[3])])
+                                .collect()
+                        } else if fmt_type == 0x1E {
+                            // Legacy BC5 mapping (G→brightness inverted, R→alpha).
                             rgba.chunks_exact(4).flat_map(|p| {
                                 let influence = 255u8.saturating_sub(p[1]); // invert G
                                 [influence, influence, influence, p[0]]
@@ -2709,32 +3003,15 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 final_bpr = if fmt_type == 0x02 || fmt_type == 0x09 || fmt_type == 0x0A { w * 4 } else { raw_tight_bpr };
                 tex_data = &decoded_buf;
             }
-            const ALIGN: u32 = 256;
-            let aligned_bpr = (final_bpr + ALIGN - 1) & !(ALIGN - 1);
-            let (tex_data_padded, upload_bpr) = if aligned_bpr != final_bpr {
-                let mut padded = Vec::with_capacity(h as usize * aligned_bpr as usize);
-                for row in 0..h as usize {
-                    let s = row * final_bpr as usize;
-                    let e = s + final_bpr as usize;
-                    if e <= tex_data.len() { padded.extend_from_slice(&tex_data[s..e]); } else { padded.extend(std::iter::repeat(0u8).take(final_bpr as usize)); }
-                    padded.extend(std::iter::repeat(0u8).take((aligned_bpr - final_bpr) as usize));
-                }
-                (padded, aligned_bpr)
-            } else { (tex_data.to_vec(), final_bpr) };
-
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("bntx_tex_{bntx_idx}")),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu_format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            queue.write_texture(
-                texture.as_image_copy(), &tex_data_padded,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(upload_bpr), rows_per_image: None },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            let texture = create_texture_with_mips(
+                device,
+                queue,
+                &format!("bntx_tex_{bntx_idx}"),
+                wgpu_format,
+                w,
+                h,
+                tex_data,
+                final_bpr,
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2794,6 +3071,9 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         ptcl: &PtclFile,
         shader_reflection: Option<&crate::bnsh_reflection::ShaderStageReflection>,
     ) {
+        if !ptcl.needs_mesh_material_pass() {
+            return;
+        }
         // Clear existing material texture caches
         self.mat_tex_bg_cache.clear();
         self.mat_tex_views_cache.clear();
@@ -2804,12 +3084,9 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         
         // Resolve material texture GPU binding slots from shader reflection if available
         let (col_slot, emi_slot, prm_slot) = if let Some(refl) = shader_reflection {
-            let jump_table = refl.build_sampler_jump_table();
-            let col_slot = jump_table.get("_col").or_else(|| jump_table.get("tex_col")).copied().unwrap_or(0);
-            let emi_slot = jump_table.get("_emi").or_else(|| jump_table.get("tex_emi")).copied().unwrap_or(2);
-            let prm_slot = jump_table.get("_prm").or_else(|| jump_table.get("tex_prm")).copied().unwrap_or(4);
-            eprintln!("[MAT_TEX] Resolved shader slots: _col={}, _emi={}, _prm={}", col_slot, emi_slot, prm_slot);
-            (col_slot, emi_slot, prm_slot)
+            let (col, emi, prm) = refl.material_texture_slots();
+            eprintln!("[MAT_TEX] Resolved shader slots: _col={}, _emi={}, _prm={}", col, emi, prm);
+            (col, emi, prm)
         } else {
             eprintln!("[MAT_TEX] No shader reflection available, using default slots: _col=0, _emi=2, _prm=4");
             (0, 2, 4)
@@ -3140,7 +3417,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 Some(e) => e,
                 None => continue,
             };
-            append_bnsh_particle_vertices(&mut vertex_data, p, emitter, aspect_ratio, None);
+            append_bnsh_particle_vertices(&mut vertex_data, p, emitter, aspect_ratio, None, None, None);
         }
 
         device.create_buffer_init(
@@ -3152,6 +3429,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         )
     }
 
+    /// Bind mesh/path depth for soft-particle `@group(3)` sampling (call before `prepare_particle_frame`).
+    pub fn set_scene_depth_view(&mut self, view: &wgpu::TextureView) {
+        self.scene_depth_view = Some(view.clone());
+    }
+
     /// Upload uniforms, vertex data, and bind groups. Must run outside an active render pass.
     pub fn prepare_particle_frame(
         &mut self,
@@ -3160,6 +3442,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         view_proj: Mat4,
         cam_right: Vec3,
         cam_up: Vec3,
+        cam_pos: Vec3,
         particles: &[Particle],
         trails: &[SwordTrail],
         emitter_sets: &[EmitterSet],
@@ -3173,7 +3456,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         self.prepared_trail_segments.clear();
         self.prepared_bnsh_draws.clear();
         self.prepared_draw_paths.clear();
+        // Blit bind groups are owned by `prepare_composite` (finish_prepare); do not clear here
+        // or paint can run with empty bind groups after prepare until finish_prepare rebuilds.
         self.extra_tex_blend_pool_offset = 0;
+        self.particle_alpha_mod_pool_offset = 0;
+        self.soft_particle_pool_offset = 0;
 
         if !particles.is_empty() || !trails.is_empty() || !bfres_models.is_empty() {
             if crate::fx_debug_enabled() {
@@ -3219,14 +3506,20 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             eprintln!("[BNSH-RENDER] tracking {} particles", particles.len());
         }
 
-        let mut sorted_billboard: Vec<&Particle> = particles.iter().collect();
-        if sorted_billboard.is_empty() {
-            if self.prepared_trail_vertex_count > 0 {
-                self.prepared_draw_paths =
-                    crate::effects::distinct_draw_paths(particles, trails);
-            }
+        if !particles.is_empty() || !trails.is_empty() {
+            self.prepared_draw_paths =
+                crate::effects::distinct_draw_paths(particles, trails);
+        }
+
+        if particles.is_empty() {
             return;
         }
+
+        let only_emitter: Option<usize> = std::env::var("FX_ONLY_EMITTER").ok().and_then(|s| s.parse().ok());
+        let mut sorted_billboard: Vec<&Particle> = particles
+            .iter()
+            .filter(|p| only_emitter.is_none_or(|e| p.emitter_idx == e))
+            .collect();
         sorted_billboard.sort_by(|a, b| {
             crate::effects::particle_draw_sort_key(a)
                 .cmp(&crate::effects::particle_draw_sort_key(b))
@@ -3237,7 +3530,6 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
-        self.prepared_draw_paths = crate::effects::distinct_draw_paths(particles, trails);
 
         let mut all_vertex_data: Vec<f32> = Vec::new();
         let mut indirect_pool_offset: u64 = 0;
@@ -3263,27 +3555,54 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
             let vertex_byte_offset = (all_vertex_data.len() * 4) as u64;
             let aspect_ratio = self.tex_aspect_cache.get(&emitter_key).copied().unwrap_or(1.0);
-            {
-                let mesh_ctx = crate::effects::SpawnMeshContext {
-                    primitives: &self.primitives,
-                    bfres_models,
-                };
-                for p in group.iter() {
-                    append_bnsh_particle_vertices(
-                        &mut all_vertex_data,
-                        p,
-                        emitter,
-                        aspect_ratio,
-                        Some(&mesh_ctx),
-                    );
-                }
+            let mesh_ctx = crate::effects::SpawnMeshContext {
+                primitives: &self.primitives,
+                bfres_models,
+            };
+            // Which attrs carry the shader's birth/lifetime pair varies per shader family.
+            let life_roles = self
+                .bnsh_shader_set
+                .pair_for_emitter(emitter)
+                .vertex
+                .as_ref()
+                .and_then(|vs| crate::spirv_to_wgsl::detect_life_attr_roles(&vs.wgsl_source));
+            let verts_before = all_vertex_data.len();
+            for p in group.iter() {
+                append_bnsh_particle_vertices(
+                    &mut all_vertex_data,
+                    p,
+                    emitter,
+                    aspect_ratio,
+                    Some(&mesh_ctx),
+                    Some(cam_pos),
+                    life_roles,
+                );
             }
-            let num_vertices = (group.len() * 6) as u32;
+            let num_vertices =
+                ((all_vertex_data.len() - verts_before) / (BNSH_VERTEX_STRIDE as usize / 4)) as u32;
             if num_vertices == 0 {
                 continue;
             }
+            if std::env::var("FX_VTX_DUMP").is_ok() && verts_before < all_vertex_data.len() {
+                // First vertex of this group: attr0 = center (0..3), attr4 = [life,size,aspect,w]
+                // at floats 16..20, attr6 = corner seeds at 24..28. Project the center by view_proj.
+                let stride = BNSH_VERTEX_STRIDE as usize / 4;
+                let v = &all_vertex_data[verts_before..verts_before + stride];
+                let center = glam::Vec4::new(v[0], v[1], v[2], v[3]);
+                let clip = view_proj * center;
+                let ndc = if clip.w.abs() > 1e-6 { clip.truncate() / clip.w } else { clip.truncate() };
+                eprintln!(
+                    "[VTXDUMP] em='{}' n={num_vertices} center=({:.2},{:.2},{:.2}) attr4=[{:.2},{:.2},{:.2},{:.2}] attr6=[{:.3},{:.3},{:.3},{:.3}] -> clip.w={:.2} ndc=({:.3},{:.3})",
+                    emitter.name, v[0], v[1], v[2], v[16], v[17], v[18], v[19], v[24], v[25], v[26], v[27],
+                    clip.w, ndc.x, ndc.y,
+                );
+            }
 
             let tex_res = emitter.textures.get(0);
+            // Batch-average normalized life for emitter TRS / pat_blend; per-particle
+            // normalized life is in vertex attr5.w. Native FS colour splines read attr5.w
+            // (remaining life via cbuf_10[2].x - in_attr5.w); scroll/atlas cbuf rows use
+            // batch_life_min/max envelope when IsRotate/IsScale vary over life.
             let group_life_t = group
                 .iter()
                 .map(|p| {
@@ -3295,12 +3614,55 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 })
                 .sum::<f32>()
                 / group.len().max(1) as f32;
+            let (group_life_min, group_life_max) = group.iter().fold((f32::MAX, f32::MIN), |acc, p| {
+                let t = if p.lifetime <= 0.0 {
+                    1.0
+                } else {
+                    (p.age / p.lifetime).clamp(0.0, 1.0)
+                };
+                (acc.0.min(t), acc.1.max(t))
+            });
+            let group_life_min = if group_life_min.is_finite() {
+                group_life_min
+            } else {
+                group_life_t
+            };
+            let group_life_max = if group_life_max.is_finite() {
+                group_life_max
+            } else {
+                group_life_t
+            };
 
             let avg_indirect = group.iter().fold([0.0f32, 0.0], |acc, p| {
                 [acc[0] + p.indirect_tex_offset[0], acc[1] + p.indirect_tex_offset[1]]
             });
             let gn = group.len().max(1) as f32;
             let avg_pat_blend = group.iter().map(|p| p.pat_blend).sum::<f32>() / gn;
+            let avg_tex_scale = {
+                let mut acc = [0.0f32, 0.0];
+                for p in group.iter() {
+                    acc[0] += p.tex_scale_live[0];
+                    acc[1] += p.tex_scale_live[1];
+                }
+                [acc[0] / gn, acc[1] / gn]
+            };
+            if crate::fx_env::fx_viewport_log_enabled() && emitter.tex_pat_frame_count > 1 {
+                let ref_u = emitter.tex_scale_uv[0].abs();
+                let ref_v = emitter.tex_scale_uv[1].abs();
+                if (avg_tex_scale[0].abs() - ref_u).abs() > 0.05
+                    || (avg_tex_scale[1].abs() - ref_v).abs() > 0.05
+                {
+                    eprintln!(
+                        "[ATLAS-UV] emitter ({},{}) batch |tex_scale_live|=[{:.3},{:.3}] vs |tex_scale_uv|=[{:.3},{:.3}] (InvRand flips are per-particle)",
+                        emitter_key.0,
+                        emitter_key.1,
+                        avg_tex_scale[0].abs(),
+                        avg_tex_scale[1].abs(),
+                        ref_u,
+                        ref_v,
+                    );
+                }
+            }
             let batch_velocity = {
                 let mut v = glam::Vec3::ZERO;
                 for p in group.iter() {
@@ -3318,16 +3680,12 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 }
                 acc.map(|[u, v]| [u / gn, v / gn])
             };
-            let indirect_params = IndirectParams {
-                is_indirect: u32::from(emitter.is_indirect_slot1),
-                distortion_strength: emitter.distortion_strength,
-                indirect_scroll_u: avg_indirect[0] / gn,
-                indirect_scroll_v: avg_indirect[1] / gn,
-                indirect_scale_u: emitter.indirect_tex_scale_uv[0],
-                indirect_scale_v: emitter.indirect_tex_scale_uv[1],
-                indirect_offset_u: avg_indirect[0] / gn,
-                indirect_offset_v: avg_indirect[1] / gn,
-            };
+            let indirect_params = indirect_params_from_emitter(
+                emitter,
+                cam_pos,
+                avg_indirect[0] / gn,
+                avg_indirect[1] / gn,
+            );
             let indirect_dynamic_offset = indirect_pool_offset as u32;
             queue.write_buffer(
                 &self.indirect_uniform_pool,
@@ -3338,40 +3696,34 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
             let emitter_tex_bg = {
                 let (color_view, color_sampler) = self.emitter_texture_for_slot(emitter_key, emitter, 0);
-                let (alpha_view, alpha_sampler) = if let Some((v, s)) = self.alpha_view_cache.get(&emitter_key) {
+                let (alpha_view, alpha_sampler) = if emitter.is_indirect_slot1 {
+                    (&self.white_view, &self.white_sampler)
+                } else if let Some((v, s)) = self.alpha_view_cache.get(&emitter_key) {
                     (v, s)
                 } else {
                     (&self.white_view, &self.white_sampler)
                 };
-                let (indirect_view, indirect_sampler) = if let Some((v, s)) = self.indirect_view_cache.get(&emitter_key) {
-                    (v, s)
+                let (indirect_view, indirect_sampler) = if emitter.is_indirect_slot1 {
+                    if let Some((v, s)) = self.indirect_view_cache.get(&emitter_key) {
+                        (v, s)
+                    } else {
+                        (&self.white_view, &self.white_sampler)
+                    }
                 } else {
                     (&self.white_view, &self.white_sampler)
                 };
                 let (slot2_view, slot2_sampler) = self.emitter_texture_for_slot(emitter_key, emitter, 2);
                 Some((
-                    device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some(&format!("emitter_tex_bg_{}_{}", emitter_key.0, emitter_key.1)),
-                        layout: &self.tex_bg_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(color_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(color_sampler) },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(alpha_view) },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(alpha_sampler) },
-                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(indirect_view) },
-                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(indirect_sampler) },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &self.indirect_uniform_pool,
-                                    offset: 0,
-                                    size: std::num::NonZeroU64::new(std::mem::size_of::<IndirectParams>() as u64),
-                                }),
-                            },
-                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(slot2_view) },
-                            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(slot2_sampler) },
-                        ],
-                    }),
+                    build_emitter_tex_bind_group(
+                        device,
+                        &self.tex_bg_layout,
+                        &self.indirect_uniform_pool,
+                        &format!("emitter_tex_bg_{}_{}", emitter_key.0, emitter_key.1),
+                        (color_view, color_sampler),
+                        (alpha_view, alpha_sampler),
+                        (indirect_view, indirect_sampler),
+                        (slot2_view, slot2_sampler),
+                    ),
                     indirect_dynamic_offset,
                 ))
             };
@@ -3383,7 +3735,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         inst.emitter_key() == emitter_key && inst.bone_name() == p.bone_name
                     })
                 });
-                if let (Some(p), Some(inst)) = (sample, inst) {
+                let m = if let (Some(p), Some(inst)) = (sample, inst) {
                     let bone_mat = bone_matrices
                         .get(&p.bone_name)
                         .or_else(|| bone_matrices.get(&p.bone_name.to_lowercase()))
@@ -3393,10 +3745,17 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                         .unwrap_or(Mat4::IDENTITY);
                     let f = inst.effect_local_frame(current_frame);
                     let effect_t = crate::effects::emitter_effect_t(emitter, f);
-                    crate::effects::compute_emitter_world_mat(emitter, inst, bone_mat, effect_t)
+                    let wm = crate::effects::compute_emitter_world_mat(emitter, inst, bone_mat, effect_t);
+                    if std::env::var("FX_TRS_DEBUG").is_ok() {
+                        let t = wm.w_axis;
+                        eprintln!("[TRS] em='{}' cur_frame={current_frame} local_f={f:.1} effect_t={effect_t:.3} det={:.2e} sX={:.3} trans=({:.1},{:.1},{:.1})",
+                            emitter.name, wm.determinant(), wm.x_axis.truncate().length(), t.x, t.y, t.z);
+                    }
+                    wm
                 } else {
                     crate::effects::build_emitter_trs_at(emitter, group_life_t)
-                }
+                };
+                m
             };
 
             let (pipeline_key, _) = self.ensure_bnsh_pipeline(device, emitter);
@@ -3430,39 +3789,19 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     avg_pat_blend,
                     avg_tex_extra,
                     batch_velocity,
+                    None,
                     &self.primitives,
                     bfres_models,
+                    group_life_min,
+                    group_life_max,
                 )
-            };
-            {
-                let state = self.bnsh_pipelines.get_mut(&pipeline_key).unwrap();
-                state.pipeline_for_blend(device, self.surface_format, blend, &shader_label, false, false);
-                state.pipeline_for_blend(device, self.surface_format, blend, &shader_label, true, false);
-                state.pipeline_for_blend(device, self.surface_format, blend, &shader_label, true, true);
-            }
-
-            let extra_tex_bg = {
-                let (tex_view, tex_sampler) = self.emitter_texture_for_slot(emitter_key, emitter, 0);
-                Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("bnsh_tex_bg"),
-                    layout: &self.bnsh_tex_bg_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(tex_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(tex_sampler),
-                        },
-                    ],
-                }))
             };
 
             let extra_tex345_bg = {
                 let state = self.bnsh_pipelines.get(&pipeline_key).unwrap();
                 let needs_group2 = state.extra_tex_slots_needed.iter().any(|&b| b)
-                    || state.tex_blend_uniform_needed;
+                    || state.tex_blend_uniform_needed
+                    || state.particle_alpha_uniform_needed;
                 if !needs_group2 {
                     None
                 } else {
@@ -3473,11 +3812,24 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                     let tex345 = self.extra_tex345_for_emitter(emitter_key);
                     let white = (self.white_view.clone(), self.white_sampler.clone());
                     let picked = extra_tex345_bind_entries(active, &tex345, &white);
-                    let blend_offset = upload_extra_tex_blend_uniform(
+                    let blend_offset = if state.tex_blend_uniform_needed
+                        || state.extra_tex_slots_needed.iter().any(|&b| b)
+                    {
+                        upload_extra_tex_blend_uniform(
+                            queue,
+                            &self.extra_tex_blend_uniform_pool,
+                            &mut self.extra_tex_blend_pool_offset,
+                            &emitter.combiner,
+                        )
+                    } else {
+                        0
+                    };
+                    let alpha_mod_offset = upload_particle_alpha_mod_uniform(
                         queue,
-                        &self.extra_tex_blend_uniform_pool,
-                        &mut self.extra_tex_blend_pool_offset,
-                        &emitter.combiner,
+                        &self.particle_alpha_mod_uniform_pool,
+                        &mut self.particle_alpha_mod_pool_offset,
+                        &emitter.particle_color,
+                        cam_pos,
                     );
                     Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("bnsh_extra_tex345_bg"),
@@ -3515,6 +3867,52 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                                     size: std::num::NonZeroU64::new(EXTRA_TEX_BLEND_UNIFORM_SIZE),
                                 }),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.particle_alpha_mod_uniform_pool,
+                                    offset: alpha_mod_offset,
+                                    size: std::num::NonZeroU64::new(
+                                        crate::shader_registry::PARTICLE_ALPHA_MOD_UNIFORM_SIZE,
+                                    ),
+                                }),
+                            },
+                        ],
+                    }))
+                }
+            };
+
+            let soft_particle_bg = {
+                let state = self.bnsh_pipelines.get(&pipeline_key).unwrap();
+                if !state.soft_particle_needed {
+                    None
+                } else {
+                    let soft_offset = upload_soft_particle_uniform(
+                        queue,
+                        &self.soft_particle_uniform_pool,
+                        &mut self.soft_particle_pool_offset,
+                        &emitter.particle_color,
+                    );
+                    let depth_view = self
+                        .scene_depth_view
+                        .as_ref()
+                        .unwrap_or(&self.fallback_depth_view);
+                    Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("bnsh_soft_particle_bg"),
+                        layout: &self.bnsh_soft_particle_bg_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(depth_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.soft_particle_uniform_pool,
+                                    offset: soft_offset,
+                                    size: std::num::NonZeroU64::new(SOFT_PARTICLE_UNIFORM_SIZE),
+                                }),
+                            },
                         ],
                     }))
                 }
@@ -3528,8 +3926,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 blend,
                 opaque_core,
                 bind_groups,
-                extra_tex_bg,
                 extra_tex345_bg,
+                soft_particle_bg,
                 emitter_tex_bg,
                 vertex_byte_offset,
                 vertex_count: num_vertices,
@@ -3586,26 +3984,46 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     }
 
     /// Record draws from data prepared in `prepare_particle_frame`. No queue writes.
-    pub fn draw_prepared_particles(&self, rpass: &mut wgpu::RenderPass<'_>) {
-        self.draw_prepared_particles_filtered(rpass, true, BnshDrawFilter::All, DepthDrawConfig::NONE);
+    pub fn draw_prepared_particles(
+        &mut self,
+        device: &wgpu::Device,
+        rpass: &mut wgpu::RenderPass<'_>,
+    ) {
+        self.draw_prepared_particles_filtered(
+            device,
+            rpass,
+            true,
+            BnshDrawFilter::All,
+            DepthDrawConfig::NONE,
+        );
     }
 
     /// Filter BNSH billboard draws (trails are always Normal-blended).
     pub fn draw_prepared_particles_filtered(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         rpass: &mut wgpu::RenderPass<'_>,
         include_trails: bool,
         filter: BnshDrawFilter,
         depth: DepthDrawConfig,
     ) {
-        for &path in &self.prepared_draw_paths {
-            self.draw_prepared_particles_for_path(rpass, path, include_trails, filter, depth);
+        let paths: Vec<u32> = self.prepared_draw_paths.clone();
+        for path in paths {
+            self.draw_prepared_particles_for_path(
+                device,
+                rpass,
+                path,
+                include_trails,
+                filter,
+                depth,
+            );
         }
     }
 
     /// Record draws for one `draw_path` id. Trails for that path render when `include_trails` is true.
     pub fn draw_prepared_particles_for_path(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         rpass: &mut wgpu::RenderPass<'_>,
         draw_path: u32,
         include_trails: bool,
@@ -3627,6 +4045,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             .filter(|(_, draw)| draw.draw_path == draw_path)
             .filter(|(_, draw)| bnsh_draw_filter_matches(filter, draw.blend))
             .filter(|(_, draw)| !depth.opaque_core_only || draw.opaque_core)
+            .filter(|(_, draw)| !depth.exclude_opaque_core || !draw.opaque_core)
             .map(|(i, _)| i)
             .collect();
         let ordered: Vec<usize> = if depth.reverse_order {
@@ -3635,40 +4054,63 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             draw_indices
         };
 
+        if crate::fx_env::fx_viewport_log_enabled() && !ordered.is_empty() {
+            let verts: u32 = ordered
+                .iter()
+                .map(|&idx| self.prepared_bnsh_draws[idx].vertex_count)
+                .sum();
+            let filter_label = match filter {
+                BnshDrawFilter::All => "All",
+                BnshDrawFilter::ExcludeSub => "ExcludeSub",
+                BnshDrawFilter::SubOnly => "SubOnly",
+            };
+            eprintln!(
+                "[PARTICLE-DRAW-FILTER] path={draw_path} {filter_label}: {} draws, {verts} verts",
+                ordered.len(),
+            );
+        }
+
         for idx in ordered {
             let draw = &self.prepared_bnsh_draws[idx];
-            let pipeline = self
-                .bnsh_pipelines
-                .get(&draw.pipeline_key)
-                .and_then(|s| {
-                    if depth.test {
-                        if depth.write {
-                            s.pipeline_cache_depth_write.get(&draw.blend)
-                        } else {
-                            s.pipeline_cache_depth.get(&draw.blend)
-                        }
-                    } else {
-                        s.pipeline_cache.get(&draw.blend)
-                    }
-                });
-            let Some(pipeline) = pipeline else {
-                continue;
-            };
+            let state = self.bnsh_pipelines.get_mut(&draw.pipeline_key).unwrap_or_else(|| {
+                panic!(
+                    "[PARTICLE-DRAW] path={draw_path} pipeline state {:#x} missing after prepare \
+                     (registry key mismatch between ensure_bnsh_pipeline and PreparedBnshDraw)",
+                    draw.pipeline_key,
+                );
+            });
+            let shader_label = format!("{:#x}", draw.pipeline_key);
+            let pipeline = state.pipeline_for_blend(
+                device,
+                self.surface_format,
+                draw.blend,
+                &shader_label,
+                depth.test,
+                depth.write,
+            );
             rpass.set_pipeline(pipeline);
             for (set_idx, bg) in draw.bind_groups.iter().enumerate() {
                 rpass.set_bind_group(set_idx as u32, bg, &[]);
             }
-            if let Some(tex_bg) = &draw.extra_tex_bg {
-                rpass.set_bind_group(draw.bind_groups.len() as u32, tex_bg, &[]);
+            let mut next_set = draw.bind_groups.len() as u32;
+            if let Some((tex_bg, offset)) = &draw.emitter_tex_bg {
+                rpass.set_bind_group(next_set, tex_bg, &[*offset]);
+                next_set += 1;
             }
-            let mut next_set = draw.bind_groups.len() as u32
-                + u32::from(draw.extra_tex_bg.is_some());
             if let Some(tex345_bg) = &draw.extra_tex345_bg {
                 rpass.set_bind_group(next_set, tex345_bg, &[]);
                 next_set += 1;
+            } else if draw.soft_particle_bg.is_some() {
+                let needs_group2 = state.extra_tex_slots_needed.iter().any(|&b| b)
+                    || state.tex_blend_uniform_needed
+                    || state.particle_alpha_uniform_needed;
+                if !needs_group2 {
+                    rpass.set_bind_group(next_set, &self.bnsh_group2_placeholder_bg, &[]);
+                    next_set += 1;
+                }
             }
-            if let Some((tex_bg, offset)) = &draw.emitter_tex_bg {
-                rpass.set_bind_group(next_set, tex_bg, &[*offset]);
+            if let Some(soft_bg) = &draw.soft_particle_bg {
+                rpass.set_bind_group(next_set, soft_bg, &[]);
             }
             let end = draw.vertex_byte_offset + draw.vertex_count as u64 * BNSH_VERTEX_STRIDE;
             rpass.set_vertex_buffer(0, vertex_buf.slice(draw.vertex_byte_offset..end));
@@ -3694,9 +4136,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             } else {
                 &self.trail_pipeline
             });
-            rpass.set_bind_group(0, &self.trail_cam_bg, &[]);
-            rpass.set_bind_group(1, &self.white_tex_bg, &[]);
-            rpass.set_bind_group(2, &self.default_mat_tex_bg, &[]);
+            self.trail_cam_bg.set(rpass);
+            self.trail_tex_bg.set(rpass);
             let first = start;
             let end = start + count;
             rpass.set_vertex_buffer(0, buf.slice((first as u64 * std::mem::size_of::<TrailVertex>() as u64)..(end as u64 * std::mem::size_of::<TrailVertex>() as u64)));
@@ -3704,24 +4145,36 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
         }
     }
 
+    /// True when `finish_prepare` rebuilt per-path blit bind groups for color + Sub offscreen targets.
+    pub fn editor_composite_is_ready(&self) -> bool {
+        !self.blit_bind_groups.is_empty()
+            && self.blit_bind_groups.len() == self.sub_blit_bind_groups.len()
+    }
+
+    /// True when this frame has offscreen draw paths to composite in the editor viewport.
+    pub fn editor_needs_composite(&self) -> bool {
+        !self.prepared_draw_paths.is_empty()
+    }
+
     /// Editor viewport: for each draw_path (ascending), blit premultiplied color then Sub offscreen.
     pub fn composite_editor_particles(&self, rpass: &mut wgpu::RenderPass<'static>) {
-        let paths = self.prepared_draw_paths();
-        if paths.is_empty() {
-            self.composite_paths(rpass);
-            return;
-        }
-        for (i, _path) in paths.iter().enumerate() {
-            if let Some(bg) = self.blit_bind_groups.get(i) {
-                rpass.set_pipeline(&self.blit_pipeline);
-                rpass.set_bind_group(0, bg, &[]);
-                rpass.draw(0..3, 0..1);
-            }
-            if let Some(sub_bg) = self.sub_blit_bind_groups.get(i) {
-                rpass.set_pipeline(&self.sub_blit_pipeline);
-                rpass.set_bind_group(0, sub_bg, &[]);
-                rpass.draw(0..3, 0..1);
-            }
+        self.composite_draw_paths(rpass);
+    }
+
+    fn composite_draw_paths(&self, rpass: &mut wgpu::RenderPass<'_>) {
+        debug_assert!(!self.blit_bind_groups.is_empty());
+        debug_assert_eq!(
+            self.blit_bind_groups.len(),
+            self.sub_blit_bind_groups.len(),
+            "each draw_path needs color + Sub offscreen bind groups"
+        );
+        for i in 0..self.blit_bind_groups.len() {
+            rpass.set_pipeline(&self.blit_pipeline);
+            self.blit_bind_groups[i].set(rpass);
+            rpass.draw(0..3, 0..1);
+            rpass.set_pipeline(&self.sub_blit_pipeline);
+            self.sub_blit_bind_groups[i].set(rpass);
+            rpass.draw(0..3, 0..1);
         }
     }
 
@@ -3746,6 +4199,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
             view_proj,
             cam_right,
             cam_up,
+            view_proj.inverse().col(3).truncate(),
             particles,
             trails,
             emitter_sets,
@@ -3779,65 +4233,74 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.draw_prepared_particles_for_path(&mut rpass, path, true, BnshDrawFilter::All, DepthDrawConfig::NONE);
+            self.draw_prepared_particles_for_path(
+                device,
+                &mut rpass,
+                path,
+                true,
+                BnshDrawFilter::ExcludeSub,
+                DepthDrawConfig::NONE,
+            );
+            self.draw_prepared_particles_for_path(
+                device,
+                &mut rpass,
+                path,
+                false,
+                BnshDrawFilter::SubOnly,
+                DepthDrawConfig::NONE,
+            );
         }
     }
 
-    /// Pre-build blit bind groups for each draw_path offscreen target.
-    /// Call from `finish_prepare` so `composite_paths` / `composite_editor_particles` can run in `paint`.
+    /// Pre-build blit bind groups for each draw_path offscreen target (color + Sub pairs).
+    /// Call from `finish_prepare` so `composite_paths` can run in `paint`.
     pub fn prepare_composite(
         &mut self,
         device: &wgpu::Device,
-        particle_target_views: &[&wgpu::TextureView],
-        sub_target_views: &[&wgpu::TextureView],
+        color_views: &[&wgpu::TextureView],
+        sub_views: &[&wgpu::TextureView],
     ) {
+        debug_assert_eq!(
+            color_views.len(),
+            sub_views.len(),
+            "prepare_composite requires one color + Sub view per draw_path"
+        );
         self.blit_bind_groups.clear();
-        for (i, view) in particle_target_views.iter().enumerate() {
-            self.blit_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("blit_bg_path_{i}")),
-                layout: &self.blit_bg_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
-                    },
-                ],
-            }));
-        }
         self.sub_blit_bind_groups.clear();
-        for (i, view) in sub_target_views.iter().enumerate() {
-            self.sub_blit_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("sub_blit_bg_path_{i}")),
-                layout: &self.blit_bg_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
+        for view in color_views {
+            self.blit_bind_groups.push(
+                crate::blit_shader::bind_groups::BindGroup0::from_bindings(
+                    device,
+                    crate::blit_shader::bind_groups::BindGroupLayout0 {
+                        t_particle: view,
+                        s_particle: &self.blit_sampler,
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.blit_sampler),
+                ),
+            );
+        }
+        for view in sub_views {
+            self.sub_blit_bind_groups.push(
+                crate::blit_shader::bind_groups::BindGroup0::from_bindings(
+                    device,
+                    crate::blit_shader::bind_groups::BindGroupLayout0 {
+                        t_particle: view,
+                        s_particle: &self.blit_sampler,
                     },
-                ],
-            }));
+                ),
+            );
         }
     }
 
-    /// Composite all prepared draw_path offscreen textures onto the surface (ascending order).
-    pub fn composite_paths(&self, render_pass: &mut wgpu::RenderPass<'static>) {
-        for bg in &self.blit_bind_groups {
-            render_pass.set_pipeline(&self.blit_pipeline);
-            render_pass.set_bind_group(0, bg, &[]);
-            render_pass.draw(0..3, 0..1);
+    /// Composite each draw_path offscreen target onto the surface (color blit then Sub reverse-subtract).
+    pub fn composite_paths(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        if self.blit_bind_groups.is_empty() {
+            return;
         }
+        self.composite_draw_paths(render_pass);
     }
 
     /// Composite the first (or only) prepared offscreen texture onto the surface.
-    pub fn composite(&self, render_pass: &mut wgpu::RenderPass<'static>) {
+    pub fn composite(&self, render_pass: &mut wgpu::RenderPass<'_>) {
         self.composite_paths(render_pass);
     }
 }
@@ -3857,6 +4320,35 @@ const BNSH_QUAD_CORNER_UVS: [([f32; 2], [f32; 2]); 6] = [
     ([-0.5,  0.5], [0.0, 1.0]),
 ];
 
+/// Camera-distance size scaling (`ParticleScale.EnableScalingByCameraDistNear/Far` with
+/// `ScaleMin/ScaleMax` as the near/far distances — same interpretation as the FS
+/// distortion path): shrink toward zero inside the near distance, grow linearly past the
+/// far distance (keeps apparent size for far sparks). Formula pending capture validation.
+fn camera_dist_size_factor(p: &Particle, emitter: &EmitterDef, cam_pos: Option<Vec3>) -> f32 {
+    let ps = &emitter.particle_scale;
+    if ps.enable_scaling_by_camera_dist_near == 0 && ps.enable_scaling_by_camera_dist_far == 0 {
+        return 1.0;
+    }
+    if std::env::var("FX_SIZE_DEBUG").is_ok() {
+        let dist = cam_pos.map(|c| (p.position - c).length()).unwrap_or(-1.0);
+        eprintln!("[SIZE] em='{}' near_en={} far_en={} scale_min={:.3} scale_max={:.3} dist={dist:.2} p.size={:.3}",
+            emitter.name, ps.enable_scaling_by_camera_dist_near, ps.enable_scaling_by_camera_dist_far,
+            ps.scale_min, ps.scale_max, p.size);
+    }
+    let Some(cam) = cam_pos else { return 1.0 };
+    let near = ps.scale_min.max(1e-4);
+    let far = ps.scale_max.max(near);
+    let dist = (p.position - cam).length();
+    let mut factor = 1.0f32;
+    if ps.enable_scaling_by_camera_dist_near != 0 && dist < near {
+        factor *= dist / near;
+    }
+    if ps.enable_scaling_by_camera_dist_far != 0 && dist > far {
+        factor *= dist / far;
+    }
+    factor
+}
+
 /// Append 6 BNSH vertices (208-byte stride) for one particle.
 /// attr0 = world-space center on every vertex; attr3-7 feed the NVN GPR chains.
 fn append_bnsh_particle_vertices(
@@ -3865,11 +4357,22 @@ fn append_bnsh_particle_vertices(
     emitter: &EmitterDef,
     aspect_ratio: f32,
     mesh_ctx: Option<&crate::effects::SpawnMeshContext<'_>>,
+    cam_pos: Option<Vec3>,
+    life_roles: Option<(u32, u32)>,
 ) {
-    let size = p.size * emitter.emitter_scale.length().max(0.001);
-    let color = p.color.to_array();
+    let size = (p.size * camera_dist_size_factor(p, emitter, cam_pos)).max(0.001);
+    let color_scale = p.color_scale_live.max(0.0);
+    let c = p.color.to_array();
+    let color = [
+        c[0] * color_scale,
+        c[1] * color_scale,
+        c[2] * color_scale,
+        c[3] * color_scale,
+    ];
     let life_t = if p.lifetime <= 0.0 { 1.0 } else { (p.age / p.lifetime).clamp(0.0, 1.0) };
-    let aspect = if aspect_ratio > 0.0 { 1.0 / aspect_ratio } else { 1.0 };
+    // Texture aspect × authored ScaleY/ScaleX ratio (non-uniform emitter scale).
+    let aspect =
+        (if aspect_ratio > 0.0 { 1.0 / aspect_ratio } else { 1.0 }) * emitter.scale_aspect_y;
     let bb = emitter.billboard_type;
 
     let pivot = crate::effects::billboard_pivot_bias(emitter.offset_type);
@@ -3902,27 +4405,57 @@ fn append_bnsh_particle_vertices(
     } else {
         None
     };
+    let mesh_basis = prim_quads.as_ref().map(|(_, basis)| *basis);
     let aspect_in_attr4 = match bb {
         crate::effects::BillboardType::Stripe | crate::effects::BillboardType::ComplexStripe => 1.0,
         _ => aspect,
     };
 
     // attr0: particle center (identical for all 6 verts — VS expands via in_attr6/7)
-    let center = [p.position.x, p.position.y, p.position.z, 1.0];
+    let base_center = p.position;
 
     // attr3.w feeds the native VS rotation chain (cbuf_10[3] × sin/cos) and out_attr4.w.
     let attr3w = std::env::var("FX_ATTR3W")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(if native_vs && axes.z { p.rotation } else { z_spin });
+    // Game life-chain semantics (decoded from VS microcode + session2 vertex capture,
+    // docs/game-particle-vertex-layout.md): the shader computes
+    //   age = cbuf_10[2].x - attr<B>.w,  lifetime = trunc(attr<L>.w),
+    //   spline_t = age / lifetime,  cull when birth > clock or age >= lifetime.
+    // WHICH attrs carry birth/lifetime varies per shader family (bomb: B=4/L=3,
+    // impactflash: B=5/L=4) — `life_roles` comes from detect_life_attr_roles on the
+    // decoded VS. We feed a fixed clock origin so birth = clock - age.
+    // Frame-clock life feed (task #22): the native VS age chain computes
+    //   age = cbuf_10[2].x - attr<B>.w;  lifetime = trunc(attr<L>.w);
+    //   cull when attr<B>.w > clock or age >= lifetime.
+    // Feeding normalized life_t as birth with clock=1.0 mis-culls almost every fragment.
+    // Instead put birth = CLOCK - p.age and lifetime = p.lifetime on the family's
+    // birth/lifetime attrs (roles from `life_roles`), and set cbuf_10[2].x = CLOCK
+    // (force_hybrid_billboard_cbuf_defaults). Then age = p.age, lifetime = p.lifetime,
+    // spline_t = age/lifetime = life_t, and no spurious cull.
+    let frame_clock = crate::fx_env::fx_frame_clock_enabled();
+    let clock = crate::nvn_chain::EMITTER_CLOCK_FRAMES;
+    let birth_w = clock - p.age;
+    let life_w = p.lifetime.max(1.0);
+    let (birth_attr, life_attr) = life_roles.unwrap_or((5, 4));
+    let attr_w_for = |idx: u32, default: f32| -> f32 {
+        if frame_clock && idx == birth_attr {
+            birth_w
+        } else if frame_clock && idx == life_attr {
+            life_w
+        } else {
+            default
+        }
+    };
+    let attr3w = attr_w_for(3, attr3w);
     let attr3 = [p.velocity.x, p.velocity.y, p.velocity.z, attr3w];
-    let attr4 = [life_t, size, aspect_in_attr4, 1.0];
     let scroll_z = if emitter.tex_is_rotate {
         p.tex_scroll_angle
     } else {
         p.rotation_speed
     };
-    let attr5 = [p.tex_offset[0], p.tex_offset[1], scroll_z, life_t];
+    let attr5 = [p.tex_offset[0], p.tex_offset[1], scroll_z, attr_w_for(5, life_t)];
     let silhouette_rects: Vec<([f32; 2], [f32; 2])> = match &prim_quads {
         Some((quads, _)) if !quads.is_empty() => quads.clone(),
         _ => Vec::new(),
@@ -3939,20 +4472,30 @@ fn append_bnsh_particle_vertices(
         None
     };
     for (min_c, max_c) in &rects {
+        let (rect_center, rect_size, rect_aspect) = if use_silhouette {
+            let (c, sz, asp) = crate::effects::silhouette_billboard_metrics(
+                *min_c,
+                *max_c,
+                size,
+                aspect,
+                bb,
+            );
+            let world_center = if let Some((mesh_right, mesh_up)) = mesh_basis {
+                base_center + mesh_right * (c[0] * size) + mesh_up * (c[1] * size)
+            } else {
+                base_center
+            };
+            (world_center, sz, asp)
+        } else {
+            (base_center, size, aspect_in_attr4)
+        };
+        let center = [rect_center.x, rect_center.y, rect_center.z, 1.0];
+        let attr4 = [life_t, rect_size, rect_aspect, attr_w_for(4, 1.0)];
         for &(unit_corner, unit_uv) in &BNSH_QUAD_CORNER_UVS {
             let [uv_u, uv_v] = silhouette_envelope
                 .map(|env| crate::effects::silhouette_atlas_uv(unit_uv, (*min_c, *max_c), env))
                 .unwrap_or(unit_uv);
-            let mut corner = if use_silhouette {
-                let u = unit_corner[0] + 0.5;
-                let v = unit_corner[1] + 0.5;
-                [
-                    min_c[0] + (max_c[0] - min_c[0]) * u,
-                    min_c[1] + (max_c[1] - min_c[1]) * v,
-                ]
-            } else {
-                unit_corner
-            };
+            let mut corner = unit_corner;
             corner = crate::effects::stripe_corner_half_extents(bb, corner, aspect, p.velocity);
             corner =
                 crate::effects::rotate_billboard_corner(corner, z_spin, emitter.rot_type, axes);
@@ -3978,7 +4521,11 @@ fn append_bnsh_particle_vertices(
                 p.pat_blend,
                 p.pat_next_uv_delta[0],
                 p.pat_next_uv_delta[1],
-                0.0f32,
+                if emitter.tex_is_rotate {
+                    p.tex_scroll_angle
+                } else {
+                    0.0
+                },
             ];
             vertex_data.extend_from_slice(&attr10);                    // attr10: flipbook crossfade
             let attr11 = [
@@ -4004,7 +4551,7 @@ fn append_bnsh_particle_vertices(
 fn build_trail_vertices(
     trails: &[SwordTrail],
     segments: &mut Vec<(u32, u32, u32)>,
-) -> Vec<TrailVertex> {
+) -> Vec<TrailVertexPod> {
     let mut verts = Vec::new();
     segments.clear();
     for trail in trails {
@@ -4018,14 +4565,14 @@ fn build_trail_vertices(
             let t = i as f32 / (trail.samples.len() - 1).max(1) as f32;
             let alpha = (1.0_f32 - sample.age / max_age).clamp(0.0, 1.0);
             let color = [base_color[0], base_color[1], base_color[2], base_color[3] * alpha];
-            verts.push(TrailVertex {
+            verts.push(TrailVertexPod {
                 position: sample.tip.to_array(),
                 uv: [t, 0.0],
                 alpha,
                 _pad: 0.0,
                 color,
             });
-            verts.push(TrailVertex {
+            verts.push(TrailVertexPod {
                 position: sample.base.to_array(),
                 uv: [t, 1.0],
                 alpha,
@@ -4449,7 +4996,7 @@ mod tests {
     // The mesh UV transform validation test is superseded by the BNSH WGSL patching.
 
     #[test]
-    fn editor_composite_steps_blit_then_sub_per_path() {
+    fn editor_composite_steps_one_blit_per_path() {
         assert_eq!(
             editor_composite_steps(&[]),
             Vec::<EditorCompositeStep>::new()

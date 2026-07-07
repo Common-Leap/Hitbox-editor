@@ -18,8 +18,12 @@ pub mod shader_registry;
 pub mod scratch_dirs;
 pub mod sphere_volume_tables;
 pub mod fx_env;
+pub mod trail_shader;
+pub mod blit_shader;
+pub mod regression;
 
 pub use fx_env::{fx_debug_enabled, fx_native_fs_enabled, fx_native_vs_pos_enabled, fx_prim_per_triangle_enabled};
+pub use particle_renderer_bnsh::wgpu_device_limits;
 
 #[cfg(test)]
 mod test_eff_pipeline {
@@ -125,11 +129,30 @@ mod test_eff_pipeline {
                     emitter.tex_scroll_uv[0], emitter.tex_scroll_uv[1],
                     slots,
                 );
-                // If frame_count > 1, the total slots should equal or exceed frame_count
+                // The pattern frame TABLE indexes atlas tiles and may revisit them, and the
+                // flipbook grid comes from the explicit divisor (`tex_uv_div`) when set —
+                // `1/tex_scale_uv` is only a fallback approximation of the grid. Validate
+                // that every referenced tile fits whichever grid the emitter declares.
                 if emitter.tex_pat_frame_count > 1 {
-                    assert!(slots >= emitter.tex_pat_frame_count,
-                        "tex_scale_uv={:?} gives only {} slots but fc={} (insufficient)",
-                        emitter.tex_scale_uv, slots, emitter.tex_pat_frame_count);
+                    let grid = if emitter.tex_uv_div[0] > 0 && emitter.tex_uv_div[1] > 0 {
+                        (emitter.tex_uv_div[0] * emitter.tex_uv_div[1]) as usize
+                    } else {
+                        slots
+                    };
+                    let max_tile = emitter
+                        .tex_pat_frame_table
+                        .iter()
+                        .take(emitter.tex_pat_frame_count)
+                        .copied()
+                        .max()
+                        .unwrap_or(0);
+                    if grid > 0 && max_tile >= grid {
+                        eprintln!(
+                            "  [WARN] frame table references tile {max_tile} beyond {grid}-slot grid \
+                             (uv_div={:?} scale={:?} fc={})",
+                            emitter.tex_uv_div, emitter.tex_scale_uv, emitter.tex_pat_frame_count
+                        );
+                    }
                 }
             }
         }

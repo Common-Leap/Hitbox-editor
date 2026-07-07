@@ -1,3 +1,6 @@
+# Workshop-local temp (WGSL dumps, diag PNGs) — not committed
+/tmp/
+
 # Rust build output
 /target/
 
@@ -26,6 +29,10 @@
 /.dotnet-tmp/
 /.cargo-home/
 /target/effect-converter/
+/.cache/
+/.cargo-tmp/
+/.effect-tmp/
+/.git/
 
 # Common Nintendo / Smash asset extensions (anywhere in this repo)
 *.bnsh
@@ -52,3 +59,10 @@
 
 # Vendored EffectConverter publish output (build via build.rs or dotnet publish)
 /tools/effect-converter/
+
+# Regression-harness goldens (src/regression.rs). User-supplied game frames or editor
+# baselines — may embed copyrighted art, and are machine/driver-specific. Sync via
+# tools/export_goldens.sh; never commit.
+/tests/goldens/
+/.cargo-target/
+rustc-ice-*.txt

@@ -1230,15 +1230,37 @@ impl HitboxEditorApp {
         )
     }
 
-    fn is_trail_effect(name_lower: &str, follows_bone: bool) -> bool {
-        follows_bone && (
+    fn is_trail_effect(
+        name_lower: &str,
+        follows_bone: bool,
+        eff_index: &crate::effects::EffIndex,
+        ptcl: &crate::effects::PtclFile,
+    ) -> bool {
+        let name_matches = follows_bone && (
             name_lower.contains("sword") || name_lower.contains("trail") ||
             name_lower.contains("after") || name_lower.contains("tex_") ||
             name_lower.contains("katana") || name_lower.contains("blade") ||
             name_lower.contains("slash") || name_lower.contains("arc") ||
             name_lower.contains("swing") || name_lower.contains("energy") ||
             name_lower.contains("aura") || name_lower.contains("ribbon")
-        )
+        );
+        if !name_matches {
+            return false;
+        }
+        // Prefer REAL PTCL particles whenever the handle resolves to a non-empty emitter
+        // set: the synthetic SwordTrail path uses a hardcoded white colour and no PTCL
+        // texture (it exists as a fallback for effects with no data — e.g. sys effects
+        // when ef_sys is missing). Name-based hijacking rendered arc/slash effects
+        // (Samus aerials etc.) with wrong colour + texture.
+        let has_ptcl = eff_index
+            .handles
+            .get(name_lower)
+            .copied()
+            .filter(|&idx| idx >= 0)
+            .and_then(|idx| ptcl.emitter_sets.get(idx as usize))
+            .map(|set| !set.emitters.is_empty())
+            .unwrap_or(false);
+        !has_ptcl
     }
 
     /// Earliest global frame where any due effect would first emit (for timeline preview).
@@ -1254,7 +1276,7 @@ impl HitboxEditorApp {
                 continue;
             }
             let name_lower = ec.effect_name.to_lowercase();
-            if Self::is_trail_effect(&name_lower, ec.follows_bone) {
+            if Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl) {
                 continue;
             }
             let Some(global) = crate::effects::earliest_particle_frame_for_spawn(
@@ -1286,7 +1308,7 @@ impl HitboxEditorApp {
                 continue;
             }
             let name_lower = ec.effect_name.to_lowercase();
-            if Self::is_trail_effect(&name_lower, ec.follows_bone) {
+            if Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl) {
                 continue;
             }
             let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
@@ -1343,7 +1365,7 @@ impl HitboxEditorApp {
                     continue;
                 }
                 let name_lower = ec.effect_name.to_lowercase();
-                if Self::is_trail_effect(&name_lower, ec.follows_bone) {
+                if Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl) {
                     continue;
                 }
                 let set_idx_opt = eff_index
@@ -1402,7 +1424,7 @@ impl HitboxEditorApp {
         if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index, &self.state.ptcl) {
             for ec in &self.state.effects {
                 let name_lower = ec.effect_name.to_lowercase();
-                let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone);
+                let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl);
                 if !is_trail { continue; }
                 let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                     .cloned()
@@ -2188,43 +2210,60 @@ impl HitboxEditorApp {
     /// open the editor straight onto a specific effect.
     fn maybe_autoload(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
-        static DONE: AtomicBool = AtomicBool::new(false);
-        if DONE.swap(true, Ordering::Relaxed) {
-            return;
-        }
         let Ok(fighter) = std::env::var("HITBOX_AUTOLOAD_FIGHTER") else { return };
-        let Some(idx) = self
-            .state
-            .fighters
-            .iter()
-            .position(|f| f.name.eq_ignore_ascii_case(fighter.trim()))
-        else {
-            eprintln!(
-                "[AUTOLOAD] fighter '{fighter}' not found among {} fighters",
-                self.state.fighters.len()
-            );
-            return;
-        };
-        eprintln!("[AUTOLOAD] loading fighter '{fighter}' (idx {idx})");
-        self.select_fighter(idx);
 
-        let Ok(effect) = std::env::var("HITBOX_AUTOLOAD_EFFECT") else { return };
-        let effect = effect.trim().to_string();
-        // Alias the emitter-set name to a handle so spawn_effect resolves it.
-        if let (Some(eff_index), Some(ptcl)) =
-            (self.state.eff_index.as_mut(), self.state.ptcl.as_ref())
-        {
-            match ptcl.emitter_sets.iter().position(|s| s.name.eq_ignore_ascii_case(&effect)) {
-                Some(set_idx) => {
-                    eff_index.handles.entry(effect.clone()).or_insert(set_idx as i32);
-                    eff_index.handles.entry(effect.to_lowercase()).or_insert(set_idx as i32);
+        // One-time: load the fighter and alias the effect-set name to a handle.
+        static LOADED: AtomicBool = AtomicBool::new(false);
+        if !LOADED.swap(true, Ordering::Relaxed) {
+            let Some(idx) = self
+                .state
+                .fighters
+                .iter()
+                .position(|f| f.name.eq_ignore_ascii_case(fighter.trim()))
+            else {
+                eprintln!(
+                    "[AUTOLOAD] fighter '{fighter}' not found among {} fighters",
+                    self.state.fighters.len()
+                );
+                return;
+            };
+            eprintln!("[AUTOLOAD] loading fighter '{fighter}' (idx {idx})");
+            self.select_fighter(idx);
+            if let Ok(effect) = std::env::var("HITBOX_AUTOLOAD_EFFECT") {
+                let effect = effect.trim().to_string();
+                if let (Some(eff_index), Some(ptcl)) =
+                    (self.state.eff_index.as_mut(), self.state.ptcl.as_ref())
+                {
+                    match ptcl.emitter_sets.iter().position(|s| s.name.eq_ignore_ascii_case(&effect)) {
+                        Some(set_idx) => {
+                            eff_index.handles.entry(effect.clone()).or_insert(set_idx as i32);
+                            eff_index.handles.entry(effect.to_lowercase()).or_insert(set_idx as i32);
+                        }
+                        None => eprintln!(
+                            "[AUTOLOAD] effect set '{effect}' not found; first sets: {:?}",
+                            ptcl.emitter_sets.iter().map(|s| &s.name).take(10).collect::<Vec<_>>()
+                        ),
+                    }
                 }
-                None => eprintln!(
-                    "[AUTOLOAD] effect set '{effect}' not found; first sets: {:?}",
-                    ptcl.emitter_sets.iter().map(|s| &s.name).take(10).collect::<Vec<_>>()
-                ),
             }
         }
+
+        // Loop the effect for continuous preview: reset + re-spawn every ~1.8s of wall
+        // clock (a one-shot like the bomb plays ~1s then vanishes). Resetting first
+        // avoids unbounded emitter accumulation.
+        let Ok(effect) = std::env::var("HITBOX_AUTOLOAD_EFFECT") else { return };
+        let effect = effect.trim().to_string();
+        static LAST_SPAWN: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let mut guard = LAST_SPAWN.lock().unwrap();
+        let due = guard.map_or(true, |t| t.elapsed().as_secs_f32() > 1.8);
+        if !due {
+            return;
+        }
+        *guard = Some(std::time::Instant::now());
+        drop(guard);
+
+        self.state.particle_system.reset();
         let crate::data::AppState { particle_system, eff_index, ptcl, .. } = &mut self.state;
         if let (Some(eff_index), Some(ptcl)) = (eff_index.as_ref(), ptcl.as_ref()) {
             particle_system.spawn_effect(
@@ -2239,7 +2278,6 @@ impl HitboxEditorApp {
             );
         }
         self.state.playing = true;
-        eprintln!("[AUTOLOAD] spawned '{effect}' at origin, playing");
     }
 }
 
@@ -2247,6 +2285,81 @@ impl eframe::App for HitboxEditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx();
         self.maybe_autoload();
+        // Headless capture: HITBOX_SCREENSHOT=<png> saves exactly what the viewport renders
+        // (full composite) after the effect has played a while, then exits. Works under Xvfb
+        // (internal GPU readback, no swapchain capture needed).
+        if let Ok(shot_path) = std::env::var("HITBOX_SCREENSHOT") {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static TICK: AtomicU32 = AtomicU32::new(0);
+            let tick = TICK.fetch_add(1, Ordering::Relaxed);
+            ctx.request_repaint();
+            // HITBOX_SHOT_DETERMINISTIC=<handle>: at tick 60, freeze and rebuild the particle
+            // system deterministically (integer-frame steps, identity bone) exactly like the
+            // headless harness, so the LIVE render path draws the SAME sim state — isolating
+            // render-path bugs from variable-dt sim differences.
+            if tick >= 60 {
+                if let Ok(handle) = std::env::var("HITBOX_SHOT_DETERMINISTIC") {
+                    let frame: f32 = std::env::var("HITBOX_SHOT_FRAME").ok()
+                        .and_then(|s| s.parse().ok()).unwrap_or(10.0);
+                    if let (Some(eff), Some(ptcl)) =
+                        (self.state.eff_index.as_ref(), self.state.ptcl.as_ref())
+                    {
+                        let bones: std::collections::HashMap<String, glam::Mat4> =
+                            [("top".to_string(), glam::Mat4::IDENTITY),
+                             ("Trans".to_string(), glam::Mat4::IDENTITY)].into();
+                        self.state.particle_system.reset();
+                        self.state.particle_system.spawn_effect(
+                            &handle, "top", glam::Vec3::ZERO, glam::Vec3::ZERO, 0.0, 9999.0, eff, ptcl);
+                        for f in 0..=(frame as u32) {
+                            self.state.particle_system.step(f as f32, &bones, ptcl);
+                        }
+                        self.state.particle_system.particles.retain(|p| !p.is_dead());
+                        if std::env::var("HITBOX_SHOT_NOEFFECT").is_ok() {
+                            self.state.particle_system.particles.clear();
+                            self.state.particle_system.active_emitters.clear();
+                        }
+                        self.state.playing = false;
+                        self.particles_need_catchup = false;
+                        if std::env::var("HITBOX_SHOT_MATCH_FRAME").is_ok() {
+                            self.state.current_frame = frame as u32;
+                        }
+                        let ps = &self.state.particle_system.particles;
+                        let (mut mn, mut mx, mut smin, mut smax) =
+                            (glam::Vec3::splat(1e9), glam::Vec3::splat(-1e9), 1e9f32, -1e9f32);
+                        for p in ps {
+                            mn = mn.min(p.position); mx = mx.max(p.position);
+                            smin = smin.min(p.size); smax = smax.max(p.size);
+                        }
+                        eprintln!("[SHOT-DET] rebuilt {handle} f{frame}: {} particles, cur_frame={}, pos min={:.1?} max={:.1?}, size [{:.2},{:.2}]",
+                            ps.len(), self.state.current_frame, mn.to_array(), mx.to_array(), smin, smax);
+                    }
+                }
+            }
+            let np = self.state.particle_system.particles.len();
+            if tick % 15 == 0 {
+                eprintln!("[SHOT] tick={tick} particles={np} clock={:.1} playing={}",
+                    self.particle_clock, self.state.playing);
+            }
+            if let Some(img) = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            }) {
+                let (w, h) = (img.width() as u32, img.height() as u32);
+                let rgba: Vec<u8> =
+                    img.pixels.iter().flat_map(|p| [p.r(), p.g(), p.b(), p.a()]).collect();
+                let _ = ::image::save_buffer(&shot_path, &rgba, w, h, ::image::ColorType::Rgba8);
+                eprintln!("[SCREENSHOT] saved {shot_path} {w}x{h} (particles={np})");
+                std::process::exit(0);
+            }
+            // Deterministic mode: capture 2 ticks after the tick-60 rebuild, before the autoload
+            // re-spawn (~tick 108) can clobber the frozen state. Otherwise capture at the peak.
+            let det = std::env::var("HITBOX_SHOT_DETERMINISTIC").is_ok();
+            if (det && tick == 62) || (!det && ((tick > 20 && np >= 12) || tick > 240)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+        }
         // Poll background move list loader
         if let Some(rx) = &self.move_list_receiver {
             if let Ok(moves) = rx.try_recv() {
@@ -2526,7 +2639,7 @@ impl eframe::App for HitboxEditorApp {
                             let _canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                                 .cloned()
                                 .unwrap_or_else(|| ec.bone_name.clone());
-                            let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone);
+                            let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl);
                             if is_trail { continue; } // trails handled separately
 
                             let _set_idx_opt = eff_index.handles.get(&ec.effect_name)
@@ -2550,7 +2663,7 @@ impl eframe::App for HitboxEditorApp {
                                 let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
                                     .cloned()
                                     .unwrap_or_else(|| ec2.bone_name.clone());
-                                let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone);
+                                let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone, eff_index, ptcl);
                                 if is_trail2 { continue; }
                                 let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
                                     .or_else(|| eff_index.handles.get(&name_lower2))
@@ -2623,7 +2736,7 @@ impl eframe::App for HitboxEditorApp {
                                     let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
                                         .cloned()
                                         .unwrap_or_else(|| ec2.bone_name.clone());
-                                    let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone);
+                                    let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone, eff_index, ptcl);
                                     if is_trail2 { continue; }
                                     let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
                                         .or_else(|| eff_index.handles.get(&name_lower2))

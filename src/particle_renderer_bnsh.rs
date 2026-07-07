@@ -10,8 +10,24 @@ use crate::bnsh_shader_integration::{
 };
 use crate::shader_registry::ShaderKey;
 
+/// Device limits for BNSH particle pipelines.
+///
+/// `wgpu::Limits::default()` caps `max_storage_buffers_per_shader_stage` at 8, but NVN
+/// particle pairs (e.g. Samus bomb) can merge to 9 set-0 storage buffers after FS remap.
+/// Request the adapter's native limits instead.
+pub fn wgpu_device_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let mut limits = adapter.limits();
+    limits.max_sampled_textures_per_shader_stage =
+        limits.max_sampled_textures_per_shader_stage.max(32);
+    limits
+}
+
 /// Depth format for per-draw_path offscreen passes (cleared each path like NVN).
 pub const PARTICLE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Sampled in soft-particle FS (`textureLoad`); must not use [`PARTICLE_DEPTH_FORMAT`]
+/// because `Queue::write_texture` cannot target depth formats for CPU init.
+pub const SOFT_PARTICLE_DEPTH_SAMPLE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 /// Depth/stencil for offscreen particle passes. Billboards keep depth writes off so alpha
 /// blending stays correct; the attachment is primed from mesh depth each path.
@@ -22,6 +38,28 @@ pub fn particle_depth_stencil_state() -> wgpu::DepthStencilState {
         depth_compare: Some(wgpu::CompareFunction::LessEqual),
         stencil: wgpu::StencilState::default(),
         bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Depth attachment for per-path offscreen particle passes.
+///
+/// When `mesh_depth_primed` is true the texture already holds copied mesh depth from
+/// [`ssbh_wgpu::SsbhRenderer::copy_mesh_depth_resolved`]; otherwise it is cleared to `1.0`.
+pub fn particle_path_depth_attachment<'a>(
+    view: &'a wgpu::TextureView,
+    mesh_depth_primed: bool,
+) -> wgpu::RenderPassDepthStencilAttachment<'a> {
+    wgpu::RenderPassDepthStencilAttachment {
+        view,
+        depth_ops: Some(wgpu::Operations {
+            load: if mesh_depth_primed {
+                wgpu::LoadOp::Load
+            } else {
+                wgpu::LoadOp::Clear(1.0)
+            },
+            store: wgpu::StoreOp::Store,
+        }),
+        stencil_ops: None,
     }
 }
 
@@ -58,6 +96,10 @@ pub struct BnshPipelineState {
     pub cbuf_slot_usage: HashMap<String, HashSet<u32>>,
     pub extra_tex_slots_needed: [bool; 3],
     pub tex_blend_uniform_needed: bool,
+    pub particle_alpha_uniform_needed: bool,
+    pub soft_particle_needed: bool,
+    pub vs_reflection: Option<crate::bnsh_reflection::ShaderStageReflection>,
+    pub fs_reflection: Option<crate::bnsh_reflection::ShaderStageReflection>,
 }
 
 /// Loaded WGSL modules + descriptor reflection for one shader pair.
@@ -71,6 +113,10 @@ pub struct BnshLoadedModules {
     pub cbuf_slot_usage: HashMap<String, HashSet<u32>>,
     pub extra_tex_slots_needed: [bool; 3],
     pub tex_blend_uniform_needed: bool,
+    pub particle_alpha_uniform_needed: bool,
+    pub soft_particle_needed: bool,
+    pub vs_reflection: Option<crate::bnsh_reflection::ShaderStageReflection>,
+    pub fs_reflection: Option<crate::bnsh_reflection::ShaderStageReflection>,
 }
 
 /// WGSL after NVN patch + particle simulation wiring (no GPU modules yet).
@@ -78,9 +124,12 @@ pub struct PreparedBnshWgsl {
     pub vs_wgsl: String,
     pub fs_wgsl: String,
     pub fs_wgsl_depth_write: String,
+    pub uses_native_fs_fragment: bool,
     pub cbuf_slot_usage: HashMap<String, HashSet<u32>>,
     pub extra_tex_slots_needed: [bool; 3],
     pub tex_blend_uniform_needed: bool,
+    pub particle_alpha_uniform_needed: bool,
+    pub soft_particle_needed: bool,
 }
 
 /// Full CPU-side BNSH WGSL pipeline shared by the renderer and integration tests.
@@ -88,11 +137,15 @@ pub fn prepare_bnsh_wgsl(
     vs_wgsl: &str,
     fs_wgsl: &str,
     vs_hint: Option<crate::shader_registry::ShaderVsProfile>,
+    vs_spirv: Option<&[u8]>,
+    fs_spirv: Option<&[u8]>,
+    native_color_hint: crate::shader_registry::NativeColorInput,
 ) -> PreparedBnshWgsl {
     let vs_prefixed = crate::spirv_to_wgsl::wire_vertex_simulation_varyings(vs_wgsl);
     let fs_prefixed = {
         let fs = crate::spirv_to_wgsl::wire_crossfade_fragment_input(fs_wgsl, &vs_prefixed);
-        crate::spirv_to_wgsl::wire_extra_tex_fragment_input(&fs, &vs_prefixed)
+        let fs = crate::spirv_to_wgsl::wire_extra_tex_fragment_input(&fs, &vs_prefixed);
+        crate::spirv_to_wgsl::wire_quad_uv_fragment_input(&fs, &vs_prefixed)
     };
     let vs_wgsl = crate::spirv_to_wgsl::patch_vertex_wgsl_with_hint(
         &vs_prefixed,
@@ -103,31 +156,48 @@ pub fn prepare_bnsh_wgsl(
         &fs_prefixed,
         crate::spirv_to_wgsl::PARTICLE_COMPOSITE_MRT_LOCATIONS,
     );
-    let fs_wgsl = if crate::fx_native_fs_enabled() {
-        crate::spirv_to_wgsl::enhance_native_fragment_wgsl(&fs_clamped)
+    let wgsl_color_hint =
+        crate::spirv_to_wgsl::infer_native_color_from_fs_wgsl(&fs_clamped);
+    let native_color = native_color_hint.merge(wgsl_color_hint);
+    let uses_native_fs =
+        crate::spirv_to_wgsl::should_use_native_fs_fragment(&fs_clamped, native_color);
+    let fs_wgsl = if uses_native_fs {
+        let enhanced = crate::spirv_to_wgsl::enhance_native_fragment_wgsl_with_hint(
+            &fs_clamped,
+            native_color,
+        );
+        crate::spirv_to_wgsl::neutralize_fs_cbuf9_life_discard(&enhanced)
     } else {
         crate::spirv_to_wgsl::patch_fragment_wgsl(&fs_clamped)
     };
     let extra_tex_slots_needed = crate::spirv_to_wgsl::native_fs_extra_tex_slots_needed(&fs_wgsl);
     let tex_blend_uniform_needed =
         crate::spirv_to_wgsl::native_fs_tex_blend_uniform_needed(&fs_wgsl);
+    let particle_alpha_uniform_needed =
+        crate::spirv_to_wgsl::native_fs_particle_alpha_uniform_needed(&fs_wgsl);
     let fs_wgsl = if std::env::var("FX_DEBUG_SOLID_FS").is_ok() {
         crate::spirv_to_wgsl::debug_solid_fragment_wgsl(&fs_wgsl)
     } else {
         fs_wgsl
     };
+    let fs_wgsl = crate::spirv_to_wgsl::inject_soft_particle_fs(&fs_wgsl);
     let fs_wgsl_depth_write = crate::spirv_to_wgsl::inject_opaque_core_alpha_test(
         &fs_wgsl,
         crate::spirv_to_wgsl::OPAQUE_CORE_DEPTH_ALPHA_TEST,
     );
-    let cbuf_slot_usage = crate::nvn_chain::cbuf_slot_usage_from_wgsl(&vs_wgsl, &fs_wgsl);
+    let soft_particle_needed = crate::spirv_to_wgsl::native_fs_soft_particle_needed(&fs_wgsl);
+    let cbuf_slot_usage =
+        crate::nvn_chain::cbuf_slot_usage_from_shaders(vs_spirv, fs_spirv, &vs_wgsl, &fs_wgsl);
     PreparedBnshWgsl {
         vs_wgsl,
         fs_wgsl,
         fs_wgsl_depth_write,
+        uses_native_fs_fragment: uses_native_fs,
         cbuf_slot_usage,
         extra_tex_slots_needed,
         tex_blend_uniform_needed,
+        particle_alpha_uniform_needed,
+        soft_particle_needed,
     }
 }
 
@@ -181,10 +251,15 @@ pub fn blend_state_for(blend: BlendType) -> wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
         },
-        BlendType::Unknown(_) => wgpu::BlendState {
-            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
-            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
-        },
+        BlendType::Unknown(raw) => {
+            // Fall back to Normal, but surface the raw NVN blend value so unmapped modes can be
+            // identified and added above (instead of silently rendering as Normal).
+            eprintln!("[blend] unmapped NVN blend type {raw:?}; falling back to Normal");
+            wgpu::BlendState {
+                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+                alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+            }
+        }
     }
 }
 
@@ -193,6 +268,8 @@ pub fn load_bnsh_shader_modules(
     device: &wgpu::Device,
     pair: &EffectShaderPair,
     label_tag: &str,
+    native_color_hint: crate::shader_registry::NativeColorInput,
+    registry_vs_profile: crate::shader_registry::ShaderVsProfile,
 ) -> BnshLoadedModules {
     let vs_info = pair.vertex.as_ref().expect("BNSH vertex shader required");
     let fs_info = pair.fragment.as_ref().expect("BNSH fragment shader required");
@@ -230,29 +307,115 @@ pub fn load_bnsh_shader_modules(
     ).expect("Failed to convert fragment SPIR-V to WGSL");
 
     let vs_hint = {
-        let mut hint = vs_info
-            .reflection
-            .as_ref()
-            .map(crate::shader_registry::vs_profile_from_reflection)
-            .unwrap_or_default();
-        hint = hint.merge(crate::spirv_to_wgsl::classify_vs_profile(vs_wgsl));
+        let vs_prefixed = crate::spirv_to_wgsl::wire_vertex_simulation_varyings(vs_wgsl);
+        let wired_for_hint =
+            crate::spirv_to_wgsl::wire_billboard_vertex_inputs(&vs_prefixed);
+        let mut hint = registry_vs_profile;
+        if let Some(reflection) = vs_info.reflection.as_ref() {
+            hint = hint.merge(crate::shader_registry::vs_profile_from_reflection(reflection));
+        }
+        hint = hint.merge(crate::spirv_to_wgsl::classify_vs_profile(&wired_for_hint));
         if hint == crate::shader_registry::ShaderVsProfile::Unknown {
             None
         } else {
             Some(hint)
         }
     };
-    let prepared = prepare_bnsh_wgsl(vs_wgsl, fs_wgsl, vs_hint);
-    let vs_wgsl = prepared.vs_wgsl;
-    let fs_wgsl = prepared.fs_wgsl;
-    let fs_wgsl_depth_write = prepared.fs_wgsl_depth_write;
+    if std::env::var("FX_VS_BRANCH_DEBUG").is_ok() {
+        eprintln!(
+            "[VS-BRANCH] pair '{}': registry_profile={:?} reflection={} final_hint={:?}",
+            label_tag,
+            registry_vs_profile,
+            vs_info.reflection.is_some(),
+            vs_hint
+        );
+    }
+    let prepared = prepare_bnsh_wgsl(
+        vs_wgsl,
+        fs_wgsl,
+        vs_hint,
+        Some(&to_bytes(&vs_w)),
+        Some(&to_bytes(&fs_w)),
+        native_color_hint,
+    );
+    let mut vs_wgsl = prepared.vs_wgsl;
+    let mut fs_wgsl = prepared.fs_wgsl;
+    let mut fs_wgsl_depth_write = prepared.fs_wgsl_depth_write;
+    crate::scratch_dirs::write_workshop_wgsl_dump(
+        &format!("hitbox_prepared_vs_{label_tag}.wgsl"),
+        &vs_wgsl,
+    );
+    crate::scratch_dirs::write_workshop_wgsl_dump(
+        &format!("hitbox_prepared_fs_{label_tag}.wgsl"),
+        &fs_wgsl,
+    );
+    if prepared.uses_native_fs_fragment {
+        fs_wgsl = crate::spirv_to_wgsl::strip_fs_wgsl_conflicting_with_vs(
+            &fs_wgsl,
+            &vs_descs,
+            &fs_descs,
+        );
+        fs_wgsl_depth_write = crate::spirv_to_wgsl::strip_fs_wgsl_conflicting_with_vs(
+            &fs_wgsl_depth_write,
+            &vs_descs,
+            &fs_descs,
+        );
+        crate::spirv_to_wgsl::validate_wgsl_shader(
+            &fs_wgsl,
+            &format!("particle_bnsh_fs_{label_tag}"),
+        )
+        .unwrap_or_else(|e| {
+            let dump = crate::scratch_dirs::workshop_tmp_path(&format!(
+                "hitbox_stripped_fs_{label_tag}.wgsl"
+            ));
+            crate::scratch_dirs::write_workshop_wgsl_dump(
+                &format!("hitbox_stripped_fs_{label_tag}.wgsl"),
+                &fs_wgsl,
+            );
+            eprintln!("[BNSH] Wrote stripped FS WGSL to {} for debugging", dump.display());
+            panic!("BNSH fragment WGSL failed validation after native FS strip: {e}");
+        });
+        crate::spirv_to_wgsl::validate_wgsl_shader(
+            &fs_wgsl_depth_write,
+            &format!("particle_bnsh_fs_depth_write_{label_tag}"),
+        )
+        .unwrap_or_else(|e| {
+            let dump = crate::scratch_dirs::workshop_tmp_path(&format!(
+                "hitbox_stripped_fs_depth_{label_tag}.wgsl"
+            ));
+            crate::scratch_dirs::write_workshop_wgsl_dump(
+                &format!("hitbox_stripped_fs_depth_{label_tag}.wgsl"),
+                &fs_wgsl_depth_write,
+            );
+            eprintln!(
+                "[BNSH] Wrote stripped depth FS WGSL to {} for debugging",
+                dump.display()
+            );
+            panic!(
+                "BNSH depth-write fragment WGSL failed validation after native FS strip: {e}"
+            );
+        });
+    }
+    let (fs_wgsl, fs_wgsl_depth_write, fs_descs) =
+        crate::spirv_to_wgsl::remap_fs_storage_bindings_for_vs_pair(
+            &fs_wgsl,
+            &fs_wgsl_depth_write,
+            &vs_descs,
+            &fs_descs,
+        );
     let extra_tex_slots_needed = prepared.extra_tex_slots_needed;
     let tex_blend_uniform_needed = prepared.tex_blend_uniform_needed;
+    let particle_alpha_uniform_needed = prepared.particle_alpha_uniform_needed;
+    let soft_particle_needed = prepared.soft_particle_needed;
     let cbuf_slot_usage = prepared.cbuf_slot_usage;
     if label_tag.contains("5740678a2aa5959f") {
-        let _ = std::fs::write(
-            format!("/tmp/hitbox_patched_vs_{label_tag}.wgsl"),
+        crate::scratch_dirs::write_workshop_wgsl_dump(
+            &format!("hitbox_patched_vs_{label_tag}.wgsl"),
             &vs_wgsl,
+        );
+        crate::scratch_dirs::write_workshop_wgsl_dump(
+            &format!("hitbox_patched_fs_{label_tag}.wgsl"),
+            &fs_wgsl,
         );
     }
 
@@ -269,10 +432,8 @@ pub fn load_bnsh_shader_modules(
         source: wgpu::ShaderSource::Wgsl(fs_wgsl_depth_write.into()),
     });
 
-    let mut descriptors = vs_descs.clone();
-    descriptors.extend(fs_descs.clone());
-    descriptors.sort_by(|a, b| a.set.cmp(&b.set).then(a.binding.cmp(&b.binding)));
-    descriptors.dedup_by(|a, b| a.set == b.set && a.binding == b.binding);
+    let descriptors =
+        crate::spirv_to_wgsl::merge_stage_pipeline_descriptors(&vs_descs, &fs_descs);
 
     BnshLoadedModules {
         vs_module: vs_mod,
@@ -284,6 +445,10 @@ pub fn load_bnsh_shader_modules(
         cbuf_slot_usage,
         extra_tex_slots_needed,
         tex_blend_uniform_needed,
+        particle_alpha_uniform_needed,
+        soft_particle_needed,
+        vs_reflection: vs_info.reflection.clone(),
+        fs_reflection: fs_info.reflection.clone(),
     }
 }
 
@@ -293,20 +458,23 @@ impl BnshPipelineState {
         modules: BnshLoadedModules,
         tex_bg_layout: &wgpu::BindGroupLayout,
         extra_tex345_bg_layout: Option<&wgpu::BindGroupLayout>,
+        group2_placeholder_bg_layout: &wgpu::BindGroupLayout,
+        soft_particle_bg_layout: Option<&wgpu::BindGroupLayout>,
         surface_format: wgpu::TextureFormat,
         label_tag: &str,
     ) -> Self {
-        let max_set = modules.descriptors.iter().map(|d| d.set).max().unwrap_or(0);
-        let per_set: Vec<Vec<&crate::spirv_to_wgsl::DescriptorInfo>> = (0..=max_set)
-            .map(|s| modules.descriptors.iter().filter(|d| d.set == s).collect())
-            .collect();
+        use crate::spirv_to_wgsl::{BindingClass, DescriptorInfo};
 
-        let mut bind_group_layouts: Vec<wgpu::BindGroupLayout> = Vec::new();
-        for entries in &per_set {
+        fn push_native_bgl(
+            device: &wgpu::Device,
+            bind_group_layouts: &mut Vec<wgpu::BindGroupLayout>,
+            label: &str,
+            entries: &[&DescriptorInfo],
+        ) {
             let mut bgl_entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
             for d in entries {
                 let (visibility, binding_ty) = match d.class {
-                    crate::spirv_to_wgsl::BindingClass::Texture => (
+                    BindingClass::Texture => (
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -314,11 +482,11 @@ impl BnshPipelineState {
                             multisampled: false,
                         },
                     ),
-                    crate::spirv_to_wgsl::BindingClass::Sampler => (
+                    BindingClass::Sampler => (
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     ),
-                    crate::spirv_to_wgsl::BindingClass::Storage => (
+                    BindingClass::Storage => (
                         wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -326,7 +494,7 @@ impl BnshPipelineState {
                             min_binding_size: None,
                         },
                     ),
-                    crate::spirv_to_wgsl::BindingClass::Uniform => (
+                    BindingClass::Uniform => (
                         wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -342,19 +510,47 @@ impl BnshPipelineState {
                     count: None,
                 });
             }
-            let label = format!("bnsh_bgl_{label_tag}_{}", bind_group_layouts.len());
-            bind_group_layouts.push(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(&label),
-                entries: &bgl_entries,
-            }));
+            if bgl_entries.is_empty() {
+                return;
+            }
+            bind_group_layouts.push(device.create_bind_group_layout(
+                &wgpu::BindGroupLayoutDescriptor {
+                    label: Some(label),
+                    entries: &bgl_entries,
+                },
+            ));
         }
+
+        let mut bind_group_layouts: Vec<wgpu::BindGroupLayout> = Vec::new();
+        // `@group(1..3)` are editor-injected; keep decoded set 0 intact (cbufs + any native set-0
+        // textures spirv-cross did not strip). Drop FS texture/sampler descriptors on set >= 1 so
+        // `tex_bg_layout` stays at pipeline bind index 1.
+        let set0_entries: Vec<&DescriptorInfo> = modules
+            .descriptors
+            .iter()
+            .filter(|d| d.set == 0)
+            .collect();
+        push_native_bgl(
+            device,
+            &mut bind_group_layouts,
+            &format!("bnsh_bgl_{label_tag}_0"),
+            &set0_entries,
+        );
 
         let mut bgl_all = Vec::with_capacity(bind_group_layouts.len() + 2);
         bgl_all.extend(bind_group_layouts.iter().map(|b| Some(b)));
         // @group(1) emitter texture: patched FS and enhance_native_fragment_wgsl both sample it.
         bgl_all.push(Some(tex_bg_layout));
-        if modules.extra_tex_slots_needed.iter().any(|&b| b) || modules.tex_blend_uniform_needed {
+        let needs_group2 = modules.extra_tex_slots_needed.iter().any(|&b| b)
+            || modules.tex_blend_uniform_needed
+            || modules.particle_alpha_uniform_needed;
+        if needs_group2 {
             bgl_all.push(extra_tex345_bg_layout);
+        } else if modules.soft_particle_needed {
+            bgl_all.push(Some(group2_placeholder_bg_layout));
+        }
+        if modules.soft_particle_needed {
+            bgl_all.push(soft_particle_bg_layout);
         }
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("bnsh_pipeline_layout_{label_tag}")),
@@ -418,6 +614,10 @@ impl BnshPipelineState {
             cbuf_slot_usage: modules.cbuf_slot_usage,
             extra_tex_slots_needed: modules.extra_tex_slots_needed,
             tex_blend_uniform_needed: modules.tex_blend_uniform_needed,
+            particle_alpha_uniform_needed: modules.particle_alpha_uniform_needed,
+            soft_particle_needed: modules.soft_particle_needed,
+            vs_reflection: modules.vs_reflection,
+            fs_reflection: modules.fs_reflection,
         }
     }
 
@@ -496,11 +696,15 @@ impl BnshPipelineState {
 /// Metadata about loaded BNSH shaders for rendering
 #[derive(Debug, Clone)]
 pub struct BnshShaderSet {
-    /// All decoded shader pairs keyed by content hash (from embedded Shader.bnsh).
+    /// All decoded shader pairs keyed by PTCL registry hash (embedded Shader.bnsh).
     pub all_shaders: HashMap<ShaderKey, EffectShaderPair>,
     pub default_key: ShaderKey,
     /// shader_index → key mapping from effect ShaderReferences.
     pub library_indices: HashMap<i32, ShaderKey>,
+    /// Per-shader native colour input hints aggregated from emitters.
+    pub native_color_by_key: HashMap<ShaderKey, crate::shader_registry::NativeColorInput>,
+    /// Per-shader VS profile hints from PTCL registry metadata.
+    pub vs_profile_by_key: HashMap<ShaderKey, crate::shader_registry::ShaderVsProfile>,
     pub material_bindings: MaterialTextureBindings,
     #[allow(dead_code)]
     pub stats: ShaderStats,
@@ -551,23 +755,39 @@ impl BnshShaderSet {
             })?;
 
         let stats = crate::bnsh_shader_integration::get_shader_stats(&shader_pair);
-        let material_bindings = MaterialTextureBindings::from_ptcl_file(ptcl);
+        let fs_samplers = crate::bnsh_shader_integration::fragment_sampler_count(&shader_pair);
 
         eprintln!(
-            "[BNSH Shader] Loaded {} shader variant(s), default={:#x}, {} samplers",
+            "[BNSH Shader] Loaded {} shader variant(s), default={:#x}, {} FS samplers (reflection)",
             all_shaders.len(),
             default_key,
-            stats.total_samplers()
+            fs_samplers
         );
 
         Ok(BnshShaderSet {
             all_shaders,
             default_key,
             library_indices,
-            material_bindings,
+            native_color_by_key: ptcl.shader_registry.native_color_inputs().clone(),
+            vs_profile_by_key: ptcl.shader_registry.vs_profiles().clone(),
+            material_bindings: MaterialTextureBindings::default(),
             stats,
             source_name: source_name.to_string(),
         })
+    }
+
+    pub fn native_color_for_key(&self, key: ShaderKey) -> crate::shader_registry::NativeColorInput {
+        self.native_color_by_key
+            .get(&key)
+            .copied()
+            .unwrap_or(crate::shader_registry::NativeColorInput::Auto)
+    }
+
+    pub fn vs_profile_for_key(&self, key: ShaderKey) -> crate::shader_registry::ShaderVsProfile {
+        self.vs_profile_by_key
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn default_pair(&self) -> &EffectShaderPair {
@@ -590,6 +810,7 @@ impl BnshShaderSet {
         })
     }
 
+    /// Registry shader key for GPU pipeline cache lookup (one BNSH pair per registry entry).
     pub fn pipeline_key_for_emitter(&self, emitter: &EmitterDef) -> ShaderKey {
         self.resolve_key(emitter)
     }
@@ -638,23 +859,8 @@ impl BnshShaderSet {
         }
     }
 
-    #[allow(dead_code)]
     pub fn apply_material_bindings(&self) -> HashMap<String, u32> {
-        let pair = self.default_pair();
-        let mut all_bindings = HashMap::new();
-        if let Some(fs) = &pair.fragment {
-            if let Some(ref refl) = fs.reflection {
-                let resolved = self.material_bindings.resolve_with_reflection(refl);
-                all_bindings.extend(resolved);
-            }
-        }
-        if let Some(vs) = &pair.vertex {
-            if let Some(ref refl) = vs.reflection {
-                let resolved = self.material_bindings.resolve_with_reflection(refl);
-                all_bindings.extend(resolved);
-            }
-        }
-        all_bindings
+        HashMap::new()
     }
 }
 
@@ -682,6 +888,8 @@ mod tests {
             all_shaders: HashMap::from([(0u64, pair.clone())]),
             default_key: 0,
             library_indices: HashMap::new(),
+            native_color_by_key: HashMap::new(),
+            vs_profile_by_key: HashMap::new(),
             material_bindings: crate::bnsh_shader_integration::MaterialTextureBindings::default(),
             stats: crate::bnsh_shader_integration::ShaderStats::default(),
             source_name: "test.eff".to_string(),

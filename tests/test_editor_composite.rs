@@ -22,7 +22,7 @@ fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         &wgpu::DeviceDescriptor {
             label: Some("editor_composite_test"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: hitbox_editor::wgpu_device_limits(&adapter),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,

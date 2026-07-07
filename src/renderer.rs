@@ -8,7 +8,7 @@ use ssbh_wgpu::{
     CameraTransforms, ModelFolder, ModelRenderOptions, RenderModel, RenderSettings,
     SharedRenderData, SsbhRenderer,
 };
-use crate::particle_renderer::BnshDrawFilter;
+use crate::particle_renderer::{BnshDrawFilter, DepthDrawConfig};
 use crate::particle_renderer_bnsh::PARTICLE_DEPTH_FORMAT;
 
 /// Per-draw_path offscreen color + depth targets for particle compositing.
@@ -256,7 +256,14 @@ impl HitboxRenderState {
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if width == 0 || height == 0 { return; }
-        if width == self.current_width && height == self.current_height { return; }
+        if width == self.current_width && height == self.current_height {
+            // Viewport size unchanged but offscreen targets may never have been allocated
+            // (e.g. finish_prepare ran without a prior prepare() at this size).
+            if self.particle_target_size == (0, 0) {
+                self.particle_target_size = (width, height);
+            }
+            return;
+        }
         self.renderer.resize(device, width, height, 1.0);
         self.current_width = width;
         self.current_height = height;
@@ -314,12 +321,13 @@ impl HitboxRenderState {
         }
     }
 
-    /// Returns (view_proj, cam_right, cam_up) for particle rendering.
-    pub fn camera_vectors(&self) -> (Mat4, Vec3, Vec3) {
+    /// Returns (view_proj, cam_right, cam_up, cam_pos) for particle rendering.
+    pub fn camera_vectors(&self) -> (Mat4, Vec3, Vec3, Vec3) {
         let transforms = self.camera.transforms(self.current_width as f32, self.current_height as f32);
         let mv_inv = transforms.model_view_matrix.inverse();
         let cam_right = mv_inv.col(0).truncate().normalize();
         let cam_up    = mv_inv.col(1).truncate().normalize();
+        let cam_pos = mv_inv.col(3).truncate();
         static CAM_LOG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !CAM_LOG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) && crate::fx_debug_enabled() {
             let pos = transforms.model_view_matrix.col(3).truncate();
@@ -330,7 +338,7 @@ impl HitboxRenderState {
                 cam_right.x, cam_right.y, cam_right.z,
                 cam_up.x, cam_up.y, cam_up.z);
         }
-        (transforms.mvp_matrix, cam_right, cam_up)
+        (transforms.mvp_matrix, cam_right, cam_up, cam_pos)
     }
 
     pub fn load_model(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, model_dir: &Path) {
@@ -459,24 +467,21 @@ impl HitboxRenderState {
             Ok(pr) => {
                 *self.particle_renderer.lock().unwrap() = Some(pr);
             }
-            Err(_) => {
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
                 eprintln!(
-                    "[ParticleRenderer] FAILED to create GPU particle renderer (native_fs={native_fs}). \
+                    "[ParticleRenderer] FAILED to create GPU particle renderer (native_fs={native_fs}): {msg}. \
                      Check stderr above for WGSL/pipeline validation errors."
                 );
                 return false;
             }
         }
         
-        // Set material texture bindings from shader reflection
-        if let Some(pr) = self.particle_renderer.lock().unwrap().as_mut() {
-            let bindings = bnsh_shaders.material_bindings.as_gpu_slots();
-            pr.set_material_texture_bindings(bindings);
-            eprintln!("[ParticleRenderer] Applied {} material texture bindings", 
-                bnsh_shaders.material_bindings.sampler_bindings.len() + 
-                bnsh_shaders.material_bindings.emissive_bindings.len() + 
-                bnsh_shaders.material_bindings.pbr_bindings.len());
-        }
+        // Particle billboards bind emitter BNTX via FS jump tables — not FMAT _col/_emi/_prm.
         true
     }
 
@@ -659,11 +664,9 @@ fn weapon_attach_bone(weapon_dir: &str) -> String {
     }
 }
 ///
-/// In `prepare`: runs ssbh internal passes + uploads particle uniforms/geometry.
-/// In `finish_prepare`: one wgpu render pass per distinct `draw_path` (ascending), each into its
-/// own cleared transparent offscreen target (approximates NVN depth clear between paths).
-/// Sub-blend emitters are excluded from offscreen passes.
-/// In `paint`: for each draw_path in order, blits premultiplied color then Sub reverse-subtract.
+/// In `prepare`: runs ssbh internal passes only (particle upload deferred to `finish_prepare`).
+/// In `finish_prepare`: particle GPU upload + mesh depth for soft particles.
+/// In `paint`: draws particles directly onto the viewport after model overlays.
 pub struct ViewportCallback {
     pub width: f32,
     pub height: f32,
@@ -731,20 +734,15 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             );
 
             if !self.particles.is_empty() || !self.trails.is_empty() {
-                let (view_proj, cam_right, cam_up) = state.camera_vectors();
-                if let Some(pr) = state.particle_renderer.lock().unwrap().as_mut() {
-                    pr.prepare_particle_frame(
-                        device,
-                        queue,
-                        view_proj,
-                        cam_right,
-                        cam_up,
-                        &self.particles,
-                        &self.trails,
-                        &self.emitter_sets,
-                        &self.bfres_models,
-                        &self.bone_matrices,
-                        &self.active_emitters,
+                static PREPARE_DIAG: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if crate::fx_env::fx_viewport_log_enabled()
+                    || !PREPARE_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    eprintln!(
+                        "[VIEWPORT] prepare: {} particles, {} trails, frame={} (GPU upload deferred to finish_prepare)",
+                        self.particles.len(),
+                        self.trails.len(),
                         self.current_frame,
                     );
                 }
@@ -756,7 +754,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
     fn finish_prepare(
         &self,
         device: &wgpu::Device,
-        _queue: &wgpu::Queue,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
@@ -767,142 +765,95 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             return Vec::new();
         };
 
-        let paths = {
-            let pr_guard = state.particle_renderer.lock().unwrap();
-            let Some(pr) = pr_guard.as_ref() else {
-                return Vec::new();
-            };
-            pr.prepared_draw_paths().to_vec()
-        };
-        if paths.is_empty() {
-            return Vec::new();
-        }
+        state.resize(device, self.width as u32, self.height as u32);
 
-        state.ensure_particle_path_targets(device, paths.len());
-        if state.particle_path_targets.is_empty() {
+        if state.particle_renderer.lock().unwrap().is_none() {
             return Vec::new();
         }
 
         let (width, height) = state.particle_target_size;
-        state.ensure_scene_mesh_depth(device, width, height);
-        // Depth from pass-ordered 1× re-render at end of begin_render_models (opaque→near).
-        if editor_mesh_depth_sharing_available() {
-            if let Some((scene_depth, _)) = state.scene_mesh_depth.as_ref() {
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+
+        let mut bone_matrices = state.bone_world_matrices_at(self.current_frame);
+        if std::env::var("FX_IDENTITY_BONES").is_ok() {
+            for m in bone_matrices.values_mut() {
+                *m = glam::Mat4::IDENTITY;
+            }
+        }
+        let (view_proj, cam_right, cam_up, cam_pos) = state.camera_vectors();
+        if std::env::var("FX_VP_DEBUG").is_ok() {
+            eprintln!("[LIVE-VP] cur_frame={} particles={} active_emitters={} wh={}x{} cam_pos={:.1?}",
+                self.current_frame, self.particles.len(), self.active_emitters.len(),
+                self.width, self.height, cam_pos.to_array());
+            for inst in self.active_emitters.iter().take(3) {
+                eprintln!("    active_emitter key={:?} bone='{}' start_frame={}",
+                    inst.emitter_key(), inst.bone_name(), inst.start_frame());
+            }
+            if let Some(p) = self.particles.first() {
+                eprintln!("    particle[0] bone='{}' pos=({:.1},{:.1},{:.1}) age={:.1}/{:.1}",
+                    p.bone_name, p.position.x, p.position.y, p.position.z, p.age, p.lifetime);
+            }
+        }
+
+        let mesh_depth_for_soft = editor_mesh_depth_sharing_available()
+            && !state.render_models.is_empty();
+        if mesh_depth_for_soft {
+            state.ensure_scene_mesh_depth(device, width, height);
+            if let Some((ref mesh_depth, ref mesh_depth_view)) = state.scene_mesh_depth {
                 state.renderer.copy_mesh_depth_resolved(
                     encoder,
-                    scene_depth,
+                    mesh_depth,
+                    width,
+                    height,
+                );
+                let mut pr_guard = state.particle_renderer.lock().unwrap();
+                if let Some(pr) = pr_guard.as_mut() {
+                    pr.set_scene_depth_view(mesh_depth_view);
+                }
+            }
+        }
+
+        let paths = {
+            let mut pr_guard = state.particle_renderer.lock().unwrap();
+            let Some(pr) = pr_guard.as_mut() else {
+                return Vec::new();
+            };
+            pr.prepare_particle_frame(
+                device,
+                queue,
+                view_proj,
+                cam_right,
+                cam_up,
+                cam_pos,
+                &self.particles,
+                &self.trails,
+                &self.emitter_sets,
+                &self.bfres_models,
+                &bone_matrices,
+                &self.active_emitters,
+                self.current_frame,
+            );
+            pr.prepared_draw_paths().to_vec()
+        };
+
+        if paths.is_empty() {
+            return Vec::new();
+        }
+
+        if crate::fx_env::fx_viewport_log_enabled() {
+            let pr_guard = state.particle_renderer.lock().unwrap();
+            if let Some(pr) = pr_guard.as_ref() {
+                eprintln!(
+                    "[VIEWPORT] finish_prepare: {} draw paths, target={}x{} (direct viewport draw in paint)",
+                    paths.len(),
                     width,
                     height,
                 );
             }
         }
 
-        let mut pr_guard = state.particle_renderer.lock().unwrap();
-        let Some(pr) = pr_guard.as_mut() else {
-            return Vec::new();
-        };
-
-        use crate::particle_renderer::DepthDrawConfig;
-
-        for (i, &path) in paths.iter().enumerate() {
-            let target = &state.particle_path_targets[i];
-            if editor_mesh_depth_sharing_available() {
-                if let Some((scene_depth, _)) = state.scene_mesh_depth.as_ref() {
-                    copy_depth_texture(encoder, scene_depth, &target.depth, width, height);
-                }
-            }
-
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&format!("particle_offscreen_path_{path}")),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target.color_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &target.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: if editor_mesh_depth_sharing_available() {
-                                wgpu::LoadOp::Load
-                            } else {
-                                wgpu::LoadOp::Clear(1.0)
-                            },
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    multiview_mask: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pr.draw_prepared_particles_for_path(
-                    &mut rpass,
-                    path,
-                    false,
-                    BnshDrawFilter::ExcludeSub,
-                    DepthDrawConfig::OPAQUE_CORE,
-                );
-                pr.draw_prepared_particles_for_path(
-                    &mut rpass,
-                    path,
-                    true,
-                    BnshDrawFilter::ExcludeSub,
-                    DepthDrawConfig::TRANSPARENT,
-                );
-            }
-
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&format!("particle_sub_offscreen_path_{path}")),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target.sub_color_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &target.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    multiview_mask: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pr.draw_prepared_particles_for_path(
-                    &mut rpass,
-                    path,
-                    false,
-                    BnshDrawFilter::SubOnly,
-                    DepthDrawConfig::TRANSPARENT,
-                );
-            }
-        }
-
-        let path_views: Vec<&wgpu::TextureView> = state
-            .particle_path_targets
-            .iter()
-            .take(paths.len())
-            .map(|t| &t.color_view)
-            .collect();
-        let sub_path_views: Vec<&wgpu::TextureView> = state
-            .particle_path_targets
-            .iter()
-            .take(paths.len())
-            .map(|t| &t.sub_color_view)
-            .collect();
-        pr.prepare_composite(device, &path_views, &sub_path_views);
         Vec::new()
     }
 
@@ -917,8 +868,12 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             if self.particles.is_empty() && self.trails.is_empty() {
                 return;
             }
-            let pr = state.particle_renderer.lock().unwrap();
-            let Some(pr) = pr.as_ref() else {
+            let Some(device) = state.wgpu_device.as_ref() else {
+                return;
+            };
+            let _ = device;
+            let mut pr_guard = state.particle_renderer.lock().unwrap();
+            let Some(pr) = pr_guard.as_mut() else {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static LOGGED: AtomicBool = AtomicBool::new(false);
                 if !LOGGED.swap(true, Ordering::Relaxed) {
@@ -929,7 +884,49 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 }
                 return;
             };
-            pr.composite_editor_particles(render_pass);
+            if !pr.editor_needs_composite() {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[VIEWPORT] paint skipped: GPU prepare produced no draw paths ({} particles, {} trails). \
+                         This message prints once.",
+                        self.particles.len(),
+                        self.trails.len()
+                    );
+                }
+                return;
+            }
+            static PAINT_DIAG: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if crate::fx_env::fx_viewport_log_enabled()
+                || !PAINT_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                eprintln!(
+                    "[VIEWPORT] paint: drawing {} particles, {} draw paths onto viewport",
+                    self.particles.len(),
+                    pr.prepared_draw_paths().len(),
+                );
+            }
+            let paths: Vec<u32> = pr.prepared_draw_paths().to_vec();
+            for path in paths {
+                pr.draw_prepared_particles_for_path(
+                    device,
+                    render_pass,
+                    path,
+                    true,
+                    BnshDrawFilter::ExcludeSub,
+                    DepthDrawConfig::NONE,
+                );
+                pr.draw_prepared_particles_for_path(
+                    device,
+                    render_pass,
+                    path,
+                    false,
+                    BnshDrawFilter::SubOnly,
+                    DepthDrawConfig::NONE,
+                );
+            }
         } else {
             eprintln!("[VIEWPORT] paint skipped: HitboxRenderState missing (load a model first)");
         }

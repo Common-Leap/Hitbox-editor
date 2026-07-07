@@ -29,7 +29,20 @@ fn test_extra_tex345_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroup
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
-            min_binding_size: std::num::NonZeroU64::new(64),
+            // FxTexBlendCoeffs: 6 × vec4<f32> (matches EXTRA_TEX_BLEND_UNIFORM_SIZE).
+            min_binding_size: std::num::NonZeroU64::new(96),
+        },
+        count: None,
+    });
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 7,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: std::num::NonZeroU64::new(
+                hitbox_editor::shader_registry::PARTICLE_ALPHA_MOD_UNIFORM_SIZE as u64,
+            ),
         },
         count: None,
     });
@@ -47,7 +60,13 @@ fn test_extra_tex345_bind_group(
 ) -> wgpu::BindGroup {
     let blend_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("test_tex_blend"),
-        size: 64,
+        size: 96,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let alpha_mods_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test_particle_alpha_mods"),
+        size: hitbox_editor::shader_registry::PARTICLE_ALPHA_MOD_UNIFORM_SIZE as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -62,12 +81,83 @@ fn test_extra_tex345_bind_group(
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(white_view) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(white_sampler) },
             wgpu::BindGroupEntry { binding: 6, resource: blend_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 7, resource: alpha_mods_buf.as_entire_binding() },
         ],
     })
 }
 
 fn needs_extra_tex_bind_group(prepared: &hitbox_editor::particle_renderer_bnsh::PreparedBnshWgsl) -> bool {
-    prepared.tex_blend_uniform_needed || prepared.extra_tex_slots_needed.iter().any(|&b| b)
+    prepared.tex_blend_uniform_needed
+        || prepared.particle_alpha_uniform_needed
+        || prepared.extra_tex_slots_needed.iter().any(|&b| b)
+}
+
+/// Mirror of the production `bnsh_soft_particle_bgl` (@group(3): scene depth + FxSoftParticle).
+fn test_soft_particle_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("test_soft_particle_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    // FxSoftParticle uniform (production SOFT_PARTICLE_UNIFORM_SIZE).
+                    min_binding_size: std::num::NonZeroU64::new(32),
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn test_soft_particle_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::BindGroup {
+    let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test_scene_depth"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        depth_tex.as_image_copy(),
+        &1.0f32.to_le_bytes(),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    let view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test_soft_particle_uniform"),
+        size: 32,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("test_soft_particle_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
+        ],
+    })
 }
 
 fn resolve_effect_eff(effect_name: &str) -> Option<std::path::PathBuf> {
@@ -214,7 +304,7 @@ fn create_test_device() -> (Option<wgpu::Device>, Option<wgpu::Queue>) {
         &wgpu::DeviceDescriptor {
             label: Some("test_device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: hitbox_editor::wgpu_device_limits(&adapter),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,
@@ -299,17 +389,25 @@ fn test_bnsh_shaders_render() {
     let white_view = white_tex.create_view(&wgpu::TextureViewDescriptor::default());
     let white_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
-    let prepared = prepare_bnsh_wgsl(&vs_wgsl, &fs_wgsl, None);
+    let prepared = prepare_bnsh_wgsl(
+        &vs_wgsl,
+        &fs_wgsl,
+        None,
+        None,
+        None,
+        hitbox_editor::shader_registry::NativeColorInput::Auto,
+    );
     let needs_extra = needs_extra_tex_bind_group(&prepared);
     let vs_wgsl = prepared.vs_wgsl;
     let patched_fs = prepared.fs_wgsl;
-    let _ = std::fs::write("/tmp/bnsh_vs.wgsl", &vs_wgsl);
-    let _ = std::fs::write("/tmp/bnsh_fs.wgsl", &fs_wgsl);
+    let soft_needed = hitbox_editor::spirv_to_wgsl::native_fs_soft_particle_needed(&patched_fs);
+    hitbox_editor::scratch_dirs::write_workshop_wgsl_dump("bnsh_vs.wgsl", &vs_wgsl);
+    hitbox_editor::scratch_dirs::write_workshop_wgsl_dump("bnsh_fs.wgsl", &fs_wgsl);
     let vs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bnsh_vs"),
         source: wgpu::ShaderSource::Wgsl(vs_wgsl.into()),
     });
-    let _ = std::fs::write("/tmp/bnsh_fs_patched.wgsl", &patched_fs);
+    hitbox_editor::scratch_dirs::write_workshop_wgsl_dump("bnsh_fs_patched.wgsl", &patched_fs);
     let fs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bnsh_fs"),
         source: wgpu::ShaderSource::Wgsl(patched_fs.into()),
@@ -499,34 +597,37 @@ fn test_bnsh_shaders_render() {
         bind_groups.push(bg);
     }
 
-    // Create texture bind group layout for set=1 (used by patch_fragment_wgsl)
+    // Create full emitter texture bind group layout for @group(1).
     let test_tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("test_tex_bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
+        entries: &hitbox_editor::particle_renderer::emitter_tex_bind_group_layout_entries(),
     });
+    let indirect_pool = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test_indirect_pool"),
+        size: 256,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let test_tex_bg = hitbox_editor::particle_renderer::test_emitter_tex_bind_group(
+        &device,
+        &test_tex_bgl,
+        &white_view,
+        &white_sampler,
+        &indirect_pool,
+    );
     let mut bgl_all: Vec<Option<&wgpu::BindGroupLayout>> = bgls.iter().map(|b| Some(b)).collect();
     bgl_all.push(Some(&test_tex_bgl));
     let extra_tex_bgl = test_extra_tex345_bind_group_layout(&device);
-    let extra_tex_bg = if needs_extra {
+    let extra_tex_bg = if needs_extra || soft_needed {
         bgl_all.push(Some(&extra_tex_bgl));
         Some(test_extra_tex345_bind_group(&device, &extra_tex_bgl, &white_view, &white_sampler))
+    } else {
+        None
+    };
+    let soft_bgl = test_soft_particle_bind_group_layout(&device);
+    let soft_bg = if soft_needed {
+        bgl_all.push(Some(&soft_bgl));
+        Some(test_soft_particle_bind_group(&device, &queue, &soft_bgl))
     } else {
         None
     };
@@ -639,25 +740,14 @@ fn test_bnsh_shaders_render() {
             for (set_idx, bg) in bind_groups.iter().enumerate() {
                 rp.set_bind_group(set_idx as u32, bg, &[]);
             }
-            // Bind white texture+sampler at set=1 for patch_fragment_wgsl
+            // Bind emitter textures at set=1 (patch/enhance native FS).
             let tex_set = bind_groups.len() as u32;
-            let test_tex_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("test_tex_bg"),
-                layout: &test_tex_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&white_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&white_sampler),
-                    },
-                ],
-            });
-            rp.set_bind_group(tex_set, &test_tex_bg, &[]);
+            rp.set_bind_group(tex_set, &test_tex_bg, &[0]);
             if let Some(bg) = &extra_tex_bg {
                 rp.set_bind_group(tex_set + 1, bg, &[]);
+            }
+            if let Some(bg) = &soft_bg {
+                rp.set_bind_group(tex_set + 2, bg, &[]);
             }
             rp.draw(0..3, 0..1);
         }
@@ -866,7 +956,7 @@ fn test_render_random_effect_no_fallback() {
         &wgpu::DeviceDescriptor {
             label: Some("test_window_device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: hitbox_editor::wgpu_device_limits(&adapter),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,
@@ -899,10 +989,18 @@ fn test_render_random_effect_no_fallback() {
     let window_white_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
     // ---------- Build pipeline with proper vertex buffer layout ----------
-    let prepared = prepare_bnsh_wgsl(&vs_wgsl, &fs_wgsl, None);
+    let prepared = prepare_bnsh_wgsl(
+        &vs_wgsl,
+        &fs_wgsl,
+        None,
+        None,
+        None,
+        hitbox_editor::shader_registry::NativeColorInput::Auto,
+    );
     let needs_extra = needs_extra_tex_bind_group(&prepared);
     let vs_wgsl = prepared.vs_wgsl;
     let fs_wgsl = prepared.fs_wgsl;
+    let soft_needed = hitbox_editor::spirv_to_wgsl::native_fs_soft_particle_needed(&fs_wgsl);
 
     let vs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bnsh_vs"),
@@ -1011,47 +1109,28 @@ fn test_render_random_effect_no_fallback() {
         bind_groups.push(bg);
     }
 
-    // Create texture bind group layout for set=1 (used by patch_fragment_wgsl)
     let window_tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("window_tex_bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
+        entries: &hitbox_editor::particle_renderer::emitter_tex_bind_group_layout_entries(),
     });
-    // Create texture bind group for set=1
-    let window_tex_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("window_tex_bg"),
-        layout: &window_tex_bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&window_white_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&window_white_sampler),
-            },
-        ],
+    let window_indirect_pool = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("window_indirect_pool"),
+        size: 256,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
-    bind_groups.push(window_tex_bg);
+    let window_tex_bg = hitbox_editor::particle_renderer::test_emitter_tex_bind_group(
+        &device,
+        &window_tex_bgl,
+        &window_white_view,
+        &window_white_sampler,
+        &window_indirect_pool,
+    );
 
+    // Soft-particle depth fade adds @group(3); it needs @group(2) present as well since
+    // pipeline-layout group indices are positional.
     let extra_tex_bgl = test_extra_tex345_bind_group_layout(&device);
-    let extra_tex_bg = if needs_extra {
+    let extra_tex_bg = if needs_extra || soft_needed {
         Some(test_extra_tex345_bind_group(
             &device,
             &extra_tex_bgl,
@@ -1061,11 +1140,20 @@ fn test_render_random_effect_no_fallback() {
     } else {
         None
     };
+    let soft_bgl = test_soft_particle_bind_group_layout(&device);
+    let soft_bg = if soft_needed {
+        Some(test_soft_particle_bind_group(&device, &queue, &soft_bgl))
+    } else {
+        None
+    };
 
     let mut bgl_all: Vec<Option<&wgpu::BindGroupLayout>> = bgls.iter().map(|b| Some(b)).collect();
     bgl_all.push(Some(&window_tex_bgl));
     if extra_tex_bg.is_some() {
         bgl_all.push(Some(&extra_tex_bgl));
+    }
+    if soft_bg.is_some() {
+        bgl_all.push(Some(&soft_bgl));
     }
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bnsh_window_test"),
@@ -1163,8 +1251,13 @@ fn test_render_random_effect_no_fallback() {
         for (set_idx, bg) in bind_groups.iter().enumerate() {
             rp.set_bind_group(set_idx as u32, bg, &[]);
         }
+        let tex_set = bind_groups.len() as u32;
+        rp.set_bind_group(tex_set, &window_tex_bg, &[0]);
         if let Some(bg) = &extra_tex_bg {
-            rp.set_bind_group(bind_groups.len() as u32, bg, &[]);
+            rp.set_bind_group(tex_set + 1, bg, &[]);
+        }
+        if let Some(bg) = &soft_bg {
+            rp.set_bind_group(tex_set + 2, bg, &[]);
         }
         rp.draw(0..3, 0..1);
     }

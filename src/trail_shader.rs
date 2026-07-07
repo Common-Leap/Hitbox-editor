@@ -171,7 +171,7 @@ pub fn fs_main_entry(targets: [Option<wgpu::ColorTargetState>; 1]) -> FragmentEn
         constants: Default::default(),
     }
 }
-pub const SOURCE: &str = include_str!("src/trail.wgsl");
+pub const SOURCE: &str = include_str!("trail.wgsl");
 pub fn create_shader_module(device: &wgpu::Device) -> wgpu::ShaderModule {
     let source = std::borrow::Cow::Borrowed(SOURCE);
     device
@@ -196,22 +196,22 @@ pub fn create_pipeline_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, encase::ShaderType)]
 pub struct CameraUniforms {
-    pub view_proj: glam::Mat4,
-    pub cam_right: glam::Vec3,
+    pub view_proj: [[f32; 4]; 4],
+    pub cam_right: [f32; 3],
     pub _pad0: f32,
-    pub cam_up: glam::Vec3,
+    pub cam_up: [f32; 3],
     pub _pad1: f32,
 }
 pub const ENTRY_FS_MAIN: &str = "fs_main";
 pub const ENTRY_VS_MAIN: &str = "vs_main";
 #[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct VertexInput {
-    pub position: glam::Vec3,
-    pub uv: glam::Vec2,
+    pub position: [f32; 3],
+    pub uv: [f32; 2],
     pub alpha: f32,
     pub _pad: f32,
-    pub color: glam::Vec4,
+    pub color: [f32; 4],
 }
 impl VertexInput {
     pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [

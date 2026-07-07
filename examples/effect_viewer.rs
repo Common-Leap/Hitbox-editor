@@ -125,7 +125,7 @@ fn main() {
         &wgpu::DeviceDescriptor {
             label: Some("viewer_device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: hitbox_editor::wgpu_device_limits(&adapter),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             trace: wgpu::Trace::Off,

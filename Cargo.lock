@@ -2189,6 +2189,7 @@ dependencies = [
  "egui-wgpu",
  "egui_extras",
  "encase",
+ "flate2",
  "glam",
  "hash40",
  "image",
