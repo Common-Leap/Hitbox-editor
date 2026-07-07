@@ -4577,6 +4577,18 @@ fn append_bnsh_particle_vertices(
                 .map(|env| crate::effects::silhouette_atlas_uv(unit_uv, (*min_c, *max_c), env))
                 .unwrap_or(unit_uv);
             let mut corner = unit_corner;
+            // Quad half-extents span ±size like the game, not ±size/2: two independent
+            // capture measurements (fireBase detonation frame 4274: game ≈22 world units
+            // vs ours ≈12.7; CmnBomb smoke frame 4286: game ≈31 vs ours ≈15.3) both give
+            // a 2.0× deficit with authored-exact scatter radii — the game's corner
+            // convention is a full size unit per half-extent. FX_CORNER_SCALE overrides
+            // for calibration.
+            let corner_scale = std::env::var("FX_CORNER_SCALE")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(2.0);
+            corner[0] *= corner_scale;
+            corner[1] *= corner_scale;
             corner = crate::effects::stripe_corner_half_extents(bb, corner, aspect, p.velocity);
             corner =
                 crate::effects::rotate_billboard_corner(corner, z_spin, emitter.rot_type, axes);

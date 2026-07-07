@@ -2911,7 +2911,11 @@ fn insert_billboard_clip_position(wgsl: &str, mode: BillboardClipMode) -> String
         vp3 = vp_base + 3,
     );
     override_code.push_str(&basis_block);
-    let world_block = if std::env::var("FX_DEBUG_CLIP_CENTER").is_ok() {
+    let world_block = if std::env::var("FX_NATIVE_CLIP").is_ok() {
+        // Keep main_1()'s own clip position (the game's corner/size/stretch math) —
+        // diagnostic for aligning our CPU billboard expansion with the native chain.
+        String::from("        // FX_NATIVE_CLIP: native gl_Position kept\n")
+    } else if std::env::var("FX_DEBUG_CLIP_CENTER").is_ok() {
         // Spread corners so the quad has non-zero area (identical clip coords rasterize nothing).
         format!(
             "\x20       let _corner = {corner_expr};\n\
