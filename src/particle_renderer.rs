@@ -3645,8 +3645,11 @@ impl ParticleRenderer {
                 let clip = view_proj * center;
                 let ndc = if clip.w.abs() > 1e-6 { clip.truncate() / clip.w } else { clip.truncate() };
                 eprintln!(
-                    "[VTXDUMP] em='{}' n={num_vertices} center=({:.2},{:.2},{:.2}) attr4=[{:.2},{:.2},{:.2},{:.2}] attr6=[{:.3},{:.3},{:.3},{:.3}] -> clip.w={:.2} ndc=({:.3},{:.3})",
-                    emitter.name, v[0], v[1], v[2], v[16], v[17], v[18], v[19], v[24], v[25], v[26], v[27],
+                    "[VTXDUMP] em='{}' n={num_vertices} center=({:.2},{:.2},{:.2}) attr4=[{:.2},{:.2},{:.2},{:.2}] attr5=[{:.2},{:.2},{:.2},{:.2}] attr6=[{:.3},{:.3},{:.3},{:.3}] p.age={:.2}/{:.2} -> clip.w={:.2} ndc=({:.3},{:.3})",
+                    emitter.name, v[0], v[1], v[2], v[16], v[17], v[18], v[19],
+                    v[20], v[21], v[22], v[23], v[24], v[25], v[26], v[27],
+                    group.first().map(|p| p.age).unwrap_or(-1.0),
+                    group.first().map(|p| p.lifetime).unwrap_or(-1.0),
                     clip.w, ndc.x, ndc.y,
                 );
             }

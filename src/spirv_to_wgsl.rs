@@ -2984,6 +2984,16 @@ fn insert_billboard_clip_position(wgsl: &str, mode: BillboardClipMode) -> String
     {
         override_code.push_str("        out_attr2_ = in_attr2_1;\n");
     }
+    // FX_DEBUG_VS_OUT="<wgsl scalar exprs>": overwrite out_attr0 with arbitrary VS values
+    // (gprs, cbuf reads) after main_1(), so the FS ATTR0 debug can visualize any VS
+    // register. Example: FX_DEBUG_VS_OUT="gpr_10_, gpr_0_ * 0.05, gpr_1_ * 0.05, 1.0".
+    if let Ok(expr) = std::env::var("FX_DEBUG_VS_OUT") {
+        if wgsl.contains("out_attr0_") && !expr.is_empty() {
+            override_code.push_str(&format!(
+                "        out_attr0_ = vec4<f32>({expr});\n"
+            ));
+        }
+    }
     override_code.push_str("    }\n");
     let mut result = wgsl.to_string();
     result.insert_str(insert_at, &override_code);

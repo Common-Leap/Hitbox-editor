@@ -263,19 +263,20 @@ pub fn force_hybrid_billboard_cbuf_defaults(
                 data.set(0, [1.0, 1.0, 1.0, 1.0]);
             }
             if !data.slot_data.contains_key(&1) {
-                data.set(1, [1.0, 1.0, 1.0, 0.0]);
+                // Whole row 1 like the game — .w=0 zeroed out_attr1.w (FS discard gate).
+                data.set(1, [1.0, 1.0, 1.0, 1.0]);
             }
             if !data.slot_data.contains_key(&2) {
                 // cbuf_10[2].x = emitter clock (frames). The native VS/FS age chain reads
                 // age = clock - attr<birth>.w; the vertex builder feeds birth = clock - age
                 // with the same CLOCK when the frame-clock feed is on (task #22). With the
-                // legacy normalized feed leave x = 1.0.
+                // legacy normalized feed leave x = 1.0. Capture: .yzw carry 1s.
                 let clock = if crate::fx_env::fx_frame_clock_enabled() {
                     EMITTER_CLOCK_FRAMES
                 } else {
                     1.0
                 };
-                data.set(2, [clock, 0.0, 0.0, 0.0]);
+                data.set(2, [clock, 1.0, 1.0, 1.0]);
             }
             if !data.slot_data.contains_key(&3) {
                 data.set(3, [1.0, 1.0, 1.0, 1.0]);
@@ -1243,10 +1244,10 @@ fn nvn_table_entry(entries: &[[f32; 4]], i: usize) -> [f32; 4] {
     }
 }
 
-/// Colour1 keyframe table (cbuf_9 slots 84..87): the second multiplier colour chain.
-/// Constant-white 1-key table when unauthored — capture-verified (game fire_g dumps
-/// (1,1,1,0),(1,1,1,1),(1,1,1,2),(1,1,1,3)); the old zero fill multiplied every
-/// emitter's colour chain to black.
+/// Colour1 keyframe table (cbuf_9 slots 76..83): the second multiplier colour chain.
+/// Capture-verified layout (game samus/common fireBase draw frame_004272_draw_0020:
+/// [76..79] = its authored colour1 ramp (1,.734,.603)@0 → (.095,0,0)@.32). The old
+/// heuristic wrote flipbook pattern-pair data here, zeroing the chain for most emitters.
 fn nvn_color_table1_entries(emitter: &EmitterDef) -> Vec<[f32; 4]> {
     if !emitter.color1.is_empty() {
         return emitter
@@ -1257,6 +1258,36 @@ fn nvn_color_table1_entries(emitter: &EmitterDef) -> Vec<[f32; 4]> {
     }
     let c = crate::effects::sample_color_or_white(&emitter.color1, 0.0);
     vec![[c.x, c.y, c.z, 0.0]]
+}
+
+/// Alpha1 keyframe table (cbuf_9 slots 84..91) — same (a,a,a,t) encoding as alpha0.
+/// Constant-1 single key when unauthored, padding to the game's (1,1,1,i) rows
+/// (capture: fire_g / fireBase [84..87] = (1,1,1,0..3)).
+fn nvn_alpha_table2_entries(emitter: &EmitterDef) -> Vec<[f32; 4]> {
+    if !emitter.alpha1_keys.is_empty() {
+        let mut entries: Vec<[f32; 4]> = emitter
+            .alpha1_keys
+            .iter()
+            .map(|k| [k.a, k.a, k.a, k.frame.clamp(0.0, 1.0)])
+            .collect();
+        if entries.len() == 1 && entries[0][3] > 0.0 {
+            entries.insert(0, [entries[0][0], 0.0, 0.0, 0.0]);
+        }
+        return entries;
+    }
+    let a = &emitter.alpha1;
+    if a.time2 <= 0.0 && a.time3 <= 0.0 {
+        return vec![[a.start_value, a.start_value, a.start_value, 0.0]];
+    }
+    let v1 = a.start_value;
+    let v2 = v1 + a.start_diff;
+    let v3 = v2 + a.end_diff;
+    vec![
+        [v1, v1, v1, 0.0],
+        [v2, v2, v2, a.time2.clamp(0.0, 1.0)],
+        [v2, v2, v2, a.time3.clamp(0.0, 1.0)],
+        [v3, v3, v3, 1.0],
+    ]
 }
 
 fn cbuf_base_kind(buf_name: &str) -> Option<&'static str> {
@@ -1595,25 +1626,16 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
             // 1.7/2.0 exactly matching the authored scale, yzw = 0; the game keeps
             // cbuf_10[0] at 1). Replaces the old heuristic combiner-coefficient fill.
             59 => data.set(59, [ctx.emitter.color_scale.max(0.0), 0.0, 0.0, 0.0]),
-            // Colour/alpha keyframe tables [60..75] are filled whole by
-            // `fill_cbuf_9_color_alpha_tables` after this loop.
-            76..=78 => {
-                let (kf76, kf77, kf78) = nvn_pattern_frame_pair3_slots(ctx.emitter, ctx.pat_blend);
-                let v = match slot {
-                    76 => kf76,
-                    77 => kf77,
-                    _ => kf78,
-                };
-                data.set(slot as u64, v);
-            }
+            // Colour0/alpha0 [60..75], colour1 [76..83] and alpha1 [84..91] keyframe
+            // tables are filled whole by `fill_cbuf_9_color_alpha_tables` after this
+            // loop. ([76..78] previously held a heuristic flipbook pattern-pair fill —
+            // capture frame_004272_draw_0020 pins [76..83] as the colour1 ramp.)
+            76..=91 => {}
             // World-position chain coefficients (zero .xyz = no extra offset; .w = compare sentinel)
             113 => data.set(113, [1.0, 1.0, 1.0, 1.0]),
             114 => data.set(114, [0.0, 0.0, 0.0, 1.0]),
             // Axis scales for in_attr0_.xyz — must be 1.0 so particle center reaches gl_Position
             115 => data.set(115, [1.0, 1.0, 1.0, 1.0]),
-            // [84..87]: colour1 keyframe table — filled by `fill_cbuf_9_color_alpha_tables`
-            // (the old [84]=zeros fill multiplied every emitter's colour chain to black).
-            84..=87 => {}
             92 => data.set(
                 92,
                 [
@@ -1721,9 +1743,17 @@ fn fill_cbuf_9_color_alpha_tables(
             }
         }
     }
-    if slots.iter().any(|&s| (84..=87).contains(&s)) {
+    if slots.iter().any(|&s| (76..=83).contains(&s)) {
         let entries = nvn_color_table1_entries(emitter);
-        for i in 0..4 {
+        for i in 0..NVN_TABLE_MAX_KEYS {
+            if slots.contains(&(76 + i as u32)) {
+                data.set(76 + i as u64, nvn_table_entry(&entries, i));
+            }
+        }
+    }
+    if slots.iter().any(|&s| (84..=91).contains(&s)) {
+        let entries = nvn_alpha_table2_entries(emitter);
+        for i in 0..NVN_TABLE_MAX_KEYS {
             if slots.contains(&(84 + i as u32)) {
                 data.set(84 + i as u64, nvn_table_entry(&entries, i));
             }
@@ -1759,17 +1789,33 @@ fn build_cbuf_10_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuf
             // this at 1 and feeds ColorScale via cbuf_9[59].x instead (the VS multiplies
             // both into the colour, so the product is unchanged).
             0 => data.set(0, [1.0, 1.0, 1.0, 1.0]),
-            // VS multiplies gpr components by .xyz (see bomb VS cbuf_10[1] at ~line 2617).
-            // Neutral multiply = 1, not 0 — [0,1,0,0] zeroed .x/.z and collapsed geometry.
-            1 => data.set(1, [1.0, 1.0, 1.0, 0.0]),
+            // VS multiplies gpr components by .xyzw (see bomb VS cbuf_10[1] at ~line 2617).
+            // Capture: the game keeps the whole row at 1 — [1,1,1,0] zeroed out_attr1.w
+            // (the FS discard gate multiplies by it → every fragment discarded).
+            1 => data.set(1, [1.0, 1.0, 1.0, 1.0]),
             // [2].x: the GAME uploads the emitter clock in frames here (age = clock -
             // attr_birth.w, lifetime = trunc(attr_life.w) — see
-            // docs/game-particle-vertex-layout.md). Our renderer keeps the legacy
-            // normalized feed (1.0 + attr5.w = life_t) because the FS side of the native
-            // chain consumes the same varyings with per-family roles and our Family-A
-            // overrides forward raw attrs — switching feeds requires the full native
-            // life-chain project (task #22).
-            2 => data.set(2, [1.0, 0.0, 0.0, 0.0]),
+            // docs/game-particle-vertex-layout.md). The frame-clock feed (task #22)
+            // uploads birth = EMITTER_CLOCK_FRAMES - p.age, so the clock MUST be the
+            // same constant: the old legacy 1.0 here made the native chain see
+            // birth(≈300) > clock(1) → early-return cull → colour varyings stayed
+            // zero-init (all effects rendered gray) while the billboard override
+            // resurrected the quads. force_hybrid_billboard_cbuf_defaults only fills
+            // MISSING slots, so shaders whose usage includes [2] took this arm.
+            2 => data.set(
+                2,
+                [
+                    if crate::fx_env::fx_frame_clock_enabled() {
+                        EMITTER_CLOCK_FRAMES
+                    } else {
+                        1.0
+                    },
+                    // Capture: game rows carry 1s alongside the clock, not zeros.
+                    1.0,
+                    1.0,
+                    1.0,
+                ],
+            ),
             // Native VS (Family A) assigns .y to gpr_20 then multiplies it into the sin/cos
             // rotation chain; .z/.w are pure multiplies (see bomb VS ~L1213/L1317/L1325).
             // [0,0,0,1] zeroed .y/.z and collapsed world position before the VP multiply.
@@ -1863,8 +1909,8 @@ fn documented_cbuf_8_slots() -> HashSet<u32> {
 fn documented_cbuf_9_slots() -> HashSet<u32> {
     [
         0, 1, 2, 3, 5, 8, 9, 10, 13, 14, 15, 17, 44, 45, 46, 47, 48, 49, 50, 51, 53, 59, 60, 61,
-        62, 68, 69, 70, 71, 76, 77, 78, 84, 85, 86, 87, 92, 94, 96, 97, 98, 99, 100, 101, 113,
-        114, 115,
+        62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
+        84, 85, 86, 87, 88, 89, 90, 91, 92, 94, 96, 97, 98, 99, 100, 101, 113, 114, 115,
     ]
     .into_iter()
     .collect()
@@ -2298,16 +2344,22 @@ mod tests {
 
     #[test]
     fn test_cbuf_10_slot2_life_gate_does_not_cull_alive_particles() {
+        // With the frame-clock feed (FX_FRAME_CLOCK, default on except lib tests where
+        // env decides) the builder must upload the SAME clock the vertex feed uses —
+        // the legacy 1.0 made the native age chain cull every frame-clock-fed particle
+        // (birth ≈ 300 > clock 1) and all effects rendered gray. .yzw carry 1s (capture).
         let mut usage = HashMap::new();
         usage.insert("cbuf_10_1_".to_string(), [2u32].into_iter().collect());
         let emitter = EmitterDef::default();
         let params = NvnChainParams::new(&emitter, 0.5, &Mat4::IDENTITY, None);
         let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
-        let slot2 = result.get("cbuf_10_1_").unwrap().slot_data.get(&2).unwrap();
-        assert_eq!(
-            slot2[0], 1.0,
-            "legacy life gate: 1.0 so normalized life_t in 0..1 is not culled (game uses a frame clock here — task #22)"
-        );
+        let slot2 = *result.get("cbuf_10_1_").unwrap().slot_data.get(&2).unwrap();
+        let expected_clock = if crate::fx_env::fx_frame_clock_enabled() {
+            EMITTER_CLOCK_FRAMES
+        } else {
+            1.0
+        };
+        assert_eq!(slot2, [expected_clock, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -3458,29 +3510,27 @@ main_1(); in_attr0_1 in_attr4_1 in_attr6_1 cbuf_9_1_ cbuf_9_1_._m0_[0] gl_Positi
     }
 
     #[test]
-    fn build_cbuf9_slots76_78_fill_pattern_frame_pair() {
+    fn build_cbuf9_slots76_78_fill_color1_table() {
+        // Capture-pinned (frame_004272_draw_0020): [76..83] is the colour1 keyframe
+        // table (r,g,b,t) — NOT flipbook pattern-pair data as previously guessed.
         let emitter = EmitterDef {
-            tex_pat_frame_count: 4,
-            tex_pat_frame_table: vec![2, 0, 1],
-            tex_pat_frequency: 1.0,
-            tex_pattern_anim_type: crate::effects::pattern_anim_type::FIT_LIFESPAN,
-            tex_crossfade: true,
+            color1: vec![
+                ColorKey { frame: 0.0, r: 1.0, g: 0.734, b: 0.603, a: 1.0 },
+                ColorKey { frame: 0.14, r: 1.0, g: 0.652, b: 0.571, a: 1.0 },
+                ColorKey { frame: 0.28, r: 1.0, g: 0.331, b: 0.0, a: 1.0 },
+            ],
             ..Default::default()
         };
         let mut usage = HashMap::new();
-        usage.insert("cbuf_9_1_".to_string(), [76u32, 77, 78].into_iter().collect());
-        let params = NvnChainParams::new(&emitter, 0.25, &Mat4::IDENTITY, None)
-            .with_pat_blend(0.35);
+        usage.insert("cbuf_9_1_".to_string(), [76u32, 77, 78, 79].into_iter().collect());
+        let params = NvnChainParams::new(&emitter, 0.25, &Mat4::IDENTITY, None);
         let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
         let c9 = result.get("cbuf_9_1_").unwrap();
-        let slot76 = c9.slot_data.get(&76).unwrap();
-        let slot77 = c9.slot_data.get(&77).unwrap();
-        let slot78 = c9.slot_data.get(&78).unwrap();
-        assert_eq!(slot76[0], 2.0, "life=0 frame from table[0]");
-        assert_eq!(slot77[0], 1.0, "life=1 frame from table tail");
-        assert_eq!(slot77[3], 4.0, "frame count in .w");
-        assert!((slot78[2] - 0.35).abs() < 0.001, "crossfade blend in .z");
-        assert_eq!(slot78[3], 4.0);
+        assert_eq!(*c9.slot_data.get(&76).unwrap(), [1.0, 0.734, 0.603, 0.0]);
+        assert_eq!(*c9.slot_data.get(&77).unwrap(), [1.0, 0.652, 0.571, 0.14]);
+        assert_eq!(*c9.slot_data.get(&78).unwrap(), [1.0, 0.331, 0.0, 0.28]);
+        // Past-end rows pad (last rgb, i + last time) like the other tables.
+        assert_eq!(*c9.slot_data.get(&79).unwrap(), [1.0, 0.331, 0.0, 3.28]);
     }
 
     #[test]
