@@ -192,10 +192,21 @@ impl<'a> EffectHarness<'a> {
         }
         system.particles.retain(|p| !p.is_dead());
 
-        let mut renderer = ParticleRenderer::new(
+        // Mirror the live viewport's HDR composite (FX_HDR_COMPOSITE, default on):
+        // particles accumulate in RGBA16F and tonemap-composite into the RGBA8 target.
+        // Authored colours exceed 1.0 (fire keys ×1.3, ColorScale ×1.4) — direct LDR
+        // rendering clamps per channel and skews fire from orange to pure red.
+        let hdr = crate::fx_env::fx_hdr_composite_enabled();
+        let particle_format = if hdr {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        };
+        let mut renderer = ParticleRenderer::new_with_particle_format(
             self.device,
             self.queue,
             wgpu::TextureFormat::Rgba8UnormSrgb,
+            particle_format,
             &self.bnsh_set,
         );
         renderer.upload_textures(self.device, self.queue, &self.ptcl);
@@ -258,43 +269,151 @@ impl<'a> EffectHarness<'a> {
             &system.active_emitters,
             frame as f32,
         );
-        for (i, &path) in renderer.prepared_draw_paths().to_vec().iter().enumerate() {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("regression_particles"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: if i == 0 {
-                            wgpu::LoadOp::Clear(CLEAR)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                        store: wgpu::StoreOp::Store,
+        let paths: Vec<u32> = renderer.prepared_draw_paths().to_vec();
+        if hdr {
+            // Per-path RGBA16F accumulation + tonemap blit, mirroring the live viewport
+            // (renderer.rs finish_prepare + paint composite).
+            let make_offscreen = |label: &str| {
+                let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: TARGET_SIZE,
+                        height: TARGET_SIZE,
+                        depth_or_array_layers: 1,
                     },
-                })],
-                depth_stencil_attachment: None,
-                multiview_mask: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            renderer.draw_prepared_particles_for_path(
-                self.device,
-                &mut rpass,
-                path,
-                true,
-                crate::particle_renderer::BnshDrawFilter::ExcludeSub,
-                crate::particle_renderer::DepthDrawConfig::NONE,
-            );
-            renderer.draw_prepared_particles_for_path(
-                self.device,
-                &mut rpass,
-                path,
-                false,
-                crate::particle_renderer::BnshDrawFilter::SubOnly,
-                crate::particle_renderer::DepthDrawConfig::NONE,
-            );
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                (tex, view)
+            };
+            let offscreens: Vec<((wgpu::Texture, wgpu::TextureView), (wgpu::Texture, wgpu::TextureView))> = paths
+                .iter()
+                .map(|_| (make_offscreen("regression_hdr_color"), make_offscreen("regression_hdr_sub")))
+                .collect();
+            for (i, &path) in paths.iter().enumerate() {
+                let (color, sub) = &offscreens[i];
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("regression_hdr_path"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &color.1,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        multiview_mask: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    renderer.draw_prepared_particles_for_path(
+                        self.device,
+                        &mut rpass,
+                        path,
+                        true,
+                        crate::particle_renderer::BnshDrawFilter::ExcludeSub,
+                        crate::particle_renderer::DepthDrawConfig::NONE,
+                    );
+                }
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("regression_hdr_sub_path"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &sub.1,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        multiview_mask: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    renderer.draw_prepared_particles_for_path(
+                        self.device,
+                        &mut rpass,
+                        path,
+                        false,
+                        crate::particle_renderer::BnshDrawFilter::SubOnly,
+                        crate::particle_renderer::DepthDrawConfig::NONE,
+                    );
+                }
+            }
+            let color_views: Vec<&wgpu::TextureView> =
+                offscreens.iter().map(|(c, _)| &c.1).collect();
+            let sub_views: Vec<&wgpu::TextureView> =
+                offscreens.iter().map(|(_, s)| &s.1).collect();
+            renderer.prepare_composite(self.device, &color_views, &sub_views);
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("regression_composite"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(CLEAR),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    multiview_mask: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                renderer.composite_paths(&mut rpass);
+            }
+        } else {
+            for (i, &path) in paths.iter().enumerate() {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("regression_particles"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: if i == 0 {
+                                wgpu::LoadOp::Clear(CLEAR)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    multiview_mask: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                renderer.draw_prepared_particles_for_path(
+                    self.device,
+                    &mut rpass,
+                    path,
+                    true,
+                    crate::particle_renderer::BnshDrawFilter::ExcludeSub,
+                    crate::particle_renderer::DepthDrawConfig::NONE,
+                );
+                renderer.draw_prepared_particles_for_path(
+                    self.device,
+                    &mut rpass,
+                    path,
+                    false,
+                    crate::particle_renderer::BnshDrawFilter::SubOnly,
+                    crate::particle_renderer::DepthDrawConfig::NONE,
+                );
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         let _ = self
