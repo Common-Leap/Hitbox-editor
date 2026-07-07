@@ -2355,8 +2355,17 @@ impl eframe::App for HitboxEditorApp {
             }
             // Deterministic mode: capture 2 ticks after the tick-60 rebuild, before the autoload
             // re-spawn (~tick 108) can clobber the frozen state. Otherwise capture at the peak.
+            // HITBOX_SHOT_TICK=<n> forces the capture at an exact tick (playback debugging —
+            // short-lived effects can die between the default triggers).
             let det = std::env::var("HITBOX_SHOT_DETERMINISTIC").is_ok();
-            if (det && tick == 62) || (!det && ((tick > 20 && np >= 12) || tick > 240)) {
+            let forced_tick: Option<u32> = std::env::var("HITBOX_SHOT_TICK")
+                .ok()
+                .and_then(|s| s.parse().ok());
+            let fire = match forced_tick {
+                Some(t) => tick == t,
+                None => (det && tick == 62) || (!det && ((tick > 20 && np >= 12) || tick > 240)),
+            };
+            if fire {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
         }
