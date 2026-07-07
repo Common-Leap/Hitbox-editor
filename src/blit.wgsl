@@ -48,6 +48,18 @@ fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3(0.0), vec3(1.0));
 }
 
+// Per-channel shoulder: identity below the knee, smooth exponential rolloff above —
+// LDR-authored colours pass through untouched; only HDR magnitudes compress. The knee
+// sits below 1 so the shoulder is continuous; per-channel application preserves the
+// game's channel-saturation hue shift (fire rolls toward yellow/white, not just dimmer).
+fn tonemap_shoulder(x: vec3<f32>) -> vec3<f32> {
+    let knee = 0.85;
+    let span = 1.0 - knee;
+    let over = max(x - vec3(knee), vec3(0.0));
+    let shoulder = vec3(knee) + span * (vec3(1.0) - exp(-over / span));
+    return select(shoulder, x, x <= vec3(knee));
+}
+
 // HDR composite: offscreen is RGBA16F accumulated in linear light; tonemap and
 // alpha-composite over the scene (premultiplied layer, blend One / OneMinusSrcAlpha).
 @fragment
@@ -57,7 +69,30 @@ fn fs_tonemap_main(in: VOut) -> @location(0) vec4<f32> {
         discard;
     }
     let alpha = clamp(c.a, 0.0, 1.0);
+    return vec4(tonemap_shoulder(c.rgb), alpha);
+}
+
+// A/B variant (FX_TONEMAP=aces): the filmic curve reshapes LDR content too
+// (0.18→0.28, 1.0→0.80) — kept for comparison, not the default.
+@fragment
+fn fs_tonemap_aces(in: VOut) -> @location(0) vec4<f32> {
+    let c = textureSample(t_particle, s_particle, in.uv);
+    if (c.a == 0.0 && c.r == 0.0 && c.g == 0.0 && c.b == 0.0) {
+        discard;
+    }
+    let alpha = clamp(c.a, 0.0, 1.0);
     return vec4(tonemap_aces(c.rgb), alpha);
+}
+
+// A/B variant (FX_TONEMAP=clip): plain clamp — shows raw per-channel saturation.
+@fragment
+fn fs_tonemap_clip(in: VOut) -> @location(0) vec4<f32> {
+    let c = textureSample(t_particle, s_particle, in.uv);
+    if (c.a == 0.0 && c.r == 0.0 && c.g == 0.0 && c.b == 0.0) {
+        discard;
+    }
+    let alpha = clamp(c.a, 0.0, 1.0);
+    return vec4(clamp(c.rgb, vec3(0.0), vec3(1.0)), alpha);
 }
 
 // Sub offscreen is cleared to white; discard untouched backdrop before reverse-subtract blit.

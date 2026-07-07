@@ -233,7 +233,11 @@ pub fn blend_state_for(blend: BlendType) -> wgpu::BlendState {
     match blend {
         BlendType::Add => wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+            // Additive light must not occlude what's behind it: the HDR composite blits
+            // the layer over the scene with (One, OneMinusSrcAlpha), and accumulating
+            // alpha (One,One) drove layer alpha to 1 in hot regions — fire ERASED the
+            // model/stage behind it instead of adding over them. Keep dst alpha.
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
         },
         BlendType::Sub => wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::ReverseSubtract },
