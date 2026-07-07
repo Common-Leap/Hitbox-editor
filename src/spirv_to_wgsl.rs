@@ -5139,7 +5139,10 @@ fn main() -> FragmentOutput {
     return FragmentOutput(_fx_native_col_base);
 }
 ";
+        // Injection is opt-in (FX_SOFT_PARTICLE) — force it on for the structural test.
+        std::env::set_var("FX_SOFT_PARTICLE", "1");
         let out = inject_soft_particle_fs(fs);
+        std::env::remove_var("FX_SOFT_PARTICLE");
         assert!(out.contains("@group(3) @binding(0) var scene_depth"));
         assert!(out.contains("_fx_apply_soft_particle"));
         assert!(out.contains(
@@ -5157,7 +5160,10 @@ fn main(@builtin(position) gl_FragCoord: vec4<f32>) -> FragmentOutput {
     return FragmentOutput(col);
 }
 ";
+        // Injection is opt-in (FX_SOFT_PARTICLE) — force it on for the structural test.
+        std::env::set_var("FX_SOFT_PARTICLE", "1");
         let out = inject_soft_particle_fs(fs);
+        std::env::remove_var("FX_SOFT_PARTICLE");
         assert_eq!(out.matches("@builtin(position)").count(), 1);
         assert!(out.contains("_fx_frag_pos = gl_FragCoord"));
         assert!(out.contains("_fx_apply_soft_particle(col, _fx_frag_pos)"));

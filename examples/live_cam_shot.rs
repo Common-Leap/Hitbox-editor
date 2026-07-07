@@ -32,15 +32,23 @@ fn main() {
         eprintln!("no GPU");
         std::process::exit(1);
     };
-    let Some(eff) = hitbox_editor::scratch_dirs::resolve_fighter_eff(&fighter) else {
-        eprintln!("no eff for {fighter}");
-        std::process::exit(1);
+    // A fighter name resolves via the data root; a path (contains '/') is used directly.
+    let eff = if fighter.contains('/') {
+        std::path::PathBuf::from(&fighter)
+    } else {
+        match hitbox_editor::scratch_dirs::resolve_fighter_eff(&fighter) {
+            Some(p) => p,
+            None => {
+                eprintln!("no eff for {fighter}");
+                std::process::exit(1);
+            }
+        }
     };
+    let mut idx = hitbox_editor::effects::EffIndex::from_file(&eff).expect("eff parse");
+    let mut ptcl = hitbox_editor::effects::PtclFile::parse(&idx.ptcl_data).expect("ptcl parse");
     // FX_MERGE_COMMON=1: merge ef_common.eff like the live app does, to reproduce the
     // live viewport's merged-PTCL state in the harness.
-    let harness = if std::env::var("FX_MERGE_COMMON").is_ok() {
-        let mut idx = hitbox_editor::effects::EffIndex::from_file(&eff).expect("eff parse");
-        let mut ptcl = hitbox_editor::effects::PtclFile::parse(&idx.ptcl_data).expect("ptcl parse");
+    if std::env::var("FX_MERGE_COMMON").is_ok() {
         let common = eff
             .parent()
             .and_then(|p| p.parent())
@@ -50,11 +58,15 @@ fn main() {
             .expect("ef_common.eff not found next to fighter effects");
         idx.merge_from_file_with_ptcl(&common, &mut ptcl).expect("merge ef_common");
         eprintln!("[live_cam_shot] merged ef_common: {} sets", ptcl.emitter_sets.len());
-        EffectHarness::from_parts(&device, &queue, idx, ptcl, "ef_samus.eff")
-    } else {
-        EffectHarness::load(&device, &queue, &eff)
-    };
-    let Some(harness) = harness else {
+    }
+    // Register set names as handles so sets without usable eff handles (common sets like
+    // P_CmnBombMain1, whose SYS_* handles parse with set idx -1) are spawnable by name.
+    for (i, set) in ptcl.emitter_sets.iter().enumerate() {
+        idx.handles.entry(set.name.clone()).or_insert(i as i32);
+        idx.handles.entry(set.name.to_lowercase()).or_insert(i as i32);
+    }
+    let source_name = eff.file_name().and_then(|s| s.to_str()).unwrap_or("effect.eff").to_string();
+    let Some(harness) = EffectHarness::from_parts(&device, &queue, idx, ptcl, &source_name) else {
         eprintln!("load failed");
         std::process::exit(1);
     };

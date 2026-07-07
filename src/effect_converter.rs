@@ -354,50 +354,71 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
                 }
             }
 
-            // Read textures (.bntx files) in this emitter directory
-            let mut tex_list: Vec<TextureRes> = Vec::new();
+            // Read textures (<texture_id>.bntx) in this emitter directory and order them
+            // by the emitter's sampler slots (Sampler0..5 TextureID). Directory order is
+            // filesystem-dependent and REVERSED the slots for some emitters (ring3), and
+            // the per-slot entries used to carry offsets from their own discarded BNTX
+            // section (usually 0) — every alpha/indirect slot decoded the first texture's
+            // bytes as noise. Entries now point into the shared texture_section.
+            let mut by_id: Vec<(u64, TextureRes, Vec<u8>)> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&emtr_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.extension().and_then(|e| e.to_str()) == Some("bntx") {
-                        if let Ok(bntx_bytes) = std::fs::read(&p) {
-                            let (tex_map, _section, _ordered) =
-                                crate::effects::parse_bntx_named(&bntx_bytes);
-                            if let Some((_, (tex, _pixels))) = tex_map.into_iter().next() {
-                                tex_list.push(tex);
-                            }
-                        }
-                    }
+                let mut paths: Vec<std::path::PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("bntx"))
+                    .collect();
+                paths.sort();
+                for p in paths {
+                    let Ok(bntx_bytes) = std::fs::read(&p) else { continue };
+                    let (mut tex_map, _section, ordered) =
+                        crate::effects::parse_bntx_named(&bntx_bytes);
+                    let Some(first) = ordered.first() else { continue };
+                    let Some((tex, pixels)) = tex_map.remove(&first.tex_name) else {
+                        continue;
+                    };
+                    let id = p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(u64::MAX);
+                    by_id.push((id, tex, pixels));
                 }
             }
-
-            // Build texture_section / bntx_textures from the collected textures
-            for tex in &tex_list {
-                let tex_clone = tex.clone();
-                if let Ok(entries) = std::fs::read_dir(&emtr_dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.extension().and_then(|e| e.to_str()) == Some("bntx") {
-                            if let Ok(bntx_bytes) = std::fs::read(&p) {
-                                let (tex_map2, _section2, _ordered2) =
-                                    crate::effects::parse_bntx_named(&bntx_bytes);
-                                for (name, (_tex_res, pixels)) in &tex_map2 {
-                                    if *name == tex_clone.tex_name {
-                                        let offset = texture_section.len() as u32;
-                                        texture_section.extend_from_slice(pixels);
-                                        let mut tx = tex_clone.clone();
-                                        tx.ftx_data_offset = offset;
-                                        tx.ftx_data_size = pixels.len() as u32;
-                                        tx.original_data_offset = offset;
-                                        tx.original_data_size = pixels.len() as u32;
-                                        bntx_textures.push(tx);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+            let sampler_ids: Vec<u64> = [
+                &emitter_data.sampler0,
+                &emitter_data.sampler1,
+                &emitter_data.sampler2,
+                &emitter_data.sampler3,
+                &emitter_data.sampler4,
+                &emitter_data.sampler5,
+            ]
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .map(|s| s.texture_id)
+            .filter(|&id| id != u64::MAX)
+            .collect();
+            let mut slot_texs: Vec<(TextureRes, Vec<u8>)> = Vec::new();
+            for id in &sampler_ids {
+                if let Some(pos) = by_id.iter().position(|(i, ..)| i == id) {
+                    let (_, tex, pixels) = by_id.remove(pos);
+                    slot_texs.push((tex, pixels));
                 }
+            }
+            // Textures without a matching sampler id keep sorted-filename order.
+            for (_, tex, pixels) in by_id {
+                slot_texs.push((tex, pixels));
+            }
+
+            let mut tex_list: Vec<TextureRes> = Vec::new();
+            for (tex, pixels) in slot_texs {
+                let mut tx = tex;
+                tx.ftx_data_offset = texture_section.len() as u32;
+                tx.ftx_data_size = pixels.len() as u32;
+                tx.original_data_offset = tx.ftx_data_offset;
+                tx.original_data_size = tx.ftx_data_size;
+                texture_section.extend_from_slice(&pixels);
+                bntx_textures.push(tx.clone());
+                tex_list.push(tx);
             }
 
             // Read primitive models (.bfres files) — track where this emitter's models start
@@ -1733,11 +1754,14 @@ fn convert_emitter_data(
     let mesh_type = 0;
     let primitive_index = 0;
 
-    // ── Indirect texture fields (from sampler1 / texture_anim1) ────────────
-    let is_indirect_slot1 = tex_list
-        .get(1)
-        .map(|t| t.tex_name.to_lowercase().contains("indirect"))
-        .unwrap_or(false);
+    // ── Indirect texture fields ────────────────────────────────────────────
+    // tex_list is in GAME sampler-slot order; the indirect texture can sit at slot 0
+    // (smokeBomb: Sampler0 = ef_cmn_bomb_indirect00, Sampler1 = ef_cmn_smoke11). The
+    // editor's colour/alpha caches still assume colour-first, so classify by name.
+    let indirect_pos = tex_list
+        .iter()
+        .position(|t| t.tex_name.to_lowercase().contains("indirect"));
+    let is_indirect_slot1 = indirect_pos.is_some() && tex_list.len() >= 2;
     let distortion_strength = json.emitter_static.as_ref()
         .and_then(|s| s.tex_scroll_anim1.as_ref())
         .map(|t| t.distortion_strength.clamp(0.0, 1.0))
@@ -1864,14 +1888,21 @@ fn convert_emitter_data(
     let _ = crate::combiner::combiner_texture_slots_used(&combiner_state);
 
     // ── texture_index ──────────────────────────────────────────────────────
-    let texture_index = if !bntx_textures.is_empty() && !tex_list.is_empty() {
-        // Find the first matching entry in bntx_textures
-        bntx_textures
+    // The editor's colour texture (drives aspect / UV-grid inference / slot-0 cache):
+    // the first NON-indirect entry — the indirect UV-distortion map can occupy game
+    // sampler slot 0 and must not become the colour texture (smokeBomb rendered its
+    // smoke through the 128² indirect map's inferred flipbook grid → full-width quads).
+    let color_tex_name = tex_list
+        .iter()
+        .enumerate()
+        .find(|(i, _)| Some(*i) != indirect_pos)
+        .map(|(_, t)| t.tex_name.clone());
+    let texture_index = match (&color_tex_name, bntx_textures.is_empty()) {
+        (Some(name), false) => bntx_textures
             .iter()
-            .position(|t| t.tex_name == tex_list[0].tex_name)
-            .unwrap_or(0) as u32
-    } else {
-        0
+            .position(|t| &t.tex_name == name)
+            .unwrap_or(0) as u32,
+        _ => 0,
     };
 
     // ── Sampler wrap modes (Texture0–1) ────────────────────────────────────

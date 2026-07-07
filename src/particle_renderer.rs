@@ -2639,10 +2639,17 @@ impl ParticleRenderer {
                     }
                 }
 
-                // ── Slot-1 alpha/gradient texture upload ──────────────────
-                // If the emitter has a second texture slot, decode and upload it.
-                // The alpha_view_cache entry will be used to build combined bind groups at render time.
-                if let Some(alpha_res) = emitter.textures.get(1) {
+                // ── Slot-1 alpha/gradient/indirect texture upload ──────────
+                // emitter.textures is in GAME sampler-slot order, where the indirect
+                // UV-distortion map can occupy slot 0 (smokeBomb). The editor's
+                // secondary slot is: the indirect entry when present, else textures[1];
+                // the colour entry stays whatever texture_index resolves to.
+                let secondary_res = emitter
+                    .textures
+                    .iter()
+                    .find(|t| t.tex_name.to_lowercase().contains("indirect"))
+                    .or_else(|| emitter.textures.get(1));
+                if let Some(alpha_res) = secondary_res {
                     if alpha_res.width > 0 && alpha_res.height > 0 {
                         let a_data_offset = alpha_res.ftx_data_offset as usize;
                         let a_data_size   = alpha_res.ftx_data_size as usize;
@@ -3560,9 +3567,11 @@ impl ParticleRenderer {
         }
 
         let only_emitter: Option<usize> = std::env::var("FX_ONLY_EMITTER").ok().and_then(|s| s.parse().ok());
+        let skip_emitter: Option<usize> = std::env::var("FX_SKIP_EMITTER").ok().and_then(|s| s.parse().ok());
         let mut sorted_billboard: Vec<&Particle> = particles
             .iter()
             .filter(|p| only_emitter.is_none_or(|e| p.emitter_idx == e))
+            .filter(|p| skip_emitter.is_none_or(|e| p.emitter_idx != e))
             .collect();
         sorted_billboard.sort_by(|a, b| {
             crate::effects::particle_draw_sort_key(a)
