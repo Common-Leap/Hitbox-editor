@@ -88,6 +88,15 @@ pub fn fs_main_entry(targets: [Option<wgpu::ColorTargetState>; 1]) -> FragmentEn
         constants: Default::default(),
     }
 }
+pub fn fs_tonemap_main_entry(
+    targets: [Option<wgpu::ColorTargetState>; 1],
+) -> FragmentEntry<1> {
+    FragmentEntry {
+        entry_point: ENTRY_FS_TONEMAP_MAIN,
+        targets,
+        constants: Default::default(),
+    }
+}
 pub fn fs_sub_main_entry(
     targets: [Option<wgpu::ColorTargetState>; 1],
 ) -> FragmentEntry<1> {
@@ -120,6 +129,7 @@ pub fn create_pipeline_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
 }
 pub const ENTRY_FS_MAIN: &str = "fs_main";
 pub const ENTRY_FS_SUB_MAIN: &str = "fs_sub_main";
+pub const ENTRY_FS_TONEMAP_MAIN: &str = "fs_tonemap_main";
 pub const ENTRY_VS_MAIN: &str = "vs_main";
 #[derive(Debug)]
 pub struct VertexEntry<const N: usize> {

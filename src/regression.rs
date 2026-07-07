@@ -140,7 +140,19 @@ impl<'a> EffectHarness<'a> {
         let eff = EffIndex::from_file(eff_path).ok()?;
         let ptcl = PtclFile::parse(&eff.ptcl_data).ok()?;
         let filename = eff_path.file_name()?.to_str()?;
-        let bnsh_set = BnshShaderSet::from_ptcl_file(&ptcl, filename).ok()?;
+        Self::from_parts(device, queue, eff, ptcl, filename)
+    }
+
+    /// Like [`Self::load`], but from already-parsed (possibly ef_common-merged) data —
+    /// lets the harness reproduce the live app's merged-PTCL state exactly.
+    pub fn from_parts(
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        eff: EffIndex,
+        ptcl: PtclFile,
+        source_name: &str,
+    ) -> Option<Self> {
+        let bnsh_set = BnshShaderSet::from_ptcl_file(&ptcl, source_name).ok()?;
         Some(Self {
             device,
             queue,

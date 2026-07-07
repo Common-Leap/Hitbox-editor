@@ -1243,6 +1243,22 @@ fn nvn_table_entry(entries: &[[f32; 4]], i: usize) -> [f32; 4] {
     }
 }
 
+/// Colour1 keyframe table (cbuf_9 slots 84..87): the second multiplier colour chain.
+/// Constant-white 1-key table when unauthored — capture-verified (game fire_g dumps
+/// (1,1,1,0),(1,1,1,1),(1,1,1,2),(1,1,1,3)); the old zero fill multiplied every
+/// emitter's colour chain to black.
+fn nvn_color_table1_entries(emitter: &EmitterDef) -> Vec<[f32; 4]> {
+    if !emitter.color1.is_empty() {
+        return emitter
+            .color1
+            .iter()
+            .map(|k| [k.r, k.g, k.b, k.frame.clamp(0.0, 1.0)])
+            .collect();
+    }
+    let c = crate::effects::sample_color_or_white(&emitter.color1, 0.0);
+    vec![[c.x, c.y, c.z, 0.0]]
+}
+
 fn cbuf_base_kind(buf_name: &str) -> Option<&'static str> {
     // Longer prefixes first — `cbuf_1` is a prefix of `cbuf_10` / `cbuf_16`.
     if buf_name.starts_with("cbuf_16") {
@@ -1595,7 +1611,9 @@ fn build_cbuf_9_slots(slots: &HashSet<u32>, ctx: &NvnEvalContext<'_>) -> NvnBuff
             114 => data.set(114, [0.0, 0.0, 0.0, 1.0]),
             // Axis scales for in_attr0_.xyz — must be 1.0 so particle center reaches gl_Position
             115 => data.set(115, [1.0, 1.0, 1.0, 1.0]),
-            84 => data.set(84, [0.0, 0.0, 0.0, 0.0]),
+            // [84..87]: colour1 keyframe table — filled by `fill_cbuf_9_color_alpha_tables`
+            // (the old [84]=zeros fill multiplied every emitter's colour chain to black).
+            84..=87 => {}
             92 => data.set(
                 92,
                 [
@@ -1700,6 +1718,14 @@ fn fill_cbuf_9_color_alpha_tables(
         for i in 0..NVN_TABLE_MAX_KEYS {
             if slots.contains(&(68 + i as u32)) {
                 data.set(68 + i as u64, nvn_table_entry(&entries, i));
+            }
+        }
+    }
+    if slots.iter().any(|&s| (84..=87).contains(&s)) {
+        let entries = nvn_color_table1_entries(emitter);
+        for i in 0..4 {
+            if slots.contains(&(84 + i as u32)) {
+                data.set(84 + i as u64, nvn_table_entry(&entries, i));
             }
         }
     }
@@ -1837,7 +1863,8 @@ fn documented_cbuf_8_slots() -> HashSet<u32> {
 fn documented_cbuf_9_slots() -> HashSet<u32> {
     [
         0, 1, 2, 3, 5, 8, 9, 10, 13, 14, 15, 17, 44, 45, 46, 47, 48, 49, 50, 51, 53, 59, 60, 61,
-        62, 68, 69, 70, 71, 76, 77, 78, 84, 92, 94, 96, 97, 98, 99, 100, 101, 113, 114, 115,
+        62, 68, 69, 70, 71, 76, 77, 78, 84, 85, 86, 87, 92, 94, 96, 97, 98, 99, 100, 101, 113,
+        114, 115,
     ]
     .into_iter()
     .collect()

@@ -613,8 +613,11 @@ pub struct ParticleRenderer {
     /// Per-frame vertex buffer for BNSH particle quads (shared across shader variants)
     bnsh_vertex_buf: Option<wgpu::Buffer>,
     bnsh_vertex_buf_capacity: usize,
-    /// Surface texture format (stored for lazy BNSH pipeline variant creation)
+    /// Surface texture format (blit composite output)
     surface_format: wgpu::TextureFormat,
+    /// Format particle/trail pipelines render into (offscreen HDR target or the surface;
+    /// stored for lazy BNSH pipeline variant creation)
+    particle_format: wgpu::TextureFormat,
     /// CPU→GPU uploads happen in prepare; paint only records draws (wgpu rule).
     prepared_trail_vertex_count: u32,
     /// `(draw_path, first_vertex, vertex_count)` into [`Self::trail_vertex_buf`].
@@ -1431,9 +1434,23 @@ fn build_bnsh_frame_bind_groups_inner(
 impl ParticleRenderer {
     /// Create particle renderer with BNSH shaders from effect file
     pub fn new(
-        device: &wgpu::Device, 
-        queue: &wgpu::Queue, 
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
+        bnsh_shaders: &BnshShaderSet,
+    ) -> Self {
+        Self::new_with_particle_format(device, queue, surface_format, surface_format, bnsh_shaders)
+    }
+
+    /// Like [`Self::new`], but particle/trail pipelines render into `particle_format`
+    /// offscreen targets (e.g. `Rgba16Float` for HDR accumulation) while the blit
+    /// composite pipelines still output to `surface_format`. When the formats differ
+    /// the color blit tonemaps (`fs_tonemap_main`) and alpha-composites over the scene.
+    pub fn new_with_particle_format(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        particle_format: wgpu::TextureFormat,
         bnsh_shaders: &BnshShaderSet,
     ) -> Self {
         eprintln!("[ParticleRenderer] BNSH shader set provided: {}", bnsh_shaders.summary());
@@ -1842,7 +1859,7 @@ impl ParticleRenderer {
             alpha: wgpu::BlendComponent::OVER,
         };
         let color_target = wgpu::ColorTargetState {
-            format: surface_format,
+            format: particle_format,
             blend: Some(additive_blend),
             write_mask: wgpu::ColorWrites::ALL,
         };
@@ -1910,7 +1927,7 @@ impl ParticleRenderer {
             Some(&bnsh_extra_tex345_bg_layout),
             &bnsh_group2_placeholder_bg_layout,
             Some(&bnsh_soft_particle_bg_layout),
-            surface_format,
+            particle_format,
             &format!("{:#x}", bnsh_shaders.default_key),
         );
         let mut bnsh_pipelines = HashMap::new();
@@ -1955,14 +1972,40 @@ impl ParticleRenderer {
             ..Default::default()
         });
 
-        let blit_color_target = wgpu::ColorTargetState {
-            format: surface_format,
-            // Replace-only blit; empty texels are discarded in blit.wgsl so the mesh pass is preserved.
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
+        let hdr_composite = particle_format != surface_format;
+        let blit_color_target = if hdr_composite {
+            // HDR accumulate → tonemap, then alpha-composite over the scene (layer is
+            // premultiplied by construction: blend into transparent black).
+            wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::OVER,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            }
+        } else {
+            wgpu::ColorTargetState {
+                format: surface_format,
+                // Replace-only blit; empty texels are discarded in blit.wgsl so the mesh pass is preserved.
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }
         };
         let blit_vs_entry = crate::blit_shader::vs_main_entry();
-        let blit_fs_entry = crate::blit_shader::fs_main_entry([Some(blit_color_target)]);
+        let blit_fs_entry = crate::blit_shader::FragmentEntry {
+            entry_point: if hdr_composite {
+                crate::blit_shader::ENTRY_FS_TONEMAP_MAIN
+            } else {
+                crate::blit_shader::ENTRY_FS_MAIN
+            },
+            targets: [Some(blit_color_target)],
+            constants: Default::default(),
+        };
 
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blit_pipeline"),
@@ -2109,6 +2152,7 @@ impl ParticleRenderer {
             prepared_bnsh_draws: Vec::new(),
             prepared_draw_paths: Vec::new(),
             surface_format,
+            particle_format,
             primitives: Vec::new(),
             bfres_models: Vec::new(),
         }
@@ -2143,7 +2187,7 @@ impl ParticleRenderer {
                 Some(&self.bnsh_extra_tex345_bg_layout),
                 &self.bnsh_group2_placeholder_bg_layout,
                 Some(&self.bnsh_soft_particle_bg_layout),
-                self.surface_format,
+                self.particle_format,
                 &label,
             );
             self.bnsh_pipelines.insert(pipeline_key, state);
@@ -2177,9 +2221,9 @@ impl ParticleRenderer {
                         BlendType::Screen,
                         BlendType::Multiply,
                     ] {
-                        state.pipeline_for_blend(device, self.surface_format, blend, &label, false, false);
-                        state.pipeline_for_blend(device, self.surface_format, blend, &label, true, false);
-                        state.pipeline_for_blend(device, self.surface_format, blend, &label, true, true);
+                        state.pipeline_for_blend(device, self.particle_format, blend, &label, false, false);
+                        state.pipeline_for_blend(device, self.particle_format, blend, &label, true, false);
+                        state.pipeline_for_blend(device, self.particle_format, blend, &label, true, true);
                     }
                 }
             }
@@ -4082,7 +4126,7 @@ impl ParticleRenderer {
             let shader_label = format!("{:#x}", draw.pipeline_key);
             let pipeline = state.pipeline_for_blend(
                 device,
-                self.surface_format,
+                self.particle_format,
                 draw.blend,
                 &shader_label,
                 depth.test,

@@ -36,7 +36,25 @@ fn main() {
         eprintln!("no eff for {fighter}");
         std::process::exit(1);
     };
-    let Some(harness) = EffectHarness::load(&device, &queue, &eff) else {
+    // FX_MERGE_COMMON=1: merge ef_common.eff like the live app does, to reproduce the
+    // live viewport's merged-PTCL state in the harness.
+    let harness = if std::env::var("FX_MERGE_COMMON").is_ok() {
+        let mut idx = hitbox_editor::effects::EffIndex::from_file(&eff).expect("eff parse");
+        let mut ptcl = hitbox_editor::effects::PtclFile::parse(&idx.ptcl_data).expect("ptcl parse");
+        let common = eff
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.join("system/common/ef_common.eff"))
+            .filter(|p| p.exists())
+            .expect("ef_common.eff not found next to fighter effects");
+        idx.merge_from_file_with_ptcl(&common, &mut ptcl).expect("merge ef_common");
+        eprintln!("[live_cam_shot] merged ef_common: {} sets", ptcl.emitter_sets.len());
+        EffectHarness::from_parts(&device, &queue, idx, ptcl, "ef_samus.eff")
+    } else {
+        EffectHarness::load(&device, &queue, &eff)
+    };
+    let Some(harness) = harness else {
         eprintln!("load failed");
         std::process::exit(1);
     };

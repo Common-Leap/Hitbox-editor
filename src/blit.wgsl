@@ -37,6 +37,29 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     return vec4(c.rgb, 1.0);
 }
 
+// ACES filmic approximation (Narkowicz 2015). Rolls HDR fire off toward saturated
+// orange instead of clamping to white like a raw 8-bit additive accumulate.
+fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3(0.0), vec3(1.0));
+}
+
+// HDR composite: offscreen is RGBA16F accumulated in linear light; tonemap and
+// alpha-composite over the scene (premultiplied layer, blend One / OneMinusSrcAlpha).
+@fragment
+fn fs_tonemap_main(in: VOut) -> @location(0) vec4<f32> {
+    let c = textureSample(t_particle, s_particle, in.uv);
+    if (c.a == 0.0 && c.r == 0.0 && c.g == 0.0 && c.b == 0.0) {
+        discard;
+    }
+    let alpha = clamp(c.a, 0.0, 1.0);
+    return vec4(tonemap_aces(c.rgb), alpha);
+}
+
 // Sub offscreen is cleared to white; discard untouched backdrop before reverse-subtract blit.
 @fragment
 fn fs_sub_main(in: VOut) -> @location(0) vec4<f32> {

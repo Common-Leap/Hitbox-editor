@@ -11,6 +11,16 @@ use ssbh_wgpu::{
 use crate::particle_renderer::{BnshDrawFilter, DepthDrawConfig};
 use crate::particle_renderer_bnsh::PARTICLE_DEPTH_FORMAT;
 
+/// Live-viewport particle accumulation format: RGBA16F so additive fire keeps HDR
+/// magnitudes for the tonemap blit instead of clamping at 1.0 in the 8-bit surface.
+fn particle_offscreen_format(surface_format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    if crate::fx_env::fx_hdr_composite_enabled() {
+        wgpu::TextureFormat::Rgba16Float
+    } else {
+        surface_format
+    }
+}
+
 /// Per-draw_path offscreen color + depth targets for particle compositing.
 struct ParticlePathTarget {
     color: wgpu::Texture,
@@ -295,18 +305,19 @@ impl HitboxRenderState {
         }
         while self.particle_path_targets.len() < path_count {
             let i = self.particle_path_targets.len();
+            let offscreen_format = particle_offscreen_format(self.surface_format);
             let (color, color_view) = create_particle_path_color(
                 device,
                 width,
                 height,
-                self.surface_format,
+                offscreen_format,
                 &format!("particle_path_{i}"),
             );
             let (sub_color, sub_color_view) = create_particle_path_color(
                 device,
                 width,
                 height,
-                self.surface_format,
+                offscreen_format,
                 &format!("particle_sub_path_{i}"),
             );
             let (depth, depth_view) = create_particle_path_depth(device, width, height);
@@ -456,10 +467,11 @@ impl HitboxRenderState {
         let surface_format = self.surface_format;
         let bnsh = bnsh_shaders.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            crate::particle_renderer::ParticleRenderer::new(
+            crate::particle_renderer::ParticleRenderer::new_with_particle_format(
                 device,
                 queue,
                 surface_format,
+                particle_offscreen_format(surface_format),
                 &bnsh,
             )
         }));
@@ -842,14 +854,92 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             return Vec::new();
         }
 
+        if crate::fx_env::fx_hdr_composite_enabled() {
+            // HDR composite: accumulate each draw path into its RGBA16F offscreen pair here
+            // (encoder submits before the egui pass), then `paint` runs the tonemap blits.
+            state.ensure_particle_path_targets(device, paths.len());
+            let mut pr_guard = state.particle_renderer.lock().unwrap();
+            if let Some(pr) = pr_guard.as_mut() {
+                for (i, &path) in paths.iter().enumerate() {
+                    let target = &state.particle_path_targets[i];
+                    {
+                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some(&format!("particle_hdr_path_{path}")),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &target.color_view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            multiview_mask: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                        pr.draw_prepared_particles_for_path(
+                            device,
+                            &mut rpass,
+                            path,
+                            true,
+                            BnshDrawFilter::ExcludeSub,
+                            DepthDrawConfig::NONE,
+                        );
+                    }
+                    {
+                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some(&format!("particle_hdr_sub_path_{path}")),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &target.sub_color_view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            multiview_mask: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                        pr.draw_prepared_particles_for_path(
+                            device,
+                            &mut rpass,
+                            path,
+                            false,
+                            BnshDrawFilter::SubOnly,
+                            DepthDrawConfig::NONE,
+                        );
+                    }
+                }
+                let color_views: Vec<&wgpu::TextureView> = state
+                    .particle_path_targets
+                    .iter()
+                    .take(paths.len())
+                    .map(|t| &t.color_view)
+                    .collect();
+                let sub_views: Vec<&wgpu::TextureView> = state
+                    .particle_path_targets
+                    .iter()
+                    .take(paths.len())
+                    .map(|t| &t.sub_color_view)
+                    .collect();
+                pr.prepare_composite(device, &color_views, &sub_views);
+            }
+        }
+
         if crate::fx_env::fx_viewport_log_enabled() {
             let pr_guard = state.particle_renderer.lock().unwrap();
             if let Some(pr) = pr_guard.as_ref() {
                 eprintln!(
-                    "[VIEWPORT] finish_prepare: {} draw paths, target={}x{} (direct viewport draw in paint)",
+                    "[VIEWPORT] finish_prepare: {} draw paths, target={}x{} (hdr_composite={})",
                     paths.len(),
                     width,
                     height,
+                    crate::fx_env::fx_hdr_composite_enabled(),
                 );
             }
         }
@@ -907,6 +997,11 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     self.particles.len(),
                     pr.prepared_draw_paths().len(),
                 );
+            }
+            if crate::fx_env::fx_hdr_composite_enabled() && pr.editor_composite_is_ready() {
+                // Tonemap blit of the HDR offscreen accumulation from finish_prepare.
+                pr.composite_editor_particles(render_pass);
+                return;
             }
             let paths: Vec<u32> = pr.prepared_draw_paths().to_vec();
             for path in paths {

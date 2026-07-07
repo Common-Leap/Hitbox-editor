@@ -106,6 +106,39 @@ pub fn fx_bc5_swizzle_fix_enabled() -> bool {
     }
 }
 
+/// Soft-particle scene-depth fade: opt-in with `FX_SOFT_PARTICLE=1` until the fade
+/// math is capture-validated (it currently suppresses most of the effect body when a
+/// real scene depth is bound in the live viewport).
+pub fn fx_soft_particle_enabled() -> bool {
+    matches!(
+        std::env::var("FX_SOFT_PARTICLE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn read_hdr_composite_from_env() -> bool {
+    match std::env::var("FX_HDR_COMPOSITE").as_deref() {
+        Ok("0") | Ok("false") | Ok("no") => false,
+        _ => true,
+    }
+}
+
+/// Accumulate live-viewport particles in an RGBA16F offscreen target and tonemap on
+/// composite, so additive fire doesn't clamp to white in the 8-bit surface (the game
+/// renders effects into an HDR scene buffer and tonemaps afterwards).
+/// Opt out with `FX_HDR_COMPOSITE=0` to draw particles directly into the surface pass.
+pub fn fx_hdr_composite_enabled() -> bool {
+    #[cfg(any(test, debug_assertions))]
+    {
+        return read_hdr_composite_from_env();
+    }
+    #[cfg(not(any(test, debug_assertions)))]
+    {
+        static FX_HDR_COMPOSITE: OnceLock<bool> = OnceLock::new();
+        *FX_HDR_COMPOSITE.get_or_init(read_hdr_composite_from_env)
+    }
+}
+
 /// Use the decoded NVN vertex position chain when the shader family is fully wired.
 /// Opt out with `FX_NATIVE_VS_POS=0` to force the CPU billboard VP override fallback.
 fn read_native_vs_pos_from_env(default_when_unset: bool) -> bool {

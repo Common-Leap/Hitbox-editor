@@ -47,7 +47,7 @@ fn dump_set(set_idx: usize, set: &hitbox_editor::effects::EmitterSet) {
             "name": emitter.name,
             "cbuf_16": grab(&c16, &[0, 1, 2, 3, 4]),
             "cbuf_10": grab(&c10, &[0, 1, 2, 3]),
-            "cbuf_9_tables": grab(&c9, &[60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75]),
+            "cbuf_9_tables": grab(&c9, &[5, 44, 45, 46, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 84, 85, 86, 87, 113, 114, 115]),
             "cbuf_9_uv": grab(&c9, &[8, 10, 48, 53, 96, 97, 98, 99]),
             "scale_xy": [emitter.scale, emitter.scale * emitter.scale_aspect_y],
             "emitter_scale": emitter.emitter_scale.to_array(),

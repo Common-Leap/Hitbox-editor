@@ -2957,13 +2957,24 @@ fn insert_billboard_clip_position(wgsl: &str, mode: BillboardClipMode) -> String
             override_code.push_str("        out_attr12_ = in_attr12_1;\n");
         }
     }
-    // Native main_1() maps out_attr4.w from in_attr3.w (rotation); bomb FS uses in_attr4.w for
-    // the life/alpha GPR gate (gpr_5). Forward CPU attr3/4 so billboard clip overrides do not
-    // leave zero varyings that discard every fragment or zero the colour chain.
-    if wgsl.contains("out_attr3_") && wgsl.contains("in_attr3_1") {
+    // Forward CPU attr3/attr4 only when main_1() does not itself compute the varying, so
+    // clip overrides never leave zero varyings that discard every fragment. When the native
+    // chain (frame-clock fed) DOES write them, keep its outputs — out_attr3 carries the
+    // colour evaluated from the cbuf_9 keyframe tables, and the CPU overwrite rendered all
+    // fire/flare emitters grayscale. Legacy OverrideAll distrusts main_1 wholesale and
+    // keeps the unconditional forward.
+    let force_cpu_attr34 = matches!(mode, BillboardClipMode::OverrideAll);
+    let main1_for_attr34 = vs_main1_body(wgsl);
+    if (force_cpu_attr34 || !main1_writes_varying(&main1_for_attr34, "out_attr3_"))
+        && wgsl.contains("out_attr3_")
+        && wgsl.contains("in_attr3_1")
+    {
         override_code.push_str("        out_attr3_ = in_attr3_1;\n");
     }
-    if wgsl.contains("out_attr4_") && wgsl.contains("in_attr4_1") {
+    if (force_cpu_attr34 || !main1_writes_varying(&main1_for_attr34, "out_attr4_"))
+        && wgsl.contains("out_attr4_")
+        && wgsl.contains("in_attr4_1")
+    {
         override_code.push_str("        out_attr4_ = in_attr4_1;\n");
     }
     // Family-A bomb VS computes atlas UV in main_1() without reading CPU attr2; forward quad UV.
@@ -2977,6 +2988,17 @@ fn insert_billboard_clip_position(wgsl: &str, mode: BillboardClipMode) -> String
     let mut result = wgsl.to_string();
     result.insert_str(insert_at, &override_code);
     result
+}
+
+/// True when `main_1()` assigns the varying beyond naga's `_NNN_init` zero-initializers
+/// (whole-vector assignment from a computed value, or any per-component write).
+fn main1_writes_varying(main1: &str, name: &str) -> bool {
+    let assign = format!("{name} =");
+    let component = format!("{name}.");
+    main1.lines().any(|l| {
+        let t = l.trim_start();
+        (t.starts_with(&assign) && !t.contains("_init;")) || t.starts_with(&component)
+    })
 }
 
 /// Insert an early return at the start of `@fragment fn main` (after input copies).
@@ -3011,6 +3033,13 @@ fn debug_fs_output_expr(wgsl: &str) -> String {
         "vec4<f32>(cbuf_9_1_._m0_[59].x, cbuf_9_1_._m0_[59].x, cbuf_9_1_._m0_[59].x, 1.0)".to_string()
     } else if std::env::var("FX_DEBUG_CBUF60_FS").is_ok() && wgsl.contains("cbuf_9_1_") {
         "vec4<f32>(cbuf_9_1_._m0_[60].x, cbuf_9_1_._m0_[60].y, cbuf_9_1_._m0_[60].z, 1.0)".to_string()
+    } else if std::env::var("FX_DEBUG_CBUF84_FS").is_ok() && wgsl.contains("cbuf_9_1_") {
+        "vec4<f32>(cbuf_9_1_._m0_[84].x, cbuf_9_1_._m0_[84].y, cbuf_9_1_._m0_[84].z, 1.0)".to_string()
+    } else if std::env::var("FX_DEBUG_ATTR0_FS").is_ok() && wgsl.contains("in_attr0_1") {
+        // Native VS colour-chain varying as received by the FS.
+        "vec4<f32>(in_attr0_1.rgb, 1.0)".to_string()
+    } else if std::env::var("FX_DEBUG_ATTR1_FS").is_ok() && wgsl.contains("in_attr1_1") {
+        "vec4<f32>(in_attr1_1.rgb, 1.0)".to_string()
     } else if std::env::var("FX_DEBUG_VCOLOR_FS").is_ok() && wgsl.contains("in_attr1_1") {
         "vec4<f32>(in_attr1_1.rgb, 1.0)".to_string()
     } else if std::env::var("FX_DEBUG_UV2ZW_FS").is_ok() && wgsl.contains("in_attr2_1") {
@@ -3268,6 +3297,13 @@ fn ensure_fragment_position_builtin(wgsl: &str) -> String {
 /// Gated at runtime via [`FxSoftParticle::enabled`] uniform (see `particle_renderer` group 3 bind).
 /// Does not use `@group(2)` so Agent 3 can keep extra texture bindings there.
 pub fn inject_soft_particle_fs(wgsl: &str) -> String {
+    // Soft-particle depth fade is opt-in (FX_SOFT_PARTICLE=1) until its distance/compare
+    // math is capture-validated: with the live viewport's real scene depth bound it faded
+    // most of the bomb smoke to a dithered remnant (harness never binds scene depth, so
+    // tests could not catch it).
+    if !crate::fx_env::fx_soft_particle_enabled() {
+        return wgsl.to_string();
+    }
     if wgsl.contains("_fx_apply_soft_particle") {
         return wgsl.to_string();
     }
