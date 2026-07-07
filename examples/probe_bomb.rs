@@ -7,8 +7,13 @@ use std::collections::HashMap;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let eff = EffIndex::from_file(args[0].as_ref()).expect("eff");
+    let mut eff = EffIndex::from_file(args[0].as_ref()).expect("eff");
     let ptcl = PtclFile::parse(&eff.ptcl_data).expect("ptcl");
+    // Register set names as handles (common sets like P_CmnBombMain1 have no eff handle).
+    for (i, set) in ptcl.emitter_sets.iter().enumerate() {
+        eff.handles.entry(set.name.clone()).or_insert(i as i32);
+        eff.handles.entry(set.name.to_lowercase()).or_insert(i as i32);
+    }
     let handle = args[1].clone();
     let max_frame: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
 

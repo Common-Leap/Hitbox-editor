@@ -2275,14 +2275,31 @@ fn sphere_spawn_y(emitter: &EmitterDef, ru: impl Fn(usize) -> f32) -> f32 {
 fn circle_same_divide_theta(emitter: &EmitterDef, index: usize, count: usize, seed: usize) -> f32 {
     let count = effective_circle_divide_count(emitter, count);
     let idx = circle_divide_index(emitter, index, count, seed);
-    let start = emitter.sweep_start;
+    // SweepStartRandom rotates each emission wave as a whole. Spawn loops pass
+    // seed = wave_base + index, so wave_base = seed - index keeps the divided points
+    // equally spaced within a wave while each wave lands at a fresh rotation
+    // (capture: smoke1_fireLine spawn positions cover the whole disc).
+    let start = if emitter.sweep_start_random {
+        rand_unit(seed.wrapping_sub(index).wrapping_add(61)) * std::f32::consts::TAU
+    } else {
+        emitter.sweep_start
+    };
     if count <= 1 {
         return start;
     }
-    let step = if emitter.sweep_longitude > 0.0 {
-        emitter.sweep_longitude / (count - 1) as f32
+    // Full-circle sweeps tile (the endpoint wraps onto the start): step = sweep/count.
+    // Partial arcs include both endpoints: step = sweep/(count-1). Using /(count-1) on
+    // a full circle put divide=3 at 0°/180°/360° — two clumps on the x-axis.
+    let sweep = if emitter.sweep_longitude > 0.0 {
+        emitter.sweep_longitude
     } else {
-        std::f32::consts::TAU / count as f32
+        std::f32::consts::TAU
+    };
+    let full_circle = (sweep - std::f32::consts::TAU).abs() < 1e-3;
+    let step = if full_circle {
+        sweep / count as f32
+    } else {
+        sweep / (count - 1) as f32
     };
     start + idx as f32 * step
 }
