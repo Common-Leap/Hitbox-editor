@@ -917,13 +917,19 @@ fn map_named_sampler_pairs_to_descriptors(
     descriptors: &[DescriptorInfo],
 ) -> HashMap<(u32, u32), u32> {
     let mut out = HashMap::new();
-    for (emitter_slot, (_name, tex_binding, sampler_binding)) in pairs.iter().enumerate() {
+    for (emitter_slot, (name, tex_binding, sampler_binding)) in pairs.iter().enumerate() {
         let emitter_slot = emitter_slot as u32;
         let set = descriptor_set_for_binding(descriptors, *tex_binding, BindingClass::Texture)
             .or_else(|| {
                 descriptor_set_for_binding(descriptors, *sampler_binding, BindingClass::Sampler)
             })
             .unwrap_or(0);
+        if crate::fx_debug_enabled() {
+            eprintln!(
+                "[BNSH-BIND] sampler pair '{}' tex@{} sampler@{} (set {}) -> emitter slot {}",
+                name, tex_binding, sampler_binding, set, emitter_slot
+            );
+        }
         out.insert((set, *tex_binding), emitter_slot);
         out.insert((set, *sampler_binding), emitter_slot);
     }

@@ -1375,15 +1375,31 @@ fn build_bnsh_frame_bind_groups_inner(
         if set_idx >= state.bind_group_layouts.len() { break; }
         let layout = &state.bind_group_layouts[set_idx];
 
+        // Reflection slot-map keys use the BNSH reflection binding numbers, which can
+        // differ from the WGSL descriptor bindings after the storage-cbuf remap. When the
+        // lookup misses, fall back to the sampler-slot index encoded in the spirv-cross
+        // name (`texture_1_` / `sampler_1_` → slot 1) — defaulting to slot 0 bound the
+        // colour texture to EVERY slot (smoke1_fireLine's fire02 flame colour at
+        // texture_1_ never appeared; the CmnBomb explosion rendered white).
+        let name_slot = |name: &str| -> u32 {
+            name.trim_end_matches('_')
+                .rsplit('_')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0)
+        };
         let mut bg_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
         for d in entries {
             let entry = match d.class {
                 crate::spirv_to_wgsl::BindingClass::Texture => {
-                    let slot = slot_map
-                        .get(&(d.set, d.binding))
-                        .copied()
-                        .unwrap_or(0)
-                        .min(2) as usize;
+                    let mapped = slot_map.get(&(d.set, d.binding)).copied();
+                    let slot = mapped.unwrap_or_else(|| name_slot(&d.name)).min(2) as usize;
+                    if crate::fx_debug_enabled() {
+                        eprintln!(
+                            "[BNSH-BIND] tex desc '{}' set={} binding={} map={:?} -> slot {}",
+                            d.name, d.set, d.binding, mapped, slot
+                        );
+                    }
                     let (tex_view, _) = emitter_textures[slot];
                     wgpu::BindGroupEntry {
                         binding: d.binding,
@@ -1394,7 +1410,7 @@ fn build_bnsh_frame_bind_groups_inner(
                     let slot = slot_map
                         .get(&(d.set, d.binding))
                         .copied()
-                        .unwrap_or(0)
+                        .unwrap_or_else(|| name_slot(&d.name))
                         .min(2) as usize;
                     let (_, sampler) = emitter_textures[slot];
                     wgpu::BindGroupEntry {
@@ -4559,7 +4575,16 @@ fn append_bnsh_particle_vertices(
             let attr7 = [corner[0], corner[1], emitter.offset_type as f32, bb_type as f32];
             vertex_data.extend_from_slice(&center);                    // attr0: position (center)
             vertex_data.extend_from_slice(&color);                     // attr1: color
-            vertex_data.extend_from_slice(&[uv_u, uv_v, 0.0, 0.0]);   // attr2: raw quad UV
+            // attr2: raw quad UV (xy) + secondary-texture quad UV (zw). Native FS chains
+            // sample texture_1_ at in_attr2.zw — zw=0 pinned the slot-1 texture to its
+            // corner texel (smoke1_fireLine's fire02 flame colour never appeared and the
+            // CmnBomb explosion rendered white). Slot-1 scale = texture_anim1 fields.
+            let s1 = emitter.indirect_tex_scale_uv;
+            let uv2 = [
+                uv_u * if s1[0] > 0.0 { s1[0] } else { 1.0 },
+                uv_v * if s1[1] > 0.0 { s1[1] } else { 1.0 },
+            ];
+            vertex_data.extend_from_slice(&[uv_u, uv_v, uv2[0], uv2[1]]);
             vertex_data.extend_from_slice(&attr3);                     // attr3: velocity, rotation
             vertex_data.extend_from_slice(&attr4);                     // attr4: life_t, size, aspect
             vertex_data.extend_from_slice(&attr5);                     // attr5: tex_offset, rot_speed

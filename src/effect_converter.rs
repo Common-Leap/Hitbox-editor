@@ -1403,6 +1403,28 @@ fn convert_emitter_data(
     // ── Color / alpha / scale animation keys ───────────────────────────────
     let (color0, _color0_keys) = extract_color_keys(json.emitter_static.as_ref().and_then(|s| s.color0.as_ref()));
     let (color1, _color1_keys) = extract_color_keys(json.emitter_static.as_ref().and_then(|s| s.color1.as_ref()));
+    // ParticleColor.ColorNType == "Constant": the chain uses the constant RGB from
+    // ParticleColor, not the EmitterStatic keyframe table (which may hold a stale white
+    // key). smoke1_fireLine's flame colour is Color1 = (0.873, 0.082, 0) — capture
+    // [76] matches the constant verbatim; without this it rendered white.
+    let color_type_is_constant = |v: &serde_json::Value| -> bool {
+        v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("constant"))
+    };
+    let (color0, color1) = if let Some(pc) = json.particle_color.as_ref() {
+        let c0 = if color_type_is_constant(&pc.color0_type) {
+            vec![ColorKey { frame: 0.0, r: pc.color0_r, g: pc.color0_g, b: pc.color0_b, a: pc.alpha0 }]
+        } else {
+            color0
+        };
+        let c1 = if color_type_is_constant(&pc.color1_type) {
+            vec![ColorKey { frame: 0.0, r: pc.color1_r, g: pc.color1_g, b: pc.color1_b, a: pc.alpha1 }]
+        } else {
+            color1
+        };
+        (c0, c1)
+    } else {
+        (color0, color1)
+    };
     let (alpha0_anim, alpha0_keys) =
         extract_alpha_keys(json.emitter_static.as_ref().and_then(|s| s.alpha0.as_ref()), lifetime);
     let (alpha1_anim, alpha1_keys) =

@@ -253,17 +253,37 @@ pub fn strip_fs_wgsl_conflicting_with_vs(
     texture_names.dedup();
     sampler_names.sort_unstable();
     sampler_names.dedup();
+    // Redirect stripped set-0 textures to the @group(1) emitter slots BY SAMPLER SLOT
+    // (spirv-cross names them `texture_<N>_` / `sampler_<N>_` in slot order). Collapsing
+    // everything onto color_tex bound the colour texture to every slot — dual-texture
+    // emitters (smoke1_fireLine: smoke17 + fire02) never sampled their second texture
+    // and the CmnBomb explosion rendered white.
+    let slot_of = |name: &str| -> usize {
+        name.trim_end_matches('_')
+            .rsplit('_')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(2)
+    };
+    const TEX_TARGETS: [&str; 3] = ["color_tex", "alpha_tex", "slot2_tex"];
+    const SAMPLER_TARGETS: [&str; 3] = ["color_sampler", "alpha_sampler", "slot2_sampler"];
     let mut redirected = out;
     for name in &texture_names {
-        redirected = replace_wgsl_identifier(&redirected, name, "color_tex");
+        redirected = replace_wgsl_identifier(&redirected, name, TEX_TARGETS[slot_of(name)]);
     }
     for name in &sampler_names {
-        redirected = replace_wgsl_identifier(&redirected, name, "color_sampler");
+        redirected =
+            replace_wgsl_identifier(&redirected, name, SAMPLER_TARGETS[slot_of(name)]);
     }
     // spirv-cross particle FS always samples via these identifiers in the body.
     if !strip_bindings.is_empty() {
         redirected = replace_wgsl_identifier(&redirected, "texture_0_", "color_tex");
         redirected = replace_wgsl_identifier(&redirected, "sampler_0_", "color_sampler");
+        redirected = replace_wgsl_identifier(&redirected, "texture_1_", "alpha_tex");
+        redirected = replace_wgsl_identifier(&redirected, "sampler_1_", "alpha_sampler");
+        redirected = replace_wgsl_identifier(&redirected, "texture_2_", "slot2_tex");
+        redirected = replace_wgsl_identifier(&redirected, "sampler_2_", "slot2_sampler");
     }
     redirected
 }
