@@ -2351,19 +2351,27 @@ fn normalize_anim_key_pairs(pairs: &mut [(f32, f32)], lifetime: f32) {
 /// the 3v4k approximation.
 fn extract_scale_keys(table: Option<&AnimKeyTableJson>, lifetime: f32) -> Vec<ColorKey> {
     let Some(table) = table else { return vec![] };
-    let mut pairs: Vec<(f32, f32)> = table
+    // ScaleAnim keys are XYZ VECTORS — X≠Y is the authored per-axis stretch
+    // (capture: flashLine1_b table (1.61, 1.07, 0.688)@0.42; the game's cbuf_9[96..103]
+    // rows carry (x,y,z,t) verbatim). Collapsing to X lost all stretch.
+    let mut keys: Vec<(f32, [f32; 3])> = table
         .keys
         .iter()
-        .filter(|k| k.time != 0.0 || k.x != 0.0)
-        .map(|k| (k.time, k.x))
+        .filter(|k| k.time != 0.0 || k.x != 0.0 || k.y != 0.0 || k.z != 0.0)
+        .map(|k| (k.time, [k.x, k.y, k.z]))
         .collect();
-    if pairs.is_empty() {
+    if keys.is_empty() {
         return vec![];
     }
+    let mut pairs: Vec<(f32, f32)> = keys.iter().map(|&(t, v)| (t, v[0])).collect();
     normalize_anim_key_pairs(&mut pairs, lifetime);
-    pairs
-        .iter()
-        .map(|&(t, v)| ColorKey { frame: t, r: v, g: v, b: v, a: v })
+    for (k, p) in keys.iter_mut().zip(&pairs) {
+        k.0 = p.0;
+    }
+    keys.iter()
+        // .a keeps X so scalar consumers (`sample_alpha` reads .r; legacy .a readers)
+        // see the same value as before.
+        .map(|&(t, v)| ColorKey { frame: t, r: v[0], g: v[1], b: v[2], a: v[0] })
         .collect()
 }
 

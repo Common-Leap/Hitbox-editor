@@ -4589,6 +4589,14 @@ fn append_bnsh_particle_vertices(
                 .unwrap_or(2.0);
             corner[0] *= corner_scale;
             corner[1] *= corner_scale;
+            // Per-axis stretch: ScaleAnim keys are XYZ vectors; p.size carries the X
+            // curve, so the quad height scales by the authored Y/X ratio at this life.
+            if !emitter.scale_keys.is_empty() {
+                let s = crate::effects::sample_color_or_white(&emitter.scale_keys, life_t);
+                if s.x.abs() > 1e-5 && (s.y - s.x).abs() > 1e-5 {
+                    corner[1] *= s.y / s.x;
+                }
+            }
             corner = crate::effects::stripe_corner_half_extents(bb, corner, aspect, p.velocity);
             corner =
                 crate::effects::rotate_billboard_corner(corner, z_spin, emitter.rot_type, axes);

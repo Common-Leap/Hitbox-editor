@@ -1198,14 +1198,15 @@ fn nvn_alpha_table1_entries(emitter: &EmitterDef) -> Vec<[f32; 4]> {
 }
 
 /// Build the particle scale keyframe table (cbuf_9 slots 96..103) — same capture-pinned
-/// layout as colour/alpha: raw authored scale keys [s,s,s,t], forward axis
-/// (ring1_sub's 3 keys (0.95@0, 0.95@0.2, 0.58@1.0) match its captured table exactly).
+/// layout as colour/alpha: raw authored scale keys [x,y,z,t], forward axis. Per-axis
+/// stretch is real: flashLine1_b's captured rows carry (1.61, 1.07, 0.688)@0.42;
+/// uniform emitters (ring1_sub (0.95@0, 0.95@0.2, 0.58@1.0)) match as before.
 fn nvn_scale_table_entries(emitter: &EmitterDef) -> Vec<[f32; 4]> {
     if !emitter.scale_keys.is_empty() {
         let mut entries: Vec<[f32; 4]> = emitter
             .scale_keys
             .iter()
-            .map(|k| [k.a, k.a, k.a, k.frame.clamp(0.0, 1.0)])
+            .map(|k| [k.r, k.g, k.b, k.frame.clamp(0.0, 1.0)])
             .collect();
         if entries.len() == 1 && entries[0][3] > 0.0 {
             entries.insert(0, [entries[0][0], 0.0, 0.0, 0.0]);
@@ -3507,6 +3508,22 @@ main_1(); in_attr0_1 in_attr4_1 in_attr6_1 cbuf_9_1_ cbuf_9_1_._m0_[0] gl_Positi
         let result = NvnChainEvaluator::evaluate_usage(&usage, &params);
         let slot59 = result.get("cbuf_9_1_").unwrap().slot_data.get(&59).unwrap();
         assert_eq!(*slot59, [1.4, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn scale_table_carries_per_axis_stretch() {
+        // Capture-pinned: flashLine1_b's cbuf_9[96..] rows are (x,y,z,t) with x≠y —
+        // the authored per-axis stretch must survive into the table verbatim.
+        let emitter = EmitterDef {
+            scale_keys: vec![
+                ColorKey { frame: 0.0, r: 0.62, g: 0.62, b: 0.62, a: 0.62 },
+                ColorKey { frame: 0.42, r: 1.61, g: 1.07, b: 0.688, a: 1.61 },
+            ],
+            ..Default::default()
+        };
+        let entries = nvn_scale_table_entries(&emitter);
+        assert_eq!(entries[0], [0.62, 0.62, 0.62, 0.0]);
+        assert_eq!(entries[1], [1.61, 1.07, 0.688, 0.42]);
     }
 
     #[test]
