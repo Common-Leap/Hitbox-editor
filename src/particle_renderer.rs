@@ -4453,9 +4453,22 @@ fn append_bnsh_particle_vertices(
         c[3] * color_scale,
     ];
     let life_t = if p.lifetime <= 0.0 { 1.0 } else { (p.age / p.lifetime).clamp(0.0, 1.0) };
-    // Texture aspect × authored ScaleY/ScaleX ratio (non-uniform emitter scale).
-    let aspect =
-        (if aspect_ratio > 0.0 { 1.0 / aspect_ratio } else { 1.0 }) * emitter.scale_aspect_y;
+    // Billboard width multiplier = texture width/height ratio × authored ScaleY/ScaleX.
+    // The VS builds the quad as width = size·aspect, height = size, so for the texture to
+    // map UNDISTORTED the quad ratio must EQUAL the texture ratio (aspect_ratio =
+    // tex_w·su / tex_h·sv), not its inverse. The old `1/aspect_ratio` squished every
+    // non-square frame onto a quad of the opposite proportion — invisible on square-cell
+    // emitters (ratio 1) but it collapsed AttackBombRing (256×128 ring → 2px sliver) and
+    // rendered fireBase's wide fire-impact burst as a thin vertical streak.
+    // `FX_ASPECT_LEGACY=1` restores the old inverse for comparison.
+    let tex_aspect_term = if std::env::var("FX_ASPECT_LEGACY").is_ok() {
+        if aspect_ratio > 0.0 { 1.0 / aspect_ratio } else { 1.0 }
+    } else if aspect_ratio > 0.0 {
+        aspect_ratio
+    } else {
+        1.0
+    };
+    let aspect = tex_aspect_term * emitter.scale_aspect_y;
     let bb = emitter.billboard_type;
 
     let pivot = crate::effects::billboard_pivot_bias(emitter.offset_type);
