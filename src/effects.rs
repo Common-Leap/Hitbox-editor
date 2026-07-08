@@ -4506,19 +4506,25 @@ pub fn frame_uv_offset(
 ///
 /// Also fixes `tex2_scale_uv` (slot-2 texture) using the same heuristic.
 pub fn fix_tex_scale_uv(emitter: &mut EmitterDef, bntx_textures: &[TextureRes]) {
+    // Honour an EXPLICIT authored atlas grid (at least one axis subdivided ≥2):
+    // covers real N×1 / 1×N strips and 2D sheets, and is authoritative even when
+    // div_x*div_y != fc (hold / partial-sheet pattern tables). A 1×1 (or 0×0) UVDiv
+    // is NOT a real pattern grid — it is the TexScrollAnim default divisor that is
+    // left unset when the flipbook grid is implied by the texture layout. Honouring
+    // 1×1 for a multi-frame flipbook produced a degenerate cell and then a horizontal
+    // strip fallback (see fix_all_emitter_tex_scales), blowing the billboard aspect up
+    // by fc× — the smokeBomb bug (P_SamusAttackBomb: authored UVDiv=[1,1] fc=16 on the
+    // 512×512 ef_cmn_smoke11 sheet, which is really a 4×4 grid; the sibling `fire`
+    // emitter authors UVDiv=[4,4] for the identical 512²/16 layout, confirming 4×4).
     let apply_uv_div = |scale_uv: &mut [f32; 2], fc: usize| -> bool {
         let div_x = emitter.tex_uv_div[0];
         let div_y = emitter.tex_uv_div[1];
-        // UVDiv (0,0) = unspecified → let the caller infer the grid from texture size.
-        if div_x == 0 || div_y == 0 {
+        if div_x < 2 && div_y < 2 {
+            // No real grid authored → let the caller infer it from the texture size.
             return false;
         }
-        // Otherwise honour the game's explicit atlas layout: cell size = 1/div per axis.
-        // This covers 1×1 (a SINGLE frame — which must NOT be inferred into a fake grid,
-        // or the whole texture tiles), 1×N / N×1 strips, and 2D sheets. It is authoritative
-        // even when div_x*div_y != fc (hold / partial-sheet pattern tables).
-        let su = 1.0 / div_x as f32;
-        let sv = 1.0 / div_y as f32;
+        let su = 1.0 / div_x.max(1) as f32;
+        let sv = 1.0 / div_y.max(1) as f32;
         if (scale_uv[0] - su).abs() > 0.001 || (scale_uv[1] - sv).abs() > 0.001 {
             eprintln!(
                 "[FIX_UV] tex_uv_div {}×{} fc={}: tex_scale_uv=[{}, {}] (was [{}, {}])",
@@ -4534,10 +4540,14 @@ pub fn fix_tex_scale_uv(emitter: &mut EmitterDef, bntx_textures: &[TextureRes]) 
         if apply_uv_div(scale_uv, fc) {
             return;
         }
+        // No authored grid: infer the layout geometrically from the texture dimensions
+        // + frame count (a square 512² 16-frame sheet is a 4×4 grid, NOT a 1×16 strip).
+        // This is authoritative over any converter strip guess — a 1×N / N×1 guess has
+        // the right cell COUNT (product == fc) but the wrong cell ASPECT on a square
+        // sheet, which is exactly what stretches the billboard.
         let Some(tex) = bntx_textures.get(emitter.texture_index as usize) else { return; };
         let cur_cols = (1.0 / scale_uv[0].max(0.001)).round() as usize;
         let cur_rows = (1.0 / scale_uv[1].max(0.001)).round() as usize;
-        if cur_cols * cur_rows == fc && cur_cols > 0 && cur_rows > 0 { return; }
         let (cols, rows) = infer_grid_layout(tex.width, tex.height, fc);
         let su = 1.0 / cols as f32;
         let sv = 1.0 / rows as f32;
@@ -5825,6 +5835,33 @@ mod uv_tests {
             ..Default::default()
         };
         fix_tex_scale_uv(&mut emitter, &[]);
+        assert_eq!(emitter.tex_scale_uv, [0.25, 0.25]);
+    }
+
+    // smokeBomb regression: a multi-frame flipbook whose authored UVDiv is the
+    // degenerate [1,1] scroll default (P_SamusAttackBomb/smokeBomb: fc=16 on the
+    // square 512×512 ef_cmn_smoke11 sheet). A 1×1 div is NOT a real pattern grid, so
+    // it must be inferred geometrically to 4×4 (aspect 1.0), NOT honoured as one cell
+    // and then blown up by a 1×fc horizontal-strip fallback (aspect fc×). The sibling
+    // `fire` emitter authors [4,4] for the identical layout, confirming 4×4 is correct.
+    #[test]
+    fn fix_tex_scale_uv_infers_grid_when_uv_div_is_degenerate_1x1() {
+        let mut emitter = EmitterDef {
+            texture_index: 0,
+            // Value the converter's vertical-strip guess produces (product == fc but
+            // wrong cell aspect on a square sheet).
+            tex_scale_uv: [1.0, 1.0 / 16.0],
+            tex_uv_div: [1, 1],
+            tex_pat_frame_count: 16,
+            ..Default::default()
+        };
+        let textures = vec![TextureRes {
+            tex_name: "ef_cmn_smoke11".into(),
+            width: 512,
+            height: 512,
+            ..Default::default()
+        }];
+        fix_tex_scale_uv(&mut emitter, &textures);
         assert_eq!(emitter.tex_scale_uv, [0.25, 0.25]);
     }
 

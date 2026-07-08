@@ -2248,6 +2248,59 @@ impl HitboxEditorApp {
             }
         }
 
+        // HITBOX_AUTOLOAD_MOVE=<name substring>: once the async move list has loaded,
+        // select the matching move and Fetch ACMD so the *full* move effect list plays
+        // exactly like clicking the move + "Fetch ACMD" in the UI. Runs once.
+        if let Ok(move_query) = std::env::var("HITBOX_AUTOLOAD_MOVE") {
+            static MOVE_DONE: AtomicBool = AtomicBool::new(false);
+            if !MOVE_DONE.load(Ordering::Relaxed) {
+                if self.move_list.is_empty() {
+                    // Move list is still loading on a background thread (polled later in
+                    // this same update). Retry next frame.
+                    return;
+                }
+                // Normalize separators so a human query like "Attack Air F" matches an
+                // internal move name like "attack_air_f".
+                let norm = |s: &str| s.to_lowercase().replace([' ', '-'], "_");
+                let q = norm(move_query.trim());
+                match self
+                    .move_list
+                    .iter()
+                    .find(|m| norm(&m.name).contains(&q))
+                    .cloned()
+                {
+                    Some(entry) => {
+                        eprintln!(
+                            "[AUTOLOAD] move '{}' matched query '{}'",
+                            entry.name,
+                            move_query.trim()
+                        );
+                        MOVE_DONE.store(true, Ordering::Relaxed);
+                        self.select_move(entry);
+                        self.fetch_acmd();
+                    }
+                    None => {
+                        MOVE_DONE.store(true, Ordering::Relaxed);
+                        // Print candidates sharing the first query token to aid discovery.
+                        let first_tok = q.split('_').next().unwrap_or("");
+                        let candidates: Vec<&String> = self
+                            .move_list
+                            .iter()
+                            .map(|m| &m.name)
+                            .filter(|n| norm(n).contains(first_tok) && norm(n).contains("air"))
+                            .collect();
+                        eprintln!(
+                            "[AUTOLOAD] move query '{}' matched nothing among {} moves; air candidates: {:?}",
+                            move_query.trim(),
+                            self.move_list.len(),
+                            candidates
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
         // Loop the effect for continuous preview: reset + re-spawn every ~1.8s of wall
         // clock (a one-shot like the bomb plays ~1s then vanishes). Resetting first
         // avoids unbounded emitter accumulation.
