@@ -2013,14 +2013,16 @@ impl ParticleRenderer {
             }
         };
         let blit_vs_entry = crate::blit_shader::vs_main_entry();
-        // Tonemap entry selected by FX_TONEMAP. Default: ACES — measured closest to the
-        // game's fire palette (ours (220,117,7) vs game (218,130,78) R/G ratio) and ties
-        // with the alternatives on dark smoke. `shoulder` (identity below the knee) and
-        // `clip` are kept for A/B calibration.
+        // Tonemap entry selected by FX_TONEMAP. Default: shoulder — identity below the
+        // knee (0.85), exponential rolloff above. LDR-authored colours pass through
+        // UNCHANGED; only HDR magnitudes compress. ACES (measured slightly closer on
+        // isolated fire pixels) reshapes ALL content — 0.18→0.28, 0.5→0.62 — which
+        // lifted darks and washed the whole effect toward mid-grey (the "normalized"
+        // look). `aces` / `clip` kept for A/B calibration.
         let tonemap_entry = match std::env::var("FX_TONEMAP").as_deref() {
-            Ok("shoulder") => crate::blit_shader::ENTRY_FS_TONEMAP_MAIN,
+            Ok("aces") => crate::blit_shader::ENTRY_FS_TONEMAP_ACES,
             Ok("clip") => crate::blit_shader::ENTRY_FS_TONEMAP_CLIP,
-            _ => crate::blit_shader::ENTRY_FS_TONEMAP_ACES,
+            _ => crate::blit_shader::ENTRY_FS_TONEMAP_MAIN,
         };
         let blit_fs_entry = crate::blit_shader::FragmentEntry {
             entry_point: if hdr_composite {
