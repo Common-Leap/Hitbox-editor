@@ -40,15 +40,13 @@ impl ShaderVsProfile {
     }
 }
 
-/// Classify VS profile from BNSH stage reflection input names when available.
-pub fn vs_profile_from_reflection(
-    reflection: &crate::bnsh_reflection::ShaderStageReflection,
-) -> ShaderVsProfile {
-    if reflection.input_names.is_empty() {
+/// Classify VS profile from shader stage input names when available.
+/// (eff-editor branch: takes the raw name list — bnsh_reflection lives on the render branch.)
+pub fn vs_profile_from_input_names(input_names: &[String]) -> ShaderVsProfile {
+    if input_names.is_empty() {
         return ShaderVsProfile::Unknown;
     }
-    let lower: Vec<String> = reflection
-        .input_names
+    let lower: Vec<String> = input_names
         .iter()
         .map(|s| s.to_ascii_lowercase())
         .collect();
@@ -579,20 +577,14 @@ mod tests {
 
     #[test]
     fn vs_profile_from_reflection_detects_mesh_inputs() {
-        let mesh = crate::bnsh_reflection::ShaderStageReflection {
-            input_names: vec!["Position".into(), "Normal".into(), "TexCoord0".into()],
-            ..Default::default()
-        };
+        let mesh = vec!["Position".to_string(), "Normal".into(), "TexCoord0".into()];
         assert_eq!(
-            vs_profile_from_reflection(&mesh),
+            vs_profile_from_input_names(&mesh),
             ShaderVsProfile::MeshModel
         );
-        let particle = crate::bnsh_reflection::ShaderStageReflection {
-            input_names: vec!["ATTR0".into(), "ATTR4".into(), "ATTR6".into()],
-            ..Default::default()
-        };
+        let particle = vec!["ATTR0".to_string(), "ATTR4".into(), "ATTR6".into()];
         assert_eq!(
-            vs_profile_from_reflection(&particle),
+            vs_profile_from_input_names(&particle),
             ShaderVsProfile::ParticleBillboard
         );
     }

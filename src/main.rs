@@ -1,35 +1,19 @@
+// Eff-editor: effect-file editing + in-game live preview. Effect RENDERING is deliberately
+// absent on this branch (see `game-accurate-sim` for the particle renderer).
 mod app;
 mod data;
 mod acmd;
 mod renderer;
 mod effects;
-mod particle_renderer;
-mod particle_renderer_bnsh;
-mod shader_cache;
 mod batch_loader;
-mod bnsh_ffi;
-mod bnsh_reflection;
 mod effect_browser;
-mod shader_integration;
-mod bnsh_shader_integration;
 mod effect_converter;
-mod spirv_to_wgsl;
-mod spirv_patch;
-mod nvn_chain;
-mod combiner;
-mod shader_registry;
 mod scratch_dirs;
-mod sphere_volume_tables;
+mod shader_registry;
+mod combiner;
 mod fx_env;
-mod trail_shader;
-mod blit_shader;
 pub(crate) use fx_env::{fx_debug_enabled, fx_native_fs_enabled, fx_native_vs_pos_enabled};
-
-#[cfg(test)]
-mod integration_tests;
-
-#[cfg(test)]
-mod end_to_end_integration_test;
+mod sphere_volume_tables;
 
 use ssbh_wgpu;
 
@@ -70,7 +54,7 @@ fn main() -> anyhow::Result<()> {
                     wgpu::DeviceDescriptor {
                         label: Some("hitbox_editor"),
                         required_features: features,
-                        required_limits: crate::particle_renderer_bnsh::wgpu_device_limits(adapter),
+                        required_limits: adapter.limits(),
                         memory_hints: wgpu::MemoryHints::default(),
                         ..Default::default()
                     }

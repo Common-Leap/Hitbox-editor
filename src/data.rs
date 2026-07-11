@@ -379,8 +379,6 @@ pub struct AppState {
     pub trail_system: crate::effects::TrailSystem,
     /// Set to true when a new ptcl file is loaded — consumed by the update loop to upload textures
     pub pending_texture_upload: bool,
-    /// Cached BNSH shaders decoded from the effect file
-    pub bnsh_shaders: Option<crate::particle_renderer_bnsh::BnshShaderSet>,
 }
 
 #[derive(Debug, Clone)]
@@ -414,7 +412,6 @@ impl Default for AppState {
             particle_system: crate::effects::ParticleSystem::default(),
             trail_system: crate::effects::TrailSystem::default(),
             pending_texture_upload: false,
-            bnsh_shaders: None,
         }
     }
 }

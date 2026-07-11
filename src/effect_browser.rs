@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 use crate::batch_loader::{BatchEffectLoader, EffectMetadata, BatchLoaderStats};
-use crate::shader_cache::ShaderCache;
 use crate::effects::PtclFile;
 
 #[allow(dead_code)]
@@ -12,7 +11,6 @@ use crate::effects::PtclFile;
 #[allow(dead_code)]
 pub struct EffectBrowser {
     loader: BatchEffectLoader,
-    cache: ShaderCache,
     
     // UI state
     selected_category: String,
@@ -31,7 +29,6 @@ pub struct EffectBrowser {
 impl EffectBrowser {
     pub fn new(effects_dir: PathBuf) -> Self {
         let loader = BatchEffectLoader::new(effects_dir);
-        let cache = ShaderCache::new();
         let last_stats = BatchLoaderStats {
             total_effects: 0,
             loaded_effects: 0,
@@ -42,7 +39,6 @@ impl EffectBrowser {
         
         Self {
             loader,
-            cache,
             selected_category: "fighters".to_string(),
             selected_effect: None,
             search_filter: String::new(),
@@ -145,10 +141,6 @@ impl EffectBrowser {
         &self.last_stats
     }
 
-    /// Get shader cache stats
-    pub fn shader_cache_stats(&self) -> (usize, usize, f32) {
-        self.cache.stats()
-    }
 
     /// Clear in-memory caches
     pub fn clear_caches(&mut self) {

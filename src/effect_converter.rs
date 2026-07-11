@@ -346,11 +346,9 @@ pub(crate) fn load_dump(dump_dir: &Path) -> anyhow::Result<PtclFile> {
             if shader_path.exists() {
                 let bytes = std::fs::read(&shader_path).unwrap_or_default();
                 if !bytes.is_empty() {
+                    // eff-editor branch: no BNSH decoding (rendering lives on
+                    // game-accurate-sim) — register the shader bytes without a VS profile.
                     emitter_shader_key = shader_registry.register(bytes.clone());
-                    shader_registry.set_vs_profile(
-                        emitter_shader_key,
-                        crate::bnsh_shader_integration::vs_profile_from_bnsh_bytes(&bytes),
-                    );
                 }
             }
 

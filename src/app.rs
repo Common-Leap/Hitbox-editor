@@ -962,148 +962,16 @@ impl HitboxEditorApp {
         self.fetching_acmd = false;
     }
 
-    /// Decode BNSH shaders from the current PTCL and queue GPU renderer refresh.
-    fn queue_bnsh_reload_from_ptcl(&mut self, source_label: &str) {
-        let Some(ptcl) = &self.state.ptcl else { return };
-        match crate::particle_renderer_bnsh::BnshShaderSet::from_ptcl_file(ptcl, source_label) {
-            Ok(bnsh_set) => {
-                let audit = crate::shader_registry::audit_ptcl(ptcl);
-                eprintln!(
-                    "[BNSH] Queued reload ({} variants, {} emitter shader keys): {}",
-                    bnsh_set.all_shaders.len(),
-                    audit.distinct_shader_keys,
-                    bnsh_set.summary(),
-                );
-                self.state.bnsh_shaders = Some(bnsh_set);
-                self.state.pending_texture_upload = true;
-            }
-            Err(e) => {
-                eprintln!("[BNSH] Shader reload failed: {e}");
-                // Keep a previously decoded set — a failed ef_common re-merge must not wipe fighter shaders.
-                if self.state.bnsh_shaders.is_none() {
-                    self.state.pending_texture_upload = false;
-                }
-                if crate::effect_converter::is_effect_io_error(&e) {
-                    self.state.status =
-                        "BNSH decode failed: disk full (export HITBOX_EFFECT_TMP=...)".to_string();
-                }
-            }
-        }
-    }
+    /// eff-editor branch: effect RENDERING removed (lives on game-accurate-sim).
+    /// These stubs keep the load/merge call sites intact — shader decode, GPU particle
+    /// renderer and texture upload simply do not happen here.
+    fn queue_bnsh_reload_from_ptcl(&mut self, _source_label: &str) {}
 
-    /// After merging a supplemental .eff, reload BNSH only when new shader data may have been added.
-    fn maybe_queue_bnsh_after_sys_merge(&mut self, merged_path: &std::path::Path) {
-        let file_name = merged_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("sys.eff");
-        if file_name.eq_ignore_ascii_case("ef_common.eff") {
-            // load_eff_file already merged ef_common and queued BNSH reload.
-            return;
-        }
-        self.queue_bnsh_reload_from_ptcl(file_name);
-    }
+    fn maybe_queue_bnsh_after_sys_merge(&mut self, _merged_path: &std::path::Path) {}
 
-    /// Create or refresh the GPU particle renderer and upload PTCL textures.
-    /// Call at least once per frame while `bnsh_shaders` or `pending_texture_upload` is set.
-    fn apply_pending_gpu_effects(&mut self, frame: &eframe::Frame) {
-        // Eff may be loaded late in the frame (panel buttons run after this at the top of
-        // `ui()`). If PTCL has embedded shaders but no renderer yet, queue BNSH decode now.
-        if self.state.bnsh_shaders.is_none() && self.state.pending_texture_upload {
-            if let Some(ptcl) = &self.state.ptcl {
-                if !ptcl.shader_registry.is_empty() {
-                    if let Some(wgpu_state) = frame.wgpu_render_state() {
-                        let pr_missing = {
-                            let renderer = wgpu_state.renderer.read();
-                            renderer
-                                .callback_resources
-                                .get::<HitboxRenderState>()
-                                .map(|rs| rs.particle_renderer.lock().unwrap().is_none())
-                                .unwrap_or(true)
-                        };
-                        if pr_missing {
-                            self.queue_bnsh_reload_from_ptcl("pending-retry");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extract shader reflection BEFORE consuming bnsh_shaders
-        let saved_shader_reflection = self.state.bnsh_shaders.as_ref()
-            .and_then(|bnsh_set| bnsh_set.default_pair().fragment.as_ref())
-            .and_then(|frag_shader| frag_shader.reflection.as_ref())
-            .cloned();
-
-        // Update particle renderer with BNSH shaders FIRST (before texture upload)
-        // so the renderer recreation with new shaders doesn't lose uploaded textures.
-        if let Some(bnsh_set) = &self.state.bnsh_shaders {
-            if let Some(wgpu_state) = frame.wgpu_render_state() {
-                let mut renderer = wgpu_state.renderer.write();
-                if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
-                    if rs.update_particle_renderer_with_shaders(&wgpu_state.device, &wgpu_state.queue, bnsh_set) {
-                        let native = crate::fx_native_fs_enabled();
-                        eprintln!(
-                            "[BNSH] Applied BNSH pipeline to particle renderer (native_fs={native}, {} variants)",
-                            bnsh_set.all_shaders.len()
-                        );
-                        // Clear it so we don't re-apply every frame
-                        self.state.bnsh_shaders = None;
-                        // GPU renderer was unavailable until now — re-spawn emitters and catch up sim.
-                        if !self.state.effects.is_empty() {
-                            self.respawn_effects();
-                        }
-                    } else {
-                        eprintln!(
-                            "[BNSH] GPU particle pipeline init failed — not retrying every frame. \
-                             Fix stderr errors and reload the fighter/effect."
-                        );
-                        self.state.bnsh_shaders = None;
-                    }
-                } else {
-                    eprintln!("[BNSH] HitboxRenderState not ready — deferring BNSH apply");
-                }
-            }
-        }
-
-        // Upload particle textures to GPU when a new ptcl file has been loaded
-        // Must come AFTER BNSH shader application so textures go to the final renderer.
-        if self.state.pending_texture_upload {
-            if let Some(ptcl) = &self.state.ptcl {
-                if let Some(wgpu_state) = frame.wgpu_render_state() {
-                    let mut renderer = wgpu_state.renderer.write();
-                    if let Some(rs) = renderer.callback_resources.get_mut::<HitboxRenderState>() {
-                        if let Some(pr) = rs.particle_renderer.lock().unwrap().as_mut() {
-                            pr.upload_textures(&wgpu_state.device, &wgpu_state.queue, ptcl);
-                            pr.upload_meshes(&wgpu_state.device, &wgpu_state.queue, ptcl);
-                            // BNSH pipelines are compiled lazily per emitter shader on first use
-                            // (see ensure_bnsh_pipeline). Eagerly warming every variant blocks the
-                            // UI for a long time on effects with many shaders (e.g. mario ≈ 92).
-                            if ptcl.needs_mesh_material_pass() {
-                                pr.create_material_texture_bind_groups(
-                                    &wgpu_state.device,
-                                    &wgpu_state.queue,
-                                    ptcl,
-                                    saved_shader_reflection.as_ref(),
-                                );
-                            } else {
-                                eprintln!("[MAT_TEX] skipped (no BFRES material textures)");
-                            }
-                            eprintln!("[TEX] texture upload complete");
-                            self.state.pending_texture_upload = false;
-                            // Textures arrive after BNSH init — re-spawn so sim/viewport see a live system.
-                            if !self.state.effects.is_empty() {
-                                self.respawn_effects();
-                            }
-                        }
-                        // else: particle_renderer not yet initialized, retry next frame
-                    }
-                }
-                // else: no wgpu state yet, retry next frame
-            } else {
-                self.state.pending_texture_upload = false; // no ptcl, nothing to upload
-            }
-        }
+    fn apply_pending_gpu_effects(&mut self, _frame: &eframe::Frame) {
+        // Nothing to upload — no particle renderer on this branch.
+        self.state.pending_texture_upload = false;
     }
 
     /// Re-spawn all effects into the particle/trail systems using current eff_index + ptcl.
