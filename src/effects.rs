@@ -4591,6 +4591,32 @@ pub fn sample_color_pub(keys: &[ColorKey], t: f32) -> [f32; 4] {
     [v.x, v.y, v.z, v.w]
 }
 
+/// Representative display color of one emitter at normalized time `t`: the game combiner is
+/// color0 × color1 with an empty table acting as multiplicative identity — so emitters whose
+/// tint lives only in color1 (common for arc/trail effects) don't come out white.
+pub fn emitter_display_color(emitter: &EmitterDef, t: f32) -> [f32; 4] {
+    let v = sample_color_or_white(&emitter.color0, t) * sample_color_or_white(&emitter.color1, t);
+    [v.x, v.y, v.z, v.w]
+}
+
+/// Representative color of a whole emitter set: the first emitter whose combined color isn't
+/// plain white (parents are often untinted while a child carries the color). Returns None
+/// for an empty set; all-white sets return white.
+pub fn set_display_color(set: &EmitterSet, t: f32) -> Option<[f32; 4]> {
+    let mut first: Option<[f32; 4]> = None;
+    for e in &set.emitters {
+        let c = emitter_display_color(e, t);
+        if first.is_none() {
+            first = Some(c);
+        }
+        let is_white = (c[0] - 1.0).abs() < 1e-3 && (c[1] - 1.0).abs() < 1e-3 && (c[2] - 1.0).abs() < 1e-3;
+        if !is_white {
+            return Some(c);
+        }
+    }
+    first
+}
+
 fn sample_color(keys: &[ColorKey], t: f32) -> Vec4 {
     if keys.is_empty() {
         return Vec4::ONE;
@@ -7578,29 +7604,9 @@ mod uv_tests {
         );
     }
 
-    #[test]
-    fn multi_path_compositing_order_matches_distinct_draw_paths() {
-        use crate::particle_renderer::{editor_composite_steps, EditorCompositeStep};
-
-        let particles = vec![
-            stub_particle(2, false, 0, 0),
-            stub_particle(0, false, 0, 1),
-            stub_particle(1, false, 0, 2),
-        ];
-        let paths = distinct_particle_draw_paths(&particles);
-        assert_eq!(paths, vec![0, 1, 2]);
-        assert_eq!(
-            editor_composite_steps(&paths),
-            vec![
-                EditorCompositeStep::BlitDrawPath(0),
-                EditorCompositeStep::SubDrawPath(0),
-                EditorCompositeStep::BlitDrawPath(1),
-                EditorCompositeStep::SubDrawPath(1),
-                EditorCompositeStep::BlitDrawPath(2),
-                EditorCompositeStep::SubDrawPath(2),
-            ]
-        );
-    }
+    // multi_path_compositing_order_matches_distinct_draw_paths lives on the
+    // game-accurate-sim branch — it needs particle_renderer::editor_composite_steps,
+    // which is part of the stripped render stack.
 
     #[test]
     fn distinct_draw_paths_includes_trail_paths() {

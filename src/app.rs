@@ -1,5 +1,6 @@
 /// Main egui application for the SSBU Hitbox Editor.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use egui::{Color32, RichText, ScrollArea, Ui};
 use glam;
@@ -326,6 +327,17 @@ fn angle_picker(ui: &mut egui::Ui, angle: &mut i32) {
 
 /// System/root bones in Smash Ultimate whose hitbox offsets are in world space,
 /// not bone local space. For these we only use the bone's translation.
+/// Effect-kind id for the game link: hash40 of the lowercase effect name, or the literal
+/// hash for names ACMD parsing left unresolved ("0x…").
+fn effect_name_hash(name: &str) -> u64 {
+    if let Some(hex) = name.strip_prefix("0x") {
+        if let Ok(h) = u64::from_str_radix(hex, 16) {
+            return h;
+        }
+    }
+    hash40::hash40(&name.to_lowercase()).0
+}
+
 fn is_system_bone(name: &str) -> bool {
     matches!(name.to_lowercase().as_str(),
         "top" | "trans" | "rot" | "throw" | "itemroot"
@@ -339,6 +351,58 @@ fn hitbox_color(hitbox_type: u32) -> Color32 {
         2 => Color32::from_rgba_premultiplied(68, 255, 136, 180),
         3 => Color32::from_rgba_premultiplied(255, 221, 68, 180),
         _ => Color32::from_rgba_premultiplied(255, 255, 255, 180),
+    }
+}
+
+/// Sliders that DON'T clamp typed input to the visual range — drag within the range, but
+/// double-click and type any value (bigger or negative) to override it. Used across the
+/// hitbox property editor so the ranges are just handles, not hard limits.
+fn wide_slider_f32(
+    ui: &mut Ui,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    text: &str,
+) -> egui::Response {
+    ui.add(
+        egui::Slider::new(v, range)
+            .text(text)
+            .clamping(egui::SliderClamping::Never),
+    )
+}
+
+fn wide_slider_i32(
+    ui: &mut Ui,
+    v: &mut i32,
+    range: std::ops::RangeInclusive<i32>,
+    text: &str,
+) -> egui::Response {
+    ui.add(
+        egui::Slider::new(v, range)
+            .text(text)
+            .clamping(egui::SliderClamping::Never),
+    )
+}
+
+fn wide_slider_u32(
+    ui: &mut Ui,
+    v: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    text: &str,
+) -> egui::Response {
+    ui.add(
+        egui::Slider::new(v, range)
+            .text(text)
+            .clamping(egui::SliderClamping::Never),
+    )
+}
+
+/// Preview color by collision family: attack keeps the per-type palette, grab = cyan,
+/// wind = green. Used everywhere hitboxes are drawn so the three categories read distinctly.
+fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
+    match hb.category {
+        1 => Color32::from_rgba_premultiplied(80, 200, 255, 180),  // grab — cyan
+        2 => Color32::from_rgba_premultiplied(120, 240, 140, 170), // wind — green
+        _ => hitbox_color(hb.hitbox_type),
     }
 }
 
@@ -382,6 +446,41 @@ pub struct HitboxEditorApp {
     show_debug: bool,
     show_edit_log: bool,
     export_dir: Option<PathBuf>,
+    /// The selected fighter's resolved ef_*.eff — re-queued when the Eff Editor opens.
+    current_eff_path: Option<PathBuf>,
+    /// Effs opened from outside the game data root (most-recent first), persisted.
+    recent_effs: Vec<PathBuf>,
+    /// Background cargo-skyline build of an exported mod's source (status polled in update).
+    export_build: Option<std::sync::Arc<std::sync::Mutex<ExportBuildState>>>,
+    /// Connection the pin-sync check last ran for (plugin client id).
+    pin_sync_client: Option<u64>,
+    /// Set on new connection; when the settle window elapses, untracked game pins prompt.
+    pin_sync_wait: Option<std::time::Instant>,
+    /// Untracked in-game pins awaiting the user's Import / Reset / Ignore choice.
+    pin_sync_prompt: Option<Vec<(u64, crate::game_link::LiveKind)>>,
+    /// Live hitbox rules per "fighter/move" (the plugin gets the flattened union).
+    hitbox_rules_store: HashMap<String, Vec<crate::game_link::HitboxRuleWire>>,
+    /// Live effect spawn rules per "fighter/move" (suppress + per-spawn transform); the
+    /// plugin gets the flattened union so edits persist across move switches.
+    effect_rules_store: HashMap<String, Vec<crate::game_link::SpawnRuleWire>>,
+    /// (move key, hitbox snapshot) — change detection for live hitbox pushes.
+    hitbox_watch: Option<(String, Vec<crate::data::Hitbox>)>,
+    hitbox_dirty_at: Option<std::time::Instant>,
+    /// game_link.captures_seq at the last auto-populate check.
+    captures_seen_seq: u64,
+    /// One-Slot studio: entry pool across every eff under the export root.
+    effect_pool: Option<crate::effect_pool::EffectPool>,
+    show_one_slot: bool,
+    one_slot_search: String,
+    /// Search text for the Effects-panel effect-name picker (live kinds + pool).
+    effect_pick_search: String,
+    /// Whether the inline effect-name picker (next to the effect field) is expanded.
+    effect_pick_open: bool,
+    /// Selected donor: (file rel, entry name).
+    one_slot_sel: Option<(String, String)>,
+    one_slot_new_name: String,
+    /// After a one-slot: uses of the donor effect offered for per-use redirect.
+    redirect_prompt: Option<RedirectPrompt>,
     fighter_search: String,
     move_search: String,
     /// Last frame for which particles were simulated — used to detect backwards scrubs
@@ -396,6 +495,16 @@ pub struct HitboxEditorApp {
     /// Instant of the last particle simulation step — used to compute dt independently
     /// of the hitbox scrub frame timer.
     particle_step_time: std::time::Instant,
+    /// Eff-file editor with in-game live preview (replaces RPM).
+    eff_editor: crate::eff_editor::EffEditor,
+    /// TCP client to the slight_replica plugin (:7878).
+    game_link: crate::game_link::GameLink,
+    /// Debounced live-pin push for an edited effect call (index, last edit time).
+    /// Shared per-kind runtime overrides (Effects panel + Eff Editor game panel).
+    live_overrides: crate::game_link::LiveOverrides,
+    /// Authored .eff edits per fighter (project store; synced from the eff editor).
+    eff_mods: HashMap<String, crate::mod_project::EffMod>,
+    project_name: String,
 }
 
 impl HitboxEditorApp {
@@ -431,6 +540,25 @@ impl HitboxEditorApp {
             show_debug: false,
             show_edit_log: false,
             export_dir: saved_export_dir,
+            current_eff_path: None,
+            recent_effs: load_recent_effs(),
+            export_build: None,
+            pin_sync_client: None,
+            pin_sync_wait: None,
+            pin_sync_prompt: None,
+            hitbox_rules_store: HashMap::new(),
+            effect_rules_store: HashMap::new(),
+            hitbox_watch: None,
+            hitbox_dirty_at: None,
+            captures_seen_seq: 0,
+            effect_pool: None,
+            show_one_slot: false,
+            one_slot_search: String::new(),
+            effect_pick_search: String::new(),
+            effect_pick_open: false,
+            one_slot_sel: None,
+            one_slot_new_name: String::new(),
+            redirect_prompt: None,
             fighter_search: String::new(),
             move_search: String::new(),
             last_simulated_frame: u32::MAX,
@@ -438,6 +566,11 @@ impl HitboxEditorApp {
             particle_clock: 0.0,
             particles_need_catchup: false,
             particle_step_time: std::time::Instant::now(),
+            eff_editor: crate::eff_editor::EffEditor::default(),
+            game_link: crate::game_link::GameLink::default(),
+            live_overrides: crate::game_link::LiveOverrides::default(),
+            eff_mods: HashMap::new(),
+            project_name: "unnamed_mod".into(),
         };
 
         if let Some(root) = saved_data_root {
@@ -619,6 +752,9 @@ impl HitboxEditorApp {
             }
         }
         if let Some(eff_path) = eff_path.filter(|p| p.exists()) {
+            // Keep the eff editor in step with the selected fighter (loads when open).
+            self.current_eff_path = Some(eff_path.clone());
+            self.eff_editor.queue_load(&eff_path);
             self.load_eff_file(&eff_path);
             // Merge ef_sys.eff for sys_* handles. ef_common is merged inside load_eff_file.
             if let Some(root) = &self.state.data_root.clone() {
@@ -916,11 +1052,16 @@ impl HitboxEditorApp {
                             }
                         }
                     }
+                    self.state.hitboxes_pristine = hitboxes.clone();
+                    self.state.acmd_source = "GitHub".into();
                     self.state.hitboxes = hitboxes;
                     self.state.script = script;
 
-                    // Store effect data
+                    // Store effect data — pristine first, then re-apply this move's edits.
                     self.state.effects = effect_script.to_effect_calls();
+                    self.state.effects_pristine = self.state.effects.clone();
+                    self.state.selected_effect_call = None;
+                    self.apply_effect_call_edits_to_current();
                     self.state.effect_script = effect_script;
 
                     // Jump the timeline to the earliest active window (hitbox or effect).
@@ -1083,6 +1224,36 @@ impl HitboxEditorApp {
         }
     }
 
+    /// Open an arbitrary .eff from disk (outside the game data root): load + render it,
+    /// make it the current eff, index it into the donor pool, and remember it as recent.
+    /// Available regardless of whether a data root is set.
+    fn open_external_eff(&mut self, path: PathBuf) {
+        if !path.exists() {
+            self.state.status = format!("Effect file not found: {}", path.display());
+            return;
+        }
+        self.load_eff_file(&path);
+        self.respawn_effects();
+        self.current_eff_path = Some(path.clone());
+        if self.eff_editor.open {
+            self.eff_editor.queue_load(&path);
+        }
+        // Make its entries searchable in One-Slot + the effect-name picker.
+        if self.effect_pool.is_none() {
+            if let Some(root) = self.export_dir.clone().or_else(|| self.state.data_root.clone()) {
+                self.effect_pool = Some(crate::effect_pool::EffectPool::new(root));
+            }
+        }
+        if let Some(pool) = self.effect_pool.as_mut() {
+            pool.add_file(&path);
+        }
+        // Recents: de-dupe, most-recent first, cap at 12.
+        self.recent_effs.retain(|p| p != &path);
+        self.recent_effs.insert(0, path);
+        self.recent_effs.truncate(12);
+        save_recent_effs(&self.recent_effs);
+    }
+
     /// ACMD `active_start` / `active_end` for emitter lifecycle (local emission frame = target − start).
     fn effect_spawn_window(
         ec: &crate::data::EffectCall,
@@ -1099,6 +1270,7 @@ impl HitboxEditorApp {
     }
 
     fn is_trail_effect(
+        name: &str,
         name_lower: &str,
         follows_bone: bool,
         eff_index: &crate::effects::EffIndex,
@@ -1120,9 +1292,13 @@ impl HitboxEditorApp {
         // texture (it exists as a fallback for effects with no data — e.g. sys effects
         // when ef_sys is missing). Name-based hijacking rendered arc/slash effects
         // (Samus aerials etc.) with wrong colour + texture.
+        // Try both the original-case and lowercase keys — same as every other handle lookup.
+        // Checking only lowercase sent cased arc/slash effects WITH real PTCL down the
+        // synthetic hardcoded-white trail path.
         let has_ptcl = eff_index
             .handles
-            .get(name_lower)
+            .get(name)
+            .or_else(|| eff_index.handles.get(name_lower))
             .copied()
             .filter(|&idx| idx >= 0)
             .and_then(|idx| ptcl.emitter_sets.get(idx as usize))
@@ -1144,7 +1320,7 @@ impl HitboxEditorApp {
                 continue;
             }
             let name_lower = ec.effect_name.to_lowercase();
-            if Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl) {
+            if Self::is_trail_effect(&ec.effect_name, &name_lower, ec.follows_bone, eff_index, ptcl) {
                 continue;
             }
             let Some(global) = crate::effects::earliest_particle_frame_for_spawn(
@@ -1176,7 +1352,7 @@ impl HitboxEditorApp {
                 continue;
             }
             let name_lower = ec.effect_name.to_lowercase();
-            if Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl) {
+            if Self::is_trail_effect(&ec.effect_name, &name_lower, ec.follows_bone, eff_index, ptcl) {
                 continue;
             }
             let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
@@ -1233,7 +1409,7 @@ impl HitboxEditorApp {
                     continue;
                 }
                 let name_lower = ec.effect_name.to_lowercase();
-                if Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl) {
+                if Self::is_trail_effect(&ec.effect_name, &name_lower, ec.follows_bone, eff_index, ptcl) {
                     continue;
                 }
                 let set_idx_opt = eff_index
@@ -1292,7 +1468,7 @@ impl HitboxEditorApp {
         if let (Some(eff_index), Some(ptcl)) = (&self.state.eff_index, &self.state.ptcl) {
             for ec in &self.state.effects {
                 let name_lower = ec.effect_name.to_lowercase();
-                let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl);
+                let is_trail = Self::is_trail_effect(&ec.effect_name, &name_lower, ec.follows_bone, eff_index, ptcl);
                 if !is_trail { continue; }
                 let canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                     .cloned()
@@ -1300,10 +1476,16 @@ impl HitboxEditorApp {
                 let (color, blend, draw_path) = eff_index.handles.get(&ec.effect_name)
                     .or_else(|| eff_index.handles.get(&name_lower))
                     .and_then(|&idx| if idx >= 0 { ptcl.emitter_sets.get(idx as usize) } else { None })
-                    .and_then(|set| set.emitters.first())
-                    .map(|emitter| {
-                        let c = crate::effects::sample_color_pub(&emitter.color0, 0.0);
-                        ([c[0], c[1], c[2], c[3]], emitter.blend_type, emitter.draw_path)
+                    .and_then(|set| {
+                        // Tint from the first non-white emitter (color0 × color1 — arc/trail
+                        // tints often live in color1 or a child emitter, not first().color0).
+                        let c = crate::effects::set_display_color(set, 0.0)?;
+                        let (blend, draw_path) = set
+                            .emitters
+                            .first()
+                            .map(|e| (e.blend_type, e.draw_path))
+                            .unwrap_or((crate::effects::BlendType::Add, 0));
+                        Some((c, blend, draw_path))
                     })
                     .unwrap_or(([1.0, 1.0, 1.0, 1.0], crate::effects::BlendType::Add, 0));
                 let bone_lower = canonical_bone.to_lowercase();
@@ -1332,96 +1514,243 @@ impl HitboxEditorApp {
     }
 
     fn draw_edit_log_window(&mut self, ctx: &egui::Context) {
+        // Keep the authored-eff numbers current with the eff editor's live diff.
+        self.sync_eff_mods_from_editor();
+
         // Collect pending actions to avoid borrow conflicts
         let mut remove_move: Option<(String, String)> = None;
         let mut remove_fighter: Option<String> = None;
         let mut export_move: Option<(String, String)> = None;
+        let mut remove_call_key: Option<String> = None;
+        let mut clear_eff_fighter: Option<String> = None;
+        let mut clear_tweak_hash: Option<u64> = None;
         let mut export_all = false;
 
+        // Union of fighters across all edit sources: hitboxes, effect calls, authored eff.
+        let mut fighters: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for (name, display) in self.state.edit_log.fighters_sorted() {
+            fighters.insert(name, display);
+        }
+        for key in self.state.effect_call_edits.keys() {
+            if self.state.effect_call_edits[key].is_empty() {
+                continue;
+            }
+            let fighter = key.split_once('/').map(|(f, _)| f).unwrap_or(key.as_str());
+            fighters
+                .entry(fighter.to_string())
+                .or_insert_with(|| crate::data::fighter_display_name(fighter));
+        }
+        for (fighter, eff) in &self.eff_mods {
+            if !eff.is_empty() {
+                fighters
+                    .entry(fighter.clone())
+                    .or_insert_with(|| crate::data::fighter_display_name(fighter));
+            }
+        }
+
         let mut open = self.show_edit_log;
-        egui::Window::new("Edit Log")
+        egui::Window::new("Edits")
             .open(&mut open)
             .resizable(true)
-            .default_size([420.0, 480.0])
+            .default_size([460.0, 520.0])
             .show(ctx, |ui| {
-                if self.state.edit_log.is_empty() {
+                if fighters.is_empty() {
                     ui.label(egui::RichText::new("No edits recorded yet.")
                         .color(egui::Color32::GRAY));
                     return;
                 }
 
                 ui.label(egui::RichText::new(
-                    "Edits are saved automatically. Use × to discard before exporting."
+                    "All edits across the toolkit — hitboxes (incl. live rules), effect \
+                     spawns, live tweaks, and authored eff values. Saved automatically; \
+                     use × to discard (also un-sends the live state)."
                 ).small().color(egui::Color32::GRAY));
                 ui.separator();
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (fighter_name, fighter_display) in self.state.edit_log.fighters_sorted() {
-                        let move_names = self.state.edit_log.moves_for(&fighter_name);
-
-                        // Fighter row
+                // ── Live color/speed tweaks (kind-global runtime multipliers) ──
+                let tweaks = self.live_overrides.tweaked();
+                if !tweaks.is_empty() {
+                    ui.label(egui::RichText::new("Live color/speed tweaks").small().strong());
+                    for (hash, form) in &tweaks {
                         ui.horizontal(|ui| {
-                            ui.strong(&fighter_display);
-                            ui.label(egui::RichText::new(
-                                format!("({} move{})", move_names.len(), if move_names.len() == 1 { "" } else { "s" })
-                            ).small().color(egui::Color32::GRAY));
-                            if ui.small_button("× all").on_hover_text("Remove all edits for this fighter").clicked() {
-                                remove_fighter = Some(fighter_name.clone());
+                            ui.add_space(12.0);
+                            let c = form.rainbow.color;
+                            ui.label(egui::RichText::new(format!(
+                                "{} — color ×[{:.2} {:.2} {:.2}] speed ×{:.2}",
+                                form.effect_name, c.red, c.green, c.blue, form.speed
+                            )).small().monospace());
+                            if ui.small_button("×").on_hover_text("Revert (also in game)").clicked() {
+                                clear_tweak_hash = Some(*hash);
                             }
                         });
+                    }
+                    ui.separator();
+                }
 
-                        // Move rows
-                        for move_name in &move_names {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (fighter_name, fighter_display) in &fighters {
+                        let move_names = self.state.edit_log.moves_for(fighter_name);
+                        let call_keys: Vec<String> = self
+                            .state
+                            .effect_call_edits
+                            .iter()
+                            .filter(|(k, v)| {
+                                !v.is_empty()
+                                    && k.split_once('/').map(|(f, _)| f == fighter_name).unwrap_or(false)
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        let eff = self.eff_mods.get(fighter_name).filter(|e| !e.is_empty());
+                        let total =
+                            move_names.len() + call_keys.len() + eff.map(|_| 1).unwrap_or(0);
+
+                        egui::CollapsingHeader::new(
+                            egui::RichText::new(format!("{fighter_display}  ({total})")).strong(),
+                        )
+                        .id_salt(format!("edits_{fighter_name}"))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            // ── Hitboxes / ACMD ────────────────────────────
+                            if !move_names.is_empty() {
+                                ui.label(egui::RichText::new("Hitboxes / ACMD").small().strong());
+                                for move_name in &move_names {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(12.0);
+                                        let is_active = self.state.selected_fighter
+                                            .and_then(|i| self.state.fighters.get(i))
+                                            .map(|f| &f.name == fighter_name)
+                                            .unwrap_or(false)
+                                            && self.state.selected_move.as_ref()
+                                                .map(|m| &m.name == move_name)
+                                                .unwrap_or(false);
+                                        let label = if is_active {
+                                            egui::RichText::new(format!("▶ {}", move_name))
+                                                .color(egui::Color32::from_rgb(100, 200, 255))
+                                        } else {
+                                            egui::RichText::new(move_name.clone())
+                                        };
+                                        ui.label(label);
+                                        if let Some(record) = self.state.edit_log.entries
+                                            .get(fighter_name)
+                                            .and_then(|m| m.get(move_name))
+                                        {
+                                            ui.label(egui::RichText::new(
+                                                format!("{} hb", record.hitboxes.len())
+                                            ).small().color(egui::Color32::GRAY));
+                                        }
+                                        let rule_key = format!("{fighter_name}/{move_name}");
+                                        if let Some(rules) = self.hitbox_rules_store.get(&rule_key)
+                                        {
+                                            if !rules.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "⚡{} live",
+                                                        rules.len()
+                                                    ))
+                                                    .small()
+                                                    .color(egui::Color32::from_rgb(90, 220, 90)),
+                                                );
+                                            }
+                                        }
+                                        if ui.small_button("Export")
+                                            .on_hover_text("Export this move as smashline source")
+                                            .clicked()
+                                        {
+                                            export_move =
+                                                Some((fighter_name.clone(), move_name.clone()));
+                                        }
+                                        if ui.small_button("×").clicked() {
+                                            remove_move =
+                                                Some((fighter_name.clone(), move_name.clone()));
+                                        }
+                                    });
+                                }
+                            }
+
+                            // ── Effect spawns ──────────────────────────────
+                            if !call_keys.is_empty() {
+                                ui.label(egui::RichText::new("Effect spawns").small().strong());
+                                for key in &call_keys {
+                                    let mv = key.split_once('/').map(|(_, m)| m).unwrap_or(key);
+                                    let edits = &self.state.effect_call_edits[key];
+                                    let (n_mod, n_add, n_rem, n_sup) = edits.iter().fold(
+                                        (0, 0, 0, 0),
+                                        |(m, a, r, s), e| match &e.op {
+                                            crate::data::EffectCallOp::Modify(c) => {
+                                                (m + 1, a, r, s + usize::from(c.disabled))
+                                            }
+                                            crate::data::EffectCallOp::Add(c) => {
+                                                (m, a + 1, r, s + usize::from(c.disabled))
+                                            }
+                                            crate::data::EffectCallOp::Remove => (m, a, r + 1, s),
+                                        },
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(12.0);
+                                        ui.label(mv);
+                                        let mut txt = format!(
+                                            "{n_mod} edited · {n_add} added · {n_rem} removed"
+                                        );
+                                        if n_sup > 0 {
+                                            txt.push_str(&format!(" · {n_sup} suppressed live"));
+                                        }
+                                        ui.label(egui::RichText::new(txt).small().color(egui::Color32::GRAY));
+                                        if ui.small_button("×").clicked() {
+                                            remove_call_key = Some(key.clone());
+                                        }
+                                    });
+                                }
+                            }
+
+                            // ── Authored eff values ────────────────────────
+                            if let Some(eff) = eff {
+                                ui.label(egui::RichText::new("Authored eff").small().strong());
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    ui.label(egui::RichText::new(&eff.source_rel).small().monospace());
+                                    if ui.small_button("×").on_hover_text("Discard all authored eff edits").clicked() {
+                                        clear_eff_fighter = Some(fighter_name.clone());
+                                    }
+                                });
+                                for a in &eff.authored {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(24.0);
+                                        ui.label(egui::RichText::new(format!(
+                                            "{} / {} — {} field(s)",
+                                            if a.set_name.is_empty() { format!("set {}", a.set_idx) } else { a.set_name.clone() },
+                                            if a.emitter_name.is_empty() { format!("emitter {}", a.emitter_idx) } else { a.emitter_name.clone() },
+                                            a.fields.count(),
+                                        )).small());
+                                    });
+                                }
+                                for os in &eff.one_slot {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(24.0);
+                                        ui.label(egui::RichText::new(format!(
+                                            "one-slot: {} ← {}",
+                                            os.new_entry_name, os.src_set_name
+                                        )).small().color(egui::Color32::from_rgb(190, 160, 255)));
+                                    });
+                                }
+                            }
+                        });
+                        ui.add_space(2.0);
+
+                        // Fighter-wide discard (hitbox log only keeps its own remove API)
+                        if move_names.len() > 1 {
                             ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                // Highlight if this is the currently loaded move
-                                let is_active = self.state.selected_fighter
-                                    .and_then(|i| self.state.fighters.get(i))
-                                    .map(|f| f.name == fighter_name)
-                                    .unwrap_or(false)
-                                    && self.state.selected_move.as_ref()
-                                        .map(|m| &m.name == move_name)
-                                        .unwrap_or(false);
-
-                                let label = if is_active {
-                                    egui::RichText::new(format!("▶ {}", move_name))
-                                        .color(egui::Color32::from_rgb(100, 200, 255))
-                                } else {
-                                    egui::RichText::new(format!("  {}", move_name))
-                                };
-                                ui.label(label);
-
-                                // Hitbox count badge
-                                if let Some(record) = self.state.edit_log.entries
-                                    .get(&fighter_name)
-                                    .and_then(|m| m.get(move_name))
-                                {
-                                    ui.label(egui::RichText::new(
-                                        format!("{} hb", record.hitboxes.len())
-                                    ).small().color(egui::Color32::GRAY));
-                                }
-
-                                if ui.small_button("Export")
-                                    .on_hover_text("Export this move as smashline source")
-                                    .clicked()
-                                {
-                                    export_move = Some((fighter_name.clone(), move_name.clone()));
-                                }
-                                if ui.small_button("×")
-                                    .on_hover_text("Remove this edit from the log")
-                                    .clicked()
-                                {
-                                    remove_move = Some((fighter_name.clone(), move_name.clone()));
+                                ui.add_space(8.0);
+                                if ui.small_button(format!("× all {fighter_display} hitbox edits")).clicked() {
+                                    remove_fighter = Some(fighter_name.clone());
                                 }
                             });
                         }
-                        ui.add_space(4.0);
                     }
                 });
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Export All").on_hover_text("Export every logged edit to a folder").clicked() {
+                    if ui.button("Export All").on_hover_text("Export every logged hitbox edit to a folder").clicked() {
                         export_all = true;
                     }
                 });
@@ -1435,9 +1764,33 @@ impl HitboxEditorApp {
         }
         if let Some((f, m)) = remove_move {
             self.state.edit_log.remove_move(&f, &m);
+            // Un-send this move's live hitbox rules too.
+            if self.hitbox_rules_store.remove(&format!("{f}/{m}")).is_some() {
+                let all: Vec<crate::game_link::HitboxRuleWire> =
+                    self.hitbox_rules_store.values().flatten().cloned().collect();
+                self.game_link.send_hitbox_rules(&all);
+            }
         }
         if let Some(f) = remove_fighter {
             self.state.edit_log.remove_fighter(&f);
+            let before = self.hitbox_rules_store.len();
+            self.hitbox_rules_store.retain(|k, _| !k.starts_with(&format!("{f}/")));
+            if self.hitbox_rules_store.len() != before {
+                let all: Vec<crate::game_link::HitboxRuleWire> =
+                    self.hitbox_rules_store.values().flatten().cloned().collect();
+                self.game_link.send_hitbox_rules(&all);
+            }
+        }
+        if let Some(key) = remove_call_key {
+            self.state.effect_call_edits.remove(&key);
+            self.apply_effect_call_edits_to_current();
+            self.push_effect_rules(); // discarded disabled-calls stop suppressing
+        }
+        if let Some(f) = clear_eff_fighter {
+            self.eff_mods.remove(&f);
+        }
+        if let Some(hash) = clear_tweak_hash {
+            self.live_overrides.clear_tweak(hash);
         }
         if let Some((fighter, move_name)) = export_move {
             self.export_logged_move(&fighter, &move_name);
@@ -1505,7 +1858,9 @@ impl HitboxEditorApp {
         }
     }
 
-    /// Snapshot the current hitboxes/script into the edit log for the active fighter+move.
+    /// Snapshot the current hitboxes/script into the edit log for the active fighter+move —
+    /// but only when they actually DIFFER from the pristine load (the log is an edit tree,
+    /// not a browsing history).
     fn commit_current_edits(&mut self) {
         let fighter = match self.state.selected_fighter.and_then(|i| self.state.fighters.get(i)) {
             Some(f) => f.clone(),
@@ -1518,7 +1873,23 @@ impl HitboxEditorApp {
         if self.state.script.stmts.is_empty() && self.state.hitboxes.is_empty() {
             return;
         }
-        let script = rebuild_script_from_hitboxes(&self.state.script, &self.state.hitboxes);
+        let already_logged = self
+            .state
+            .edit_log
+            .entries
+            .get(&fighter.name)
+            .map(|m| m.contains_key(&move_name))
+            .unwrap_or(false);
+        if self.state.hitboxes == self.state.hitboxes_pristine && !already_logged {
+            return;
+        }
+        // Capture-sourced moves have no base script text — synthesize one from the hitboxes
+        // so the export path works the same as for GitHub-fetched scripts.
+        let script = if self.state.script.stmts.is_empty() {
+            synthesize_script_from_hitboxes(&self.state.hitboxes)
+        } else {
+            rebuild_script_from_hitboxes(&self.state.script, &self.state.hitboxes)
+        };
         self.state.edit_log.save(
             &fighter.name,
             &fighter.display_name,
@@ -1596,19 +1967,42 @@ impl HitboxEditorApp {
             .desired_width(f32::INFINITY));
         let move_query = self.move_search.to_lowercase();
         ScrollArea::vertical().id_salt("moves").max_height(half).auto_shrink([false, false]).show(ui, |ui| {
-            let moves: Vec<MoveEntry> = self.move_list.iter()
-                .filter(|m| move_query.is_empty() || m.name.to_lowercase().contains(&move_query)
-                    || format_move_name(&m.name).to_lowercase().contains(&move_query))
-                .cloned()
-                .collect();
-            for m in moves {
-                let selected = self.state.selected_move.as_ref()
-                    .map(|sm| sm.hash == m.hash)
-                    .unwrap_or(false);
-                let label = format!("{} ({}f)", format_move_name(&m.name), m.frame_count);
-                if ui.selectable_label(selected, &label).clicked() && !selected {
-                    self.select_move(m);
+            // Group the (filtered) moves into the familiar move families, preserving order.
+            let mut groups: Vec<Vec<MoveEntry>> =
+                (0..MOVE_CATEGORY_LABELS.len()).map(|_| Vec::new()).collect();
+            for m in self.move_list.iter().filter(|m| {
+                move_query.is_empty()
+                    || m.name.to_lowercase().contains(&move_query)
+                    || format_move_name(&m.name).to_lowercase().contains(&move_query)
+            }) {
+                groups[move_category_index(&m.name)].push(m.clone());
+            }
+            let mut to_select: Option<MoveEntry> = None;
+            for (ci, group) in groups.iter().enumerate() {
+                if group.is_empty() {
+                    continue;
                 }
+                egui::CollapsingHeader::new(format!("{} ({})", MOVE_CATEGORY_LABELS[ci], group.len()))
+                    .id_salt(("movecat", ci))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for m in group {
+                            let selected = self
+                                .state
+                                .selected_move
+                                .as_ref()
+                                .map(|sm| sm.hash == m.hash)
+                                .unwrap_or(false);
+                            let label =
+                                format!("{} ({}f)", format_move_name(&m.name), m.frame_count);
+                            if ui.selectable_label(selected, &label).clicked() && !selected {
+                                to_select = Some(m.clone());
+                            }
+                        }
+                    });
+            }
+            if let Some(m) = to_select {
+                self.select_move(m);
             }
         });
     }
@@ -1623,6 +2017,29 @@ impl HitboxEditorApp {
                     .clicked()
                 {
                     self.fetch_acmd();
+                }
+                let has_capture = self
+                    .current_motion_hash()
+                    .map(|m| !self.game_link.captures_for(m).is_empty())
+                    .unwrap_or(false);
+                if ui
+                    .add_enabled(has_capture, egui::Button::new("⟳ Live"))
+                    .on_hover_text(
+                        "Load this move's hitboxes + effects from the live game capture \
+                         (exact values; perform the move in game to capture it)",
+                    )
+                    .clicked()
+                {
+                    self.load_from_capture();
+                }
+                if !self.state.acmd_source.is_empty() {
+                    let (txt, color) = if self.state.acmd_source == "Live capture" {
+                        ("● Live", egui::Color32::from_rgb(90, 220, 90))
+                    } else {
+                        ("● GitHub", egui::Color32::from_rgb(160, 160, 220))
+                    };
+                    ui.colored_label(color, txt)
+                        .on_hover_text(format!("Data source: {}", self.state.acmd_source));
                 }
             }
             if ui.button("+").clicked() {
@@ -1674,14 +2091,31 @@ impl HitboxEditorApp {
         ScrollArea::vertical().id_salt("hitboxes").show(ui, |ui| {
             let mut to_delete = None;
             for (i, hb) in self.state.hitboxes.iter().enumerate() {
-                let color = hitbox_color(hb.hitbox_type);
+                let color = hitbox_display_color(hb);
                 let selected = self.selected_hitbox == Some(i);
                 ui.horizontal(|ui| {
                     ui.colored_label(color, "*");
                     let shape = if hb.capsule_end.is_some() { "⬭" } else { "●" };
-                    let angle_label = angle_short_label(hb.angle);
-                    let label = format!("{} #{} {} {:.1}dmg {} [{}-{}]",
-                        shape, hb.id, hb.bone_name, hb.damage, angle_label, hb.active_start, hb.active_end);
+                    let label = match hb.category {
+                        1 => format!(
+                            "{} GRAB #{} {} [{}-{}]",
+                            shape, hb.id, hb.bone_name, hb.active_start, hb.active_end
+                        ),
+                        2 => format!(
+                            "{} WIND ~{:.1} [{}-{}]",
+                            shape, hb.size, hb.active_start, hb.active_end
+                        ),
+                        _ => format!(
+                            "{} #{} {} {:.1}dmg {} [{}-{}]",
+                            shape,
+                            hb.id,
+                            hb.bone_name,
+                            hb.damage,
+                            angle_short_label(hb.angle),
+                            hb.active_start,
+                            hb.active_end
+                        ),
+                    };
                     if ui.selectable_label(selected, &label).clicked() {
                         self.selected_hitbox = if selected { None } else { Some(i) };
                     }
@@ -1696,45 +2130,64 @@ impl HitboxEditorApp {
             }
         });
 
-        // Property editor for selected hitbox
+        // Property editor for selected hitbox — fields shown depend on the collision family.
         if let Some(idx) = self.selected_hitbox {
+            let bone_names = self.bone_names.clone();
+            let max_frame = self.state.total_frames.saturating_sub(1).max(1);
             if let Some(hb) = self.state.hitboxes.get_mut(idx) {
                 ui.separator();
-                ui.heading("Properties");
+                let (cat_label, cat_color) = match hb.category {
+                    1 => ("Grab box", egui::Color32::from_rgb(80, 200, 255)),
+                    2 => ("Wind box", egui::Color32::from_rgb(120, 240, 140)),
+                    _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
+                };
+                ui.horizontal(|ui| {
+                    ui.heading("Properties");
+                    ui.colored_label(cat_color, cat_label);
+                });
                 ScrollArea::vertical().id_salt("props").show(ui, |ui| {
-                    // ── Core ─────────────────────────────────────────────
+                    // ── Bone (all families) ──────────────────────────────
                     ui.horizontal(|ui| {
                         ui.label("Bone:");
-                        if self.bone_names.is_empty() {
+                        if bone_names.is_empty() {
                             ui.text_edit_singleline(&mut hb.bone_name);
                         } else {
                             egui::ComboBox::from_id_salt("edit_bone_select")
                                 .selected_text(&hb.bone_name)
                                 .show_ui(ui, |ui| {
-                                    for name in &self.bone_names.clone() {
+                                    for name in &bone_names {
                                         ui.selectable_value(&mut hb.bone_name, name.clone(), name);
                                     }
                                 });
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("ID:");
-                        ui.add(egui::DragValue::new(&mut hb.id));
-                        ui.label("Part:");
-                        ui.add(egui::DragValue::new(&mut hb.part));
-                    });
-                    ui.add(egui::Slider::new(&mut hb.damage, 0.0..=50.0).text("Damage"));
-                    angle_picker(ui, &mut hb.angle);
-                    ui.add(egui::Slider::new(&mut hb.kb_base, 0..=200).text("KB Base"));
-                    ui.add(egui::Slider::new(&mut hb.kb_scaling, 0..=200).text("KB Scaling"));
-                    ui.add(egui::Slider::new(&mut hb.fkb, 0..=200).text("Fixed KB"));
-                    ui.add(egui::Slider::new(&mut hb.size, 0.1..=20.0).text("Size"));
+                    // Wind has no id; attack + grab do.
+                    if hb.category != 2 {
+                        ui.horizontal(|ui| {
+                            ui.label("ID:");
+                            ui.add(egui::DragValue::new(&mut hb.id));
+                            if hb.category == 0 {
+                                ui.label("Part:");
+                                ui.add(egui::DragValue::new(&mut hb.part));
+                            }
+                        });
+                    }
 
-                    // ── Position / Shape ─────────────────────────────────
+                    // ── Attack-only combat fields ────────────────────────
+                    if hb.category == 0 {
+                        wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
+                        angle_picker(ui, &mut hb.angle);
+                        wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
+                        wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
+                        wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                    }
+
+                    // ── Size + position/shape (all families) ─────────────
+                    wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
                     ui.collapsing("Position / Shape", |ui| {
-                        ui.add(egui::Slider::new(&mut hb.offset_x, -20.0..=20.0).text("Offset X"));
-                        ui.add(egui::Slider::new(&mut hb.offset_y, -20.0..=20.0).text("Offset Y"));
-                        ui.add(egui::Slider::new(&mut hb.offset_z, -20.0..=20.0).text("Offset Z"));
+                        wide_slider_f32(ui, &mut hb.offset_x, -20.0..=20.0, "Offset X");
+                        wide_slider_f32(ui, &mut hb.offset_y, -20.0..=20.0, "Offset Y");
+                        wide_slider_f32(ui, &mut hb.offset_z, -20.0..=20.0, "Offset Z");
                         let is_capsule = hb.capsule_end.is_some();
                         let mut toggle = is_capsule;
                         ui.checkbox(&mut toggle, "Capsule (second endpoint)");
@@ -1744,51 +2197,57 @@ impl HitboxEditorApp {
                             hb.capsule_end = None;
                         }
                         if let Some(ref mut end) = hb.capsule_end {
-                            ui.add(egui::Slider::new(&mut end[0], -20.0..=20.0).text("End X"));
-                            ui.add(egui::Slider::new(&mut end[1], -20.0..=20.0).text("End Y"));
-                            ui.add(egui::Slider::new(&mut end[2], -20.0..=20.0).text("End Z"));
+                            wide_slider_f32(ui, &mut end[0], -20.0..=20.0, "End X");
+                            wide_slider_f32(ui, &mut end[1], -20.0..=20.0, "End Y");
+                            wide_slider_f32(ui, &mut end[2], -20.0..=20.0, "End Z");
                         }
                     });
 
-                    // ── Hit Properties ───────────────────────────────────
-                    ui.collapsing("Hit Properties", |ui| {
-                        ui.add(egui::Slider::new(&mut hb.hitlag_mult, 0.0..=5.0).text("Hitlag Mult"));
-                        ui.add(egui::Slider::new(&mut hb.sdi_mult, 0.0..=5.0).text("SDI Mult"));
-                        ui.add(egui::Slider::new(&mut hb.hitbox_attr, -10.0..=10.0).text("Hitbox Attr"));
-                        ui.add(egui::DragValue::new(&mut hb.is_add_attack).prefix("Add Attack: "));
-                        ui.add(egui::DragValue::new(&mut hb.ground_or_air).prefix("Ground/Air: "));
+                    // ── Attack-only detail sections ──────────────────────
+                    if hb.category == 0 {
+                        ui.collapsing("Hit Properties", |ui| {
+                            wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag Mult");
+                            wide_slider_f32(ui, &mut hb.sdi_mult, 0.0..=5.0, "SDI Mult");
+                            wide_slider_f32(ui, &mut hb.hitbox_attr, -10.0..=10.0, "Hitbox Attr");
+                            ui.add(egui::DragValue::new(&mut hb.is_add_attack).prefix("Add Attack: "));
+                            ui.add(egui::DragValue::new(&mut hb.ground_or_air).prefix("Ground/Air: "));
 
-                        setoff_combo(ui, &mut hb.setoff_kind, "setoff_kind");
-                        lr_check_combo(ui, &mut hb.lr_check, "lr_check");
+                            setoff_combo(ui, &mut hb.setoff_kind, "setoff_kind");
+                            lr_check_combo(ui, &mut hb.lr_check, "lr_check");
 
-                        ui.checkbox(&mut hb.is_clang, "Clang");
-                        ui.checkbox(&mut hb.is_mtk, "MTK (intangible)");
-                        ui.checkbox(&mut hb.is_shield_disable, "Shield Disable");
-                        ui.checkbox(&mut hb.is_reflectable, "Reflectable");
-                        ui.checkbox(&mut hb.is_absorbable, "Absorbable");
-                        ui.checkbox(&mut hb.is_landing_attack, "Landing Attack");
-                        ui.checkbox(&mut hb.no_finish_camera, "No Finish Camera");
-                    });
+                            ui.checkbox(&mut hb.is_clang, "Clang");
+                            ui.checkbox(&mut hb.is_mtk, "MTK (intangible)");
+                            ui.checkbox(&mut hb.is_shield_disable, "Shield Disable");
+                            ui.checkbox(&mut hb.is_reflectable, "Reflectable");
+                            ui.checkbox(&mut hb.is_absorbable, "Absorbable");
+                            ui.checkbox(&mut hb.is_landing_attack, "Landing Attack");
+                            ui.checkbox(&mut hb.no_finish_camera, "No Finish Camera");
+                        });
+                        ui.collapsing("Collision Masks", |ui| {
+                            situation_mask_combo(ui, &mut hb.situation_mask, "sit_mask");
+                            category_mask_combo(ui, &mut hb.category_mask, "cat_mask");
+                            part_mask_combo(ui, &mut hb.part_mask, "part_mask");
+                        });
+                        ui.collapsing("Effect / Sound", |ui| {
+                            collision_attr_combo(ui, &mut hb.collision_attr, "col_attr");
+                            sound_level_combo(ui, &mut hb.sound_level, "snd_lvl");
+                            sound_attr_combo(ui, &mut hb.sound_attr, "snd_attr");
+                            attack_region_combo(ui, &mut hb.attack_region, "atk_region");
+                        });
+                    }
 
-                    // ── Collision Masks ──────────────────────────────────
-                    ui.collapsing("Collision Masks", |ui| {
-                        situation_mask_combo(ui, &mut hb.situation_mask, "sit_mask");
-                        category_mask_combo(ui, &mut hb.category_mask, "cat_mask");
-                        part_mask_combo(ui, &mut hb.part_mask, "part_mask");
-                    });
+                    if hb.category == 2 {
+                        ui.colored_label(
+                            egui::Color32::GRAY,
+                            "Wind boxes: size / position / timeline are editable and suppressible. \
+                             The rest of the wind parameters use an undocumented arg layout and \
+                             aren't exposed yet.",
+                        );
+                    }
 
-                    // ── Effect / Sound ───────────────────────────────────
-                    ui.collapsing("Effect / Sound", |ui| {
-                        collision_attr_combo(ui, &mut hb.collision_attr, "col_attr");
-                        sound_level_combo(ui, &mut hb.sound_level, "snd_lvl");
-                        sound_attr_combo(ui, &mut hb.sound_attr, "snd_attr");
-                        attack_region_combo(ui, &mut hb.attack_region, "atk_region");
-                    });
-
-                    // ── Timeline ─────────────────────────────────────────
-                    let max_frame = self.state.total_frames.saturating_sub(1);
-                    ui.add(egui::Slider::new(&mut hb.active_start, 0..=max_frame).text("Start Frame"));
-                    ui.add(egui::Slider::new(&mut hb.active_end, 0..=max_frame).text("End Frame"));
+                    // ── Timeline (all families) ──────────────────────────
+                    wide_slider_u32(ui, &mut hb.active_start, 0..=max_frame, "Start Frame");
+                    wide_slider_u32(ui, &mut hb.active_end, 0..=max_frame, "End Frame");
                 });
             }
         }
@@ -1798,13 +2257,15 @@ impl HitboxEditorApp {
         let current = self.state.current_frame;
 
         ui.horizontal(|ui| {
-            ui.heading("Effects");
+            ui.heading("Effect spawns");
             ui.label(egui::RichText::new(format!("— Frame {}", current))
                 .color(egui::Color32::LIGHT_GRAY));
         });
+        ui.checkbox(&mut self.state.show_all_effect_calls, "show all frames");
         ui.separator();
 
-        let has_effect_data = !self.state.effect_script.stmts.is_empty();
+        let has_effect_data =
+            !self.state.effect_script.stmts.is_empty() || !self.state.effects.is_empty();
 
         if !has_effect_data {
             ui.colored_label(egui::Color32::GRAY, "Effect data unavailable");
@@ -1812,37 +2273,307 @@ impl HitboxEditorApp {
                 .small()
                 .color(egui::Color32::DARK_GRAY));
         } else {
-            let active_effects: Vec<&crate::data::EffectCall> = self.state.effects.iter()
-                .filter(|e| current >= e.active_start && current <= e.active_end)
+            let visible: Vec<usize> = self.state.effects.iter().enumerate()
+                .filter(|(_, e)| {
+                    if self.state.show_all_effect_calls {
+                        return true;
+                    }
+                    // Follow effects use their real end; one-shots (end == start) get a short
+                    // display window so they don't vanish one frame after they spawn.
+                    let end = if e.follows_bone {
+                        e.active_end
+                    } else {
+                        e.active_end.max(e.active_start.saturating_add(12))
+                    };
+                    current >= e.active_start && current <= end
+                })
+                .map(|(i, _)| i)
                 .collect();
 
-            if active_effects.is_empty() {
+            if visible.is_empty() {
                 ui.colored_label(egui::Color32::GRAY, "No effects on this frame");
             } else {
-                egui::ScrollArea::vertical().id_salt("effects_list").max_height(200.0).show(ui, |ui| {
-                    for effect in &active_effects {
+                egui::ScrollArea::vertical().id_salt("effects_list").max_height(180.0).show(ui, |ui| {
+                    for &i in &visible {
+                        let effect = &self.state.effects[i];
                         ui.horizontal(|ui| {
-                            // Colored dot: orange for follows_bone, yellow for one-shot
-                            let dot_color = if effect.follows_bone {
+                            // Orange = follows bone, yellow = one-shot, gray = disabled
+                            let dot_color = if effect.disabled {
+                                egui::Color32::DARK_GRAY
+                            } else if effect.follows_bone {
                                 egui::Color32::from_rgb(255, 165, 0)
                             } else {
                                 egui::Color32::from_rgb(255, 220, 0)
                             };
                             ui.colored_label(dot_color, "●");
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(&effect.effect_name)
-                                    .monospace()
-                                    .color(egui::Color32::WHITE));
-                                ui.label(egui::RichText::new(format!(
-                                    "bone: {}  [{:.2}, {:.2}, {:.2}]",
-                                    effect.bone_name,
-                                    effect.offset[0], effect.offset[1], effect.offset[2]
-                                )).small().color(egui::Color32::LIGHT_GRAY));
-                            });
+                            let selected = self.state.selected_effect_call == Some(i);
+                            let mut text = egui::RichText::new(&effect.effect_name).monospace();
+                            if effect.disabled {
+                                text = text.strikethrough().color(egui::Color32::DARK_GRAY);
+                            }
+                            if ui
+                                .selectable_label(selected, text)
+                                .on_hover_text(format!(
+                                    "bone {} · f{}-{}",
+                                    effect.bone_name, effect.active_start, effect.active_end
+                                ))
+                                .clicked()
+                            {
+                                self.state.selected_effect_call =
+                                    if selected { None } else { Some(i) };
+                            }
                         });
-                        ui.add_space(2.0);
                     }
                 });
+            }
+
+            if ui.small_button("＋ Add effect call").clicked() {
+                let call = crate::data::EffectCall {
+                    effect_name: "sys_hit_elec".into(),
+                    bone_name: "top".into(),
+                    offset: [0.0; 3],
+                    rotation: [0.0; 3],
+                    scale: 1.0,
+                    follows_bone: true,
+                    active_start: current,
+                    active_end: current.saturating_add(10),
+                    disabled: false,
+                };
+                self.state.effects.push(call.clone());
+                let idx = self.state.effects.len() - 1;
+                if let Some(mv) = self.current_move_key() {
+                    self.state
+                        .effect_call_edits
+                        .entry(mv.clone())
+                        .or_default()
+                        .push(crate::data::EffectCallEdit {
+                            index: idx,
+                            op: crate::data::EffectCallOp::Add(call),
+                        });
+                    self.state
+                        .effect_call_full
+                        .insert(mv, self.state.effects.clone());
+                }
+                self.state.selected_effect_call = Some(idx);
+            }
+
+            // Backspace / Delete removes the selected spawn (unless typing in a field).
+            if let Some(sel) = self.state.selected_effect_call {
+                let pressed = ui.input(|i| {
+                    i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)
+                });
+                let typing = ui.memory(|m| m.focused().is_some());
+                if pressed && !typing {
+                    self.delete_effect_call(sel);
+                }
+            }
+
+            // ── Selected-call editor ────────────────────────────────────────
+            if let Some(i) = self
+                .state
+                .selected_effect_call
+                .filter(|i| *i < self.state.effects.len())
+            {
+                ui.separator();
+                let pristine = self.state.effects_pristine.get(i).cloned();
+                let bone_names = self.bone_names.clone();
+                let mut changed = false;
+                // Discrete swaps (effect name / bone) need a preview rebuild; numeric drags don't.
+                let mut respawn_needed = false;
+                let mut toggle_pick = false;
+                {
+                    let ec = &mut self.state.effects[i];
+                    let orig = |ui: &mut Ui, txt: String| {
+                        ui.label(
+                            egui::RichText::new(txt).small().color(egui::Color32::GRAY),
+                        );
+                    };
+                    egui::Grid::new("effect_call_edit").num_columns(3).striped(true).show(ui, |ui| {
+                        ui.label("Effect");
+                        ui.horizontal(|ui| {
+                            changed |= ui
+                                .add(egui::TextEdit::singleline(&mut ec.effect_name).desired_width(120.0))
+                                .changed();
+                            if ui
+                                .small_button("▾")
+                                .on_hover_text("Pick from live kinds + every eff")
+                                .clicked()
+                            {
+                                toggle_pick = true;
+                            }
+                        });
+                        if let Some(p) = &pristine {
+                            orig(ui, format!("orig {}", p.effect_name));
+                        } else {
+                            ui.label(egui::RichText::new("added").small().color(egui::Color32::GRAY));
+                        }
+                        ui.end_row();
+
+                        ui.label("Bone");
+                        if bone_names.is_empty() {
+                            changed |= ui
+                                .add(egui::TextEdit::singleline(&mut ec.bone_name).desired_width(140.0))
+                                .changed();
+                        } else {
+                            egui::ComboBox::from_id_salt("effect_bone_select")
+                                .selected_text(&ec.bone_name)
+                                .width(140.0)
+                                .show_ui(ui, |ui| {
+                                    for name in &bone_names {
+                                        if ui
+                                            .selectable_value(&mut ec.bone_name, name.clone(), name)
+                                            .clicked()
+                                        {
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                    }
+                                });
+                        }
+                        if let Some(p) = &pristine {
+                            orig(ui, format!("orig {}", p.bone_name));
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+
+                        ui.label("Offset");
+                        ui.horizontal(|ui| {
+                            for v in ec.offset.iter_mut() {
+                                changed |= ui.add(egui::DragValue::new(v).speed(0.05)).changed();
+                            }
+                        });
+                        if let Some(p) = &pristine {
+                            orig(ui, format!("orig [{:.2} {:.2} {:.2}]", p.offset[0], p.offset[1], p.offset[2]));
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+
+                        ui.label("Rotation");
+                        ui.horizontal(|ui| {
+                            for v in ec.rotation.iter_mut() {
+                                changed |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+                            }
+                        });
+                        if let Some(p) = &pristine {
+                            orig(ui, format!("orig [{:.1} {:.1} {:.1}]", p.rotation[0], p.rotation[1], p.rotation[2]));
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+
+                        ui.label("Scale");
+                        changed |= ui.add(egui::DragValue::new(&mut ec.scale).speed(0.02)).changed();
+                        if let Some(p) = &pristine {
+                            orig(ui, format!("orig {:.2}", p.scale));
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+
+                        // One-shot effects have no meaningful "end" (they play their own
+                        // lifetime), so only follow effects show an end frame — otherwise the
+                        // row showed confusing "30-30" or "30-9999" ranges.
+                        ui.label("Spawn frame");
+                        ui.horizontal(|ui| {
+                            changed |= ui.add(egui::DragValue::new(&mut ec.active_start)).changed();
+                            if ec.follows_bone {
+                                ui.label("→ until");
+                                changed |= ui.add(egui::DragValue::new(&mut ec.active_end)).changed();
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("(one-shot)")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                );
+                            }
+                        });
+                        if let Some(p) = &pristine {
+                            if p.follows_bone {
+                                orig(ui, format!("orig {}→{}", p.active_start, p.active_end));
+                            } else {
+                                orig(ui, format!("orig frame {}", p.active_start));
+                            }
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+
+                        ui.label("Disabled");
+                        changed |= ui.checkbox(&mut ec.disabled, "don't spawn").changed();
+                        ui.label("");
+                        ui.end_row();
+                    });
+                }
+
+                if toggle_pick {
+                    self.effect_pick_open = !self.effect_pick_open;
+                }
+                // ── Inline searchable effect picker (opens next to the Effect field) ──
+                if self.effect_pick_open {
+                    if let Some(name) = self.draw_effect_name_picker(ui) {
+                        self.state.effects[i].effect_name = name;
+                        changed = true;
+                        respawn_needed = true;
+                        self.effect_pick_open = false;
+                    }
+                }
+
+                let mut duplicate: Option<crate::data::EffectCall> = None;
+                ui.horizontal(|ui| {
+                    if pristine.is_some() && ui.small_button("Reset to original").clicked() {
+                        if let Some(p) = &pristine {
+                            self.state.effects[i] = p.clone();
+                        }
+                        if let Some(mv) = self.current_move_key() {
+                            if let Some(edits) = self.state.effect_call_edits.get_mut(&mv) {
+                                edits.retain(|e| e.index != i);
+                            }
+                            self.state
+                                .effect_call_full
+                                .insert(mv, self.state.effects.clone());
+                        }
+                        self.push_effect_rules();
+                    }
+                    if ui
+                        .small_button("⧉ Duplicate")
+                        .on_hover_text("Add a copy of this spawn as a new effect call")
+                        .clicked()
+                    {
+                        duplicate = self.state.effects.get(i).cloned();
+                    }
+                });
+                if let Some(mut call) = duplicate {
+                    // A duplicate is a brand-new (authored) call, never a modify of pristine.
+                    call.disabled = false;
+                    self.state.effects.push(call.clone());
+                    let new_idx = self.state.effects.len() - 1;
+                    if let Some(mv) = self.current_move_key() {
+                        self.state
+                            .effect_call_edits
+                            .entry(mv.clone())
+                            .or_default()
+                            .push(crate::data::EffectCallEdit {
+                                index: new_idx,
+                                op: crate::data::EffectCallOp::Add(call),
+                            });
+                        self.state
+                            .effect_call_full
+                            .insert(mv, self.state.effects.clone());
+                    }
+                    self.state.selected_effect_call = Some(new_idx);
+                    self.push_effect_rules();
+                }
+                if changed {
+                    self.record_effect_call_edit(i);
+                    self.push_effect_rules();
+                    // Swapping the effect or bone changes what spawns — rebuild the local
+                    // preview so the new effect shows (numeric drags don't need this).
+                    if respawn_needed {
+                        self.respawn_effects();
+                    }
+                }
             }
         }
 
@@ -1882,6 +2613,1861 @@ impl HitboxEditorApp {
         }
     }
 
+    /// Searchable effect picker: live in-game kinds first, then a scan of every eff in the
+    /// pool. Returns the chosen effect name (to assign to the selected spawn) when clicked.
+    fn draw_effect_name_picker(&mut self, ui: &mut Ui) -> Option<String> {
+        // Ensure the donor pool is available for the full-eff search.
+        if self.effect_pool.is_none() {
+            if let Some(root) = self
+                .export_dir
+                .clone()
+                .or_else(|| self.state.data_root.clone())
+            {
+                self.effect_pool = Some(crate::effect_pool::EffectPool::new(root));
+            }
+        }
+        let scanning = self.effect_pool.as_mut().map(|p| p.tick(6)).unwrap_or(false);
+
+        let mut picked: Option<String> = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🔍 Pick effect").strong());
+                    if ui.small_button("✕").on_hover_text("Close picker").clicked() {
+                        self.effect_pick_open = false;
+                    }
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.effect_pick_search)
+                        .hint_text("search effect names")
+                        .desired_width(220.0),
+                );
+                let q = self.effect_pick_search.to_lowercase();
+
+                // Live in-game kinds matching the query (deduped), most-recently-updated first.
+                let mut live: Vec<String> = self
+                    .game_link
+                    .kinds()
+                    .into_iter()
+                    .map(|(_, k)| k.name)
+                    .filter(|n| q.is_empty() || n.to_lowercase().contains(&q))
+                    .collect();
+                live.sort();
+                live.dedup();
+
+                let pool_hits: Vec<String> = self
+                    .effect_pool
+                    .as_ref()
+                    .map(|p| {
+                        p.search(&self.effect_pick_search, 60)
+                            .into_iter()
+                            .map(|(_, name)| name)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    if !live.is_empty() {
+                        ui.label(
+                            egui::RichText::new("live in game")
+                                .small()
+                                .color(egui::Color32::from_rgb(120, 200, 120)),
+                        );
+                        for name in &live {
+                            if ui.selectable_label(false, name).clicked() {
+                                picked = Some(name.clone());
+                            }
+                        }
+                        ui.separator();
+                    }
+                    let (done, total) = self
+                        .effect_pool
+                        .as_ref()
+                        .map(|p| p.progress())
+                        .unwrap_or((0, 0));
+                    ui.label(
+                        egui::RichText::new(if scanning {
+                            format!("all effs (scanning {done}/{total})")
+                        } else {
+                            "all effs".into()
+                        })
+                        .small()
+                        .color(egui::Color32::GRAY),
+                    );
+                    for name in pool_hits.iter().filter(|n| !live.contains(n)) {
+                        if ui.selectable_label(false, name).clicked() {
+                            picked = Some(name.clone());
+                        }
+                    }
+                });
+            });
+        if scanning {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+        }
+        picked
+    }
+
+    /// Key for `effect_call_edits`: fighter-scoped so moves with the same name on
+    /// different fighters don't collide ("mario/attack_air_n").
+    fn current_move_key(&self) -> Option<String> {
+        let fighter = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|f| f.name.clone())?;
+        let mv = self.state.selected_move.as_ref()?.name.clone();
+        Some(format!("{fighter}/{mv}"))
+    }
+
+    /// Rebuild `state.effects` from the pristine parse + this move's saved edits.
+    /// Idempotent — used at move load and after loading a project.
+    fn apply_effect_call_edits_to_current(&mut self) {
+        self.state.effects = self.state.effects_pristine.clone();
+        let Some(mv) = self.current_move_key() else { return };
+        let Some(edits) = self.state.effect_call_edits.get(&mv) else { return };
+        for edit in edits {
+            match &edit.op {
+                crate::data::EffectCallOp::Modify(call) => {
+                    if let Some(slot) = self.state.effects.get_mut(edit.index) {
+                        *slot = call.clone();
+                    }
+                }
+                crate::data::EffectCallOp::Add(call) => {
+                    self.state.effects.push(call.clone());
+                }
+                crate::data::EffectCallOp::Remove => {
+                    if let Some(slot) = self.state.effects.get_mut(edit.index) {
+                        slot.disabled = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fold the eff editor's current diff into the per-fighter project store.
+    fn sync_eff_mods_from_editor(&mut self) {
+        let Some(rel) = self.eff_editor.loaded_rel() else { return };
+        let authored = self.eff_editor.collect_authored_edits();
+        let fighter = crate::mod_project::fighter_from_source_rel(&rel);
+        let entry = self.eff_mods.entry(fighter).or_default();
+        entry.source_rel = rel;
+        entry.authored = authored; // one_slot records are preserved as-is
+    }
+
+    fn build_project(&mut self) -> crate::mod_project::ModProjectFile {
+        use crate::mod_project::ModProjectFile;
+        self.sync_eff_mods_from_editor();
+        let mut project = ModProjectFile {
+            version: crate::mod_project::PROJECT_VERSION,
+            name: self.project_name.clone(),
+            fighters: HashMap::new(),
+        };
+        for (fighter, moves) in &self.state.edit_log.entries {
+            let fm = project.fighters.entry(fighter.clone()).or_default();
+            fm.display = moves
+                .values()
+                .next()
+                .map(|r| r.fighter_display.clone())
+                .unwrap_or_else(|| fighter.clone());
+            fm.acmd = moves.clone();
+        }
+        for (key, edits) in &self.state.effect_call_edits {
+            if edits.is_empty() {
+                continue;
+            }
+            let (fighter, mv) = key.split_once('/').unwrap_or(("unknown", key.as_str()));
+            let fm = project.fighters.entry(fighter.to_string()).or_default();
+            fm.effect_calls.insert(mv.to_string(), edits.clone());
+            if let Some(full) = self.state.effect_call_full.get(key) {
+                fm.effect_calls_full.insert(mv.to_string(), full.clone());
+            }
+        }
+        for (fighter, eff) in &self.eff_mods {
+            if eff.is_empty() {
+                continue;
+            }
+            project.fighters.entry(fighter.clone()).or_default().eff = Some(eff.clone());
+        }
+        // User-set live color×/speed multipliers → LiveTweaks, attached to every fighter
+        // whose spawn lists use the effect (falls back to the selected fighter).
+        let tweaks = self.live_overrides.tweaked();
+        if !tweaks.is_empty() {
+            let selected = self
+                .state
+                .selected_fighter
+                .and_then(|i| self.state.fighters.get(i))
+                .map(|f| f.name.clone());
+            for (hash, form) in tweaks {
+                let identity_color = (form.rainbow.color.red - 1.0).abs() < 1e-4
+                    && (form.rainbow.color.green - 1.0).abs() < 1e-4
+                    && (form.rainbow.color.blue - 1.0).abs() < 1e-4;
+                let identity_speed = (form.speed - 1.0).abs() < 1e-4;
+                if identity_color && identity_speed {
+                    continue;
+                }
+                let tweak = crate::mod_project::LiveTweak {
+                    effect_name: form.effect_name.clone(),
+                    color: (!identity_color).then(|| {
+                        let c = form.rainbow.color;
+                        [c.red, c.green, c.blue, c.alpha]
+                    }),
+                    speed: (!identity_speed).then_some(form.speed),
+                };
+                let mut owners: Vec<String> = self
+                    .state
+                    .effect_call_full
+                    .iter()
+                    .filter(|(_, calls)| {
+                        calls.iter().any(|c| effect_name_hash(&c.effect_name) == hash)
+                    })
+                    .filter_map(|(key, _)| key.split_once('/').map(|(f, _)| f.to_string()))
+                    .collect();
+                owners.sort();
+                owners.dedup();
+                if owners.is_empty() {
+                    if let Some(f) = &selected {
+                        owners.push(f.clone());
+                    }
+                }
+                for f in owners {
+                    let fm = project.fighters.entry(f).or_default();
+                    if !fm.live_tweaks.iter().any(|t| t.effect_name == tweak.effect_name) {
+                        fm.live_tweaks.push(tweak.clone());
+                    }
+                }
+            }
+        }
+        project
+    }
+
+    fn save_project(&mut self) {
+        let project = self.build_project();
+        if project.is_empty() {
+            self.state.status = "No edits to save yet.".into();
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new()
+            .set_file_name(crate::mod_project::PROJECT_FILE_NAME)
+            .add_filter("Mod project", &["json"]);
+        if let Some(dir) = &self.export_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        match serde_json::to_string_pretty(&project)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| std::fs::write(&path, json).map_err(anyhow::Error::from))
+        {
+            Ok(()) => self.state.status = format!("Project saved to {}", path.display()),
+            Err(e) => self.state.status = format!("Project save failed: {e}"),
+        }
+    }
+
+    fn load_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Mod project", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.load_project_from(&path);
+    }
+
+    /// Export everything as an installable mod:
+    ///   mod/     — drop-in Arcropolis data mod (rebuilt eff files + info.toml)
+    ///   source/  — buildable smashline project (also auto-compiled in the background;
+    ///              the built .nro lands in plugin/, build output in build.log)
+    ///   modproject.json — re-openable for further editing
+    fn export_full_mod(&mut self) {
+        let project = self.build_project();
+        if project.is_empty() {
+            self.state.status = "No edits to export yet.".into();
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new().set_title("Export mod into folder…");
+        if let Some(dir) = &self.export_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(dest) = dialog.pick_folder() else { return };
+        self.export_dir = Some(dest.clone());
+        save_config_path("export_dir", &dest);
+
+        let mut report: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        // 1. Data mod: rebuilt eff files under mod/effect/fighter/<name>/… + info.toml.
+        let mod_dir = dest.join("mod");
+        for (fighter, fm) in &project.fighters {
+            match &fm.eff {
+                Some(eff) if !eff.is_empty() => {
+                    let src_path = self.eff_editor.export_root().join(&eff.source_rel);
+                    let result = std::fs::read(&src_path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|bytes| {
+                            crate::eff_export::rebuild_eff_bytes(
+                                &bytes,
+                                eff,
+                                Some(&self.eff_editor.export_root()),
+                            )
+                        })
+                        .and_then(|rebuilt| {
+                            let out = mod_dir.join(&eff.source_rel);
+                            if let Some(parent) = out.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&out, rebuilt)?;
+                            Ok(())
+                        });
+                    match result {
+                        Ok(()) => report.push(format!(
+                            "{fighter}: eff written ({} authored, {} one-slot)",
+                            eff.authored.len(),
+                            eff.one_slot.len()
+                        )),
+                        Err(e) => errors.push(format!("{fighter} eff: {e}")),
+                    }
+                }
+                _ => report.push(format!(
+                    "{fighter}: no authored eff edits — spawn/live edits ship via the plugin"
+                )),
+            }
+        }
+
+        // 2. smashline source project (hitboxes + effect spawn scripts + live tweaks).
+        let acmd_edits: Vec<(String, String, crate::data::AcmdScript)> = project
+            .fighters
+            .iter()
+            .flat_map(|(f, fm)| {
+                fm.acmd
+                    .iter()
+                    .map(move |(m, r)| (f.clone(), m.clone(), r.script.clone()))
+            })
+            .collect();
+        let effect_edits: Vec<(String, String, Vec<crate::data::EffectCall>)> = project
+            .fighters
+            .iter()
+            .flat_map(|(f, fm)| {
+                fm.effect_calls_full
+                    .iter()
+                    .map(move |(m, calls)| (f.clone(), m.clone(), calls.clone()))
+            })
+            .collect();
+        let live_tweaks: Vec<crate::mod_project::LiveTweak> = {
+            let mut v: Vec<crate::mod_project::LiveTweak> = Vec::new();
+            for fm in project.fighters.values() {
+                for t in &fm.live_tweaks {
+                    if !v.iter().any(|x| x.effect_name == t.effect_name) {
+                        v.push(t.clone());
+                    }
+                }
+            }
+            v
+        };
+        let plugin_name = format!(
+            "{}_plugin",
+            self.project_name.to_lowercase().replace([' ', '-'], "_")
+        );
+        let has_source = !acmd_edits.is_empty() || !effect_edits.is_empty();
+        let mut source_root: Option<std::path::PathBuf> = None;
+        if has_source {
+            let src_project = crate::acmd::build_mod_project_full(
+                &acmd_edits,
+                &effect_edits,
+                &live_tweaks,
+                &plugin_name,
+            );
+            match write_mod_project(&src_project, &dest.join("source")) {
+                Ok(root) => {
+                    report.push(format!(
+                        "source: {} move script(s), {} effect script(s)",
+                        acmd_edits.len(),
+                        effect_edits.len()
+                    ));
+                    source_root = Some(root);
+                }
+                Err(e) => errors.push(format!("smashline source: {e}")),
+            }
+        } else {
+            report.push("source: no hitbox/spawn edits — skipped".into());
+        }
+
+        // info.toml so mod/ drops straight into Arcropolis' mods folder.
+        let _ = std::fs::create_dir_all(&mod_dir);
+        let info = format!(
+            "display_name = \"{name}\"\nauthors = \"SSBU Toolkit\"\nversion = \"1.0.0\"\ndescription = \"Exported by the SSBU hitbox/effects toolkit\"\ncategory = \"Misc\"\n",
+            name = self.project_name
+        );
+        if let Err(e) = std::fs::write(mod_dir.join("info.toml"), info) {
+            errors.push(format!("info.toml: {e}"));
+        }
+
+        // Top-level README: what goes where.
+        let readme = format!(
+            "# {name}\n\n\
+             Exported by the SSBU hitbox/effects toolkit.\n\n\
+             ## Install\n\n\
+             1. `mod/` → copy to `sd:/ultimate/mods/{name}/` (Arcropolis data mod: eff files).\n\
+             2. `plugin/lib{plugin}.nro` → copy to `atmosphere/contents/01006A800016E000/romfs/skyline/plugins/`\n   \
+                (on emulator: the title's LayeredFS `romfs/skyline/plugins/`). Appears after the\n   \
+                background build finishes — see build.log; or build manually with `source/build.sh`.\n\n\
+             ## Re-editing\n\n\
+             Open `modproject.json` via Mod → Load Project… in the toolkit.\n",
+            name = self.project_name,
+            plugin = plugin_name,
+        );
+        let _ = std::fs::write(dest.join("README.md"), readme);
+
+        // 3. The project file itself — makes the exported mod re-openable for editing.
+        match serde_json::to_string_pretty(&project) {
+            Ok(json) => {
+                if let Err(e) =
+                    std::fs::write(dest.join(crate::mod_project::PROJECT_FILE_NAME), json)
+                {
+                    errors.push(format!("modproject.json: {e}"));
+                }
+            }
+            Err(e) => errors.push(format!("modproject.json: {e}")),
+        }
+
+        // 4. Compile the source in the background; copy the nro into plugin/ on success.
+        if let Some(src_root) = source_root {
+            self.spawn_export_build(dest.clone(), src_root, plugin_name);
+        }
+
+        self.state.status = if errors.is_empty() {
+            format!(
+                "Mod exported to {} — {}{}",
+                dest.display(),
+                report.join(" · "),
+                if has_source { " · building plugin…" } else { "" }
+            )
+        } else {
+            format!(
+                "Mod export finished with errors: {} — {}",
+                errors.join("; "),
+                report.join(" · ")
+            )
+        };
+    }
+
+    /// Run `cargo skyline build --release` on the exported source in a background thread.
+    /// Progress lands in `self.export_build`; the finished nro is copied to `<dest>/plugin/`.
+    fn spawn_export_build(
+        &mut self,
+        dest: std::path::PathBuf,
+        src_root: std::path::PathBuf,
+        plugin_name: String,
+    ) {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(ExportBuildState {
+            done: false,
+            message: format!("building {plugin_name}…"),
+        }));
+        self.export_build = Some(state.clone());
+        std::thread::spawn(move || {
+            let out = std::process::Command::new("cargo")
+                .args(["skyline", "build", "--release"])
+                .current_dir(&src_root)
+                .output();
+            let msg = match out {
+                Ok(out) => {
+                    let log = format!(
+                        "--- stdout ---\n{}\n--- stderr ---\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    let _ = std::fs::write(dest.join("build.log"), &log);
+                    if out.status.success() {
+                        let nro = src_root
+                            .join("target/aarch64-skyline-switch/release")
+                            .join(format!("lib{plugin_name}.nro"));
+                        let plugin_dir = dest.join("plugin");
+                        let _ = std::fs::create_dir_all(&plugin_dir);
+                        match std::fs::copy(&nro, plugin_dir.join(format!("lib{plugin_name}.nro"))) {
+                            Ok(_) => format!("plugin built → plugin/lib{plugin_name}.nro"),
+                            Err(e) => format!(
+                                "plugin built but nro copy failed ({e}) — see {}",
+                                nro.display()
+                            ),
+                        }
+                    } else {
+                        "plugin build FAILED — see build.log in the export folder".to_string()
+                    }
+                }
+                Err(e) => format!("plugin build could not start: {e}"),
+            };
+            if let Ok(mut s) = state.lock() {
+                s.done = true;
+                s.message = msg;
+            }
+        });
+    }
+
+    fn load_project_from(&mut self, path: &std::path::Path) {
+        let project: crate::mod_project::ModProjectFile =
+            match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|s| {
+                serde_json::from_str(&s).map_err(anyhow::Error::from)
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.state.status = format!("Project load failed: {e}");
+                    return;
+                }
+            };
+        self.project_name = project.name.clone();
+        let mut n_acmd = 0;
+        let mut n_calls = 0;
+        let mut n_eff = 0;
+        for (fighter, fm) in project.fighters {
+            n_acmd += fm.acmd.len();
+            if !fm.acmd.is_empty() {
+                self.state
+                    .edit_log
+                    .entries
+                    .entry(fighter.clone())
+                    .or_default()
+                    .extend(fm.acmd);
+            }
+            for (mv, edits) in fm.effect_calls {
+                n_calls += edits.len();
+                self.state
+                    .effect_call_edits
+                    .insert(format!("{fighter}/{mv}"), edits);
+            }
+            for (mv, full) in fm.effect_calls_full {
+                self.state
+                    .effect_call_full
+                    .insert(format!("{fighter}/{mv}"), full);
+            }
+            if let Some(eff) = fm.eff {
+                n_eff += eff.authored.len() + eff.one_slot.len();
+                self.eff_mods.insert(fighter.clone(), eff);
+            }
+            // Live color/speed tweaks: restore into the override store and re-send.
+            for t in fm.live_tweaks {
+                let hash = effect_name_hash(&t.effect_name);
+                let mut init = crate::game_link::RpmEffectData {
+                    effect_name: t.effect_name.clone(),
+                    ..Default::default()
+                };
+                if let Some([r, g, b, a]) = t.color {
+                    init.rainbow.color =
+                        crate::game_link::Color { red: r, green: g, blue: b, alpha: a };
+                }
+                if let Some(s) = t.speed {
+                    init.speed = s;
+                }
+                self.live_overrides.restore_tweak(hash, init);
+            }
+        }
+
+        // Re-apply to what's currently loaded and push it live.
+        self.apply_effect_call_edits_to_current();
+        self.push_effect_rules();
+        if let Some(fighter) = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|f| f.name.clone())
+        {
+            if let Some(eff) = self.eff_mods.get(&fighter).cloned() {
+                let src = self.eff_editor.export_root().join(&eff.source_rel);
+                if self.eff_editor.loaded_rel().as_deref() == Some(eff.source_rel.as_str()) {
+                    self.eff_editor.apply_authored_edits(&eff.authored);
+                    self.eff_editor
+                        .send_all_derived(&self.game_link, &mut self.live_overrides);
+                } else if src.exists() {
+                    self.eff_editor.queue_load(&src);
+                    self.eff_editor.queue_edits(eff.authored.clone());
+                    self.eff_editor.open = true;
+                }
+            }
+        }
+        self.state.status = format!(
+            "Project '{}' loaded: {n_acmd} move edit(s), {n_calls} effect-call edit(s), {n_eff} eff edit(s)",
+            self.project_name
+        );
+    }
+
+    /// "Game has existing edits" prompt: the plugin persists pins across sessions, so a
+    /// fresh toolkit instance may connect to a game already running modifications.
+    fn draw_pin_sync_modal(&mut self, ctx: &egui::Context) {
+        let Some(kinds) = self.pin_sync_prompt.clone() else { return };
+        let mut choice: Option<&'static str> = None;
+        egui::Window::new("Game has existing edits")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "The game booted with {} saved effect edit(s) still applied (the plugin \
+                     keeps them on the SD card and re-applies them on launch). Keep them or \
+                     remove them?",
+                    kinds.len()
+                ));
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for (_, k) in &kinds {
+                        let mut fields: Vec<&str> = Vec::new();
+                        if let Some(p) = &k.pins {
+                            if p.scale.is_some() { fields.push("size"); }
+                            if p.rate.is_some() { fields.push("speed"); }
+                            if p.pos.is_some() { fields.push("pos"); }
+                            if p.rot.is_some() { fields.push("rot"); }
+                            if p.visible.is_some() { fields.push("visible"); }
+                            if p.frame.is_some() { fields.push("frame"); }
+                            if p.color.is_some() { fields.push("color"); }
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("• {}  ({})", k.name, fields.join(", ")))
+                                .monospace(),
+                        );
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Keep & import").clicked() {
+                        choice = Some("import");
+                    }
+                    if ui.button("Remove all").clicked() {
+                        choice = Some("reset");
+                    }
+                    if ui.button("Keep (don't track)").clicked() {
+                        choice = Some("ignore");
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Keep & import: leave them applied AND adopt them as tracked edits here. \
+                         Remove all: clear them in-game. Keep (don't track): leave them running \
+                         but don't pull them into this project.",
+                    )
+                    .small()
+                    .color(egui::Color32::GRAY),
+                );
+            });
+        match choice {
+            Some("import") => {
+                let n = kinds.len();
+                for (hash, k) in kinds {
+                    self.live_overrides.set_form(hash, k.data.clone());
+                    let tweaked = k
+                        .pins
+                        .as_ref()
+                        .map(|p| p.color.is_some() || p.rate.is_some())
+                        .unwrap_or(false);
+                    if tweaked {
+                        self.live_overrides.mark_tweak(hash);
+                    }
+                }
+                self.pin_sync_prompt = None;
+                self.state.status = format!("Imported {n} in-game edit(s) into the toolkit");
+            }
+            Some("reset") => {
+                self.game_link.send_reset_pins();
+                self.push_effect_rules();
+                self.pin_sync_prompt = None;
+                self.state.status =
+                    "Cleared the game's saved pins; this project's edits were re-sent".into();
+            }
+            Some("ignore") => {
+                self.pin_sync_prompt = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Clear EVERY edit the game is currently running: the plugin's persisted pins (SD-card
+    /// effect edits that survive restarts), plus all live spawn + hitbox rules this session
+    /// pushed. Use this when old edits keep re-appearing in-game.
+    fn clear_all_game_edits(&mut self) {
+        self.game_link.send_reset_pins();
+        self.effect_rules_store.clear();
+        self.hitbox_rules_store.clear();
+        self.game_link.send_spawn_rules(&[]);
+        self.game_link.send_hitbox_rules(&[]);
+        self.pin_sync_prompt = None;
+        self.state.status =
+            "Cleared all in-game edits (saved pins + live spawn/hitbox rules).".into();
+    }
+
+    // ── Live ACMD capture + live hitbox rules ─────────────────────────────────
+
+    /// hash40 of the current move's motion name (what MotionModule::motion_kind reports).
+    fn current_motion_hash(&self) -> Option<u64> {
+        self.state
+            .selected_move
+            .as_ref()
+            .map(|m| hash40::hash40(&m.name.to_lowercase()).0)
+    }
+
+    /// Reverse-lookup maps: hash40(lowercase bone) → canonical bone name; effect hashes
+    /// resolve through the loaded eff handles.
+    fn bone_reverse_map(&self) -> HashMap<u64, String> {
+        self.bone_names
+            .iter()
+            .map(|n| (hash40::hash40(&n.to_lowercase()).0, n.clone()))
+            .collect()
+    }
+
+    fn effect_reverse_map(&self) -> HashMap<u64, String> {
+        let mut m = HashMap::new();
+        if let Some(idx) = &self.state.eff_index {
+            for name in idx.handles.keys() {
+                m.insert(hash40::hash40(&name.to_lowercase()).0, name.clone());
+            }
+        }
+        for (h, k) in self.game_link.kinds() {
+            m.entry(h).or_insert(k.name);
+        }
+        m
+    }
+
+    /// Build hitboxes + effect calls for the current move from the game's live ACMD capture,
+    /// replacing the GitHub fetch as the data source ("Live capture" provenance).
+    fn load_from_capture(&mut self) {
+        let Some(motion) = self.current_motion_hash() else { return };
+        let captures = self.game_link.captures_for(motion);
+        if captures.is_empty() {
+            self.state.status = "No live capture yet — perform the move in game first.".into();
+            return;
+        }
+        let bone_rev = self.bone_reverse_map();
+        let eff_rev = self.effect_reverse_map();
+
+        let mut hitboxes: Vec<crate::data::Hitbox> = Vec::new();
+        let mut effects: Vec<crate::data::EffectCall> = Vec::new();
+        for line in &captures {
+            if line.func.starts_with("ATTACK") {
+                if let Some(hb) = Self::hitbox_from_capture(&line.args, line.frame, &bone_rev) {
+                    // Same id re-captured (multi-part moves): keep the earliest frame.
+                    if !hitboxes.iter().any(|h| h.id == hb.id && h.active_start == hb.active_start)
+                    {
+                        hitboxes.push(hb);
+                    }
+                }
+            } else if line.func == "CATCH" {
+                if let Some(hb) = Self::hitbox_from_capture_grab(&line.args, line.frame, &bone_rev) {
+                    if !hitboxes.iter().any(|h| {
+                        h.category == 1 && h.id == hb.id && h.active_start == hb.active_start
+                    }) {
+                        hitboxes.push(hb);
+                    }
+                }
+            } else if line.func.starts_with("AREA_WIND") {
+                if let Some(hb) = Self::hitbox_from_capture_wind(&line.args, line.frame) {
+                    if !hitboxes
+                        .iter()
+                        .any(|h| h.category == 2 && h.active_start == hb.active_start)
+                    {
+                        hitboxes.push(hb);
+                    }
+                }
+            } else if line.func.starts_with("EFFECT") {
+                if let Some(ec) =
+                    Self::effect_call_from_capture(&line.func, &line.args, line.frame, &bone_rev, &eff_rev)
+                {
+                    effects.push(ec);
+                }
+            }
+        }
+        if hitboxes.is_empty() && effects.is_empty() {
+            self.state.status = "Capture has no ATTACK/EFFECT lines for this move yet.".into();
+            return;
+        }
+
+        let n_hb = hitboxes.len();
+        let n_fx = effects.len();
+        if !hitboxes.is_empty() {
+            self.state.hitboxes_pristine = hitboxes.clone();
+            self.state.hitboxes = hitboxes;
+        }
+        if !effects.is_empty() {
+            self.state.effects_pristine = effects.clone();
+            self.state.effects = effects;
+            self.state.selected_effect_call = None;
+            self.apply_effect_call_edits_to_current();
+            self.respawn_effects();
+        }
+        self.state.acmd_source = "Live capture".into();
+        self.acmd_error = None;
+        self.state.status =
+            format!("Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) from live game capture");
+    }
+
+    /// ATTACK capture args (positional, editor conventions) → display Hitbox.
+    /// Const-name slots keep their raw numeric values as strings (exported bare).
+    fn hitbox_from_capture(
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        bone_rev: &HashMap<u64, String>,
+    ) -> Option<crate::data::Hitbox> {
+        use crate::game_link::LuaArgWire as A;
+        if args.len() < 17 {
+            return None;
+        }
+        let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32());
+        let i64_at = |i: usize| args.get(i).and_then(|a| a.as_i64());
+        let str_at = |i: usize| i64_at(i).map(|v| v.to_string()).unwrap_or_default();
+        let bool_at = |i: usize| matches!(args.get(i), Some(A::Bool(true)));
+        let bone_hash = args.get(2).and_then(|a| a.as_hash())?;
+        let bone_name = bone_rev
+            .get(&bone_hash)
+            .cloned()
+            .unwrap_or_else(|| format!("{bone_hash:#x}"));
+        let capsule_end = match (f32_at(12), f32_at(13), f32_at(14)) {
+            (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+            _ => None,
+        };
+        let start = frame.max(0.0).round() as u32;
+        Some(crate::data::Hitbox {
+            id: i64_at(0)? as u32,
+            part: i64_at(1).unwrap_or(0) as u32,
+            bone_name,
+            damage: f32_at(3).unwrap_or(0.0),
+            angle: i64_at(4).unwrap_or(0) as i32,
+            kb_scaling: i64_at(5).unwrap_or(0) as i32,
+            fkb: i64_at(6).unwrap_or(0) as i32,
+            kb_base: i64_at(7).unwrap_or(0) as i32,
+            size: f32_at(8).unwrap_or(1.0),
+            offset_x: f32_at(9).unwrap_or(0.0),
+            offset_y: f32_at(10).unwrap_or(0.0),
+            offset_z: f32_at(11).unwrap_or(0.0),
+            capsule_end,
+            hitlag_mult: f32_at(15).unwrap_or(1.0),
+            sdi_mult: f32_at(16).unwrap_or(1.0),
+            setoff_kind: str_at(17),
+            lr_check: str_at(18),
+            is_clang: bool_at(19),
+            is_add_attack: i64_at(20).unwrap_or(0) as i32,
+            hitbox_attr: f32_at(21).unwrap_or(0.0),
+            ground_or_air: i64_at(22).unwrap_or(0) as i32,
+            is_mtk: bool_at(23),
+            is_shield_disable: bool_at(24),
+            is_reflectable: bool_at(25),
+            is_absorbable: bool_at(26),
+            is_landing_attack: bool_at(27),
+            situation_mask: str_at(28),
+            category_mask: str_at(29),
+            part_mask: str_at(30),
+            no_finish_camera: bool_at(31),
+            collision_attr: args
+                .get(32)
+                .and_then(|a| a.as_hash())
+                .map(|h| format!("{h:#x}"))
+                .unwrap_or_default(),
+            sound_level: str_at(33),
+            sound_attr: str_at(34),
+            attack_region: str_at(35),
+            active_start: start,
+            active_end: start + 2,
+            hitbox_type: 0,
+            category: 0,
+        })
+    }
+
+    /// CATCH (grabbox) capture → display Hitbox with category=1 (grab).
+    /// Arg layout: 0 id, 1 bone(h), 2 size, 3 x, 4 y, 5 z, 6 x2, 7 y2, 8 z2, 9 status, 10 situation.
+    fn hitbox_from_capture_grab(
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        bone_rev: &HashMap<u64, String>,
+    ) -> Option<crate::data::Hitbox> {
+        if args.len() < 6 {
+            return None;
+        }
+        let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32());
+        let i64_at = |i: usize| args.get(i).and_then(|a| a.as_i64());
+        let bone_hash = args.get(1).and_then(|a| a.as_hash())?;
+        let bone_name = bone_rev
+            .get(&bone_hash)
+            .cloned()
+            .unwrap_or_else(|| format!("{bone_hash:#x}"));
+        let capsule_end = match (f32_at(6), f32_at(7), f32_at(8)) {
+            (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+            _ => None,
+        };
+        let start = frame.max(0.0).round() as u32;
+        Some(crate::data::Hitbox {
+            id: i64_at(0).unwrap_or(0) as u32,
+            bone_name,
+            size: f32_at(2).unwrap_or(2.0),
+            offset_x: f32_at(3).unwrap_or(0.0),
+            offset_y: f32_at(4).unwrap_or(0.0),
+            offset_z: f32_at(5).unwrap_or(0.0),
+            capsule_end,
+            // Grabboxes deal no damage/knockback — zero the attack-only fields.
+            damage: 0.0,
+            angle: 0,
+            kb_scaling: 0,
+            fkb: 0,
+            kb_base: 0,
+            active_start: start,
+            active_end: start + 2,
+            category: 1,
+            ..Default::default()
+        })
+    }
+
+    /// AREA_WIND capture → display Hitbox with category=2 (wind). The arg semantics are
+    /// undocumented (all floats); we render a best-effort sphere and keep the raw args so
+    /// the size/offset mapping can be refined once confirmed from real captures. Heuristic:
+    /// the largest-magnitude arg is treated as the reach/size, offsets left at origin.
+    fn hitbox_from_capture_wind(
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+    ) -> Option<crate::data::Hitbox> {
+        if args.is_empty() {
+            return None;
+        }
+        let vals: Vec<f32> = args.iter().filter_map(|a| a.as_f32()).collect();
+        // Guess a visible size from the largest-magnitude float (clamped to a sane range).
+        let size = vals
+            .iter()
+            .cloned()
+            .map(f32::abs)
+            .fold(0.0_f32, f32::max)
+            .clamp(1.0, 25.0);
+        let start = frame.max(0.0).round() as u32;
+        Some(crate::data::Hitbox {
+            id: 0,
+            bone_name: "top".to_string(),
+            size,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            offset_z: 0.0,
+            capsule_end: None,
+            damage: 0.0,
+            angle: 0,
+            kb_scaling: 0,
+            fkb: 0,
+            kb_base: 0,
+            active_start: start,
+            active_end: start + 2,
+            category: 2,
+            ..Default::default()
+        })
+    }
+
+    /// EFFECT-family capture → EffectCall (arc layout: gfx, joint, pos xyz, rot zr/yr/xr, size).
+    fn effect_call_from_capture(
+        func: &str,
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        bone_rev: &HashMap<u64, String>,
+        eff_rev: &HashMap<u64, String>,
+    ) -> Option<crate::data::EffectCall> {
+        let flip = func.contains("FLIP");
+        let off = usize::from(flip);
+        let eff_hash = args.first().and_then(|a| a.as_hash())?;
+        let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32()).unwrap_or(0.0);
+        let bone_hash = args.get(1 + off).and_then(|a| a.as_hash()).unwrap_or(0);
+        let follows = func.contains("FOLLOW") || func.contains("FLW");
+        let start = frame.max(0.0).round() as u32;
+        Some(crate::data::EffectCall {
+            effect_name: eff_rev
+                .get(&eff_hash)
+                .cloned()
+                .unwrap_or_else(|| format!("{eff_hash:#x}")),
+            bone_name: bone_rev
+                .get(&bone_hash)
+                .cloned()
+                .unwrap_or_else(|| format!("{bone_hash:#x}")),
+            offset: [f32_at(2 + off), f32_at(3 + off), f32_at(4 + off)],
+            rotation: [f32_at(7 + off), f32_at(6 + off), f32_at(5 + off)],
+            scale: args.get(8 + off).and_then(|a| a.as_f32()).unwrap_or(1.0),
+            follows_bone: follows,
+            active_start: start,
+            active_end: if follows { 9999 } else { start },
+            disabled: false,
+        })
+    }
+
+    /// Derive + push the full live hitbox-rule set, matched PER-OCCURRENCE so multi-hit
+    /// moves (which reuse the same hitbox id across frames) stay independent:
+    ///   * exact (id, start-frame) pair changed → frame-scoped override,
+    ///   * pristine occurrence with no current match → frame-scoped suppress (deleted/retimed),
+    ///   * current occurrence with no pristine match → inject (added/retimed),
+    /// each suppress/override windowed to its own frame so the other hits are untouched.
+    fn push_hitbox_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else { return };
+        let Some(motion) = self.current_motion_hash() else { return };
+        let captures = self.game_link.captures_for(motion);
+        // Donor capture (for injecting added/retimed collisions) matched by family + id.
+        let fam_prefix = |cat: u8| match cat {
+            1 => "CATCH",
+            2 => "AREA_WIND",
+            _ => "ATTACK",
+        };
+        let donor_for = |cat: u8, id: u32| {
+            let pre = fam_prefix(cat);
+            captures
+                .iter()
+                .find(|c| {
+                    c.func.starts_with(pre)
+                        && c.args.first().and_then(|a| a.as_i64()) == Some(id as i64)
+                })
+                .or_else(|| captures.iter().find(|c| c.func.starts_with(pre)))
+        };
+        // Frame window around a hit's spawn frame.
+        let win = |frame: u32| (Some(frame as f32 - 0.5), Some(frame as f32 + 1.5));
+
+        let pristine = self.state.hitboxes_pristine.clone();
+        let current = self.state.hitboxes.clone();
+        let mut cur_used = vec![false; current.len()];
+        let mut pri_used = vec![false; pristine.len()];
+        let mut rules: Vec<crate::game_link::HitboxRuleWire> = Vec::new();
+        let mut missing_donor = false;
+
+        // Phase 1 — exact (id, start) pairs: unchanged → nothing, changed → scoped override.
+        for (pi, p) in pristine.iter().enumerate() {
+            if let Some(ci) = current.iter().enumerate().position(|(ci, h)| {
+                !cur_used[ci] && h.id == p.id && h.active_start == p.active_start
+            }) {
+                cur_used[ci] = true;
+                pri_used[pi] = true;
+                let h = &current[ci];
+                if h != p {
+                    let (fs, fe) = win(p.active_start);
+                    rules.push(crate::game_link::HitboxRuleWire {
+                        motion,
+                        category: p.category,
+                        // Wind has no id — match by frame only.
+                        hitbox_id: (p.category != 2).then_some(p.id as u64),
+                        suppress: false,
+                        frame_start: fs,
+                        frame_end: fe,
+                        overrides: Some(Self::hitbox_overrides(h)),
+                        inject: None,
+                    });
+                }
+            }
+        }
+
+        // Phase 2 — unmatched pristine → suppress that specific hit (deleted or retimed away).
+        for (pi, p) in pristine.iter().enumerate() {
+            if pri_used[pi] {
+                continue;
+            }
+            let (fs, fe) = win(p.active_start);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: p.category,
+                hitbox_id: (p.category != 2).then_some(p.id as u64),
+                suppress: true,
+                frame_start: fs,
+                frame_end: fe,
+                overrides: None,
+                inject: None,
+            });
+        }
+
+        // Phase 3 — unmatched current → inject at its frame (added or retimed here).
+        for (ci, h) in current.iter().enumerate() {
+            if cur_used[ci] {
+                continue;
+            }
+            // Build the inject arg vector for this collision family.
+            let args = match h.category {
+                1 => Self::build_catch_args(h, donor_for(1, h.id)),
+                2 => None, // wind injection unsupported (undocumented arg semantics)
+                _ => Self::build_attack_args(h, donor_for(0, h.id)),
+            };
+            match args {
+                Some(args) => rules.push(crate::game_link::HitboxRuleWire {
+                    motion,
+                    category: h.category,
+                    hitbox_id: None,
+                    suppress: false,
+                    frame_start: None,
+                    frame_end: None,
+                    overrides: None,
+                    inject: Some(crate::game_link::InjectRuleWire {
+                        frame: h.active_start as f32,
+                        args,
+                    }),
+                }),
+                None => missing_donor = true,
+            }
+        }
+
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&mv_key);
+        } else {
+            self.hitbox_rules_store.insert(mv_key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> =
+            self.hitbox_rules_store.values().flatten().cloned().collect();
+        self.game_link.send_hitbox_rules(&all);
+        if missing_donor {
+            self.state.status =
+                "Added/retimed hitbox needs live capture args — perform the move in game once."
+                    .into();
+        }
+    }
+
+    /// Every modeled ATTACK slot as an override (unchanged values are harmless rewrites).
+    fn hitbox_overrides(h: &crate::data::Hitbox) -> crate::game_link::HbOverridesWire {
+        crate::game_link::HbOverridesWire {
+            damage: Some(h.damage),
+            angle: Some(h.angle as i64),
+            kbg: Some(h.kb_scaling as i64),
+            fkb: Some(h.fkb as i64),
+            bkb: Some(h.kb_base as i64),
+            size: Some(h.size),
+            x: Some(h.offset_x),
+            y: Some(h.offset_y),
+            z: Some(h.offset_z),
+            x2: h.capsule_end.map(|c| c[0]),
+            y2: h.capsule_end.map(|c| c[1]),
+            z2: h.capsule_end.map(|c| c[2]),
+            hitlag: Some(h.hitlag_mult),
+            sdi: Some(h.sdi_mult),
+        }
+    }
+
+    /// Full 36-slot ATTACK arg vector for injection: donor capture args (exact tail) with
+    /// the modeled slots overwritten from the Hitbox. Without a donor: None (template
+    /// injection is too risky — masks/flags would be guesses).
+    fn build_attack_args(
+        h: &crate::data::Hitbox,
+        donor: Option<&crate::game_link::CaptureLine>,
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::game_link::LuaArgWire as A;
+        let mut args = donor.filter(|d| d.args.len() >= 33)?.args.clone();
+        args[0] = A::Int(h.id as i64);
+        args[1] = A::Int(h.part as i64);
+        args[2] = A::Hash(hash40::hash40(&h.bone_name.to_lowercase()).0);
+        args[3] = A::Num(h.damage);
+        args[4] = A::Int(h.angle as i64);
+        args[5] = A::Int(h.kb_scaling as i64);
+        args[6] = A::Int(h.fkb as i64);
+        args[7] = A::Int(h.kb_base as i64);
+        args[8] = A::Num(h.size);
+        args[9] = A::Num(h.offset_x);
+        args[10] = A::Num(h.offset_y);
+        args[11] = A::Num(h.offset_z);
+        match h.capsule_end {
+            Some([x, y, z]) => {
+                args[12] = A::Num(x);
+                args[13] = A::Num(y);
+                args[14] = A::Num(z);
+            }
+            None => {
+                args[12] = A::Nil;
+                args[13] = A::Nil;
+                args[14] = A::Nil;
+            }
+        }
+        args[15] = A::Num(h.hitlag_mult);
+        args[16] = A::Num(h.sdi_mult);
+        Some(args)
+    }
+
+    /// Build a CATCH (grabbox) inject arg vector from a captured donor grab.
+    /// Layout: 0 id, 1 bone(h), 2 size, 3 x, 4 y, 5 z, 6 x2, 7 y2, 8 z2, 9 status, 10 situation.
+    fn build_catch_args(
+        h: &crate::data::Hitbox,
+        donor: Option<&crate::game_link::CaptureLine>,
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::game_link::LuaArgWire as A;
+        let mut args = donor.filter(|d| d.args.len() >= 6)?.args.clone();
+        args[0] = A::Int(h.id as i64);
+        args[1] = A::Hash(hash40::hash40(&h.bone_name.to_lowercase()).0);
+        args[2] = A::Num(h.size);
+        args[3] = A::Num(h.offset_x);
+        args[4] = A::Num(h.offset_y);
+        args[5] = A::Num(h.offset_z);
+        if args.len() >= 9 {
+            match h.capsule_end {
+                Some([x, y, z]) => {
+                    args[6] = A::Num(x);
+                    args[7] = A::Num(y);
+                    args[8] = A::Num(z);
+                }
+                None => {
+                    args[6] = A::Nil;
+                    args[7] = A::Nil;
+                    args[8] = A::Nil;
+                }
+            }
+        }
+        Some(args)
+    }
+
+    // ── One-Slot studio ───────────────────────────────────────────────────────
+
+    /// The One-Slot studio: pick ANY effect from any eff (pool), copy it into the current
+    /// fighter's eff under a new name, then choose per-use which spawns redirect to it.
+    fn draw_one_slot_studio(&mut self, ctx: &egui::Context) {
+        if !self.show_one_slot {
+            return;
+        }
+        if self.effect_pool.is_none() {
+            self.effect_pool =
+                Some(crate::effect_pool::EffectPool::new(
+                    self.eff_editor.export_root().to_path_buf(),
+                ));
+        }
+        let scanning = self
+            .effect_pool
+            .as_mut()
+            .map(|p| p.tick(6))
+            .unwrap_or(false);
+        if scanning {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+
+        let target = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|f| f.name.clone());
+        let mut open = self.show_one_slot;
+        let mut do_slot: Option<(String, String, String)> = None; // (rel, donor, new name)
+        egui::Window::new("One-Slot Studio")
+            .open(&mut open)
+            .default_width(430.0)
+            .show(ctx, |ui| {
+                let Some(target) = &target else {
+                    ui.colored_label(egui::Color32::GRAY, "Select a fighter first.");
+                    return;
+                };
+                let pool = self.effect_pool.as_ref().unwrap();
+                let (done, total) = pool.progress();
+                ui.horizontal(|ui| {
+                    ui.label(format!("Target: {target}"));
+                    if scanning {
+                        ui.label(
+                            egui::RichText::new(format!("scanning effs… {done}/{total}"))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    }
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.one_slot_search)
+                        .hint_text("Search every effect entry (all fighters + sys/common)…")
+                        .desired_width(f32::INFINITY),
+                );
+
+                // Live kinds that match — effects the running game has actually used.
+                let q = self.one_slot_search.to_lowercase();
+                let live_matches: Vec<String> = self
+                    .game_link
+                    .kinds()
+                    .into_iter()
+                    .map(|(_, k)| k.name)
+                    .filter(|n| !n.starts_with("0x") && (q.is_empty() || n.to_lowercase().contains(&q)))
+                    .take(6)
+                    .collect();
+
+                let results = pool.search(&self.one_slot_search, 200);
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    if !live_matches.is_empty() {
+                        ui.label(egui::RichText::new("Live in game").strong().small());
+                        for name in &live_matches {
+                            // Resolve the live kind to a pool file if possible.
+                            let file = results
+                                .iter()
+                                .find(|(_, n)| n.eq_ignore_ascii_case(name))
+                                .map(|(rel, _)| rel.clone());
+                            let sel = self
+                                .one_slot_sel
+                                .as_ref()
+                                .map(|(_, n)| n == name)
+                                .unwrap_or(false);
+                            let label = match &file {
+                                Some(rel) => format!("● {name}  ({rel})"),
+                                None => format!("● {name}  (source unknown yet)"),
+                            };
+                            if ui.selectable_label(sel, label).clicked() {
+                                if let Some(rel) = file {
+                                    self.one_slot_sel = Some((rel, name.clone()));
+                                    self.one_slot_new_name = format!("{name}_os");
+                                }
+                            }
+                        }
+                        ui.separator();
+                    }
+                    ui.label(egui::RichText::new("All effects").strong().small());
+                    for (rel, name) in &results {
+                        let sel = self
+                            .one_slot_sel
+                            .as_ref()
+                            .map(|(r, n)| r == rel && n == name)
+                            .unwrap_or(false);
+                        if ui
+                            .selectable_label(sel, format!("{name}  —  {rel}"))
+                            .clicked()
+                        {
+                            self.one_slot_sel = Some((rel.clone(), name.clone()));
+                            self.one_slot_new_name = format!("{name}_os");
+                        }
+                    }
+                    if results.is_empty() {
+                        ui.colored_label(egui::Color32::GRAY, "No matches (yet).");
+                    }
+                });
+
+                ui.separator();
+                if let Some((rel, donor)) = self.one_slot_sel.clone() {
+                    ui.label(format!("Donor: {donor}  ({rel})"));
+                    ui.horizontal(|ui| {
+                        ui.label("New entry name:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.one_slot_new_name)
+                                .desired_width(220.0),
+                        );
+                    });
+                    let cross = !rel.contains(&format!("/{target}/"));
+                    if cross {
+                        ui.label(
+                            egui::RichText::new(
+                                "Cross-file: textures + shaders transfer automatically. \
+                                 Donors using primitive models are refused (shown in status).",
+                            )
+                            .small()
+                            .color(egui::Color32::from_rgb(200, 200, 120)),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "One-slotting previews the merged eff in-app immediately, then lets \
+                             you pick which uses redirect to the copy.",
+                        )
+                        .small()
+                        .color(egui::Color32::GRAY),
+                    );
+                    let valid = !self.one_slot_new_name.trim().is_empty();
+                    if ui
+                        .add_enabled(valid, egui::Button::new(format!("One-slot into {target} + preview")))
+                        .clicked()
+                    {
+                        do_slot = Some((rel, donor, self.one_slot_new_name.trim().to_string()));
+                    }
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "Pick a donor effect above.");
+                }
+            });
+        self.show_one_slot = open;
+
+        if let (Some((rel, donor, new_name)), Some(fighter)) = (do_slot, target) {
+            self.record_one_slot(&fighter, &rel, &donor, &new_name);
+        }
+    }
+
+    /// Build the fighter's one-slotted eff IN MEMORY (source eff + recorded one-slot ops via
+    /// the same `rebuild_eff_bytes` the exporter uses) and load it into the preview, so the
+    /// copied effect is visible before export. Surfaces transfer errors (e.g. primitives) in
+    /// the status line instead of failing silently.
+    fn preview_one_slot_result(&mut self, fighter: &str) {
+        let Some(eff) = self.eff_mods.get(fighter).cloned() else { return };
+        let root = self.eff_editor.export_root().to_path_buf();
+        // Prefer the actually-loaded target eff bytes; fall back to the export-root source.
+        let src_bytes = self
+            .current_eff_path
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .or_else(|| std::fs::read(root.join(&eff.source_rel)).ok());
+        let Some(src_bytes) = src_bytes else {
+            self.state.status =
+                "One-slot recorded, but the target eff isn't on disk to preview — export to apply.".into();
+            return;
+        };
+        match crate::eff_export::rebuild_eff_bytes(&src_bytes, &eff, Some(&root)) {
+            Ok(merged) => {
+                // Write the preview NEXT TO the fighter's own eff so load_eff_file's sibling
+                // merges (ef_common.eff sys effects, trail/ + model/ nutexb) still resolve —
+                // writing to a scratch dir left the copied effect missing those shared
+                // textures/shaders, which showed up as an invisible effect. The
+                // `_oneslot_preview.eff` name is skipped by the donor-pool scan.
+                let tmp = self
+                    .current_eff_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|dir| dir.join("_oneslot_preview.eff"))
+                    .unwrap_or_else(|| {
+                        crate::scratch_dirs::app_storage_root().join("_oneslot_preview.eff")
+                    });
+                if std::fs::write(&tmp, &merged).is_ok() {
+                    self.load_eff_file(&tmp);
+                    self.respawn_effects();
+                    // Point the Eff Editor at the merged eff too, so the new slotted entry
+                    // shows up in its entry list (was only reading the base file).
+                    self.eff_editor.queue_load(&tmp);
+                    self.state.status =
+                        format!("One-slot applied — previewing merged eff for {fighter}");
+                }
+            }
+            Err(e) => {
+                self.state.status = format!("One-slot preview failed: {e}");
+            }
+        }
+    }
+
+    /// Record the OneSlotOp for `fighter` and open the per-use redirect prompt.
+    fn record_one_slot(&mut self, fighter: &str, rel: &str, donor: &str, new_name: &str) {
+        let own_rel = format!("effect/fighter/{fighter}/ef_{fighter}.eff");
+        let entry = self.eff_mods.entry(fighter.to_string()).or_default();
+        if entry.source_rel.is_empty() {
+            entry.source_rel = own_rel.clone();
+        }
+        entry.one_slot.push(crate::mod_project::OneSlotOp {
+            new_entry_name: new_name.to_string(),
+            src_file_rel: if rel == own_rel { String::new() } else { rel.to_string() },
+            src_set_name: donor.to_string(),
+            src_set_idx: 0,
+        });
+        self.state.status = format!("One-slot '{new_name}' recorded for {fighter}");
+
+        // Full use discovery: reconstruct EVERY move performed live that spawns the donor
+        // (not just moves already opened) into effect_call_full, so all real uses are listed
+        // and redirectable — each move played in-game contributes its captured effect script.
+        {
+            let donor_hash = effect_name_hash(donor);
+            let motion_name: HashMap<u64, String> =
+                self.move_list.iter().map(|m| (m.hash, m.name.clone())).collect();
+            let bone_rev = self.bone_reverse_map();
+            let eff_rev = self.effect_reverse_map();
+            let mut motions: Vec<u64> = self
+                .game_link
+                .all_captures()
+                .into_iter()
+                .filter(|(_, l)| {
+                    l.func.starts_with("EFFECT")
+                        && l.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
+                })
+                .map(|(m, _)| m)
+                .collect();
+            motions.sort();
+            motions.dedup();
+            for m in motions {
+                let Some(name) = motion_name.get(&m) else { continue };
+                let key = format!("{fighter}/{name}");
+                if self.state.effect_call_full.contains_key(&key) {
+                    continue;
+                }
+                let mut calls: Vec<crate::data::EffectCall> = Vec::new();
+                for line in self.game_link.captures_for(m) {
+                    if line.func.starts_with("EFFECT") {
+                        if let Some(ec) = Self::effect_call_from_capture(
+                            &line.func, &line.args, line.frame, &bone_rev, &eff_rev,
+                        ) {
+                            calls.push(ec);
+                        }
+                    }
+                }
+                if !calls.is_empty() {
+                    self.state.effect_call_full.insert(key, calls);
+                }
+            }
+        }
+
+        // Preview the merged result in-app immediately (build the one-slotted eff in memory).
+        self.preview_one_slot_result(fighter);
+
+        // Gather every known use of the donor effect for the redirect picker.
+        let donor_hash = effect_name_hash(donor);
+        let mut uses: Vec<RedirectUse> = Vec::new();
+        for (key, calls) in &self.state.effect_call_full {
+            if !key.starts_with(&format!("{fighter}/")) {
+                continue;
+            }
+            for (i, c) in calls.iter().enumerate() {
+                if effect_name_hash(&c.effect_name) == donor_hash {
+                    uses.push(RedirectUse {
+                        move_key: key.clone(),
+                        call_idx: i,
+                        label: format!(
+                            "{key} — frame {} on {}",
+                            c.active_start, c.bone_name
+                        ),
+                        selected: true,
+                    });
+                }
+            }
+        }
+        // Current move's calls (may not be snapshotted yet).
+        if let Some(mv_key) = self.current_move_key() {
+            if !self.state.effect_call_full.contains_key(&mv_key) {
+                for (i, c) in self.state.effects.iter().enumerate() {
+                    if effect_name_hash(&c.effect_name) == donor_hash {
+                        uses.push(RedirectUse {
+                            move_key: mv_key.clone(),
+                            call_idx: i,
+                            label: format!(
+                                "{mv_key} — frame {} on {}",
+                                c.active_start, c.bone_name
+                            ),
+                            selected: true,
+                        });
+                    }
+                }
+            }
+        }
+        self.redirect_prompt = Some(RedirectPrompt {
+            donor_name: donor.to_string(),
+            new_name: new_name.to_string(),
+            uses,
+        });
+    }
+
+    /// "Which uses go to the new effect?" — per-use checkboxes, applied as call edits.
+    fn draw_redirect_prompt(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.redirect_prompt else { return };
+        let mut action: Option<bool> = None; // Some(true)=apply, Some(false)=skip
+        egui::Window::new("Redirect spawns to the one-slotted effect?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "'{}' was copied as '{}'. Choose which existing spawns should use the \
+                     new effect (unchecked ones keep the original):",
+                    prompt.donor_name, prompt.new_name
+                ));
+                ui.add_space(4.0);
+                if prompt.uses.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        "No known uses yet — retarget calls later in the Effects panel \
+                         (uses appear as moves are opened or captured live).",
+                    );
+                } else {
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        for u in prompt.uses.iter_mut() {
+                            ui.checkbox(&mut u.selected, &u.label);
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let any = prompt.uses.iter().any(|u| u.selected);
+                    if ui
+                        .add_enabled(any, egui::Button::new("Redirect selected"))
+                        .clicked()
+                    {
+                        action = Some(true);
+                    }
+                    if ui.button("Keep all on the original").clicked() {
+                        action = Some(false);
+                    }
+                });
+            });
+        match action {
+            Some(true) => {
+                let prompt = self.redirect_prompt.take().unwrap();
+                self.apply_redirects(&prompt);
+            }
+            Some(false) => self.redirect_prompt = None,
+            None => {}
+        }
+    }
+
+    fn apply_redirects(&mut self, prompt: &RedirectPrompt) {
+        let mut n = 0usize;
+        let current = self.current_move_key();
+        for u in prompt.uses.iter().filter(|u| u.selected) {
+            if Some(&u.move_key) == current.as_ref() {
+                if let Some(c) = self.state.effects.get_mut(u.call_idx) {
+                    c.effect_name = prompt.new_name.clone();
+                }
+                self.record_effect_call_edit(u.call_idx);
+                self.push_effect_rules();
+                n += 1;
+                continue;
+            }
+            // Other moves: rewrite the stored full snapshot + upsert the Modify edit, AND
+            // push a live swap rule now (suppress the donor + inject the new effect) so the
+            // redirect takes effect in-game immediately instead of only when the move is opened.
+            if let Some(calls) = self.state.effect_call_full.get_mut(&u.move_key) {
+                if let Some(c) = calls.get_mut(u.call_idx) {
+                    c.effect_name = prompt.new_name.clone();
+                    let call = c.clone();
+                    let edits = self
+                        .state
+                        .effect_call_edits
+                        .entry(u.move_key.clone())
+                        .or_default();
+                    if let Some(e) = edits.iter_mut().find(|e| e.index == u.call_idx) {
+                        e.op = crate::data::EffectCallOp::Modify(call.clone());
+                    } else {
+                        edits.push(crate::data::EffectCallEdit {
+                            index: u.call_idx,
+                            op: crate::data::EffectCallOp::Modify(call.clone()),
+                        });
+                    }
+                    // Live swap rule for this other move (needs that move captured in-game).
+                    let donor_hash = effect_name_hash(&prompt.donor_name);
+                    if let Some(mname) = u.move_key.split_once('/').map(|(_, m)| m) {
+                        let motion = hash40::hash40(&mname.to_lowercase()).0;
+                        if let Some(inject) =
+                            self.build_effect_inject(&call, Some(motion), donor_hash)
+                        {
+                            let fs = call.active_start as f32 - 0.5;
+                            let fe = call.active_start as f32 + 1.5;
+                            let store = self.effect_rules_store.entry(u.move_key.clone()).or_default();
+                            store.push(crate::game_link::SpawnRuleWire {
+                                eff_hash: donor_hash,
+                                suppress: true,
+                                motion: Some(motion),
+                                frame_start: Some(fs),
+                                frame_end: Some(fe),
+                                pos: None,
+                                rot: None,
+                                scale: None,
+                                inject: None,
+                            });
+                            store.push(crate::game_link::SpawnRuleWire {
+                                eff_hash: effect_name_hash(&call.effect_name),
+                                suppress: false,
+                                motion: Some(motion),
+                                frame_start: None,
+                                frame_end: None,
+                                pos: None,
+                                rot: None,
+                                scale: None,
+                                inject: Some(inject),
+                            });
+                        }
+                    }
+                    n += 1;
+                }
+            }
+        }
+        // Flush the union of all moves' rules so cross-move redirects apply live at once.
+        let all: Vec<crate::game_link::SpawnRuleWire> =
+            self.effect_rules_store.values().flatten().cloned().collect();
+        self.game_link.send_spawn_rules(&all);
+        self.state.status = format!(
+            "Redirected {n} spawn(s) from '{}' to '{}' (live where the move was captured)",
+            prompt.donor_name, prompt.new_name
+        );
+    }
+
+    /// Record (or update) the Modify edit for effect call `i` in the current move.
+    /// Added calls keep their `Add` record updated instead.
+    fn record_effect_call_edit(&mut self, i: usize) {
+        let Some(mv) = self.current_move_key() else {
+            return;
+        };
+        let Some(call) = self.state.effects.get(i).cloned() else { return };
+        let is_added = i >= self.state.effects_pristine.len();
+        let edits = self.state.effect_call_edits.entry(mv.clone()).or_default();
+        if let Some(existing) = edits.iter_mut().find(|e| e.index == i) {
+            existing.op = if is_added {
+                crate::data::EffectCallOp::Add(call)
+            } else {
+                crate::data::EffectCallOp::Modify(call)
+            };
+        } else {
+            edits.push(crate::data::EffectCallEdit {
+                index: i,
+                op: crate::data::EffectCallOp::Modify(call),
+            });
+        }
+        self.state
+            .effect_call_full
+            .insert(mv, self.state.effects.clone());
+    }
+
+    /// Delete effect spawn `i` from the current move. An ADDED spawn is removed outright
+    /// (its edit dropped, later added-edit indices shifted down). A script (pristine) spawn
+    /// can't be removed from the ACMD, so it's recorded as `Remove` (suppressed in-game and on
+    /// export) — distinct from the `disabled` toggle only in intent. Bound to Backspace/Delete.
+    fn delete_effect_call(&mut self, i: usize) {
+        if i >= self.state.effects.len() {
+            return;
+        }
+        let Some(mv) = self.current_move_key() else { return };
+        let is_added = i >= self.state.effects_pristine.len();
+        if is_added {
+            self.state.effects.remove(i);
+            let edits = self.state.effect_call_edits.entry(mv.clone()).or_default();
+            edits.retain(|e| e.index != i);
+            for e in edits.iter_mut() {
+                if e.index > i {
+                    e.index -= 1;
+                }
+            }
+            self.state.selected_effect_call = None;
+        } else {
+            let edits = self.state.effect_call_edits.entry(mv.clone()).or_default();
+            if let Some(e) = edits.iter_mut().find(|e| e.index == i) {
+                e.op = crate::data::EffectCallOp::Remove;
+            } else {
+                edits.push(crate::data::EffectCallEdit {
+                    index: i,
+                    op: crate::data::EffectCallOp::Remove,
+                });
+            }
+            // Rebuild so the Remove op takes effect (script spawn becomes disabled).
+            self.apply_effect_call_edits_to_current();
+            self.state.selected_effect_call = None;
+        }
+        self.state
+            .effect_call_full
+            .insert(mv, self.state.effects.clone());
+        self.push_effect_rules();
+        self.respawn_effects();
+    }
+
+    /// Rebuild and push the current move's effect spawn rules: PER-SPAWN and frame/motion
+    /// scoped, so editing one spawn's offset (or disabling it) never touches the other
+    /// spawns of the same effect. Untouched spawns fire at their pristine frame with the
+    /// script's values; a moved spawn gets a transform override; a RETIMED spawn is
+    /// suppressed at its pristine frame and re-injected (from a live capture) at the new
+    /// frame with its edited transform baked in. Only changed calls produce a rule.
+    fn push_effect_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else { return };
+        let motion = self.current_motion_hash();
+        let effects = self.state.effects.clone();
+        let pristines = self.state.effects_pristine.clone();
+        let mut rules: Vec<crate::game_link::SpawnRuleWire> = Vec::new();
+        let mut missing_capture = false;
+        for (i, ec) in effects.iter().enumerate() {
+            let pristine = pristines.get(i);
+            let spawn_frame =
+                pristine.map(|p| p.active_start).unwrap_or(ec.active_start) as f32;
+            let hash = effect_name_hash(&ec.effect_name);
+            // The effect the SCRIPT actually spawns (before edits) — what to suppress.
+            let orig_hash = pristine
+                .map(|p| effect_name_hash(&p.effect_name))
+                .unwrap_or(hash);
+            let window = (Some(spawn_frame - 0.5), Some(spawn_frame + 1.5));
+            if ec.disabled {
+                rules.push(crate::game_link::SpawnRuleWire {
+                    eff_hash: orig_hash,
+                    suppress: true,
+                    motion,
+                    frame_start: window.0,
+                    frame_end: window.1,
+                    pos: None,
+                    rot: None,
+                    scale: None,
+                    inject: None,
+                });
+                continue;
+            }
+            // Swap and/or retime: the effect NAME or FRAME changed → suppress the original
+            // spawn and inject the new effect at the new frame (transform baked in). The
+            // injected call reuses the original spawn's captured args with the graphic hash
+            // swapped to the new effect. Needs a live capture of the original; without one,
+            // fall back to a transform rule (export still applies the swap) and flag it.
+            let retimed = pristine
+                .map(|p| p.active_start != ec.active_start)
+                .unwrap_or(false);
+            let swapped = orig_hash != hash;
+            if retimed || swapped {
+                if let Some(inject) = self.build_effect_inject(ec, motion, orig_hash) {
+                    rules.push(crate::game_link::SpawnRuleWire {
+                        eff_hash: orig_hash,
+                        suppress: true,
+                        motion,
+                        frame_start: window.0,
+                        frame_end: window.1,
+                        pos: None,
+                        rot: None,
+                        scale: None,
+                        inject: None,
+                    });
+                    rules.push(crate::game_link::SpawnRuleWire {
+                        eff_hash: hash,
+                        suppress: false,
+                        motion,
+                        frame_start: None,
+                        frame_end: None,
+                        pos: None,
+                        rot: None,
+                        scale: None,
+                        inject: Some(inject),
+                    });
+                    continue;
+                }
+                missing_capture = true;
+            }
+            // Only push a transform when this spawn's offset/rot/scale actually differ
+            // from pristine — untouched spawns keep the script's values.
+            let moved = pristine
+                .map(|p| {
+                    p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale
+                })
+                .unwrap_or(true);
+            if moved {
+                rules.push(crate::game_link::SpawnRuleWire {
+                    eff_hash: hash,
+                    suppress: false,
+                    motion,
+                    frame_start: window.0,
+                    frame_end: window.1,
+                    pos: Some(ec.offset),
+                    rot: Some(ec.rotation),
+                    scale: Some(ec.scale),
+                    inject: None,
+                });
+            }
+        }
+        if rules.is_empty() {
+            self.effect_rules_store.remove(&mv_key);
+        } else {
+            self.effect_rules_store.insert(mv_key, rules);
+        }
+        let all: Vec<crate::game_link::SpawnRuleWire> =
+            self.effect_rules_store.values().flatten().cloned().collect();
+        self.game_link.send_spawn_rules(&all);
+        if missing_capture {
+            self.state.status =
+                "Swapped/retimed effect needs a live capture — perform the move in game once so \
+                 the change previews live (export applies it regardless)."
+                    .into();
+        }
+    }
+
+    /// Build a live injection for a spawn from a captured EFFECT donor (matched by
+    /// `donor_hash` — the ORIGINAL effect the script spawned, so a captured copy exists),
+    /// swapping the graphic to `ec`'s (possibly different) effect and baking in the spawn's
+    /// edited bone/offset/rotation/scale + new frame. Handles retime, effect-swap, or both.
+    /// None when the original effect hasn't been captured live yet.
+    fn build_effect_inject(
+        &self,
+        ec: &crate::data::EffectCall,
+        motion: Option<u64>,
+        donor_hash: u64,
+    ) -> Option<crate::game_link::SpawnInjectWire> {
+        use crate::game_link::LuaArgWire as A;
+        let motion = motion?;
+        let new_hash = effect_name_hash(&ec.effect_name);
+        let captures = self.game_link.captures_for(motion);
+        let donor = captures.iter().find(|c| {
+            c.func.starts_with("EFFECT")
+                && c.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
+        })?;
+        let flip = donor.func.contains("FLIP");
+        let off = usize::from(flip);
+        let mut args = donor.args.clone();
+        // Vec layout (0-based, +off for flip): 0 gfx (0/1 for FLIP: gfxL/gfxR), 1 bone,
+        // 2..4 pos xyz, 5..7 rot zr,yr,xr, 8 size.
+        if args.len() < 9 + off {
+            return None;
+        }
+        // Swap the graphic to the new effect (both left/right for FLIP variants).
+        args[0] = A::Hash(new_hash);
+        if flip {
+            args[1] = A::Hash(new_hash);
+        }
+        args[1 + off] = A::Hash(hash40::hash40(&ec.bone_name.to_lowercase()).0);
+        args[2 + off] = A::Num(ec.offset[0]);
+        args[3 + off] = A::Num(ec.offset[1]);
+        args[4 + off] = A::Num(ec.offset[2]);
+        args[5 + off] = A::Num(ec.rotation[2]); // zr
+        args[6 + off] = A::Num(ec.rotation[1]); // yr
+        args[7 + off] = A::Num(ec.rotation[0]); // xr
+        args[8 + off] = A::Num(ec.scale);
+        Some(crate::game_link::SpawnInjectWire {
+            frame: ec.active_start as f32,
+            func: donor.func.clone(),
+            args,
+        })
+    }
+
     fn draw_scrubber(&mut self, ui: &mut Ui) {
         if self.state.total_frames == 0 { return; }
 
@@ -1906,10 +4492,12 @@ impl HitboxEditorApp {
             ui.label(format!("Frame {} / {}", current + 1, total));
         });
 
-        // Timeline
-        let timeline_height = if self.state.hitboxes.is_empty() { 24.0 } else {
-            24.0 + self.state.hitboxes.len() as f32 * 16.0
-        };
+        // Timeline — 24px header + one 16px row per hitbox + a compact 7px row per effect
+        // spawn at the bottom (start→end bars, like hitboxes but smaller).
+        let n_fx = self.state.effects.len();
+        let hb_band = if self.state.hitboxes.is_empty() { 0.0 } else { self.state.hitboxes.len() as f32 * 16.0 };
+        let fx_band = if n_fx == 0 { 0.0 } else { 4.0 + n_fx as f32 * 7.0 };
+        let timeline_height = (24.0 + hb_band + fx_band).max(24.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), timeline_height),
             egui::Sense::click_and_drag(),
@@ -1929,7 +4517,7 @@ impl HitboxEditorApp {
         for (row, hb) in self.state.hitboxes.iter().enumerate() {
             let y_top = rect.top() + 24.0 + row as f32 * 16.0;
             let y_bot = y_top + 14.0;
-            let color = hitbox_color(hb.hitbox_type);
+            let color = hitbox_display_color(hb);
             let is_selected = self.selected_hitbox == Some(row);
 
             let start_x = frame_to_x(hb.active_start);
@@ -1992,19 +4580,40 @@ impl HitboxEditorApp {
             }
         }
 
-        // Effect event tick marks — orange ticks below the scrubber bar
-        if !self.state.effects.is_empty() {
-            let effect_frames: std::collections::HashSet<u32> = self.state.effects.iter()
-                .map(|e| e.active_start)
-                .collect();
-            for f in effect_frames {
-                if f < total {
-                    let x = frame_to_x(f);
-                    painter.line_segment(
-                        [egui::pos2(x, rect.bottom() - 6.0), egui::pos2(x, rect.bottom())],
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 165, 0)),
-                    );
-                }
+        // Effect spawn bars — a compact band below the hitbox rows showing each spawn's
+        // start→end (one-shots get a short fixed window; follow effects extend to the end).
+        let fx_band_top = rect.top() + 24.0 + hb_band + 2.0;
+        for (row, e) in self.state.effects.iter().enumerate() {
+            let y_top = fx_band_top + row as f32 * 7.0;
+            let y_bot = y_top + 6.0;
+            let end_frame = if e.follows_bone {
+                if e.active_end >= total { total } else { e.active_end }
+            } else {
+                e.active_end.max(e.active_start.saturating_add(12)).min(total)
+            };
+            let start_x = frame_to_x(e.active_start.min(total));
+            let end_x = frame_to_x(end_frame).max(start_x + 3.0).min(rect.right());
+            let base = if e.disabled {
+                egui::Color32::from_rgb(110, 110, 110)
+            } else if e.follows_bone {
+                egui::Color32::from_rgb(255, 165, 0)
+            } else {
+                egui::Color32::from_rgb(255, 220, 0)
+            };
+            let selected = self.state.selected_effect_call == Some(row);
+            let alpha = if selected { 235 } else { 170 };
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha),
+            );
+            if selected {
+                painter.rect_stroke(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Stroke::new(1.0, egui::Color32::WHITE),
+                    egui::StrokeKind::Outside,
+                );
             }
         }
 
@@ -2205,6 +4814,10 @@ impl HitboxEditorApp {
 impl eframe::App for HitboxEditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx();
+        // Keep the game link alive whenever the app runs — live offsets, hitbox rules,
+        // ACMD capture, the reconnect modal, and the One-Slot pool all need it, not just
+        // the Eff Editor window (which used to be the only thing that started it).
+        self.game_link.ensure_started();
         self.maybe_autoload();
         // Headless capture: HITBOX_SCREENSHOT=<png> saves exactly what the viewport renders
         // (full composite) after the effect has played a while, then exits. Works under Xvfb
@@ -2395,45 +5008,137 @@ impl eframe::App for HitboxEditorApp {
             self.draw_edit_log_window(ctx);
         }
 
-        // Top menu bar
+        // Top menu bar: File / Windows / Mod + status
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("SSBU Hitbox Editor").size(16.0).color(egui::Color32::WHITE));
+                ui.label(egui::RichText::new("SSBU Toolkit").size(16.0).color(egui::Color32::WHITE));
                 ui.separator();
-                if ui.button(egui::RichText::new("Open Data Root").color(egui::Color32::WHITE)).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.set_data_root(path);
+
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open Data Root…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.set_data_root(path);
+                        }
+                        ui.close();
                     }
-                }
+                    if ui.button("Open Effect File…")
+                        .on_hover_text("Load any .eff from disk (even outside the game data root) into the preview and donor pool")
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Effect file", &["eff"])
+                            .set_title("Open effect (.eff)")
+                            .pick_file()
+                        {
+                            self.open_external_eff(path);
+                        }
+                        ui.close();
+                    }
+                    if !self.recent_effs.is_empty() {
+                        ui.menu_button("Open Recent Eff", |ui| {
+                            let recents = self.recent_effs.clone();
+                            for p in recents {
+                                let label = p
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or_else(|| p.to_str().unwrap_or("eff"));
+                                if ui.button(label).on_hover_text(p.to_string_lossy()).clicked() {
+                                    self.open_external_eff(p.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                });
+
+                ui.menu_button("Windows", |ui| {
+                    let eff_toggle = ui
+                        .checkbox(&mut self.eff_editor.open, "Eff Editor")
+                        .on_hover_text("Edit .eff authored values with in-game live preview (separate window)");
+                    if eff_toggle.changed() && self.eff_editor.open {
+                        // Opening the window always shows the selected fighter's eff (a
+                        // queued load may have been consumed by an earlier open, or a
+                        // different file loaded manually since).
+                        if let Some(p) = self.current_eff_path.clone() {
+                            self.eff_editor.queue_load(&p);
+                        }
+                    }
+                    ui.checkbox(&mut self.state.show_effects_panel, "Effects panel")
+                        .on_hover_text("Effect spawns of the current move");
+                    ui.checkbox(&mut self.show_one_slot, "One-Slot Studio")
+                        .on_hover_text(
+                            "Copy any effect (any fighter / sys) into the current fighter's \
+                             eff and redirect its uses",
+                        );
+                    let has_log = !self.state.edit_log.is_empty() || self.show_edit_log;
+                    ui.add_enabled_ui(has_log, |ui| {
+                        ui.checkbox(&mut self.show_edit_log, "Edit Log")
+                            .on_hover_text("View and manage all saved edits");
+                    });
+                    ui.checkbox(&mut self.show_debug, "Debug");
+                });
+
+                ui.menu_button("Mod", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("name:");
+                        ui.add(egui::TextEdit::singleline(&mut self.project_name).desired_width(140.0));
+                    });
+                    ui.separator();
+                    if ui.button("Save Project…")
+                        .on_hover_text("Save every edit (hitboxes, effect calls, eff values) as a project JSON")
+                        .clicked()
+                    {
+                        self.save_project();
+                        ui.close();
+                    }
+                    if ui.button("Load Project…")
+                        .on_hover_text("Load a project/mod (modproject.json) for further editing; re-applies edits to the running game")
+                        .clicked()
+                    {
+                        self.load_project();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Clear all game edits")
+                        .on_hover_text("Wipe the game's saved pins (which survive restarts) + all live spawn/hitbox rules — use when old edits keep re-appearing")
+                        .clicked()
+                    {
+                        self.clear_all_game_edits();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Export Full Mod…")
+                        .on_hover_text("Rebuilt eff files + smashline source + project JSON into a folder you pick")
+                        .clicked()
+                    {
+                        self.export_full_mod();
+                        ui.close();
+                    }
+                    let can_export = self.state.selected_fighter.is_some()
+                        && self.state.selected_move.is_some()
+                        && !self.state.script.stmts.is_empty();
+                    if ui.add_enabled(can_export, egui::Button::new("Export Source"))
+                        .on_hover_text("Export edited hitboxes as smashline Rust source code")
+                        .clicked()
+                    {
+                        self.export_acmd_source();
+                        ui.close();
+                    }
+                });
+
                 ui.separator();
-                let debug_label = if self.show_debug { "Debug ✓" } else { "Debug" };
-                if ui.button(debug_label).clicked() {
-                    self.show_debug = !self.show_debug;
-                }
-                ui.separator();
-                let can_export = self.state.selected_fighter.is_some()
-                    && self.state.selected_move.is_some()
-                    && !self.state.script.stmts.is_empty();
-                if ui.add_enabled(can_export, egui::Button::new("Export Source"))
-                    .on_hover_text("Export edited hitboxes as smashline Rust source code")
-                    .clicked()
-                {
-                    self.export_acmd_source();
-                }
-                ui.separator();
-                let log_label = if self.show_edit_log { "Edit Log ✓" } else { "Edit Log" };
-                let log_btn = ui.add_enabled(
-                    !self.state.edit_log.is_empty() || self.show_edit_log,
-                    egui::Button::new(log_label),
-                ).on_hover_text("View and manage all saved edits");
-                if log_btn.clicked() {
-                    self.show_edit_log = !self.show_edit_log;
-                }
-                ui.separator();
-                let effects_label = if self.state.show_effects_panel { "Effects ✓" } else { "Effects" };
-                if ui.button(effects_label).on_hover_text("Toggle effects panel").clicked() {
-                    self.state.show_effects_panel = !self.state.show_effects_panel;
-                }
+                // Game-link status — same widget language as the Eff Editor header.
+                let (dot, gtxt) = match self.game_link.status() {
+                    crate::game_link::LinkStatus::Connected => {
+                        (egui::Color32::from_rgb(90, 220, 90), "game")
+                    }
+                    crate::game_link::LinkStatus::Connecting => (egui::Color32::YELLOW, "game"),
+                    crate::game_link::LinkStatus::Disconnected => {
+                        (egui::Color32::from_rgb(220, 90, 90), "game")
+                    }
+                };
+                ui.colored_label(dot, "●");
+                ui.label(egui::RichText::new(gtxt).small());
                 ui.separator();
                 ui.label(egui::RichText::new(&self.state.status).color(egui::Color32::LIGHT_GRAY));
             });
@@ -2447,6 +5152,128 @@ impl eframe::App for HitboxEditorApp {
                 ui.add_space(4.0);
                 self.draw_scrubber(ui);
             });
+
+        // Eff editor (separate OS viewport; authored .eff editing + live game preview)
+        let current_fighter = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|f| f.name.clone());
+        self.eff_editor.set_target_fighter(current_fighter.clone());
+        self.eff_editor
+            .show(ctx, &self.game_link, &mut self.live_overrides);
+
+        // Single debounced sender for every live override (color/speed kind multipliers;
+        // per-spawn transforms go through push_effect_rules, not this store).
+        self.live_overrides.flush_due(&self.game_link);
+        if self.live_overrides.any_dirty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+
+        // Live hitbox rules: watch the hitbox list for edits (sliders mutate in place) and
+        // push the derived rule set debounced. Move switches reset the watch, not the rules.
+        if let Some(mv) = self.current_move_key() {
+            let same = self
+                .hitbox_watch
+                .as_ref()
+                .map(|(k, v)| *k == mv && *v == self.state.hitboxes)
+                .unwrap_or(false);
+            if !same {
+                let same_move = self
+                    .hitbox_watch
+                    .as_ref()
+                    .map(|(k, _)| *k == mv)
+                    .unwrap_or(false);
+                self.hitbox_watch = Some((mv, self.state.hitboxes.clone()));
+                if same_move {
+                    self.hitbox_dirty_at = Some(std::time::Instant::now());
+                }
+            }
+        }
+        if let Some(t) = self.hitbox_dirty_at {
+            if t.elapsed().as_millis() > 300 {
+                self.hitbox_dirty_at = None;
+                self.push_hitbox_rules();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+
+        // Auto-adopt live capture when the current move has NO data yet (no GitHub fetch).
+        let seq = self.game_link.captures_seq();
+        if seq != self.captures_seen_seq {
+            self.captures_seen_seq = seq;
+            if self.state.acmd_source.is_empty()
+                && self.state.hitboxes.is_empty()
+                && self.state.effects.is_empty()
+            {
+                if let Some(m) = self.current_motion_hash() {
+                    if !self.game_link.captures_for(m).is_empty() {
+                        self.load_from_capture();
+                    }
+                }
+            }
+        }
+
+        // Pin-sync check: on a new plugin connection, wait for the resync notifies to land,
+        // then prompt about in-game pins this session doesn't know about ("ask on connect").
+        let client = self.game_link.client_id();
+        if client != self.pin_sync_client {
+            self.pin_sync_client = client;
+            self.pin_sync_prompt = None;
+            self.pin_sync_wait = client.map(|_| std::time::Instant::now());
+        }
+        if let Some(t0) = self.pin_sync_wait {
+            // The plugin persists pins on the SD card and re-applies them when the game boots,
+            // so ANY pins present on a fresh connection are "old edits" the user should get to
+            // keep or remove. Poll until the resync notifies land (they can take a few seconds)
+            // rather than sampling once — a single 1.5s check missed late-arriving pins.
+            let waited = t0.elapsed().as_millis();
+            if waited > 1200 {
+                let pinned = self.game_link.pinned_kinds();
+                if !pinned.is_empty() {
+                    self.pin_sync_wait = None;
+                    self.pin_sync_prompt = Some(pinned);
+                } else if waited > 6000 {
+                    self.pin_sync_wait = None; // nothing pinned in-game — nothing to ask about
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(300));
+                }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
+        self.draw_pin_sync_modal(ctx);
+        self.draw_one_slot_studio(ctx);
+        self.draw_redirect_prompt(ctx);
+
+        // Background mod-export build progress.
+        if let Some(state) = &self.export_build {
+            let finished = state.lock().ok().map(|s| (s.done, s.message.clone()));
+            match finished {
+                Some((true, msg)) => {
+                    self.state.status = msg;
+                    self.export_build = None;
+                }
+                _ => ctx.request_repaint_after(std::time::Duration::from_millis(500)),
+            }
+        }
+        // Drain one-slot ops recorded in the eff editor into the project store.
+        let ops = self.eff_editor.take_one_slots();
+        if !ops.is_empty() {
+            if let Some(fighter) = current_fighter {
+                let entry = self.eff_mods.entry(fighter.clone()).or_default();
+                if entry.source_rel.is_empty() {
+                    entry.source_rel =
+                        format!("effect/fighter/{fighter}/ef_{fighter}.eff");
+                }
+                for op in ops {
+                    self.state.status =
+                        format!("One-slot '{}' recorded for {fighter}", op.new_entry_name);
+                    entry.one_slot.push(op);
+                }
+            }
+        }
 
         // Effects panel (right side, shown when toggled)
         if self.state.show_effects_panel {
@@ -2569,7 +5396,7 @@ impl eframe::App for HitboxEditorApp {
                             let _canonical_bone = bone_name_map.get(&ec.bone_name.to_lowercase())
                                 .cloned()
                                 .unwrap_or_else(|| ec.bone_name.clone());
-                            let is_trail = Self::is_trail_effect(&name_lower, ec.follows_bone, eff_index, ptcl);
+                            let is_trail = Self::is_trail_effect(&ec.effect_name, &name_lower, ec.follows_bone, eff_index, ptcl);
                             if is_trail { continue; } // trails handled separately
 
                             let _set_idx_opt = eff_index.handles.get(&ec.effect_name)
@@ -2593,7 +5420,7 @@ impl eframe::App for HitboxEditorApp {
                                 let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
                                     .cloned()
                                     .unwrap_or_else(|| ec2.bone_name.clone());
-                                let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone, eff_index, ptcl);
+                                let is_trail2 = Self::is_trail_effect(&ec2.effect_name, &name_lower2, ec2.follows_bone, eff_index, ptcl);
                                 if is_trail2 { continue; }
                                 let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
                                     .or_else(|| eff_index.handles.get(&name_lower2))
@@ -2666,7 +5493,7 @@ impl eframe::App for HitboxEditorApp {
                                     let canonical_bone2 = bone_name_map.get(&ec2.bone_name.to_lowercase())
                                         .cloned()
                                         .unwrap_or_else(|| ec2.bone_name.clone());
-                                    let is_trail2 = Self::is_trail_effect(&name_lower2, ec2.follows_bone, eff_index, ptcl);
+                                    let is_trail2 = Self::is_trail_effect(&ec2.effect_name, &name_lower2, ec2.follows_bone, eff_index, ptcl);
                                     if is_trail2 { continue; }
                                     let set_idx_opt2 = eff_index.handles.get(&ec2.effect_name)
                                         .or_else(|| eff_index.handles.get(&name_lower2))
@@ -2937,7 +5764,7 @@ impl eframe::App for HitboxEditorApp {
                                 (frame_num >= hb.active_start && frame_num <= hb.active_end);
                             if !active { continue; }
 
-                            let color = hitbox_color(hb.hitbox_type);
+                            let color = hitbox_display_color(hb);
                             let stroke = egui::Stroke::new(2.0, color);
                             let fill = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40);
 
@@ -3006,6 +5833,85 @@ impl eframe::App for HitboxEditorApp {
                                     );
                                 }
                             }
+                        }
+
+                        // Effect spawn markers: blue circles at bone position + script offset.
+                        let click_pos = ui.input(|i| {
+                            i.pointer
+                                .interact_pos()
+                                .filter(|p| i.pointer.primary_clicked() && rect.contains(*p))
+                        });
+                        let mut best_pick: Option<(usize, f32)> = None;
+                        for (i, ec) in self.state.effects.iter().enumerate() {
+                            if ec.disabled {
+                                continue;
+                            }
+                            let active =
+                                frame_num >= ec.active_start && frame_num <= ec.active_end;
+                            if !active && self.state.selected_effect_call != Some(i) {
+                                continue;
+                            }
+                            // Same bone conventions as hitboxes; skip unresolvable bones
+                            // (FOOT_/LANDING_ synthetic targets have no skeleton match).
+                            let Some(bone_mat) = bone_matrices
+                                .get(&ec.bone_name)
+                                .or_else(|| bone_matrices.get(&ec.bone_name.to_lowercase()))
+                                .copied()
+                            else {
+                                continue;
+                            };
+                            let bone_mat = if is_system_bone(&ec.bone_name) {
+                                glam::Mat4::from_translation(bone_mat.col(3).truncate())
+                            } else {
+                                bone_mat
+                            };
+                            let world_pos =
+                                bone_mat.transform_point3(glam::Vec3::from(ec.offset));
+                            let Some(screen_pos) = rs.world_to_screen(world_pos, rect) else {
+                                continue;
+                            };
+                            let radius = rs
+                                .world_radius_to_screen(world_pos, ec.scale.max(0.4), rect)
+                                .unwrap_or(ec.scale * 4.0)
+                                .clamp(5.0, 120.0);
+
+                            let selected = self.state.selected_effect_call == Some(i);
+                            let blue = if selected {
+                                egui::Color32::from_rgb(120, 190, 255)
+                            } else {
+                                egui::Color32::from_rgb(60, 130, 235)
+                            };
+                            let fill = egui::Color32::from_rgba_unmultiplied(
+                                blue.r(),
+                                blue.g(),
+                                blue.b(),
+                                if selected { 55 } else { 28 },
+                            );
+                            let stroke_w = if selected { 2.5 } else { 1.5 };
+                            ui.painter()
+                                .circle(screen_pos, radius, fill, egui::Stroke::new(stroke_w, blue));
+                            // Crosshair dot at the exact spawn point
+                            ui.painter().circle_filled(screen_pos, 2.0, blue);
+                            ui.painter().text(
+                                screen_pos + egui::vec2(radius + 3.0, -radius * 0.5),
+                                egui::Align2::LEFT_CENTER,
+                                &ec.effect_name,
+                                egui::FontId::monospace(9.0),
+                                blue,
+                            );
+
+                            if let Some(cp) = click_pos {
+                                let d = cp.distance(screen_pos);
+                                if d <= radius.max(12.0)
+                                    && best_pick.map(|(_, bd)| d < bd).unwrap_or(true)
+                                {
+                                    best_pick = Some((i, d));
+                                }
+                            }
+                        }
+                        if let Some((i, _)) = best_pick {
+                            self.state.selected_effect_call = Some(i);
+                            self.state.show_effects_panel = true;
                         }
 
                         // Particles and trails are rendered by the GPU via ViewportCallback/ParticleRenderer.
@@ -3130,6 +6036,95 @@ fn rebuild_script_from_hitboxes(
     AcmdScript { stmts: patch_stmts(&original.stmts, &by_id) }
 }
 
+/// Build a whole ACMD script from a hitbox list (capture-sourced moves have no base script
+/// to patch): frame-grouped ATTACKs, then clear_all after the last active window.
+fn synthesize_script_from_hitboxes(hitboxes: &[crate::data::Hitbox]) -> crate::data::AcmdScript {
+    use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+    if hitboxes.is_empty() {
+        return AcmdScript::default();
+    }
+    let mut sorted: Vec<&crate::data::Hitbox> = hitboxes.iter().collect();
+    sorted.sort_by_key(|h| (h.active_start, h.id));
+
+    let mut stmts: Vec<AcmdStmt> = Vec::new();
+    let mut current: Option<u32> = None;
+    let mut group: Vec<ExcuteStmt> = Vec::new();
+    for hb in &sorted {
+        if current != Some(hb.active_start) {
+            if !group.is_empty() {
+                stmts.push(AcmdStmt::Excute(std::mem::take(&mut group)));
+            }
+            stmts.push(AcmdStmt::Frame(hb.active_start as f32));
+            current = Some(hb.active_start);
+        }
+        group.push(ExcuteStmt::Attack(hb.to_attack_call()));
+    }
+    if !group.is_empty() {
+        stmts.push(AcmdStmt::Excute(group));
+    }
+    let clear_at = sorted.iter().map(|h| h.active_end).max().unwrap_or(0) + 1;
+    stmts.push(AcmdStmt::Frame(clear_at as f32));
+    stmts.push(AcmdStmt::Excute(vec![ExcuteStmt::ClearAll]));
+    AcmdScript { stmts }
+}
+
+/// Display labels for the move-list categories, indexed by `move_category_index`.
+const MOVE_CATEGORY_LABELS: [&str; 12] = [
+    "Specials",
+    "Aerials",
+    "Tilts",
+    "Smashes",
+    "Jabs",
+    "Dash Attack",
+    "Grabs & Throws",
+    "Dodges & Rolls",
+    "Ledge",
+    "Get-ups",
+    "Movement",
+    "Other",
+];
+
+/// Bucket a raw motion name (e.g. "special_air_hi", "attack_s3_s") into a category index
+/// matching `MOVE_CATEGORY_LABELS`, so the move list groups by the familiar move families.
+fn move_category_index(name: &str) -> usize {
+    let n = name;
+    if n.starts_with("special") {
+        0
+    } else if n.starts_with("attack_air") {
+        1
+    } else if n.starts_with("attack_s3") || n.starts_with("attack_hi3") || n.starts_with("attack_lw3") {
+        2 // tilts
+    } else if n.starts_with("attack_s4") || n.starts_with("attack_hi4") || n.starts_with("attack_lw4") {
+        3 // smashes
+    } else if n.starts_with("attack_dash") {
+        5 // dash attack
+    } else if n.starts_with("attack_1") || n.starts_with("attack_9") {
+        4 // jabs (attack_11/12/13, rapid-jab attack_100*)
+    } else if n.starts_with("catch") || n.starts_with("throw") {
+        6
+    } else if n.starts_with("escape") {
+        7 // spot dodge / rolls
+    } else if n.starts_with("cliff") {
+        8 // ledge
+    } else if n.starts_with("down") || n.starts_with("lie") || n.starts_with("passive") {
+        9 // get-ups
+    } else if n.starts_with("walk")
+        || n.starts_with("run")
+        || n.starts_with("dash")
+        || n.starts_with("turn")
+        || n.starts_with("jump")
+        || n.starts_with("fall")
+        || n.starts_with("landing")
+        || n.starts_with("step")
+        || n.starts_with("guard")
+        || n.starts_with("wait")
+    {
+        10 // movement / defense
+    } else {
+        11 // other
+    }
+}
+
 fn format_move_name(name: &str) -> String {
     let stripped = if name.len() > 3 {
         let b = name.as_bytes();
@@ -3154,6 +6149,29 @@ fn format_move_name(name: &str) -> String {
 // ── Mod project writer ────────────────────────────────────────────────────────
 
 /// Write a `ModProject` into `parent_dir/{project.name}/` and return the root path.
+/// Progress of a background `cargo skyline build` for an exported mod.
+struct ExportBuildState {
+    done: bool,
+    message: String,
+}
+
+/// One known use of a one-slotted donor effect, offered for redirect to the new name.
+struct RedirectUse {
+    /// "fighter/move" key.
+    move_key: String,
+    /// Index into that move's full call list.
+    call_idx: usize,
+    label: String,
+    selected: bool,
+}
+
+/// The "which uses go to the new effect?" prompt state.
+struct RedirectPrompt {
+    donor_name: String,
+    new_name: String,
+    uses: Vec<RedirectUse>,
+}
+
 fn write_mod_project(
     project: &crate::acmd::ModProject,
     parent_dir: &std::path::Path,
@@ -3191,4 +6209,28 @@ fn load_config_path(key: &str) -> Option<std::path::PathBuf> {
     let s = std::fs::read_to_string(&dest).ok()?;
     let p = std::path::PathBuf::from(s.trim());
     if p.exists() { Some(p) } else { None }
+}
+
+/// Recently opened external eff files (most-recent first), one path per line.
+fn load_recent_effs() -> Vec<PathBuf> {
+    let Some(dest) = config_path("recent_effs") else { return Vec::new() };
+    let Ok(s) = std::fs::read_to_string(&dest) else { return Vec::new() };
+    s.lines()
+        .map(|l| PathBuf::from(l.trim()))
+        .filter(|p| !p.as_os_str().is_empty() && p.exists())
+        .collect()
+}
+
+fn save_recent_effs(list: &[PathBuf]) {
+    if let Some(dest) = config_path("recent_effs") {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body: String = list
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(&dest, body);
+    }
 }

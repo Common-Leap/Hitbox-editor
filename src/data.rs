@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// A single hitbox — used for display, timeline, and viewport rendering.
 /// `active_start`/`active_end` are computed from the script structure.
 /// When `capsule_end` is `Some`, the hitbox is a capsule; otherwise a sphere.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Hitbox {
     pub id: u32,
     pub part: u32,
@@ -53,6 +53,10 @@ pub struct Hitbox {
     pub active_start: u32,
     pub active_end: u32,
     pub hitbox_type: u32,
+    /// Collision family: 0 = attack, 1 = grab (CATCH), 2 = wind (AREA_WIND). Drives the
+    /// preview color and which plugin family live edits target. Old projects omit it → 0.
+    #[serde(default)]
+    pub category: u8,
 }
 
 impl Default for Hitbox {
@@ -95,6 +99,49 @@ impl Default for Hitbox {
             active_start: 0,
             active_end: 9999,
             hitbox_type: 0,
+            category: 0,
+        }
+    }
+}
+
+impl Hitbox {
+    /// Back-convert to an ATTACK call (script synthesis for capture-sourced moves).
+    pub fn to_attack_call(&self) -> AttackCall {
+        AttackCall {
+            id: self.id,
+            part: self.part,
+            bone_name: self.bone_name.clone(),
+            damage: self.damage,
+            angle: self.angle,
+            kb_scaling: self.kb_scaling,
+            fkb: self.fkb,
+            kb_base: self.kb_base,
+            size: self.size,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            offset_z: self.offset_z,
+            capsule_end: self.capsule_end,
+            hitlag_mult: self.hitlag_mult,
+            sdi_mult: self.sdi_mult,
+            setoff_kind: self.setoff_kind.clone(),
+            lr_check: self.lr_check.clone(),
+            is_clang: self.is_clang,
+            is_add_attack: self.is_add_attack,
+            hitbox_attr: self.hitbox_attr,
+            ground_or_air: self.ground_or_air,
+            is_mtk: self.is_mtk,
+            is_shield_disable: self.is_shield_disable,
+            is_reflectable: self.is_reflectable,
+            is_absorbable: self.is_absorbable,
+            is_landing_attack: self.is_landing_attack,
+            situation_mask: self.situation_mask.clone(),
+            category_mask: self.category_mask.clone(),
+            part_mask: self.part_mask.clone(),
+            no_finish_camera: self.no_finish_camera,
+            collision_attr: self.collision_attr.clone(),
+            sound_level: self.sound_level.clone(),
+            sound_attr: self.sound_attr.clone(),
+            attack_region: self.attack_region.clone(),
         }
     }
 }
@@ -187,6 +234,7 @@ impl AttackCall {
             active_start,
             active_end: u32::MAX,
             hitbox_type: 0,
+            category: 0,
         }
     }
 }
@@ -371,6 +419,20 @@ pub struct AppState {
     pub edit_log: EditLog,
     pub effect_script: EffectScript,
     pub effects: Vec<EffectCall>,
+    /// Pristine copy of `effects` as parsed from ACMD, before user edits — "orig" ghosts.
+    pub effects_pristine: Vec<EffectCall>,
+    /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
+    pub hitboxes_pristine: Vec<Hitbox>,
+    /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
+    pub acmd_source: String,
+    /// User edits to effect calls, keyed by "fighter/move" (indices into pristine order).
+    pub effect_call_edits: HashMap<String, Vec<EffectCallEdit>>,
+    /// Full edited call list snapshot per "fighter/move" — what the mod exporter emits
+    /// (a generated effect script replaces the whole move's spawn list).
+    pub effect_call_full: HashMap<String, Vec<EffectCall>>,
+    pub selected_effect_call: Option<usize>,
+    /// Effects panel: show every call, not just the ones active on the current frame.
+    pub show_all_effect_calls: bool,
     pub show_effects_panel: bool,
     // ── Effect rendering ──────────────────────────────────────────────────
     pub eff_index: Option<crate::effects::EffIndex>,
@@ -406,6 +468,13 @@ impl Default for AppState {
             edit_log: EditLog::default(),
             effect_script: EffectScript::default(),
             effects: Vec::new(),
+            effects_pristine: Vec::new(),
+            hitboxes_pristine: Vec::new(),
+            acmd_source: String::new(),
+            effect_call_edits: HashMap::new(),
+            effect_call_full: HashMap::new(),
+            selected_effect_call: None,
+            show_all_effect_calls: false,
             show_effects_panel: false,
             eff_index: None,
             ptcl: None,
@@ -519,6 +588,27 @@ pub struct EffectCall {
     /// For one-shot effects this equals `active_start`.
     /// For following effects this is set to 9999 until an EFFECT_OFF_KIND closes it.
     pub active_end: u32,
+    /// Soft-removed by the user (kept in place so edit indices stay stable).
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// One user edit to a move's effect-call list. `index` refers to the PRISTINE
+/// `to_effect_calls()` order; added calls live past the pristine length.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EffectCallEdit {
+    pub index: usize,
+    pub op: EffectCallOp,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum EffectCallOp {
+    /// Replace the call at `index` with new values.
+    Modify(EffectCall),
+    /// A user-added call (index is its position in the edited list).
+    Add(EffectCall),
+    /// Soft-remove the call at `index`.
+    Remove,
 }
 
 impl EffectScript {
@@ -566,6 +656,7 @@ fn eval_effect_stmts(
                                 follows_bone: *follows_bone,
                                 active_start: frame as u32,
                                 active_end,
+                                disabled: false,
                             });
                         }
                         EffectMacro::EffectOffKind { effect_name } => {
@@ -587,6 +678,7 @@ fn eval_effect_stmts(
                                 follows_bone: true,
                                 active_start: frame as u32,
                                 active_end: 9999,
+                                disabled: false,
                             });
                         }
                         EffectMacro::AfterImageOff => {

@@ -707,19 +707,35 @@ pub struct ModProject {
 }
 
 /// Emit a single `macros::ATTACK(...)` call as a source line.
+/// A lua-const expression: named consts emit as `*NAME`, but live-captured hitboxes store
+/// the RAW numeric value ("3") — emit those bare (a `*3` would not compile).
+fn const_expr(s: &str) -> String {
+    let t = s.trim();
+    if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
+        t.to_string()
+    } else {
+        format!("*{t}")
+    }
+}
+
 fn emit_attack(call: &AttackCall, indent: &str) -> String {
     let bone = format!("Hash40::new(\"{}\")", call.bone_name);
     let capsule = match call.capsule_end {
         Some([x, y, z]) => format!("Some({:.1}), Some({:.1}), Some({:.1})", x, y, z),
         None => "None, None, None".to_string(),
     };
-    let collision_attr = format!("Hash40::new(\"{}\")", call.collision_attr);
+    // Live-captured hitboxes carry the collision attr as a raw hash — emit it as such.
+    let collision_attr = if let Some(hex) = call.collision_attr.strip_prefix("0x") {
+        format!("Hash40::new_raw(0x{hex})")
+    } else {
+        format!("Hash40::new(\"{}\")", call.collision_attr)
+    };
     format!(
         "{indent}macros::ATTACK(agent, {id}, {part}, {bone}, {dmg:.1}, {angle}, {kbs}, {fkb}, {kbb}, \
 {size:.1}, {ox:.1}, {oy:.1}, {oz:.1}, {capsule}, \
-{hitlag:.1}, {sdi:.1}, *{setoff}, *{lr}, {clang}, {add_atk}, {hb_attr:.1}, {goa}, \
+{hitlag:.1}, {sdi:.1}, {setoff}, {lr}, {clang}, {add_atk}, {hb_attr:.1}, {goa}, \
 {mtk}, {shield}, {reflect}, {absorb}, {landing}, \
-*{sit}, *{cat}, *{part_mask}, {no_cam}, {col_attr}, *{snd_lvl}, *{snd_attr}, *{region});",
+{sit}, {cat}, {part_mask}, {no_cam}, {col_attr}, {snd_lvl}, {snd_attr}, {region});",
         indent = indent,
         id = call.id,
         part = call.part,
@@ -736,8 +752,8 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
         capsule = capsule,
         hitlag = call.hitlag_mult,
         sdi = call.sdi_mult,
-        setoff = call.setoff_kind,
-        lr = call.lr_check,
+        setoff = const_expr(&call.setoff_kind),
+        lr = const_expr(&call.lr_check),
         clang = call.is_clang,
         add_atk = call.is_add_attack,
         hb_attr = call.hitbox_attr,
@@ -747,14 +763,14 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
         reflect = call.is_reflectable,
         absorb = call.is_absorbable,
         landing = call.is_landing_attack,
-        sit = call.situation_mask,
-        cat = call.category_mask,
-        part_mask = call.part_mask,
+        sit = const_expr(&call.situation_mask),
+        cat = const_expr(&call.category_mask),
+        part_mask = const_expr(&call.part_mask),
         no_cam = call.no_finish_camera,
         col_attr = collision_attr,
-        snd_lvl = call.sound_level,
-        snd_attr = call.sound_attr,
-        region = call.attack_region,
+        snd_lvl = const_expr(&call.sound_level),
+        snd_attr = const_expr(&call.sound_attr),
+        region = const_expr(&call.attack_region),
     )
 }
 
@@ -810,6 +826,82 @@ fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, S
     (fn_name, out)
 }
 
+/// hash40 of an effect name (or parse a hex "0x…" placeholder) — the id live tweaks are
+/// keyed by. Mirrors app::effect_name_hash.
+fn tweak_hash(name: &str) -> u64 {
+    let n = name.trim();
+    if let Some(hex) = n.strip_prefix("0x") {
+        if let Ok(v) = u64::from_str_radix(hex, 16) {
+            return v;
+        }
+    }
+    hash40::hash40(&n.to_lowercase()).0
+}
+
+/// Generate a smashline `effect_*` ACMD function that replays the (edited) effect-call
+/// list: calls grouped by spawn frame, disabled calls omitted. `tweaks` (keyed by effect
+/// hash) adds LAST_EFFECT_SET_COLOR / LAST_EFFECT_SET_RATE lines after matching spawns so
+/// live color/speed multipliers ship with the mod.
+fn emit_effect_move_fn(
+    calls: &[crate::data::EffectCall],
+    move_name: &str,
+    tweaks: &std::collections::HashMap<u64, crate::mod_project::LiveTweak>,
+) -> (String, String) {
+    let fn_name = format!(
+        "effect_{}",
+        move_name.to_lowercase().replace('_', "").replace(' ', "")
+    );
+    let mut active: Vec<&crate::data::EffectCall> =
+        calls.iter().filter(|c| !c.disabled).collect();
+    active.sort_by_key(|c| c.active_start);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n"
+    ));
+    let mut current_frame: Option<u32> = None;
+    for c in active {
+        if current_frame != Some(c.active_start) {
+            out.push_str(&format!(
+                "    frame(agent.lua_state_agent, {}.0);\n",
+                c.active_start
+            ));
+            current_frame = Some(c.active_start);
+        }
+        out.push_str("    if macros::is_excute(agent) {\n");
+        let (r0, r1, r2) = (c.rotation[0], c.rotation[1], c.rotation[2]);
+        if c.follows_bone {
+            out.push_str(&format!(
+                "        macros::EFFECT_FOLLOW(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, true);\n",
+                c.effect_name, c.bone_name,
+                c.offset[0], c.offset[1], c.offset[2], r0, r1, r2, c.scale
+            ));
+        } else {
+            // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
+            out.push_str(&format!(
+                "        macros::EFFECT(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, 0, 0, 0, 0, 0, 0, false);\n",
+                c.effect_name, c.bone_name,
+                c.offset[0], c.offset[1], c.offset[2], r0, r1, r2, c.scale
+            ));
+        }
+        if let Some(tw) = tweaks.get(&tweak_hash(&c.effect_name)) {
+            if let Some([r, g, b, _a]) = tw.color {
+                out.push_str(&format!(
+                    "        macros::LAST_EFFECT_SET_COLOR(agent, {r:.4}, {g:.4}, {b:.4});\n"
+                ));
+            }
+            if let Some(rate) = tw.speed {
+                out.push_str(&format!(
+                    "        macros::LAST_EFFECT_SET_RATE(agent, {rate:.4});\n"
+                ));
+            }
+        }
+        out.push_str("    }\n");
+    }
+    out.push_str("}\n");
+    (fn_name, out)
+}
+
 /// Build a complete, compilable skyline-rs mod project for all the provided edits.
 ///
 /// `edits` — list of `(fighter_name, move_name, script)` tuples (all fighters combined).
@@ -818,7 +910,26 @@ pub fn build_mod_project(
     edits: &[(String, String, crate::data::AcmdScript)],
     plugin_name: &str,
 ) -> ModProject {
+    build_mod_project_full(edits, &[], &[], plugin_name)
+}
+
+/// Like [`build_mod_project`] but also generates `effect_*` ACMD scripts.
+///
+/// `effect_edits` — `(fighter, move, full edited call list)`; the generated effect script
+/// REPLACES the move's original effect script, so the list must be the complete set of
+/// calls (pristine + user edits applied), not just the changed ones.
+pub fn build_mod_project_full(
+    edits: &[(String, String, crate::data::AcmdScript)],
+    effect_edits: &[(String, String, Vec<crate::data::EffectCall>)],
+    live_tweaks: &[crate::mod_project::LiveTweak],
+    plugin_name: &str,
+) -> ModProject {
     use std::collections::HashMap;
+
+    let tweaks: HashMap<u64, crate::mod_project::LiveTweak> = live_tweaks
+        .iter()
+        .map(|t| (tweak_hash(&t.effect_name), t.clone()))
+        .collect();
 
     // Group by fighter
     let mut by_fighter: HashMap<&str, Vec<(&str, &crate::data::AcmdScript)>> = HashMap::new();
@@ -826,6 +937,16 @@ pub fn build_mod_project(
         by_fighter.entry(fighter.as_str())
             .or_default()
             .push((move_name.as_str(), script));
+    }
+    let mut fx_by_fighter: HashMap<&str, Vec<(&str, &Vec<crate::data::EffectCall>)>> =
+        HashMap::new();
+    for (fighter, move_name, calls) in effect_edits {
+        fx_by_fighter
+            .entry(fighter.as_str())
+            .or_default()
+            .push((move_name.as_str(), calls));
+        // Ensure the fighter appears even with no hitbox edits.
+        by_fighter.entry(fighter.as_str()).or_default();
     }
 
     let mut files: Vec<GeneratedFile> = Vec::new();
@@ -950,6 +1071,18 @@ pub fn install() {{
             acmd_src.push_str(&fn_src);
             acmd_src.push('\n');
             fn_entries.push((fn_name, acmd_name));
+        }
+
+        // Effect scripts (edited spawn lists) for this fighter
+        if let Some(fx_moves) = fx_by_fighter.get(fighter) {
+            let mut sorted_fx = fx_moves.clone();
+            sorted_fx.sort_by_key(|(m, _)| *m);
+            for (move_name, calls) in &sorted_fx {
+                let (fn_name, fn_src) = emit_effect_move_fn(calls, move_name, &tweaks);
+                acmd_src.push_str(&fn_src);
+                acmd_src.push('\n');
+                fn_entries.push((fn_name.clone(), fn_name));
+            }
         }
 
         // install fn
@@ -1145,6 +1278,125 @@ pub fn export_acmd_source(
 mod tests {
     use super::*;
     use crate::data::EffectScript;
+
+    // ═══ Generated-source compile golden ════════════════════════════════════
+
+    fn sample_project() -> ModProject {
+        let atk = crate::data::AttackCall {
+            id: 0,
+            part: 0,
+            bone_name: "top".into(),
+            damage: 8.0,
+            angle: 361,
+            kb_scaling: 100,
+            fkb: 0,
+            kb_base: 40,
+            size: 4.0,
+            offset_x: 0.0,
+            offset_y: 8.0,
+            offset_z: 6.0,
+            capsule_end: Some([0.0, 8.0, -2.0]),
+            hitlag_mult: 1.0,
+            sdi_mult: 1.0,
+            setoff_kind: "ATTACK_SETOFF_KIND_ON".into(),
+            lr_check: "ATTACK_LR_CHECK_POS".into(),
+            is_clang: true,
+            is_add_attack: 1,
+            hitbox_attr: 0.0,
+            ground_or_air: 0,
+            is_mtk: false,
+            is_shield_disable: false,
+            is_reflectable: false,
+            is_absorbable: false,
+            is_landing_attack: false,
+            situation_mask: "COLLISION_SITUATION_MASK_GA".into(),
+            category_mask: "COLLISION_CATEGORY_MASK_ALL".into(),
+            part_mask: "COLLISION_PART_MASK_ALL".into(),
+            no_finish_camera: false,
+            collision_attr: "collision_attr_normal".into(),
+            sound_level: "ATTACK_SOUND_LEVEL_S".into(),
+            sound_attr: "COLLISION_SOUND_ATTR_KICK".into(),
+            attack_region: "ATTACK_REGION_KICK".into(),
+        };
+        let script = crate::data::AcmdScript {
+            stmts: vec![
+                crate::data::AcmdStmt::Frame(3.0),
+                crate::data::AcmdStmt::Excute(vec![crate::data::ExcuteStmt::Attack(atk)]),
+                crate::data::AcmdStmt::Wait(2.0),
+                crate::data::AcmdStmt::Excute(vec![crate::data::ExcuteStmt::ClearAll]),
+            ],
+        };
+        let fx = vec![
+            crate::data::EffectCall {
+                effect_name: "sys_attack_arc".into(),
+                bone_name: "top".into(),
+                offset: [0.0, 8.0, 0.0],
+                rotation: [0.0, 90.0, 0.0],
+                scale: 1.2,
+                follows_bone: false,
+                active_start: 3,
+                active_end: 3,
+                disabled: false,
+            },
+            crate::data::EffectCall {
+                effect_name: "sys_flash".into(),
+                bone_name: "haver".into(),
+                offset: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0],
+                scale: 0.8,
+                follows_bone: true,
+                active_start: 5,
+                active_end: 20,
+                disabled: false,
+            },
+        ];
+        build_mod_project_full(
+            &[("mario".into(), "attack_air_n".into(), script)],
+            &[("mario".into(), "attack_air_n".into(), fx)],
+            &[crate::mod_project::LiveTweak {
+                effect_name: "sys_attack_arc".into(),
+                color: Some([0.2, 0.4, 2.0, 1.0]),
+                speed: Some(1.5),
+            }],
+            "sample_plugin",
+        )
+    }
+
+    /// Always materializes the generated project under the editor cache dir; with
+    /// HITBOX_COMPILE_GOLDEN=1 it additionally runs cargo-skyline on it (slow, network)
+    /// to prove the codegen actually builds.
+    #[test]
+    fn generated_source_project_compiles() {
+        let project = sample_project();
+        assert!(project.files.iter().any(|f| f.rel_path == "Cargo.toml"));
+        assert!(project.files.iter().any(|f| f.rel_path == "src/lib.rs"));
+        assert!(project.files.iter().any(|f| f.rel_path == "src/mario/acmd.rs"));
+
+        let root = crate::scratch_dirs::app_storage_root().join("source-golden");
+        let proj_root = root.join(&project.name);
+        for f in &project.files {
+            let dest = proj_root.join(&f.rel_path);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, &f.contents).unwrap();
+        }
+        if std::env::var("HITBOX_COMPILE_GOLDEN").is_err() {
+            return;
+        }
+        let out = std::process::Command::new("cargo")
+            .args(["skyline", "build", "--release"])
+            .current_dir(&proj_root)
+            .output()
+            .expect("cargo-skyline not runnable");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "generated project failed to build in {}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            proj_root.display(),
+            &stdout[stdout.len().saturating_sub(2000)..],
+            &stderr[stderr.len().saturating_sub(6000)..],
+        );
+    }
 
     // ── Helper: wrap a body line in a minimal effect function ─────────────────
     fn wrap_effect_fn(body: &str) -> String {

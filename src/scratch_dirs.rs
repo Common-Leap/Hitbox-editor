@@ -93,21 +93,26 @@ pub fn bnsh_decode_cache_root() -> PathBuf {
     app_storage_root().join("bnsh-decode-cache")
 }
 
-/// Debug builds only: delete PTCL dump cache and EffectConverter scratch temps on each run
-/// so effects are re-converted from scratch. Set `HITBOX_KEEP_CACHE=1` to skip.
+/// Debug builds only: clear EffectConverter scratch temps on each run. The PTCL dump cache
+/// is keyed by a content hash of the eff bytes, so entries cannot go stale — wiping it on
+/// every launch (the old render-branch default, from when the dump format churned) just
+/// re-pays seconds of texture dumping per eff load. It is now KEPT by default; set
+/// `HITBOX_REFRESH_CACHE=1` to force the full wipe after a dump-format change.
 pub fn dev_refresh_storage_on_startup() {
     #[cfg(not(debug_assertions))]
     return;
 
-    if std::env::var("HITBOX_KEEP_CACHE").is_ok() {
-        eprintln!("[CACHE] HITBOX_KEEP_CACHE set — keeping existing cache");
-        return;
-    }
+    let full_refresh = std::env::var("HITBOX_REFRESH_CACHE").is_ok();
 
     let root = app_storage_root();
     eprintln!("[CACHE] dev refresh: storage root {}", root.display());
 
-    for sub in ["ptcl-dumps", "scratch"] {
+    let subs: &[&str] = if full_refresh {
+        &["ptcl-dumps", "scratch"]
+    } else {
+        &["scratch"]
+    };
+    for sub in subs {
         let path = root.join(sub);
         if !path.exists() {
             continue;

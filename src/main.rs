@@ -3,6 +3,11 @@
 mod app;
 mod data;
 mod acmd;
+mod eff_editor;
+mod eff_export;
+mod effect_pool;
+mod game_link;
+mod mod_project;
 mod renderer;
 mod effects;
 mod batch_loader;
