@@ -1,37 +1,29 @@
-# Workshop-local temp (WGSL dumps, diag PNGs) — not committed
+# Workshop-local temporary data
 /tmp/
 
 # Rust build output
 /target/
 
+# Build outputs from projects consolidated into the monorepo
+**/target/
+**/__pycache__/
+**/*.py[cod]
+/research/decomp/ssbu-re/venv/
+
 # ── Copyrighted / proprietary game assets (Smash Ultimate extracts) ─────────
 # Never commit ripped shaders, effects, models, textures, or dump output.
 
-# EffectConverter local dumps (P_*/Shader.bnsh, *.bntx, Base.ptcl, …)
+# Accidental local input trees
 /input/
-
-# Local test fixture copies (README/docs under fixtures/ are OK to commit)
-/tests/fixtures/**/*
-!/tests/fixtures/**/
-!/tests/fixtures/**/*.md
 
 # Accidental export-tree copies in the repo root
 /export/
 /effect/
 /fighter/
 
-# Editor / EffectConverter cache (PTCL dumps embed game binaries)
-/.hitbox-editor-cache/
-/ptcl-dumps/
-
 # Local build / toolchain caches (must not be committed)
-/.nuget-packages/
-/.dotnet-tmp/
-/.cargo-home/
-/target/effect-converter/
 /.cache/
 /.cargo-tmp/
-/.effect-tmp/
 /.git/
 
 # Common Nintendo / Smash asset extensions (anywhere in this repo)
@@ -52,17 +44,30 @@
 *.arc
 *.szs
 *.prc
+*.bin
+*.nso
+*.nca
+*.nsp
+*.xci
+*.rdc
+*.zip
+*.nro
+
+# Game-derived effect-name dictionaries are external runtime inputs.
+/plugins/slight_replica/src/slight/effect_viewer/effect_names.txt
 
 # Editor/IDE
 .vscode/
 .kiro/
 
-# Vendored EffectConverter publish output (build via build.rs or dotnet publish)
-/tools/effect-converter/
-
-# Regression-harness goldens (src/regression.rs). User-supplied game frames or editor
-# baselines — may embed copyrighted art, and are machine/driver-specific. Sync via
-# tools/export_goldens.sh; never commit.
-/tests/goldens/
-/.cargo-target/
 rustc-ice-*.txt
+
+# Raw research captures must remain outside the repository.
+/research/hitbox-captures/
+
+# SLight reference/decompilation is intentionally local-only. The only SLight
+# implementation eligible for commit is plugins/slight_replica/.
+/research/decomp/slight/
+/legacy/
+/tools/rust-parameter-manager/
+/test-assets/

@@ -35,7 +35,12 @@ pub struct Color {
 
 impl Default for Color {
     fn default() -> Self {
-        Self { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 }
+        Self {
+            red: 1.0,
+            green: 1.0,
+            blue: 1.0,
+            alpha: 1.0,
+        }
     }
 }
 
@@ -110,6 +115,38 @@ pub struct SpawnInjectWire {
     pub frame: f32,
     pub func: String,
     pub args: Vec<LuaArgWire>,
+}
+
+/// Wire form of plugin `spawn_rules::EffectAlias` — live one-slot kind substitution:
+/// a copy/replaced entry that doesn't exist in the running game spawns as its donor.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EffectAliasWire {
+    /// Requested kind (hash40 of the copy / replaced entry name, lowercase).
+    pub from: u64,
+    /// Kind that exists in the loaded eff resources (the donor).
+    pub to: u64,
+    /// Costume slots (c00…) the alias applies to; empty = all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<u8>,
+}
+
+/// Wire form of the plugin's `effect_reload::DonorSpec` (field names must match).
+#[derive(Clone, PartialEq, serde::Serialize)]
+pub struct DonorEffWire {
+    /// Target fighter's eff arc path (lowercase), e.g. "effect/fighter/kirby/ef_kirby.eff".
+    pub target: String,
+    /// Donor eff arc paths to co-load whenever the target's effects load.
+    pub donors: Vec<String>,
+}
+
+/// A stripped donor eff (only the referenced effects + their resources), base64-encoded,
+/// that the plugin injects as resident data for a live cross-character one-slot.
+#[derive(Clone, PartialEq, serde::Serialize)]
+pub struct DonorBytesWire {
+    /// Donor eff arc path (lowercase), e.g. "effect/assist/alucard/ef_alucard.eff".
+    pub path: String,
+    /// base64(stripped ef bytes).
+    pub b64: String,
 }
 
 // ── Live ACMD capture + hitbox rules (wire forms match slight_replica hitbox_viewer) ──
@@ -253,7 +290,11 @@ pub struct LiveOverride {
 
 impl LiveOverride {
     fn new(form: RpmEffectData) -> Self {
-        Self { form, dirty_at: None, user_tweaked: false }
+        Self {
+            form,
+            dirty_at: None,
+            user_tweaked: false,
+        }
     }
 }
 
@@ -264,16 +305,16 @@ pub struct LiveOverrides {
 
 impl LiveOverrides {
     /// The editable form for a kind, created from `init()` on first access.
-    pub fn form_mut(&mut self, hash: u64, init: impl FnOnce() -> RpmEffectData) -> &mut RpmEffectData {
+    pub fn form_mut(
+        &mut self,
+        hash: u64,
+        init: impl FnOnce() -> RpmEffectData,
+    ) -> &mut RpmEffectData {
         &mut self
             .entries
             .entry(hash)
             .or_insert_with(|| LiveOverride::new(init()))
             .form
-    }
-
-    pub fn get(&self, hash: u64) -> Option<&RpmEffectData> {
-        self.entries.get(&hash).map(|e| &e.form)
     }
 
     /// Overwrite the form (Effects-panel path) and schedule a send.
@@ -351,7 +392,10 @@ impl LiveOverrides {
     /// Restore a tweak from a loaded project: sets color/speed, flags user_tweaked,
     /// and schedules a send.
     pub fn restore_tweak(&mut self, hash: u64, init: RpmEffectData) {
-        let e = self.entries.entry(hash).or_insert_with(|| LiveOverride::new(init.clone()));
+        let e = self
+            .entries
+            .entry(hash)
+            .or_insert_with(|| LiveOverride::new(init.clone()));
         e.form.rainbow = init.rainbow;
         e.form.speed = init.speed;
         if e.form.effect_name == "0x0" {
@@ -450,7 +494,10 @@ pub struct GameLink {
 
 impl Default for GameLink {
     fn default() -> Self {
-        Self { shared: Arc::new(Mutex::new(Shared::default())), started: AtomicBool::new(false) }
+        Self {
+            shared: Arc::new(Mutex::new(Shared::default())),
+            started: AtomicBool::new(false),
+        }
     }
 }
 
@@ -468,7 +515,10 @@ impl GameLink {
     }
 
     pub fn status(&self) -> LinkStatus {
-        self.shared.lock().map(|s| s.status).unwrap_or(LinkStatus::Disconnected)
+        self.shared
+            .lock()
+            .map(|s| s.status)
+            .unwrap_or(LinkStatus::Disconnected)
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -476,7 +526,10 @@ impl GameLink {
     }
 
     pub fn stats(&self) -> (u64, u64) {
-        self.shared.lock().map(|s| (s.frames_rx, s.edits_tx)).unwrap_or((0, 0))
+        self.shared
+            .lock()
+            .map(|s| (s.frames_rx, s.edits_tx))
+            .unwrap_or((0, 0))
     }
 
     /// Snapshot of all live kinds (id = hash40 of effect name).
@@ -488,17 +541,81 @@ impl GameLink {
     }
 
     pub fn kind(&self, id: u64) -> Option<LiveKind> {
-        self.shared.lock().ok().and_then(|s| s.kinds.get(&id).cloned())
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|s| s.kinds.get(&id).cloned())
     }
 
     pub fn is_live(&self, id: u64) -> bool {
-        self.shared.lock().map(|s| s.kinds.contains_key(&id)).unwrap_or(false)
+        self.shared
+            .lock()
+            .map(|s| s.kinds.contains_key(&id))
+            .unwrap_or(false)
     }
 
     /// Replace the plugin's live spawn-rule list (suppress/retime ACMD effect spawns).
     /// Send the FULL current rule set every time — an empty slice clears all rules.
     pub fn send_spawn_rules(&self, rules: &[SpawnRuleWire]) {
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "spawn_rules": rules }))
+        else {
+            return;
+        };
+        let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Replace the plugin's live one-slot alias list (copy/replaced kind → donor kind,
+    /// optionally costume-gated). Full-list replace; empty clears all aliases.
+    pub fn send_effect_aliases(&self, aliases: &[EffectAliasWire]) {
+        let Ok(payload) = serde_json::to_string(&serde_json::json!({ "effect_aliases": aliases }))
+        else {
+            return;
+        };
+        let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Cross-fighter donor eff files the plugin co-loads with each target fighter's
+    /// effects (smashline-transplant mechanism), so donor content is spawnable live.
+    pub fn send_donor_effs(&self, specs: &[DonorEffWire]) {
+        let Ok(payload) = serde_json::to_string(&serde_json::json!({ "donor_effs": specs })) else {
+            return;
+        };
+        let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Stripped donor eff bytes for the plugin to inject as resident data (live
+    /// cross-character one-slot). Sent whenever the referenced donor set changes.
+    pub fn send_donor_bytes(&self, donors: &[DonorBytesWire]) {
+        let Ok(payload) = serde_json::to_string(&serde_json::json!({ "donor_bytes": donors }))
+        else {
+            return;
+        };
+        let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Custom names (one-slot copies) so the plugin resolves their hashes for display
+    /// instead of falling back to hex.
+    pub fn send_effect_names(&self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let Ok(payload) = serde_json::to_string(&serde_json::json!({ "effect_names": names }))
         else {
             return;
         };
@@ -538,6 +655,39 @@ impl GameLink {
         }
     }
 
+    /// Tell the plugin the live-eff manifest / merged files on the Eden SD changed —
+    /// it refreshes its Arcropolis file-provider registrations.
+    pub fn send_live_eff_reload(&self) {
+        let frame = "<TCP_MESSAGE>{\"command\":\"live_eff_reload\"}</TCP_MESSAGE>".to_string();
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Ask the plugin to synchronously LIVE RE-READ a fighter's resident eff: swap it for
+    /// the deployed merged bytes + reparse, so a cross-fighter one-slot (or authored eff
+    /// edit) renders mid-match without a re-entry. `arc_path` = "effect/fighter/<f>/ef_<f>.eff".
+    pub fn send_force_reread(&self, arc_path: &str) {
+        let frame = format!(
+            "<TCP_MESSAGE>{{\"command\":\"force_reread\",\"path\":\"{}\"}}</TCP_MESSAGE>",
+            arc_path.to_lowercase()
+        );
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Ask the plugin to write `sd:/effect_viewer_probe.txt` (serving-chain diagnosis).
+    pub fn send_live_eff_probe(&self) {
+        let frame = "<TCP_MESSAGE>{\"command\":\"live_eff_probe\"}</TCP_MESSAGE>".to_string();
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
     /// Captured ACMD lines for one motion (hash40 of the move/motion name), sorted by frame.
     pub fn captures_for(&self, motion: u64) -> Vec<CaptureLine> {
         let mut v = self
@@ -546,7 +696,11 @@ impl GameLink {
             .ok()
             .and_then(|s| s.captures.get(&motion).cloned())
             .unwrap_or_default();
-        v.sort_by(|a, b| a.frame.partial_cmp(&b.frame).unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| {
+            a.frame
+                .partial_cmp(&b.frame)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         v
     }
 
@@ -670,7 +824,9 @@ fn extract_frames(buf: &mut String) -> Vec<String> {
     const CLOSE: &str = "</TCP_MESSAGE>";
     let mut out = Vec::new();
     loop {
-        let (Some(s), Some(e)) = (buf.find(OPEN), buf.find(CLOSE)) else { break };
+        let (Some(s), Some(e)) = (buf.find(OPEN), buf.find(CLOSE)) else {
+            break;
+        };
         if e < s {
             // Torn close tag before an open — drop the garbage prefix.
             *buf = buf[e + CLOSE.len()..].to_string();
@@ -689,8 +845,12 @@ fn extract_frames(buf: &mut String) -> Vec<String> {
 }
 
 fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else { return };
-    let Some(header) = v.get("header").and_then(|h| h.as_str()) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return;
+    };
+    let Some(header) = v.get("header").and_then(|h| h.as_str()) else {
+        return;
+    };
     // The plugin serializes `body` as a JSON *string*; tolerate an object too.
     let body: serde_json::Value = match v.get("body") {
         Some(serde_json::Value::String(s)) => serde_json::from_str(s).unwrap_or_default(),
@@ -703,8 +863,14 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
     match header {
         "Notify" => {
             let Some(n) = body.get("Notify") else { return };
-            let Some(id) = n.get("id").and_then(|i| i.as_u64()) else { return };
-            let name = n.get("name").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+            let Some(id) = n.get("id").and_then(|i| i.as_u64()) else {
+                return;
+            };
+            let name = n
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?")
+                .to_string();
             let data: RpmEffectData = match n.get("value_in_json") {
                 Some(serde_json::Value::String(raw)) => match serde_json::from_str(raw) {
                     Ok(d) => d,
@@ -746,8 +912,12 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             }
         }
         "AcmdCapture" => {
-            let Some(c) = body.get("AcmdCapture") else { return };
-            let Ok(line) = serde_json::from_value::<CaptureLine>(c.clone()) else { return };
+            let Some(c) = body.get("AcmdCapture") else {
+                return;
+            };
+            let Ok(line) = serde_json::from_value::<CaptureLine>(c.clone()) else {
+                return;
+            };
             let bucket = s.captures.entry(line.motion).or_default();
             // Plugin dedupes per session, but a reconnect re-sends the whole log.
             if !bucket.contains(&line) {
@@ -756,7 +926,10 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             }
         }
         "Remove" => {
-            if let Some(id) = body.get("Remove").and_then(|r| r.get("id")).and_then(|i| i.as_u64())
+            if let Some(id) = body
+                .get("Remove")
+                .and_then(|r| r.get("id"))
+                .and_then(|i| i.as_u64())
             {
                 s.kinds.remove(&id);
             }
@@ -902,7 +1075,10 @@ mod tests {
                 suppress: false,
                 frame_start: Some(6.5),
                 frame_end: Some(8.5),
-                overrides: Some(HbOverridesWire { damage: Some(12.0), ..Default::default() }),
+                overrides: Some(HbOverridesWire {
+                    damage: Some(12.0),
+                    ..Default::default()
+                }),
                 inject: None,
             },
             HitboxRuleWire {
@@ -940,6 +1116,34 @@ mod tests {
         assert_eq!(rules[1]["inject"]["args"][0]["t"].as_str(), Some("i"));
         assert_eq!(rules[1]["inject"]["args"][1]["t"].as_str(), Some("h"));
         assert_eq!(rules[1]["inject"]["args"][2]["t"].as_str(), Some("x"));
+    }
+
+    #[test]
+    fn outbound_effect_aliases_match_plugin_field_names() {
+        let link = GameLink::default();
+        link.send_effect_aliases(&[
+            EffectAliasWire {
+                from: 0x111,
+                to: 0x222,
+                slots: vec![],
+            },
+            EffectAliasWire {
+                from: 0x333,
+                to: 0x444,
+                slots: vec![1, 3],
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        // Field names the plugin's spawn_rules::EffectAlias serde(Deserialize) expects.
+        let aliases = v.get("effect_aliases").and_then(|a| a.as_array()).unwrap();
+        assert_eq!(aliases[0]["from"].as_u64(), Some(0x111));
+        assert_eq!(aliases[0]["to"].as_u64(), Some(0x222));
+        // Empty slots (all costumes) omitted so the plugin's serde(default) fills it.
+        assert!(aliases[0].get("slots").is_none());
+        assert_eq!(aliases[1]["slots"][0].as_u64(), Some(1));
+        assert_eq!(aliases[1]["slots"][1].as_u64(), Some(3));
     }
 
     #[test]

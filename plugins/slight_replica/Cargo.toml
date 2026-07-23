@@ -1,0 +1,38 @@
+[package]
+name = "slight_replica"
+version = "0.1.0"
+authors = ["Visionary"]
+edition = "2021"
+description = "From-scratch Jorge SLight replica — lib_effect_viewer.nro"
+
+[package.metadata.skyline]
+titleid = "01006A800016E000"
+
+[lib]
+name = "_effect_viewer"
+crate-type = ["cdylib"]
+
+[dependencies]
+skyline = { version = "0.6", features = ["std"] }
+skyline_smash = { git = "https://github.com/ultimate-research/skyline-smash.git" }
+smash-arc = { git = "https://github.com/jam1garner/smash-arc", features = ["smash-runtime", "rust-zstd"] }
+smashline = { git = "https://github.com/HDR-Development/smashline" }
+nnsdk = { git = "https://github.com/ultimate-research/nnsdk-rs" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+parking_lot = "0.12"
+regex-automata = "0.4"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = false
+
+[patch.crates-io]
+libc-nnsdk = { git = "https://github.com/ultimate-research/libc-nnsdk", package = "libc-nnsdk" }
+nnsdk = { git = "https://github.com/ultimate-research/nnsdk-rs" }

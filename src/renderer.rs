@@ -1,15 +1,11 @@
-/// ssbh_wgpu rendering integration for the hitbox editor.
-/// Uses egui-wgpu paint callbacks to render directly into the egui surface.
-
-use std::path::Path;
-use std::sync::Mutex;
 use glam::{Mat4, Vec3, Vec4};
 use ssbh_wgpu::{
     CameraTransforms, ModelFolder, ModelRenderOptions, RenderModel, RenderSettings,
     SharedRenderData, SsbhRenderer,
 };
-
-// eff-editor branch: particle compositing helpers removed (no effect rendering).
+/// ssbh_wgpu rendering integration for Visionary's character viewport.
+/// Uses egui-wgpu paint callbacks to render directly into the egui surface.
+use std::path::Path;
 
 #[allow(dead_code)]
 pub struct Camera {
@@ -92,7 +88,6 @@ pub struct HitboxRenderState {
     last_frame: f32,
     last_anim_path: Option<std::path::PathBuf>,
     last_skel_path: Option<std::path::PathBuf>,
-    pub surface_format: wgpu::TextureFormat,
     /// Cached GPU handles for use in paint()
     pub wgpu_device: Option<wgpu::Device>,
     pub wgpu_queue: Option<wgpu::Queue>,
@@ -136,40 +131,21 @@ impl HitboxRenderState {
             last_frame: -1.0,
             last_anim_path: None,
             last_skel_path: None,
-            surface_format,
             wgpu_device: Some(device.clone()),
             wgpu_queue: Some(queue.clone()),
         }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if width == 0 || height == 0 { return; }
+        if width == 0 || height == 0 {
+            return;
+        }
         if width == self.current_width && height == self.current_height {
             return;
         }
         self.renderer.resize(device, width, height, 1.0);
         self.current_width = width;
         self.current_height = height;
-    }
-
-    /// Returns (view_proj, cam_right, cam_up, cam_pos) for particle rendering.
-    pub fn camera_vectors(&self) -> (Mat4, Vec3, Vec3, Vec3) {
-        let transforms = self.camera.transforms(self.current_width as f32, self.current_height as f32);
-        let mv_inv = transforms.model_view_matrix.inverse();
-        let cam_right = mv_inv.col(0).truncate().normalize();
-        let cam_up    = mv_inv.col(1).truncate().normalize();
-        let cam_pos = mv_inv.col(3).truncate();
-        static CAM_LOG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !CAM_LOG_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) && crate::fx_debug_enabled() {
-            let pos = transforms.model_view_matrix.col(3).truncate();
-            eprintln!("[CAMERA] pos=({:.2},{:.2},{:.2}) rot=({:.3},{:.3},{:.3}) fov={:.1}° right={:.3},{:.3},{:.3} up={:.3},{:.3},{:.3}",
-                self.camera.translation.x, self.camera.translation.y, self.camera.translation.z,
-                self.camera.rotation.x, self.camera.rotation.y, self.camera.rotation.z,
-                self.camera.fov_y.to_degrees(),
-                cam_right.x, cam_right.y, cam_right.z,
-                cam_up.x, cam_up.y, cam_up.z);
-        }
-        (transforms.mvp_matrix, cam_right, cam_up, cam_pos)
     }
 
     pub fn load_model(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, model_dir: &Path) {
@@ -192,9 +168,13 @@ impl HitboxRenderState {
                 for entry in entries.flatten() {
                     let dir_name = entry.file_name();
                     let dir_name = dir_name.to_string_lossy();
-                    if dir_name == "body" { continue; }
+                    if dir_name == "body" {
+                        continue;
+                    }
                     let weapon_skel = entry.path().join("c00").join("model.nusktb");
-                    if !weapon_skel.exists() { continue; }
+                    if !weapon_skel.exists() {
+                        continue;
+                    }
                     if let Ok(skel) = ssbh_data::skel_data::SkelData::from_file(&weapon_skel) {
                         // Determine the attach bone: prefer "haver" (right hand), then "havel" (left hand)
                         // This is the character body bone the weapon root is parented to at runtime.
@@ -220,7 +200,9 @@ impl HitboxRenderState {
     ) {
         // Reload anim only when path changes
         if let Some(path) = anim_path {
-            let needs_load = self.cached_anim.as_ref()
+            let needs_load = self
+                .cached_anim
+                .as_ref()
                 .map(|(p, _)| p != path)
                 .unwrap_or(true);
             if needs_load {
@@ -234,7 +216,9 @@ impl HitboxRenderState {
 
         // Reload skel only when path changes
         if let Some(path) = skel_path {
-            let needs_load = self.cached_skel.as_ref()
+            let needs_load = self
+                .cached_skel
+                .as_ref()
                 .map(|(p, _)| p != path)
                 .unwrap_or(true);
             if needs_load {
@@ -270,7 +254,8 @@ impl HitboxRenderState {
     /// Returns all bone names from the cached skeleton.
     #[allow(dead_code)]
     pub fn bone_names(&self) -> Vec<String> {
-        self.cached_skel.as_ref()
+        self.cached_skel
+            .as_ref()
             .map(|(_, s)| s.bones.iter().map(|b| b.name.clone()).collect())
             .unwrap_or_default()
     }
@@ -297,115 +282,172 @@ impl HitboxRenderState {
     /// Like `bone_world_matrices()` but evaluates animation at an explicit `frame`
     /// instead of `self.last_frame`. Use this from the simulation code so bone
     /// positions are correct on the very first frame (no 1-frame delay).
-    pub fn bone_world_matrices_at(&self, frame: f32) -> std::collections::HashMap<String, glam::Mat4> {
-            let mut result = std::collections::HashMap::new();
-            let skel = match self.cached_skel.as_ref() {
-                Some((_, s)) => s,
-                None => {
-                    if crate::fx_debug_enabled() {
-                        eprintln!("[BONE] cached_skel is NONE — returning empty map");
-                    }
-                    return result;
-                },
-            };
-            let anim = self.cached_anim.as_ref().map(|(_, a)| a);
-            let bone_count = skel.bones.len();
-            if crate::fx_debug_enabled() {
-                let names: Vec<&str> = skel.bones.iter().map(|b| b.name.as_str()).take(15).collect();
-                eprintln!("[BONE] {} bones, names={:?}, anim={}, frame={}",
-                    bone_count, names, anim.is_some(), frame);
-                // Log bone 0's bind-pose translation
-                if let Some(b0) = skel.bones.first() {
-                    let m = glam::Mat4::from_cols_array_2d(&b0.transform);
-                    eprintln!("[BONE] bone[0] '{}' bind_trans={:?}", b0.name, m.col(3).truncate());
+    pub fn bone_world_matrices_at(
+        &self,
+        frame: f32,
+    ) -> std::collections::HashMap<String, glam::Mat4> {
+        let mut result = std::collections::HashMap::new();
+        let skel = match self.cached_skel.as_ref() {
+            Some((_, s)) => s,
+            None => {
+                if crate::debug_enabled() {
+                    eprintln!("[BONE] cached_skel is NONE — returning empty map");
                 }
+                return result;
             }
-
-            struct BoneState {
-                translation: glam::Vec3,
-                rotation: glam::Quat,
-                scale: glam::Vec3,
-                compensate_scale: bool,
+        };
+        let anim = self.cached_anim.as_ref().map(|(_, a)| a);
+        let bone_count = skel.bones.len();
+        if crate::debug_enabled() {
+            let names: Vec<&str> = skel
+                .bones
+                .iter()
+                .map(|b| b.name.as_str())
+                .take(15)
+                .collect();
+            eprintln!(
+                "[BONE] {} bones, names={:?}, anim={}, frame={}",
+                bone_count,
+                names,
+                anim.is_some(),
+                frame
+            );
+            // Log bone 0's bind-pose translation
+            if let Some(b0) = skel.bones.first() {
+                let m = glam::Mat4::from_cols_array_2d(&b0.transform);
+                eprintln!(
+                    "[BONE] bone[0] '{}' bind_trans={:?}",
+                    b0.name,
+                    m.col(3).truncate()
+                );
             }
+        }
 
-            let mut states: Vec<BoneState> = skel.bones.iter().map(|b| {
+        struct BoneState {
+            translation: glam::Vec3,
+            rotation: glam::Quat,
+            scale: glam::Vec3,
+            compensate_scale: bool,
+        }
+
+        let mut states: Vec<BoneState> = skel
+            .bones
+            .iter()
+            .map(|b| {
                 let m = glam::Mat4::from_cols_array_2d(&b.transform);
                 let (scale, rotation, translation) = m.to_scale_rotation_translation();
-                BoneState { translation, rotation, scale, compensate_scale: false }
-            }).collect();
+                BoneState {
+                    translation,
+                    rotation,
+                    scale,
+                    compensate_scale: false,
+                }
+            })
+            .collect();
 
-            if let Some(anim_data) = anim {
-                for group in &anim_data.groups {
-                    use ssbh_data::anim_data::GroupType;
-                    if group.group_type != GroupType::Transform { continue; }
-                    for node in &group.nodes {
-                        let Some(idx) = skel.bones.iter().position(|b| b.name == node.name) else { continue };
-                        let Some(track) = node.tracks.first() else { continue };
-                        use ssbh_data::anim_data::TrackValues;
-                        if let TrackValues::Transform(values) = &track.values {
-                            if values.is_empty() { continue; }
-                            let cur = (frame.floor() as usize).clamp(0, values.len() - 1);
-                            let nxt = (frame.ceil()  as usize).clamp(0, values.len() - 1);
-                            let f   = frame.fract();
-                            let a = &values[cur]; let b = &values[nxt];
-                            states[idx] = BoneState {
-                                translation: glam::Vec3::from(a.translation.to_array()).lerp(glam::Vec3::from(b.translation.to_array()), f),
-                                rotation: glam::Quat::from_array(a.rotation.to_array()).slerp(glam::Quat::from_array(b.rotation.to_array()), f),
-                                scale: glam::Vec3::from(a.scale.to_array()).lerp(glam::Vec3::from(b.scale.to_array()), f),
-                                compensate_scale: track.compensate_scale,
-                            };
+        if let Some(anim_data) = anim {
+            for group in &anim_data.groups {
+                use ssbh_data::anim_data::GroupType;
+                if group.group_type != GroupType::Transform {
+                    continue;
+                }
+                for node in &group.nodes {
+                    let Some(idx) = skel.bones.iter().position(|b| b.name == node.name) else {
+                        continue;
+                    };
+                    let Some(track) = node.tracks.first() else {
+                        continue;
+                    };
+                    use ssbh_data::anim_data::TrackValues;
+                    if let TrackValues::Transform(values) = &track.values {
+                        if values.is_empty() {
+                            continue;
                         }
+                        let cur = (frame.floor() as usize).clamp(0, values.len() - 1);
+                        let nxt = (frame.ceil() as usize).clamp(0, values.len() - 1);
+                        let f = frame.fract();
+                        let a = &values[cur];
+                        let b = &values[nxt];
+                        states[idx] = BoneState {
+                            translation: glam::Vec3::from(a.translation.to_array())
+                                .lerp(glam::Vec3::from(b.translation.to_array()), f),
+                            rotation: glam::Quat::from_array(a.rotation.to_array())
+                                .slerp(glam::Quat::from_array(b.rotation.to_array()), f),
+                            scale: glam::Vec3::from(a.scale.to_array())
+                                .lerp(glam::Vec3::from(b.scale.to_array()), f),
+                            compensate_scale: track.compensate_scale,
+                        };
                     }
                 }
             }
-
-            let mut world: Vec<glam::Mat4> = vec![glam::Mat4::IDENTITY; bone_count];
-            for (i, bone) in skel.bones.iter().enumerate() {
-                let st = &states[i];
-                let comp = if st.compensate_scale {
-                    bone.parent_index.map(|p| glam::Vec3::ONE / states[p].scale).unwrap_or(glam::Vec3::ONE)
-                } else { glam::Vec3::ONE };
-                let local = glam::Mat4::from_translation(st.translation)
-                    * glam::Mat4::from_scale(comp)
-                    * glam::Mat4::from_quat(st.rotation)
-                    * glam::Mat4::from_scale(st.scale);
-                let parent = bone.parent_index.map(|p| world[p]).unwrap_or(glam::Mat4::IDENTITY);
-                world[i] = parent * local;
-                result.insert(bone.name.clone(), world[i]);
-                result.insert(bone.name.to_lowercase(), world[i]);
-            }
-
-            if crate::fx_debug_enabled() {
-                for (name, mat) in &result {
-                    let pos = mat.col(3).truncate();
-                    eprintln!("[BONE_MAT] '{}' pos=({:.3},{:.3},{:.3})", name, pos.x, pos.y, pos.z);
-                }
-            }
-
-            // `top` = character root (feet), identity matrix
-            result.entry("top".to_string()).or_insert(glam::Mat4::IDENTITY);
-            result.entry("Top".to_string()).or_insert(glam::Mat4::IDENTITY);
-
-            // ── Weapon skeletons ──────────────────────────────────────────────────
-            for (_, weapon_skel, attach_bone) in &self.weapon_skels {
-                let attach_world = skel.bones.iter().enumerate()
-                    .find(|(_, b)| b.name.eq_ignore_ascii_case(attach_bone))
-                    .map(|(i, _)| world[i])
-                    .unwrap_or(glam::Mat4::IDENTITY);
-
-                for bone in &weapon_skel.bones {
-                    let Ok(bind_world) = weapon_skel.calculate_world_transform(bone) else { continue };
-                    let bind_mat = glam::Mat4::from_cols_array_2d(&bind_world);
-                    let final_mat = attach_world * bind_mat;
-                    // Only insert if this bone name isn't already in the body skeleton —
-                    // body skeleton bones always take priority over weapon skeleton bones.
-                    result.entry(bone.name.clone()).or_insert(final_mat);
-                    result.entry(bone.name.to_lowercase()).or_insert(final_mat);
-                }
-            }
-
-            result
         }
+
+        let mut world: Vec<glam::Mat4> = vec![glam::Mat4::IDENTITY; bone_count];
+        for (i, bone) in skel.bones.iter().enumerate() {
+            let st = &states[i];
+            let comp = if st.compensate_scale {
+                bone.parent_index
+                    .map(|p| glam::Vec3::ONE / states[p].scale)
+                    .unwrap_or(glam::Vec3::ONE)
+            } else {
+                glam::Vec3::ONE
+            };
+            let local = glam::Mat4::from_translation(st.translation)
+                * glam::Mat4::from_scale(comp)
+                * glam::Mat4::from_quat(st.rotation)
+                * glam::Mat4::from_scale(st.scale);
+            let parent = bone
+                .parent_index
+                .map(|p| world[p])
+                .unwrap_or(glam::Mat4::IDENTITY);
+            world[i] = parent * local;
+            result.insert(bone.name.clone(), world[i]);
+            result.insert(bone.name.to_lowercase(), world[i]);
+        }
+
+        if crate::debug_enabled() {
+            for (name, mat) in &result {
+                let pos = mat.col(3).truncate();
+                eprintln!(
+                    "[BONE_MAT] '{}' pos=({:.3},{:.3},{:.3})",
+                    name, pos.x, pos.y, pos.z
+                );
+            }
+        }
+
+        // `top` = character root (feet), identity matrix
+        result
+            .entry("top".to_string())
+            .or_insert(glam::Mat4::IDENTITY);
+        result
+            .entry("Top".to_string())
+            .or_insert(glam::Mat4::IDENTITY);
+
+        // ── Weapon skeletons ──────────────────────────────────────────────────
+        for (_, weapon_skel, attach_bone) in &self.weapon_skels {
+            let attach_world = skel
+                .bones
+                .iter()
+                .enumerate()
+                .find(|(_, b)| b.name.eq_ignore_ascii_case(attach_bone))
+                .map(|(i, _)| world[i])
+                .unwrap_or(glam::Mat4::IDENTITY);
+
+            for bone in &weapon_skel.bones {
+                let Ok(bind_world) = weapon_skel.calculate_world_transform(bone) else {
+                    continue;
+                };
+                let bind_mat = glam::Mat4::from_cols_array_2d(&bind_world);
+                let final_mat = attach_world * bind_mat;
+                // Only insert if this bone name isn't already in the body skeleton —
+                // body skeleton bones always take priority over weapon skeleton bones.
+                result.entry(bone.name.clone()).or_insert(final_mat);
+                result.entry(bone.name.to_lowercase()).or_insert(final_mat);
+            }
+        }
+
+        result
+    }
 
     /// Returns a map of bone name -> world position (convenience wrapper).
     #[allow(dead_code)]
@@ -418,13 +460,22 @@ impl HitboxRenderState {
 
     /// Projects a 3D world position to normalized device coordinates (NDC),
     /// then to pixel coordinates within the given viewport rect.
-    pub fn world_to_screen(&self, world_pos: glam::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
+    pub fn world_to_screen(
+        &self,
+        world_pos: glam::Vec3,
+        viewport: egui::Rect,
+    ) -> Option<egui::Pos2> {
         let transforms = self.camera.transforms(viewport.width(), viewport.height());
-        let clip = transforms.mvp_matrix * glam::Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
-        if clip.w <= 0.0 { return None; }
+        let clip =
+            transforms.mvp_matrix * glam::Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
         let ndc = clip.truncate() / clip.w;
         // Allow a small margin outside NDC so hitboxes near viewport edges still show
-        if ndc.x < -1.5 || ndc.x > 1.5 || ndc.y < -1.5 || ndc.y > 1.5 { return None; }
+        if ndc.x < -1.5 || ndc.x > 1.5 || ndc.y < -1.5 || ndc.y > 1.5 {
+            return None;
+        }
         let sx = (ndc.x * 0.5 + 0.5) * viewport.width() + viewport.left();
         let sy = (-ndc.y * 0.5 + 0.5) * viewport.height() + viewport.top();
         Some(egui::pos2(sx, sy))
@@ -432,9 +483,19 @@ impl HitboxRenderState {
 
     /// Computes the screen-space radius for a sphere of `world_radius` centered at `world_pos`.
     /// Uses the camera-right vector so it's correct regardless of camera orientation.
-    pub fn world_radius_to_screen(&self, world_pos: glam::Vec3, world_radius: f32, viewport: egui::Rect) -> Option<f32> {
+    pub fn world_radius_to_screen(
+        &self,
+        world_pos: glam::Vec3,
+        world_radius: f32,
+        viewport: egui::Rect,
+    ) -> Option<f32> {
         let transforms = self.camera.transforms(viewport.width(), viewport.height());
-        let cam_right = transforms.model_view_matrix.inverse().col(0).truncate().normalize();
+        let cam_right = transforms
+            .model_view_matrix
+            .inverse()
+            .col(0)
+            .truncate()
+            .normalize();
         let edge = world_pos + cam_right * world_radius;
         let center_screen = self.world_to_screen(world_pos, viewport)?;
         let edge_screen = self.world_to_screen(edge, viewport)?;
@@ -453,22 +514,14 @@ fn weapon_attach_bone(weapon_dir: &str) -> String {
         _ => "haver".to_string(),
     }
 }
-///
-/// In `prepare`: runs ssbh internal passes only (particle upload deferred to `finish_prepare`).
-/// In `finish_prepare`: particle GPU upload + mesh depth for soft particles.
-/// In `paint`: draws particles directly onto the viewport after model overlays.
+/// Paint callback for the animated character model. Hitbox, windbox, grab, and effect-spawn
+/// circles are drawn by egui on top of this viewport in `app.rs`.
 pub struct ViewportCallback {
     pub width: f32,
     pub height: f32,
     pub current_frame: f32,
     pub anim_path: Option<std::path::PathBuf>,
     pub skel_path: Option<std::path::PathBuf>,
-    pub particles: Vec<crate::effects::Particle>,
-    pub trails: Vec<crate::effects::SwordTrail>,
-    pub emitter_sets: Vec<crate::effects::EmitterSet>,
-    pub bfres_models: Vec<crate::effects::BfresModel>,
-    pub bone_matrices: std::collections::HashMap<String, glam::Mat4>,
-    pub active_emitters: Vec<crate::effects::EmitterInstance>,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -522,7 +575,6 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                 state.shared_data.database(),
                 &state.model_render_options,
             );
-
         }
         Vec::new()
     }
@@ -534,7 +586,6 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         _encoder: &mut wgpu::CommandEncoder,
         _resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        // eff-editor branch: no particle GPU upload — effect rendering removed.
         Vec::new()
     }
 
@@ -546,7 +597,6 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
     ) {
         if let Some(state) = resources.get::<HitboxRenderState>() {
             state.renderer.end_render_models(render_pass);
-            // eff-editor branch: no particle drawing — effect rendering removed.
         } else {
             eprintln!("[VIEWPORT] paint skipped: HitboxRenderState missing (load a model first)");
         }

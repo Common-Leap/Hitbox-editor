@@ -1,0 +1,48 @@
+# Rust build output (includes the compiled lib_effect_viewer.nro)
+/target/
+
+# ── Copyrighted / proprietary game assets (Smash Ultimate extracts) ─────────
+# Never commit ripped shaders, effects, models, textures, or dumps.
+*.eff
+*.ptcl
+*.vfxb
+*.bntx
+*.nutexb
+*.bnsh
+*.numatb
+*.numshb
+*.numdlb
+*.nusktb
+*.nuanmb
+*.nufx
+*.bfres
+*.msbf
+*.arc
+*.szs
+*.prc
+
+# Switch executables / packages (game NRO/NSO deps live on the SD card, not here)
+*.nro
+*.nso
+*.nca
+*.nsp
+*.xci
+
+# Ghidra / decompilation dumps (derived from the copyrighted game binary)
+/decomp/
+/ghidra/
+*.gpr
+dynsym*.txt
+
+# Local caches / scratch
+/.cache/
+/tmp/
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,5 +1,4 @@
-/// All data types for the hitbox editor state.
-
+/// All data types for Visionary's editor state.
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -290,7 +289,8 @@ fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) 
                 for s in stmts {
                     match s {
                         ExcuteStmt::Attack(call) => {
-                            if let Some(existing) = hitboxes.iter_mut()
+                            if let Some(existing) = hitboxes
+                                .iter_mut()
                                 .find(|h| h.id == call.id && h.active_end == u32::MAX)
                             {
                                 existing.active_end = (frame as u32).saturating_sub(1);
@@ -339,17 +339,24 @@ pub struct EditLog {
 }
 
 impl EditLog {
-    pub fn save(&mut self, fighter: &str, fighter_display: &str, move_name: &str, script: AcmdScript, hitboxes: Vec<Hitbox>) {
-        self.entries
-            .entry(fighter.to_string())
-            .or_default()
-            .insert(move_name.to_string(), EditRecord {
+    pub fn save(
+        &mut self,
+        fighter: &str,
+        fighter_display: &str,
+        move_name: &str,
+        script: AcmdScript,
+        hitboxes: Vec<Hitbox>,
+    ) {
+        self.entries.entry(fighter.to_string()).or_default().insert(
+            move_name.to_string(),
+            EditRecord {
                 fighter: fighter.to_string(),
                 fighter_display: fighter_display.to_string(),
                 move_name: move_name.to_string(),
                 script,
                 hitboxes,
-            });
+            },
+        );
     }
 
     pub fn remove_move(&mut self, fighter: &str, move_name: &str) {
@@ -371,9 +378,13 @@ impl EditLog {
 
     /// Sorted list of (fighter_name, fighter_display) pairs.
     pub fn fighters_sorted(&self) -> Vec<(String, String)> {
-        let mut v: Vec<(String, String)> = self.entries.iter()
+        let mut v: Vec<(String, String)> = self
+            .entries
+            .iter()
             .map(|(k, moves)| {
-                let display = moves.values().next()
+                let display = moves
+                    .values()
+                    .next()
                     .map(|r| r.fighter_display.clone())
                     .unwrap_or_else(|| k.clone());
                 (k.clone(), display)
@@ -385,7 +396,9 @@ impl EditLog {
 
     /// Sorted move names for a fighter.
     pub fn moves_for(&self, fighter: &str) -> Vec<String> {
-        let mut v: Vec<String> = self.entries.get(fighter)
+        let mut v: Vec<String> = self
+            .entries
+            .get(fighter)
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
         v.sort();
@@ -434,13 +447,6 @@ pub struct AppState {
     /// Effects panel: show every call, not just the ones active on the current frame.
     pub show_all_effect_calls: bool,
     pub show_effects_panel: bool,
-    // ── Effect rendering ──────────────────────────────────────────────────
-    pub eff_index: Option<crate::effects::EffIndex>,
-    pub ptcl: Option<crate::effects::PtclFile>,
-    pub particle_system: crate::effects::ParticleSystem,
-    pub trail_system: crate::effects::TrailSystem,
-    /// Set to true when a new ptcl file is loaded — consumed by the update loop to upload textures
-    pub pending_texture_upload: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -476,49 +482,108 @@ impl Default for AppState {
             selected_effect_call: None,
             show_all_effect_calls: false,
             show_effects_panel: false,
-            eff_index: None,
-            ptcl: None,
-            particle_system: crate::effects::ParticleSystem::default(),
-            trail_system: crate::effects::TrailSystem::default(),
-            pending_texture_upload: false,
         }
     }
 }
 
 pub fn fighter_display_name(name: &str) -> String {
     let map: &[(&str, &str)] = &[
-        ("bayonetta", "Bayonetta"), ("brave", "Hero"), ("buddy", "Banjo & Kazooie"),
-        ("captain", "Captain Falcon"), ("chrom", "Chrom"), ("cloud", "Cloud"),
-        ("daisy", "Daisy"), ("dedede", "King Dedede"), ("demon", "Kazuya"),
-        ("diddy", "Diddy Kong"), ("dolly", "Terry"), ("donkey", "Donkey Kong"),
-        ("duckhunt", "Duck Hunt"), ("edge", "Sephiroth"), ("eflame", "Pyra"),
-        ("elight", "Mythra"), ("element", "Aegis"), ("falco", "Falco"), ("fox", "Fox"),
-        ("gamewatch", "Mr. Game & Watch"), ("ganon", "Ganondorf"), ("gaogaen", "Incineroar"),
-        ("gekkouga", "Greninja"), ("ice_climber", "Ice Climbers"), ("ike", "Ike"),
-        ("inkling", "Inkling"), ("jack", "Joker"), ("kamui", "Corrin"), ("ken", "Ken"),
-        ("kirby", "Kirby"), ("koopa", "Bowser"), ("koopajr", "Bowser Jr."),
-        ("krool", "King K. Rool"), ("link", "Link"), ("littlemac", "Little Mac"),
-        ("lucario", "Lucario"), ("lucas", "Lucas"), ("lucina", "Lucina"), ("luigi", "Luigi"),
-        ("mario", "Mario"), ("mariod", "Dr. Mario"), ("marth", "Marth"),
-        ("metaknight", "Meta Knight"), ("mewtwo", "Mewtwo"), ("miifighter", "Mii Brawler"),
-        ("miigunner", "Mii Gunner"), ("miisword", "Mii Swordfighter"),
-        ("miiswordsman", "Mii Swordfighter"), ("murabito", "Villager"), ("ness", "Ness"),
-        ("packun", "Piranha Plant"), ("pacman", "Pac-Man"), ("palutena", "Palutena"),
-        ("peach", "Peach"), ("pfushigisou", "Ivysaur"), ("pichu", "Pichu"),
-        ("pickel", "Steve"), ("pikachu", "Pikachu"), ("pikmin", "Olimar"),
-        ("pit", "Pit"), ("pitb", "Dark Pit"), ("plizardon", "Charizard"),
-        ("purin", "Jigglypuff"), ("pzenigame", "Squirtle"), ("reflet", "Robin"),
-        ("richter", "Richter"), ("ridley", "Ridley"), ("robot", "R.O.B."),
-        ("rockman", "Mega Man"), ("rosetta", "Rosalina"), ("roy", "Roy"), ("ryu", "Ryu"),
-        ("samusd", "Dark Samus"), ("samus", "Samus"), ("sheik", "Sheik"),
-        ("shizue", "Isabelle"), ("shulk", "Shulk"), ("simon", "Simon"), ("snake", "Snake"),
-        ("sonic", "Sonic"), ("szerosuit", "Zero Suit Samus"), ("tantan", "Min Min"),
-        ("toonlink", "Toon Link"), ("trail", "Sora"), ("wario", "Wario"),
-        ("wiifit", "Wii Fit Trainer"), ("wolf", "Wolf"), ("yoshi", "Yoshi"),
-        ("younglink", "Young Link"), ("zelda", "Zelda"), ("zenigame", "Squirtle"),
+        ("bayonetta", "Bayonetta"),
+        ("brave", "Hero"),
+        ("buddy", "Banjo & Kazooie"),
+        ("captain", "Captain Falcon"),
+        ("chrom", "Chrom"),
+        ("cloud", "Cloud"),
+        ("daisy", "Daisy"),
+        ("dedede", "King Dedede"),
+        ("demon", "Kazuya"),
+        ("diddy", "Diddy Kong"),
+        ("dolly", "Terry"),
+        ("donkey", "Donkey Kong"),
+        ("duckhunt", "Duck Hunt"),
+        ("edge", "Sephiroth"),
+        ("eflame", "Pyra"),
+        ("elight", "Mythra"),
+        ("element", "Aegis"),
+        ("falco", "Falco"),
+        ("fox", "Fox"),
+        ("gamewatch", "Mr. Game & Watch"),
+        ("ganon", "Ganondorf"),
+        ("gaogaen", "Incineroar"),
+        ("gekkouga", "Greninja"),
+        ("ice_climber", "Ice Climbers"),
+        ("ike", "Ike"),
+        ("inkling", "Inkling"),
+        ("jack", "Joker"),
+        ("kamui", "Corrin"),
+        ("ken", "Ken"),
+        ("kirby", "Kirby"),
+        ("koopa", "Bowser"),
+        ("koopajr", "Bowser Jr."),
+        ("krool", "King K. Rool"),
+        ("link", "Link"),
+        ("littlemac", "Little Mac"),
+        ("lucario", "Lucario"),
+        ("lucas", "Lucas"),
+        ("lucina", "Lucina"),
+        ("luigi", "Luigi"),
+        ("mario", "Mario"),
+        ("mariod", "Dr. Mario"),
+        ("marth", "Marth"),
+        ("metaknight", "Meta Knight"),
+        ("mewtwo", "Mewtwo"),
+        ("miifighter", "Mii Brawler"),
+        ("miigunner", "Mii Gunner"),
+        ("miisword", "Mii Swordfighter"),
+        ("miiswordsman", "Mii Swordfighter"),
+        ("murabito", "Villager"),
+        ("ness", "Ness"),
+        ("packun", "Piranha Plant"),
+        ("pacman", "Pac-Man"),
+        ("palutena", "Palutena"),
+        ("peach", "Peach"),
+        ("pfushigisou", "Ivysaur"),
+        ("pichu", "Pichu"),
+        ("pickel", "Steve"),
+        ("pikachu", "Pikachu"),
+        ("pikmin", "Olimar"),
+        ("pit", "Pit"),
+        ("pitb", "Dark Pit"),
+        ("plizardon", "Charizard"),
+        ("purin", "Jigglypuff"),
+        ("pzenigame", "Squirtle"),
+        ("reflet", "Robin"),
+        ("richter", "Richter"),
+        ("ridley", "Ridley"),
+        ("robot", "R.O.B."),
+        ("rockman", "Mega Man"),
+        ("rosetta", "Rosalina"),
+        ("roy", "Roy"),
+        ("ryu", "Ryu"),
+        ("samusd", "Dark Samus"),
+        ("samus", "Samus"),
+        ("sheik", "Sheik"),
+        ("shizue", "Isabelle"),
+        ("shulk", "Shulk"),
+        ("simon", "Simon"),
+        ("snake", "Snake"),
+        ("sonic", "Sonic"),
+        ("szerosuit", "Zero Suit Samus"),
+        ("tantan", "Min Min"),
+        ("toonlink", "Toon Link"),
+        ("trail", "Sora"),
+        ("wario", "Wario"),
+        ("wiifit", "Wii Fit Trainer"),
+        ("wolf", "Wolf"),
+        ("yoshi", "Yoshi"),
+        ("younglink", "Young Link"),
+        ("zelda", "Zelda"),
+        ("zenigame", "Squirtle"),
     ];
     for (k, v) in map {
-        if *k == name { return v.to_string(); }
+        if *k == name {
+            return v.to_string();
+        }
     }
     let mut c = name.chars();
     match c.next() {
@@ -599,6 +664,11 @@ pub struct EffectCall {
 pub struct EffectCallEdit {
     pub index: usize,
     pub op: EffectCallOp,
+    /// Snapshot of the pristine call this edit targets (None for adds / older saves).
+    /// Lets a reloaded pristine list re-anchor the edit when indices shift, and lets
+    /// capture loading tell "user's retimed/renamed spawn" apart from a script spawn.
+    #[serde(default)]
+    pub pristine: Option<EffectCall>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -620,11 +690,7 @@ impl EffectScript {
     }
 }
 
-fn eval_effect_stmts(
-    stmts: &[EffectStmt],
-    start_frame: f32,
-    calls: &mut Vec<EffectCall>,
-) -> f32 {
+fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<EffectCall>) -> f32 {
     let mut frame = start_frame;
     for stmt in stmts {
         match stmt {
@@ -642,11 +708,7 @@ fn eval_effect_stmts(
                             scale,
                             follows_bone,
                         } => {
-                            let active_end = if *follows_bone {
-                                9999
-                            } else {
-                                frame as u32
-                            };
+                            let active_end = if *follows_bone { 9999 } else { frame as u32 };
                             calls.push(EffectCall {
                                 effect_name: effect_name.clone(),
                                 bone_name: bone_name.clone(),
@@ -661,13 +723,18 @@ fn eval_effect_stmts(
                         }
                         EffectMacro::EffectOffKind { effect_name } => {
                             // Close the most recent open following effect with this name.
-                            if let Some(call) = calls.iter_mut().rev().find(|c| {
-                                &c.effect_name == effect_name && c.active_end == 9999
-                            }) {
+                            if let Some(call) = calls
+                                .iter_mut()
+                                .rev()
+                                .find(|c| &c.effect_name == effect_name && c.active_end == 9999)
+                            {
                                 call.active_end = frame as u32;
                             }
                         }
-                        EffectMacro::AfterImage { effect_name, bone_name } => {
+                        EffectMacro::AfterImage {
+                            effect_name,
+                            bone_name,
+                        } => {
                             // Sword/weapon trail — active until AfterImageOff
                             calls.push(EffectCall {
                                 effect_name: effect_name.clone(),
@@ -683,7 +750,9 @@ fn eval_effect_stmts(
                         }
                         EffectMacro::AfterImageOff => {
                             // Close the most recent open after-image effect.
-                            if let Some(call) = calls.iter_mut().rev().find(|c| c.active_end == 9999) {
+                            if let Some(call) =
+                                calls.iter_mut().rev().find(|c| c.active_end == 9999)
+                            {
                                 call.active_end = frame as u32;
                             }
                         }

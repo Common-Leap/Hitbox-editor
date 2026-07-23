@@ -22,7 +22,11 @@ pub struct ModProjectFile {
 
 impl Default for ModProjectFile {
     fn default() -> Self {
-        Self { version: PROJECT_VERSION, name: "unnamed_mod".into(), fighters: HashMap::new() }
+        Self {
+            version: PROJECT_VERSION,
+            name: "unnamed_mod".into(),
+            fighters: HashMap::new(),
+        }
     }
 }
 
@@ -160,6 +164,15 @@ pub struct OneSlotOp {
     pub src_file_rel: String,
     pub src_set_name: String,
     pub src_set_idx: usize,
+    /// Costume slots this op applies to (0 = c00 …). Empty = all costumes: the op lands
+    /// in the base ef_<fighter>.eff; otherwise it lands in ef_<fighter>_cXX.eff files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<u8>,
+    /// When set, the donor REPLACES this existing entry's emitter set(s) in place
+    /// (classic costume-scoped one-slot: every use switches, no ACMD redirect needed)
+    /// instead of being appended as a new entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_entry: Option<String>,
 }
 
 /// "effect/fighter/mario/ef_mario.eff" → "mario"; falls back to the file stem.

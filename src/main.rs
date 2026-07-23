@@ -1,37 +1,25 @@
-// Eff-editor: effect-file editing + in-game live preview. Effect RENDERING is deliberately
-// absent on this branch (see `game-accurate-sim` for the particle renderer).
+// Visionary: character/circle preview, authored effect editing, and live in-game rendering.
+mod acmd;
 mod app;
 mod data;
-mod acmd;
 mod eff_editor;
 mod eff_export;
 mod effect_pool;
+mod effects;
 mod game_link;
 mod mod_project;
+mod param_labels;
 mod renderer;
-mod effects;
-mod batch_loader;
-mod effect_browser;
-mod effect_converter;
 mod scratch_dirs;
-mod shader_registry;
-mod combiner;
-mod fx_env;
-pub(crate) use fx_env::{fx_debug_enabled, fx_native_fs_enabled, fx_native_vs_pos_enabled};
-mod sphere_volume_tables;
 
 use ssbh_wgpu;
 
 fn main() -> anyhow::Result<()> {
     // Force Vulkan backend on Linux — avoids silent failures with RADV + wgpu auto-detection
     std::env::set_var("WGPU_BACKEND", "vulkan");
-    // Native FS (NVN colour chain + texture enhance) is the default.
-    // Set FX_PATCHED_FS=1 or FX_NATIVE_FS=0 for legacy patch_fragment_wgsl.
-
-    scratch_dirs::dev_refresh_storage_on_startup();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("SSBU Hitbox Editor")
+            .with_title("Visionary")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 600.0]),
         renderer: eframe::Renderer::Wgpu,
@@ -57,7 +45,7 @@ fn main() -> anyhow::Result<()> {
                         wgpu::Features::empty()
                     };
                     wgpu::DeviceDescriptor {
-                        label: Some("hitbox_editor"),
+                        label: Some("visionary"),
                         required_features: features,
                         required_limits: adapter.limits(),
                         memory_hints: wgpu::MemoryHints::default(),
@@ -71,11 +59,13 @@ fn main() -> anyhow::Result<()> {
     };
 
     eframe::run_native(
-        "SSBU Hitbox Editor",
+        "Visionary",
         options,
-        Box::new(|cc| {
-            Ok(Box::new(app::HitboxEditorApp::new(cc)))
-        }),
+        Box::new(|cc| Ok(Box::new(app::VisionaryApp::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+pub(crate) fn debug_enabled() -> bool {
+    std::env::var_os("VISIONARY_DEBUG").is_some()
 }

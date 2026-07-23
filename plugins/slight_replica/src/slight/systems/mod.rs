@@ -1,0 +1,44 @@
+pub mod agent_info;
+pub mod animation_sequencer;
+pub mod article_notifier;
+pub mod damage_manager;
+pub mod dynamic_memory;
+pub mod event_system;
+pub mod excommand;
+pub mod fighter_data_space;
+pub mod gauge_system;
+pub mod guard_stance;
+pub mod init_frame;
+pub mod last_frame_data;
+pub mod main_module;
+pub mod multipliers;
+pub mod overload_timer;
+pub mod pattern_match;
+pub mod skyline_hook;
+pub mod time_counting;
+pub mod timed_action;
+pub mod timer_system;
+pub mod win_screen;
+
+pub fn clear_all() {
+    dynamic_memory::clear();
+    skyline_hook::clear();
+    multipliers::clear();
+    time_counting::clear();
+    timer_system::clear();
+    fighter_data_space::clear();
+    overload_timer::clear();
+    event_system::clear();
+    excommand::clear();
+    damage_manager::clear();
+    animation_sequencer::clear();
+    main_module::clear();
+    gauge_system::clear();
+    last_frame_data::clear();
+    article_notifier::clear();
+    guard_stance::clear();
+    timed_action::clear();
+    agent_info::clear();
+    init_frame::clear();
+    win_screen::clear();
+}

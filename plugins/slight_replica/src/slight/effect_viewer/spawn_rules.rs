@@ -1,0 +1,175 @@
+//! Live spawn rules pushed from the PC eff-editor over TCP: suppress ACMD effect spawns and
+//! per-spawn transform overrides (pos/rot/scale), scoped to a motion + motion-frame window so
+//! editing ONE spawn of an effect doesn't move every spawn of that effect.
+//!
+//! The rule list is replaced wholesale on every push (idempotent, like pins). Both the
+//! setter (TCP poll, game-thread facade) and the readers (ACMD hooks) run on the game
+//! thread, so contention is not expected — try_lock anyway per the environment rule that
+//! parked lock waiters never wake.
+
+use serde::Deserialize;
+
+use crate::slight::hitbox_viewer::LuaArg;
+
+/// Re-fire a captured EFFECT spawn at a new motion frame (live retime). `func` is the short
+/// sv_animcmd name (e.g. "EFFECT_FOLLOW"); `args` is the captured typed arg vector.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SpawnInject {
+    pub frame: f32,
+    pub func: String,
+    pub args: Vec<LuaArg>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SpawnRule {
+    pub eff_hash: u64,
+    #[serde(default)]
+    pub suppress: bool,
+    /// Live retime: fire this captured spawn at `inject.frame` (paired with a suppress rule
+    /// at the pristine frame). Injection is driven per-frame from the agent line callback.
+    #[serde(default)]
+    pub inject: Option<SpawnInject>,
+    /// Motion this rule is scoped to (hash40 of the motion name). None = any motion.
+    #[serde(default)]
+    pub motion: Option<u64>,
+    /// Motion-frame window; None = match any frame.
+    #[serde(default)]
+    pub frame_start: Option<f32>,
+    #[serde(default)]
+    pub frame_end: Option<f32>,
+    /// Per-spawn transform overrides (ACMD script-offset space). Applied ONLY inside the
+    /// window above, so distinct spawns of the same effect stay independent.
+    #[serde(default)]
+    pub pos: Option<[f32; 3]>,
+    #[serde(default)]
+    pub rot: Option<[f32; 3]>,
+    #[serde(default)]
+    pub scale: Option<f32>,
+}
+
+impl SpawnRule {
+    fn matches(&self, eff_hash: u64, motion: u64, frame: f32) -> bool {
+        self.eff_hash == eff_hash
+            && self.motion.map(|m| m == motion).unwrap_or(true)
+            && self.frame_start.map(|s| frame >= s).unwrap_or(true)
+            && self.frame_end.map(|e| frame <= e).unwrap_or(true)
+    }
+}
+
+static RULES: parking_lot::Mutex<Vec<SpawnRule>> = parking_lot::Mutex::new(Vec::new());
+
+pub fn set_rules(rules: Vec<SpawnRule>) {
+    let n = rules.len();
+    if let Some(mut r) = RULES.try_lock() {
+        *r = rules;
+        crate::slight::diag::note(format!("spawn rules replaced: {n} rule(s)"));
+    } else {
+        crate::slight::diag::note("spawn rules: lock contended, push dropped");
+    }
+}
+
+/// Cheap pre-check so the hooks only pay the MotionModule call for ruled effects.
+pub fn any_for(eff_hash: u64) -> bool {
+    RULES
+        .try_lock()
+        .map(|r| r.iter().any(|x| x.eff_hash == eff_hash))
+        .unwrap_or(false)
+}
+
+/// Any live-retime inject rules present (cheap gate for the per-frame inject engine).
+pub fn any_inject() -> bool {
+    RULES
+        .try_lock()
+        .map(|r| r.iter().any(|x| x.inject.is_some()))
+        .unwrap_or(false)
+}
+
+/// Inject rules scoped to this motion (or any-motion), with their rule index for latching.
+pub fn injections_for(motion: u64) -> Vec<(usize, SpawnInject)> {
+    let Some(rules) = RULES.try_lock() else {
+        return Vec::new();
+    };
+    rules
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.inject.is_some() && r.motion.map(|m| m == motion).unwrap_or(true))
+        .map(|(i, r)| (i, r.inject.clone().unwrap()))
+        .collect()
+}
+
+pub fn suppressed(eff_hash: u64, motion: u64, motion_frame: f32) -> bool {
+    let Some(rules) = RULES.try_lock() else {
+        return false;
+    };
+    rules
+        .iter()
+        .any(|r| r.suppress && r.matches(eff_hash, motion, motion_frame))
+}
+
+/// Per-spawn transform for the FIRST non-suppress rule matching this spawn — (pos, rot, scale),
+/// each optional. None when no transform rule applies (the spawn keeps the global pin / script).
+pub fn transform_for(
+    eff_hash: u64,
+    motion: u64,
+    motion_frame: f32,
+) -> Option<(Option<[f32; 3]>, Option<[f32; 3]>, Option<f32>)> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| {
+            !r.suppress
+                && (r.pos.is_some() || r.rot.is_some() || r.scale.is_some())
+                && r.matches(eff_hash, motion, motion_frame)
+        })
+        .map(|r| (r.pos, r.rot, r.scale))
+}
+
+// ── Effect kind aliases (live one-slot parity) ───────────────────────────────
+//
+// A one-slotted COPY (new eff entry) or a costume REPLACEMENT doesn't exist in the
+// running game's loaded eff resources until the mod is exported and the game restarts —
+// spawning its hash does nothing. But a fresh copy is content-identical to its donor,
+// so the live equivalent is: rewrite the requested kind to the donor's at the EFFECT
+// hook, while every rule/pin/override still keys on the REQUESTED (copy) hash. The
+// live game then matches what the export will produce.
+
+/// requested kind (`from`) → kind that exists live (`to`), optionally costume-gated.
+#[derive(Clone, Debug, Deserialize)]
+pub struct EffectAlias {
+    pub from: u64,
+    pub to: u64,
+    /// Costume slots (c00…c07) the alias is active on; empty = all costumes.
+    #[serde(default)]
+    pub slots: Vec<u8>,
+}
+
+static ALIASES: parking_lot::Mutex<Vec<EffectAlias>> = parking_lot::Mutex::new(Vec::new());
+
+/// Full-list replace (idempotent, like rules). Empty clears all aliases.
+pub fn set_aliases(aliases: Vec<EffectAlias>) {
+    let n = aliases.len();
+    if let Some(mut a) = ALIASES.try_lock() {
+        *a = aliases;
+        crate::slight::diag::note(format!("effect aliases replaced: {n} alias(es)"));
+    } else {
+        crate::slight::diag::note("effect aliases: lock contended, push dropped");
+    }
+}
+
+/// Cheap gate so the hooks skip the costume lookup when no aliases exist.
+pub fn any_alias() -> bool {
+    ALIASES.try_lock().map(|a| !a.is_empty()).unwrap_or(false)
+}
+
+/// The live substitute for a requested kind (`costume` = fighter color index, -1 when
+/// unknown — slot-gated aliases then do NOT match).
+pub fn alias_for(from: u64, costume: i32) -> Option<u64> {
+    let aliases = ALIASES.try_lock()?;
+    aliases
+        .iter()
+        .find(|a| {
+            a.from == from
+                && (a.slots.is_empty() || (costume >= 0 && a.slots.contains(&(costume as u8))))
+        })
+        .map(|a| a.to)
+}

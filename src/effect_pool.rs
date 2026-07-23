@@ -26,7 +26,9 @@ pub struct EffectPool {
 }
 
 fn cache_path() -> PathBuf {
-    crate::scratch_dirs::app_storage_root().join("eff-entry-cache.json")
+    // v3: entry names are canonicalized to lowercase (v2 caches kept the file's
+    // original case, so old scans still showed UPPERCASE names in the pickers).
+    crate::scratch_dirs::app_storage_root().join("eff-entry-cache-v3.json")
 }
 
 fn file_stamp(path: &Path) -> (u64, u64) {
@@ -47,7 +49,14 @@ impl EffectPool {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { root, cache, queue: Vec::new(), queued: false, total: 0, dirty: false }
+        Self {
+            root,
+            cache,
+            queue: Vec::new(),
+            queued: false,
+            total: 0,
+            dirty: false,
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -97,14 +106,16 @@ impl EffectPool {
             let rel = self.rel_of(&path);
             let (mtime, size) = file_stamp(&path);
             let entries = crate::effects::EffIndex::from_file(&path)
-                .map(|idx| {
-                    let mut names: Vec<String> = idx.handles.keys().cloned().collect();
-                    names.sort();
-                    names.dedup();
-                    names
-                })
+                .map(|idx| entry_names_deduped(&idx))
                 .unwrap_or_default();
-            self.cache.insert(rel, PoolFile { mtime, size, entries });
+            self.cache.insert(
+                rel,
+                PoolFile {
+                    mtime,
+                    size,
+                    entries,
+                },
+            );
             self.dirty = true;
         }
         if self.queue.is_empty() && self.dirty {
@@ -118,10 +129,24 @@ impl EffectPool {
 
     /// (files scanned, files total) for the progress label.
     pub fn progress(&self) -> (usize, usize) {
-        (self.total.saturating_sub(self.queue.len()), self.total.max(self.cache.len()))
+        (
+            self.total.saturating_sub(self.queue.len()),
+            self.total.max(self.cache.len()),
+        )
     }
 
     /// Case-insensitive entry search across every scanned file: (file rel, entry name).
+    /// Exact (case-insensitive) entry-name lookup → the eff file (rel path) holding it.
+    pub fn file_of_entry(&self, name: &str) -> Option<String> {
+        let want = name.to_lowercase();
+        for (rel, file) in &self.cache {
+            if file.entries.iter().any(|e| e.to_lowercase() == want) {
+                return Some(rel.clone());
+            }
+        }
+        None
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> Vec<(String, String)> {
         let q = query.to_lowercase();
         let mut out: Vec<(String, String)> = Vec::new();
@@ -142,7 +167,10 @@ impl EffectPool {
 
     /// All entry names of one file (donor listing for the currently selected source).
     pub fn entries_of(&self, rel: &str) -> Vec<String> {
-        self.cache.get(rel).map(|c| c.entries.clone()).unwrap_or_default()
+        self.cache
+            .get(rel)
+            .map(|c| c.entries.clone())
+            .unwrap_or_default()
     }
 
     /// Index an eff file explicitly (e.g. one imported from outside the export root) so
@@ -159,14 +187,16 @@ impl EffectPool {
             .unwrap_or(false);
         if !fresh {
             let entries = crate::effects::EffIndex::from_file(path)
-                .map(|idx| {
-                    let mut names: Vec<String> = idx.handles.keys().cloned().collect();
-                    names.sort();
-                    names.dedup();
-                    names
-                })
+                .map(|idx| entry_names_deduped(&idx))
                 .unwrap_or_default();
-            self.cache.insert(rel.clone(), PoolFile { mtime, size, entries });
+            self.cache.insert(
+                rel.clone(),
+                PoolFile {
+                    mtime,
+                    size,
+                    entries,
+                },
+            );
             if let Ok(json) = serde_json::to_string(&self.cache) {
                 let _ = std::fs::write(cache_path(), json);
             }
@@ -175,8 +205,26 @@ impl EffectPool {
     }
 }
 
+/// One name per entry: `EffIndex.handles` deliberately carries an original-case AND a
+/// lowercase key for every entry — listing both showed each effect twice in the studio.
+/// Canonicalize to LOWERCASE: it matches the live-kind names the game link reports and
+/// the case ACMD hashes against, so the same effect reads identically everywhere.
+fn entry_names_deduped(idx: &crate::effects::EffIndex) -> Vec<String> {
+    let mut names: Vec<String> = idx
+        .handles
+        .keys()
+        .map(|name| name.to_lowercase())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    names.sort();
+    names
+}
+
 fn walk_effs(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(root) else { return };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
         if path.is_dir() {

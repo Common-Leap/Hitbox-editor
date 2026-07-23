@@ -1,0 +1,30 @@
+# Local Ghidra databases embed analyzed game data.
+/ghidra_proj/
+
+# Raw inputs and generated binary/capture data must live outside the repository.
+/exefs/
+/v1304/
+/rdc/
+/venv/
+*.bin
+*.nso
+*.nro
+*.npdm
+*.rdc
+*.zip
+*.zip.xml
+
+# Generated inspection output. Regenerate it from the scripts when needed.
+*.png
+*.log
+*_decomp.txt
+/decomp_out.txt
+/loader860.txt
+/dynsym.txt
+/callgraph.json
+/probe_addr.txt
+/range_out.txt
+/targets.txt
+/analyze_out.txt
+/qrd_probe*.txt
+/tc_out.txt

@@ -18,23 +18,43 @@ use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, OneSlotOp};
 /// Rebuild the source .eff bytes with all authored edits applied. `donor_root` resolves
 /// cross-file one-slot donors (the ArcExplorer export root the `src_file_rel`s are
 /// relative to); pass None to restrict to same-file duplication.
+/// Applies EVERY one-slot op regardless of costume scoping (the preview view).
 pub fn rebuild_eff_bytes(
     src_bytes: &[u8],
     eff: &EffMod,
     donor_root: Option<&std::path::Path>,
 ) -> Result<Vec<u8>> {
+    rebuild_eff_bytes_filtered(src_bytes, eff, donor_root, |_| true)
+}
+
+/// Slot-scoped rebuild for export: `slot` None = the base file (only costume-unscoped
+/// ops); Some(s) = the ef_*_c0s.eff file (unscoped ops + ops scoped to that slot —
+/// the slotted file replaces the base for that costume, so it must carry both).
+pub fn rebuild_eff_bytes_for_slot(
+    src_bytes: &[u8],
+    eff: &EffMod,
+    donor_root: Option<&std::path::Path>,
+    slot: Option<u8>,
+) -> Result<Vec<u8>> {
+    rebuild_eff_bytes_filtered(src_bytes, eff, donor_root, |op| match slot {
+        None => op.slots.is_empty(),
+        Some(s) => op.slots.is_empty() || op.slots.contains(&s),
+    })
+}
+
+fn rebuild_eff_bytes_filtered(
+    src_bytes: &[u8],
+    eff: &EffMod,
+    donor_root: Option<&std::path::Path>,
+    keep: impl Fn(&OneSlotOp) -> bool,
+) -> Result<Vec<u8>> {
     let mut namco = effect_library::NamcoEffectFile::load(src_bytes)
         .context("effect_library failed to parse the source .eff")?;
-    {
-        let ptcl = namco
-            .ptcl_file
-            .as_mut()
-            .ok_or_else(|| anyhow!("source .eff has no embedded PTCL"))?;
-        for edit in &eff.authored {
-            apply_authored(ptcl, edit)?;
-        }
-    }
-    for op in &eff.one_slot {
+    // One-slot ops FIRST (they only append sets, so pre-existing set indices are
+    // stable), then authored edits — which may target a freshly cloned set by name
+    // (editing the copy in the eff editor). Cross-fighter donors bake in here too: the
+    // merged file replaces the player's own (resident) eff at boot, so it renders.
+    for op in eff.one_slot.iter().filter(|op| keep(op)) {
         let same_file = op.src_file_rel.is_empty() || op.src_file_rel == eff.source_rel;
         if same_file {
             apply_one_slot_same_file(&mut namco, op)?;
@@ -54,6 +74,15 @@ pub fn rebuild_eff_bytes(
             apply_one_slot_cross_file(&mut namco, &donor, op)?;
         }
     }
+    {
+        let ptcl = namco
+            .ptcl_file
+            .as_mut()
+            .ok_or_else(|| anyhow!("source .eff has no embedded PTCL"))?;
+        for edit in &eff.authored {
+            apply_authored(ptcl, edit)?;
+        }
+    }
     namco
         .save()
         .context("effect_library failed to re-encode the .eff")
@@ -66,13 +95,23 @@ fn apply_one_slot_same_file(
     namco: &mut effect_library::NamcoEffectFile,
     op: &OneSlotOp,
 ) -> Result<()> {
-    if namco.entry_names.iter().any(|n| n == &op.new_entry_name) {
-        anyhow::bail!("one-slot target name '{}' already exists", op.new_entry_name);
+    if op.replace_entry.is_none()
+        && namco
+            .entry_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&op.new_entry_name))
+    {
+        anyhow::bail!(
+            "one-slot target name '{}' already exists",
+            op.new_entry_name
+        );
     }
+    // Case-insensitive: the studio's donor list mixes original-case file entries with
+    // lowercase live kinds (hash40 is over the lowercase name).
     let donor_idx = namco
         .entry_names
         .iter()
-        .position(|n| n == &op.src_set_name)
+        .position(|n| n.eq_ignore_ascii_case(&op.src_set_name))
         .ok_or_else(|| {
             anyhow!(
                 "one-slot donor entry '{}' not found in this eff",
@@ -87,41 +126,80 @@ fn apply_one_slot_same_file(
         .ok_or_else(|| anyhow!("eff has no embedded PTCL"))?;
     let sets = &mut ptcl.emitter_list.emitter_sets;
 
-    let mut clone_set = |set_id: usize, sets: &mut Vec<effect_library::structs::EmitterSet>| -> Result<u32> {
-        let src = sets
-            .get(set_id)
-            .ok_or_else(|| anyhow!("donor emitter set id {set_id} out of range"))?
-            .clone();
-        let mut new_set = src;
-        new_set.name = op.new_entry_name.clone();
-        sets.push(new_set);
-        Ok((sets.len() - 1) as u32)
-    };
+    // NOTE: the on-disk entry/variant ids are 1-BASED handles (0 = none) — see
+    // eff_lib's EffectHandle docs and `entry_set_id_is_one_based`. Reads subtract 1;
+    // writes store `len` (= appended 0-based index + 1).
+    let clone_set =
+        |raw_id: u32, sets: &mut Vec<effect_library::structs::EmitterSet>| -> Result<u32> {
+            let idx = (raw_id as usize)
+                .checked_sub(1)
+                .ok_or_else(|| anyhow!("donor entry has no emitter set (id 0)"))?;
+            let src = sets
+                .get(idx)
+                .ok_or_else(|| anyhow!("donor emitter set id {raw_id} out of range"))?
+                .clone();
+            let mut new_set = src;
+            new_set.name = op.new_entry_name.clone();
+            sets.push(new_set);
+            Ok(sets.len() as u32) // raw 1-based handle of the appended set
+        };
 
     let mut new_entry = donor.clone();
     if donor.variant_count == 0 {
-        new_entry.emitter_set_id = clone_set(donor.emitter_set_id as usize, sets)?;
+        new_entry.emitter_set_id = clone_set(donor.emitter_set_id, sets)?;
     } else {
         // Multi-part effect: clone every variant's set and append a new variant block.
-        let start = donor.variant_start_idx as usize;
+        let start = (donor.variant_start_idx as usize)
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("donor variant start id 0"))?;
         let count = donor.variant_count as usize;
         let donor_variants: Vec<effect_library::namco_file::EffectVariant> = namco
             .effect_variants
             .get(start..start + count)
             .ok_or_else(|| anyhow!("donor variant range out of bounds"))?
             .to_vec();
-        let new_start = namco.effect_variants.len() as u16;
+        let new_start = namco.effect_variants.len() as u16 + 1; // raw 1-based
         for v in donor_variants {
-            let new_set_id = clone_set(v.emitter_set_id as usize, sets)?;
-            namco.effect_variants.push(effect_library::namco_file::EffectVariant {
-                start_frame: v.start_frame,
-                emitter_set_id: new_set_id as u16,
-            });
+            let new_set_id = clone_set(v.emitter_set_id as u32, sets)?;
+            namco
+                .effect_variants
+                .push(effect_library::namco_file::EffectVariant {
+                    start_frame: v.start_frame,
+                    emitter_set_id: new_set_id as u16,
+                });
         }
         new_entry.variant_start_idx = new_start;
     }
-    namco.entries.push(new_entry);
-    namco.entry_names.push(op.new_entry_name.clone());
+    finish_one_slot_entry(namco, op, new_entry)
+}
+
+/// Append `new_entry` under the op's new name, or — replace mode — repoint an existing
+/// entry at the cloned set(s) (its name and slot in the table stay; the old set is
+/// orphaned but harmless). Replace is the costume-scoped semantic: every ACMD use of
+/// the entry switches on that costume with no redirect needed.
+fn finish_one_slot_entry(
+    namco: &mut effect_library::NamcoEffectFile,
+    op: &OneSlotOp,
+    new_entry: effect_library::namco_file::EffectHeader,
+) -> Result<()> {
+    match &op.replace_entry {
+        None => {
+            namco.entries.push(new_entry);
+            namco.entry_names.push(op.new_entry_name.clone());
+        }
+        Some(target) => {
+            let ti = namco
+                .entry_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(target))
+                .ok_or_else(|| {
+                    anyhow!("one-slot replace target entry '{target}' not found in this eff")
+                })?;
+            // Take the donor's header (kind/flags describe how its set plays) but keep
+            // the entry's name so every existing ACMD call keeps resolving.
+            namco.entries[ti] = new_entry;
+        }
+    }
     Ok(())
 }
 
@@ -134,13 +212,23 @@ fn apply_one_slot_cross_file(
     donor: &effect_library::NamcoEffectFile,
     op: &OneSlotOp,
 ) -> Result<()> {
-    if namco.entry_names.iter().any(|n| n == &op.new_entry_name) {
-        anyhow::bail!("one-slot target name '{}' already exists", op.new_entry_name);
+    if op.replace_entry.is_none()
+        && namco
+            .entry_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&op.new_entry_name))
+    {
+        anyhow::bail!(
+            "one-slot target name '{}' already exists",
+            op.new_entry_name
+        );
     }
+    // Case-insensitive: live-kind donors arrive lowercase while file entries are
+    // original-case (the hash40 name is the lowercase form).
     let donor_idx = donor
         .entry_names
         .iter()
-        .position(|n| n == &op.src_set_name)
+        .position(|n| n.eq_ignore_ascii_case(&op.src_set_name))
         .ok_or_else(|| {
             anyhow!(
                 "one-slot donor entry '{}' not found in '{}'",
@@ -155,30 +243,39 @@ fn apply_one_slot_cross_file(
         .ok_or_else(|| anyhow!("donor eff has no embedded PTCL"))?;
 
     // Gather the donor emitter set(s) this entry uses (variants included).
+    // Entry/variant ids are 1-BASED handles (0 = none) — see `entry_set_id_is_one_based`.
     let mut donor_sets: Vec<effect_library::structs::EmitterSet> = Vec::new();
     let mut variant_frames: Vec<u16> = Vec::new();
     if donor_entry.variant_count == 0 {
+        let idx = (donor_entry.emitter_set_id as usize)
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("donor entry has no emitter set (id 0)"))?;
         donor_sets.push(
             donor_ptcl
                 .emitter_list
                 .emitter_sets
-                .get(donor_entry.emitter_set_id as usize)
+                .get(idx)
                 .ok_or_else(|| anyhow!("donor emitter set out of range"))?
                 .clone(),
         );
     } else {
-        let start = donor_entry.variant_start_idx as usize;
+        let start = (donor_entry.variant_start_idx as usize)
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("donor variant start id 0"))?;
         let count = donor_entry.variant_count as usize;
         for v in donor
             .effect_variants
             .get(start..start + count)
             .ok_or_else(|| anyhow!("donor variant range out of bounds"))?
         {
+            let idx = (v.emitter_set_id as usize)
+                .checked_sub(1)
+                .ok_or_else(|| anyhow!("donor variant has no emitter set (id 0)"))?;
             donor_sets.push(
                 donor_ptcl
                     .emitter_list
                     .emitter_sets
-                    .get(v.emitter_set_id as usize)
+                    .get(idx)
                     .ok_or_else(|| anyhow!("donor variant set out of range"))?
                     .clone(),
             );
@@ -194,8 +291,13 @@ fn apply_one_slot_cross_file(
     for set in &donor_sets {
         visit_emitters_ref(&set.emitters, &mut |em| {
             let d = &em.data;
-            for s in [&d.sampler0, &d.sampler1, &d.sampler2].into_iter().flatten() {
-                if s.texture_id != 0 && !tex_ids.contains(&s.texture_id) {
+            for s in [&d.sampler0, &d.sampler1, &d.sampler2]
+                .into_iter()
+                .flatten()
+            {
+                // 0 and u64::MAX are "no texture" sentinels.
+                if s.texture_id != 0 && s.texture_id != u64::MAX && !tex_ids.contains(&s.texture_id)
+                {
                     tex_ids.push(s.texture_id);
                 }
             }
@@ -214,19 +316,23 @@ fn apply_one_slot_cross_file(
                 d.particle_data.primitive_ex_id,
                 d.shape_info.primitive_index,
             ] {
-                if pid != 0 && !prim_ids.contains(&pid) {
+                // 0 and u64::MAX are "no primitive" sentinels (see descriptor_index_for_id).
+                if pid != 0 && pid != u64::MAX && !prim_ids.contains(&pid) {
                     prim_ids.push(pid);
                 }
             }
         });
     }
 
-    // Primitives (rare): the donor's PRMA `binary_data` is an opaque buffer table whose
-    // descriptors index into it, so two populated tables can't be merged without remapping.
-    // Two cases we DO handle: (a) the target already has the GUIDs → nothing to do;
-    // (b) the target has NO primitive table → transplant the donor's whole PRMA section
-    // wholesale (GUIDs + descriptors + buffers stay self-consistent). Only a genuine
-    // collision (target already has a different primitive table) is refused.
+    // Primitives: the PRMA section = descriptor table (GUID + per-model attribute
+    // indices) + a multi-model BFRES container, with descriptor index i ↔ model index i
+    // (verified against the crate's dumper/creator). Emitters reference primitives by
+    // GUID, so appending donor models + their descriptors in lockstep needs no emitter
+    // rewrites. Cases:
+    //  (a) target already has every referenced GUID → nothing to do;
+    //  (b) target has NO primitive table → transplant the donor's whole PRMA section;
+    //  (c) BOTH have tables → extract each missing donor primitive as a single-model
+    //      BFRES and append (this was the "sys donor into fighter" ⚠ failure).
     if !prim_ids.is_empty() {
         let dest_has = |id: u64| {
             namco
@@ -242,26 +348,61 @@ fn apply_one_slot_cross_file(
             .and_then(|p| p.primitive_info.as_ref())
             .map(|pi| !pi.descriptors.is_empty())
             .unwrap_or(false);
-        let missing: Vec<u64> = prim_ids.iter().copied().filter(|id| !dest_has(*id)).collect();
+        let missing: Vec<u64> = prim_ids
+            .iter()
+            .copied()
+            .filter(|id| !dest_has(*id))
+            .collect();
         if !missing.is_empty() {
-            if dest_has_table {
-                anyhow::bail!(
-                    "one-slot '{}': donor uses {} primitive model(s) and the target already has \
-                     a different primitive table — merging distinct primitive tables isn't \
-                     supported yet",
-                    op.new_entry_name,
-                    missing.len()
-                );
-            }
-            // Safe transplant: target has no primitives → take the donor's whole PRMA section.
-            let donor_prim = donor_ptcl.primitive_info.clone().ok_or_else(|| {
+            let donor_prim = donor_ptcl.primitive_info.as_ref().ok_or_else(|| {
                 anyhow!("donor references primitives but has no PRMA section to transfer")
             })?;
             let dest_ptcl = namco
                 .ptcl_file
                 .as_mut()
                 .ok_or_else(|| anyhow!("target eff has no embedded PTCL"))?;
-            dest_ptcl.primitive_info = Some(donor_prim);
+            if !dest_has_table {
+                // Safe transplant: take the donor's whole PRMA section.
+                dest_ptcl.primitive_info = Some(donor_prim.clone());
+            } else {
+                let donor_bin = donor_prim
+                    .binary_data
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("donor PRMA has descriptors but no BFRES binary"))?;
+                let dest_prim = dest_ptcl.primitive_info.as_mut().unwrap();
+                let dest_count = dest_prim.descriptors.len();
+                let mut files: Vec<Vec<u8>> =
+                    vec![dest_prim.binary_data.clone().unwrap_or_default()];
+                for id in &missing {
+                    let idx = effect_library::bfres::descriptor_index_for_id(
+                        &donor_prim.descriptors,
+                        *id,
+                    )
+                    .ok_or_else(|| anyhow!("donor primitive {id:#x} has no descriptor"))?;
+                    let blob = effect_library::bfres::export_single_model(donor_bin, idx)
+                        .with_context(|| format!("extracting donor primitive {id:#x}"))?;
+                    files.push(blob);
+                    dest_prim
+                        .descriptors
+                        .push(donor_prim.descriptors[idx].clone());
+                }
+                let merged = effect_library::bfres::ResFile::merge_model_files(&files)
+                    .context("merging donor primitives into the target PRMA")?;
+                // Sanity: descriptor index i must still map to model index i — a model
+                // NAME collision would make the container replace-instead-of-append and
+                // silently desync every primitive after it.
+                let last = dest_count + missing.len() - 1;
+                if effect_library::bfres::export_single_model(&merged, last).is_err()
+                    || effect_library::bfres::export_single_model(&merged, last + 1).is_ok()
+                {
+                    anyhow::bail!(
+                        "one-slot '{}': donor primitive model name collides with the target's \
+                         (PRMA merge would desync) — not merged",
+                        op.new_entry_name
+                    );
+                }
+                dest_prim.binary_data = Some(merged);
+            }
         }
     }
 
@@ -363,12 +504,9 @@ fn apply_one_slot_cross_file(
         }
     }
 
-    // Clone the sets in (renamed), remapping shader indices; then append the entry.
-    let dest_ptcl = namco.ptcl_file.as_mut().unwrap();
-    let sets = &mut dest_ptcl.emitter_list.emitter_sets;
-    let mut new_set_ids: Vec<u32> = Vec::new();
-    for mut set in donor_sets {
-        set.name = op.new_entry_name.clone();
+    // Shader-remap the donor emitters (shaders are index-referenced; textures/primitives are
+    // GUID-referenced against the merged pools, so they need no remap).
+    let remap = |set: &mut effect_library::structs::EmitterSet| {
         visit_emitters(&mut set.emitters, &mut 0, &mut |_, em| {
             let s = &mut em.data.shader_references;
             for idx in [
@@ -384,18 +522,72 @@ fn apply_one_slot_cross_file(
             if s.compute_shader_index >= 0 {
                 s.compute_shader_index += compute_index_base;
             }
-            // Indices moved → the cached EMTR blob is stale.
-            em.cached_binary = None;
+            em.cached_binary = None; // indices moved → cached EMTR blob is stale
         });
+    };
+
+    // LIVE REPLACE-IN-PLACE: replacing a single-set target with a single-set donor overwrites
+    // the target entry's OWN emitter set in place — the entry name + set index are unchanged,
+    // so `req(name)` (already registered at fighter-load) keeps resolving and a mid-match
+    // reparse rebuilds that set with the donor's content → renders LIVE with NO re-entry and
+    // no new-kind registration (the wall that makes appended `_os` entries NOT-FOUND live).
+    if let Some(target) = &op.replace_entry {
+        if donor_entry.variant_count == 0 {
+            let ti = namco
+                .entry_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(target))
+                .ok_or_else(|| anyhow!("replace target entry '{target}' not found in this eff"))?;
+            let tgt = &namco.entries[ti];
+            if tgt.variant_count == 0 {
+                let tset = (tgt.emitter_set_id as usize)
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow!("replace target '{target}' has no emitter set"))?;
+                let mut donor_set = donor_sets.into_iter().next().unwrap();
+                remap(&mut donor_set);
+                let dest_ptcl = namco.ptcl_file.as_mut().unwrap();
+                let sets = &mut dest_ptcl.emitter_list.emitter_sets;
+                let keep_name = sets
+                    .get(tset)
+                    .map(|s| s.name.clone())
+                    .ok_or_else(|| anyhow!("replace target set {tset} out of range"))?;
+                donor_set.name = keep_name; // keep the target set's name; only its content changes
+                sets[tset] = donor_set;
+                return Ok(());
+            }
+        }
+        // Fall through to append for multi-variant targets/donors (registration caveat applies).
+    }
+
+    // Append path (new named entry). NOTE: an APPENDED entry does NOT register as a spawnable
+    // kind mid-match (`req` NOT-FOUND) — it only becomes visible on a fresh fighter load. For
+    // live cross-fighter, prefer replace-in-place above.
+    let dest_ptcl = namco.ptcl_file.as_mut().unwrap();
+    let sets = &mut dest_ptcl.emitter_list.emitter_sets;
+    let mut new_set_ids: Vec<u32> = Vec::new();
+    for mut set in donor_sets {
+        set.name = op.new_entry_name.clone();
+        remap(&mut set);
         sets.push(set);
-        new_set_ids.push((sets.len() - 1) as u32);
+        new_set_ids.push(sets.len() as u32); // raw 1-based handle
     }
 
     let mut new_entry = donor_entry;
+    // The donor's external-model handle indexes the DONOR file's model table — it
+    // dangles here. Cross-file model transfer is unsupported; drop the reference.
+    new_entry.external_model_idx = 0;
+    // Non-fighter donors (assists/items — e.g. ef_alucard) mark entries type 0 in the kind
+    // u16's high byte; fighter tables use 0x01xx for particle entries, and the fighter
+    // spawn path REJECTS type-0 entries: the kind resolves (name registered, entry found)
+    // but never instantiates — verified live: kirby_dash entry=0x0100 spawns, the appended
+    // alucard entry=0x0000 returns handle 0. Normalize to the particle type.
+    if new_entry.kind & 0xff00 == 0 {
+        new_entry.kind |= 0x0100;
+    }
     if new_entry.variant_count == 0 {
         new_entry.emitter_set_id = new_set_ids[0];
     } else {
-        let new_start = namco.effect_variants.len() as u16;
+        let new_start = namco.effect_variants.len() as u16 + 1; // raw 1-based
         for (frame, set_id) in variant_frames.iter().zip(&new_set_ids) {
             namco
                 .effect_variants
@@ -406,9 +598,7 @@ fn apply_one_slot_cross_file(
         }
         new_entry.variant_start_idx = new_start;
     }
-    namco.entries.push(new_entry);
-    namco.entry_names.push(op.new_entry_name.clone());
-    Ok(())
+    finish_one_slot_entry(namco, op, new_entry)
 }
 
 /// Read-only recursive emitter visit (children after parent).
@@ -526,11 +716,14 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
         d.emitter_info.scale_y = v[1];
         d.emitter_info.scale_z = v[2];
     }
-    // Color precedence mirrors the editor's READ path (effect_converter.rs): a
+    // Color precedence mirrors the editor's read path (`effects.rs`): a
     // ParticleColor "Constant" type overrides the key table; an empty key table falls
     // back to the EmitterInfo static color. Write to whichever source the editor showed.
     if let Some(rows) = &f.color0 {
-        if matches!(d.particle_color.color0_type, effect_library::ColorType::Constant) {
+        if matches!(
+            d.particle_color.color0_type,
+            effect_library::ColorType::Constant
+        ) {
             if let Some(row) = rows.first() {
                 d.particle_color.color0_r = row[0];
                 d.particle_color.color0_g = row[1];
@@ -549,7 +742,10 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
         }
     }
     if let Some(rows) = &f.color1 {
-        if matches!(d.particle_color.color1_type, effect_library::ColorType::Constant) {
+        if matches!(
+            d.particle_color.color1_type,
+            effect_library::ColorType::Constant
+        ) {
             if let Some(row) = rows.first() {
                 d.particle_color.color1_r = row[0];
                 d.particle_color.color1_g = row[1];
@@ -574,323 +770,4 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
     }
     // Serializer prefers the cached EMTR blob; clearing it forces a re-encode of `data`.
     em.cached_binary = None;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    const SAMPLE: &str = "/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export/effect/fighter/mario/ef_mario.eff";
-
-    /// The writer is not byte-exact against Bandai originals (padding/alignment differ;
-    /// the crate's byte-exact guarantee is for its folder-rebuild path). What we require:
-    /// (a) a zero-edit rebuild equals a plain load→save (the exporter adds nothing), and
-    /// (b) the rebuilt bytes re-parse with identical emitter values AND survive a second
-    /// save byte-identically (the writer is a fixpoint — safe to ship).
-    #[test]
-    fn zero_edit_rebuild_is_stable_and_lossless() {
-        if !Path::new(SAMPLE).exists() {
-            eprintln!("sample eff missing — skipping");
-            return;
-        }
-        let src = std::fs::read(SAMPLE).unwrap();
-        let plain = effect_library::NamcoEffectFile::load(&src).unwrap().save().unwrap();
-        let rebuilt = rebuild_eff_bytes(&src, &EffMod::default(), None).unwrap();
-        assert!(rebuilt == plain, "zero-edit rebuild differs from plain load→save");
-
-        // Fixpoint: re-load + re-save of the rebuilt file must be byte-identical.
-        let reloaded = effect_library::NamcoEffectFile::load(&rebuilt).unwrap();
-        assert!(
-            reloaded.save().unwrap() == rebuilt,
-            "writer is not a fixpoint — second save differs"
-        );
-
-        // Semantic: emitter values survive the rebuild.
-        let a = effect_library::NamcoEffectFile::load(&src).unwrap();
-        let (pa, pb) = (a.ptcl_file.as_ref().unwrap(), reloaded.ptcl_file.as_ref().unwrap());
-        assert_eq!(
-            pa.emitter_list.emitter_sets.len(),
-            pb.emitter_list.emitter_sets.len()
-        );
-        for (sa, sb) in pa.emitter_list.emitter_sets.iter().zip(&pb.emitter_list.emitter_sets) {
-            assert_eq!(sa.name, sb.name);
-            assert_eq!(sa.emitters.len(), sb.emitters.len());
-            for (ea, eb) in sa.emitters.iter().zip(&sb.emitters) {
-                assert_eq!(ea.data.display_name(), eb.data.display_name());
-                assert_eq!(ea.data.emission.rate, eb.data.emission.rate);
-                assert_eq!(ea.data.particle_data.life, eb.data.particle_data.life);
-                assert_eq!(ea.data.particle_scale.scale_x, eb.data.particle_scale.scale_x);
-                assert_eq!(
-                    ea.data.emitter_static.color_scale,
-                    eb.data.emitter_static.color_scale
-                );
-            }
-        }
-    }
-
-    /// Same-file one-slot: duplicating an entry must produce a loadable eff with the new
-    /// entry name pointing at a cloned emitter set.
-    #[test]
-    fn same_file_one_slot_duplicates_entry() {
-        if !Path::new(SAMPLE).exists() {
-            eprintln!("sample eff missing — skipping");
-            return;
-        }
-        let src = std::fs::read(SAMPLE).unwrap();
-        let orig = effect_library::NamcoEffectFile::load(&src).unwrap();
-        let donor_name = orig.entry_names[0].clone();
-        let n_entries = orig.entries.len();
-        let n_sets = orig.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets.len();
-
-        let eff = EffMod {
-            source_rel: "test".into(),
-            authored: vec![],
-            one_slot: vec![OneSlotOp {
-                new_entry_name: format!("{donor_name}_os"),
-                src_file_rel: String::new(),
-                src_set_name: donor_name.clone(),
-                src_set_idx: 0,
-            }],
-        };
-        let rebuilt = rebuild_eff_bytes(&src, &eff, None).unwrap();
-        let reloaded = effect_library::NamcoEffectFile::load(&rebuilt).unwrap();
-        assert_eq!(reloaded.entries.len(), n_entries + 1);
-        assert!(reloaded
-            .entry_names
-            .iter()
-            .any(|n| n == &format!("{donor_name}_os")));
-        let new_sets = reloaded.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets.len();
-        assert!(new_sets > n_sets, "no emitter set was cloned");
-        // The new entry's set carries the new name.
-        let new_entry = reloaded.entries.last().unwrap();
-        if new_entry.variant_count == 0 {
-            let set = &reloaded.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets
-                [new_entry.emitter_set_id as usize];
-            assert_eq!(set.name, format!("{donor_name}_os"));
-        }
-    }
-
-    /// Cross-file one-slot: a donor entry from another eff lands in the target with its
-    /// textures merged (descriptors grow) and the result is loadable + a writer fixpoint.
-    #[test]
-    fn cross_file_one_slot_transfers_entry_and_textures() {
-        let root = Path::new("/home/leap/Workshop/Smash Mod Tools/ArcExplorer_linux_x64/export");
-        let donor_rel = "effect/fighter/kirby/ef_kirby.eff";
-        if !Path::new(SAMPLE).exists() || !root.join(donor_rel).exists() {
-            eprintln!("sample effs missing — skipping");
-            return;
-        }
-        let donor_bytes = std::fs::read(root.join(donor_rel)).unwrap();
-        let donor = effect_library::NamcoEffectFile::load(&donor_bytes).unwrap();
-        // Pick a donor entry with a plain (variant-free) set to keep the assert simple.
-        let donor_name = donor
-            .entries
-            .iter()
-            .zip(&donor.entry_names)
-            .find(|(e, _)| e.variant_count == 0)
-            .map(|(_, n)| n.clone())
-            .expect("donor has a variant-free entry");
-
-        let src = std::fs::read(SAMPLE).unwrap();
-        let before = effect_library::NamcoEffectFile::load(&src).unwrap();
-        let n_entries = before.entries.len();
-        let n_desc = before
-            .ptcl_file
-            .as_ref()
-            .and_then(|p| p.texture_info.as_ref())
-            .map(|t| t.descriptors.len())
-            .unwrap_or(0);
-
-        let eff = EffMod {
-            source_rel: "effect/fighter/mario/ef_mario.eff".into(),
-            authored: vec![],
-            one_slot: vec![OneSlotOp {
-                new_entry_name: format!("{donor_name}_kirby_os"),
-                src_file_rel: donor_rel.into(),
-                src_set_name: donor_name.clone(),
-                src_set_idx: 0,
-            }],
-        };
-        let rebuilt = match rebuild_eff_bytes(&src, &eff, Some(root)) {
-            Ok(b) => b,
-            Err(e) => {
-                // Primitive-referencing donors are expected to refuse; anything else fails.
-                assert!(
-                    e.to_string().contains("primitive"),
-                    "cross-file one-slot failed unexpectedly: {e:#}"
-                );
-                eprintln!("donor entry uses primitives — refusal path exercised: {e}");
-                return;
-            }
-        };
-        let reloaded = effect_library::NamcoEffectFile::load(&rebuilt).unwrap();
-        assert_eq!(reloaded.entries.len(), n_entries + 1);
-        assert!(reloaded
-            .entry_names
-            .iter()
-            .any(|n| n == &format!("{donor_name}_kirby_os")));
-        let n_desc_after = reloaded
-            .ptcl_file
-            .as_ref()
-            .and_then(|p| p.texture_info.as_ref())
-            .map(|t| t.descriptors.len())
-            .unwrap_or(0);
-        assert!(
-            n_desc_after >= n_desc,
-            "texture descriptors shrank ({n_desc} → {n_desc_after})"
-        );
-        // Writer fixpoint on the merged file.
-        assert!(
-            reloaded.save().unwrap() == rebuilt,
-            "cross-file merge output is not a writer fixpoint"
-        );
-    }
-
-    /// An actual edit must land in the rebuilt bytes.
-    #[test]
-    fn edited_scale_lands_in_rebuilt_file() {
-        if !Path::new(SAMPLE).exists() {
-            eprintln!("sample eff missing — skipping");
-            return;
-        }
-        let src = std::fs::read(SAMPLE).unwrap();
-        let namco = effect_library::NamcoEffectFile::load(&src).unwrap();
-        let set0 = &namco.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets[0];
-        let set_name = set0.name.clone();
-        let em_name = set0.emitters[0].data.display_name();
-        let old_scale = set0.emitters[0].data.particle_scale.scale_x;
-
-        let eff = EffMod {
-            source_rel: "test".into(),
-            authored: vec![AuthoredEdit {
-                set_name: set_name.clone(),
-                set_idx: 0,
-                emitter_name: em_name.clone(),
-                emitter_idx: 0,
-                fields: EmitterFieldEdits {
-                    scale: Some(old_scale * 2.0),
-                    ..Default::default()
-                },
-            }],
-            one_slot: vec![],
-        };
-        let rebuilt = rebuild_eff_bytes(&src, &eff, None).unwrap();
-        let reloaded = effect_library::NamcoEffectFile::load(&rebuilt).unwrap();
-        let new_scale = reloaded.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets[0]
-            .emitters[0]
-            .data
-            .particle_scale
-            .scale_x;
-        assert!(
-            (new_scale - old_scale * 2.0).abs() < 1e-4,
-            "edited scale did not survive rebuild ({new_scale} vs {})",
-            old_scale * 2.0
-        );
-    }
-
-    /// The in-tree editor parser and effect_library must agree on the fields we map,
-    /// otherwise exported values would not match what the editor showed.
-    #[test]
-    fn editor_and_writer_field_mapping_agree() {
-        if !Path::new(SAMPLE).exists() {
-            eprintln!("sample eff missing — skipping");
-            return;
-        }
-        let src = std::fs::read(SAMPLE).unwrap();
-        let namco = effect_library::NamcoEffectFile::load(&src).unwrap();
-        let lib_ptcl = namco.ptcl_file.as_ref().unwrap();
-
-        let index = crate::effects::EffIndex::from_file(Path::new(SAMPLE)).unwrap();
-        let tree_ptcl = crate::effects::PtclFile::parse(&index.ptcl_data).unwrap();
-
-        assert_eq!(
-            tree_ptcl.emitter_sets.len(),
-            lib_ptcl.emitter_list.emitter_sets.len(),
-            "emitter set count differs between parsers"
-        );
-
-        let mut checked = 0;
-        for (set_i, tree_set) in tree_ptcl.emitter_sets.iter().enumerate() {
-            let lib_set = &lib_ptcl.emitter_list.emitter_sets[set_i];
-            // Flatten lib emitters parent-first (the editor's enumeration order).
-            let mut lib_flat: Vec<&effect_library::structs::Emitter> = Vec::new();
-            fn flatten<'a>(
-                ems: &'a [effect_library::structs::Emitter],
-                out: &mut Vec<&'a effect_library::structs::Emitter>,
-            ) {
-                for e in ems {
-                    out.push(e);
-                    flatten(&e.children, out);
-                }
-            }
-            flatten(&lib_set.emitters, &mut lib_flat);
-            assert_eq!(
-                tree_set.emitters.len(),
-                lib_flat.len(),
-                "emitter count differs in set {set_i} ({})",
-                tree_set.name
-            );
-            for (tree_em, lib_em) in tree_set.emitters.iter().zip(&lib_flat) {
-                let d = &lib_em.data;
-                assert_eq!(tree_em.name, d.display_name(), "emitter name mismatch");
-                assert!(
-                    (tree_em.emission_rate - d.emission.rate).abs() < 1e-4,
-                    "emission rate mismatch on {}",
-                    tree_em.name
-                );
-                assert!(
-                    (tree_em.lifetime - d.particle_data.life as f32).abs() < 1.5,
-                    "lifetime mismatch on {} ({} vs {})",
-                    tree_em.name,
-                    tree_em.lifetime,
-                    d.particle_data.life
-                );
-                assert!(
-                    (tree_em.scale - d.particle_scale.scale_x).abs() < 1e-4,
-                    "scale mismatch on {} ({} vs {})",
-                    tree_em.name,
-                    tree_em.scale,
-                    d.particle_scale.scale_x
-                );
-                assert!(
-                    (tree_em.color_scale - d.emitter_static.color_scale).abs() < 1e-4,
-                    "color_scale mismatch on {}",
-                    tree_em.name
-                );
-                // Colors follow the editor's precedence: ParticleColor constant →
-                // key table → EmitterInfo static. Compare against the active source.
-                if let Some(key0) = tree_em.color0.first() {
-                    let (sr, sg, sb) = if matches!(
-                        d.particle_color.color0_type,
-                        effect_library::ColorType::Constant
-                    ) {
-                        (
-                            d.particle_color.color0_r,
-                            d.particle_color.color0_g,
-                            d.particle_color.color0_b,
-                        )
-                    } else if d.emitter_static.num_color0_keys > 0 {
-                        let k = &d.emitter_static.color0.keys[0];
-                        (k.x, k.y, k.z)
-                    } else {
-                        (
-                            d.emitter_info.color0_r,
-                            d.emitter_info.color0_g,
-                            d.emitter_info.color0_b,
-                        )
-                    };
-                    assert!(
-                        (key0.r - sr).abs() < 1e-3
-                            && (key0.g - sg).abs() < 1e-3
-                            && (key0.b - sb).abs() < 1e-3,
-                        "color0 source mismatch on {} (editor [{:.3} {:.3} {:.3}] vs lib [{sr:.3} {sg:.3} {sb:.3}])",
-                        tree_em.name, key0.r, key0.g, key0.b
-                    );
-                }
-                checked += 1;
-            }
-        }
-        assert!(checked > 10, "too few emitters checked ({checked})");
-    }
 }

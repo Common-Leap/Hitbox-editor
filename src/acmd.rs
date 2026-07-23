@@ -1,6 +1,7 @@
 /// Parse ACMD scripts into a structured IR that preserves loops and can be re-exported.
-
-use crate::data::{AcmdScript, AcmdStmt, AttackCall, EffectMacro, EffectScript, EffectStmt, ExcuteStmt};
+use crate::data::{
+    AcmdScript, AcmdStmt, AttackCall, EffectMacro, EffectScript, EffectStmt, ExcuteStmt,
+};
 
 /// Convert snake_case motion name to PascalCase filename.
 pub fn move_name_to_pascal(name: &str) -> String {
@@ -31,12 +32,34 @@ pub fn fetch_script_body(fighter: &str, move_name: &str) -> anyhow::Result<Strin
     Ok(reqwest::blocking::get(&url)?.text()?)
 }
 
+/// Disk-cached [`fetch_script_body`]: bodies (including "404: Not Found" misses) are
+/// stored under `{app_storage_root}/script-cache/{fighter}/`, so fighter-wide scans
+/// (one-slot full-use discovery) only hit the network once per move ever.
+pub fn fetch_script_body_cached(fighter: &str, move_name: &str) -> anyhow::Result<String> {
+    let pascal = move_name_to_pascal(move_name);
+    let dir = crate::scratch_dirs::app_storage_root()
+        .join("script-cache")
+        .join(fighter);
+    let path = dir.join(format!("{pascal}.txt"));
+    if let Ok(body) = std::fs::read_to_string(&path) {
+        return Ok(body);
+    }
+    let body = fetch_script_body(fighter, move_name)?;
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&path, &body);
+    Ok(body)
+}
+
 pub fn parse_acmd_script(source: &str) -> AcmdScript {
     let game_fn = extract_game_function(source);
     let source = game_fn.as_deref().unwrap_or(source);
     let lines: Vec<&str> = source.lines().collect();
     // Skip the function signature line and closing brace
-    let body_lines = if lines.len() >= 2 { &lines[1..lines.len()-1] } else { &lines[..] };
+    let body_lines = if lines.len() >= 2 {
+        &lines[1..lines.len() - 1]
+    } else {
+        &lines[..]
+    };
     let (stmts, _) = parse_stmts(body_lines, 0);
     AcmdScript { stmts }
 }
@@ -117,7 +140,9 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
     let mut stmts = Vec::new();
     for line in lines {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if line.contains("macros::ATTACK(") {
             if let Some(call) = parse_attack_call(line) {
                 stmts.push(ExcuteStmt::Attack(call));
@@ -139,7 +164,11 @@ fn find_block_end(lines: &[&str], start: usize) -> (usize, i32) {
     let mut depth = 0i32;
     for (i, line) in lines[start..].iter().enumerate() {
         for ch in line.chars() {
-            match ch { '{' => depth += 1, '}' => depth -= 1, _ => {} }
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
         }
         if depth == 0 {
             return (start + i, 0);
@@ -172,12 +201,24 @@ fn extract_game_function(source: &str) -> Option<String> {
             result.push_str(line);
             result.push('\n');
             for ch in line.chars() {
-                match ch { '{' => depth += 1, '}' => { depth -= 1; } _ => {} }
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
             }
-            if depth == 0 { break; }
+            if depth == 0 {
+                break;
+            }
         }
     }
-    if found { Some(result) } else { None }
+    if found {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Extract only the `effect_` function body (mirrors `extract_game_function`).
@@ -204,12 +245,24 @@ fn extract_effect_function(source: &str) -> Option<String> {
             result.push_str(line);
             result.push('\n');
             for ch in line.chars() {
-                match ch { '{' => depth += 1, '}' => { depth -= 1; } _ => {} }
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
             }
-            if depth == 0 { break; }
+            if depth == 0 {
+                break;
+            }
         }
     }
-    if found { Some(result) } else { None }
+    if found {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Parse the contents of an is_excute block from an effect_ script.
@@ -217,7 +270,9 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
     let mut macros = Vec::new();
     for line in lines {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         // Helper: extract args string from a macro call like `macros::FOO(...)`
         let try_extract = |prefix: &str| -> Option<Vec<String>> {
@@ -233,17 +288,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                 // args[1]=effect_hash, args[2]=effect_hash2 (ignore), args[3]=bone_hash
                 // args[4]=x, args[5]=y, args[6]=z, args[7]=rot_x, args[8]=rot_y, args[9]=rot_z, args[10]=scale
                 if t.len() > 10 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name   = extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
-                    let x     = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let y     = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let z     = t[6].trim().parse::<f32>().unwrap_or(0.0);
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let bone_name =
+                        extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
+                    let x = t[4].trim().parse::<f32>().unwrap_or(0.0);
+                    let y = t[5].trim().parse::<f32>().unwrap_or(0.0);
+                    let z = t[6].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_x = t[7].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_y = t[8].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_z = t[9].trim().parse::<f32>().unwrap_or(0.0);
                     let scale = t[10].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
-                        effect_name, bone_name,
+                        effect_name,
+                        bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
                         scale,
@@ -257,17 +315,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
         if line.contains("macros::EFFECT_FLIP(") {
             if let Some(t) = try_extract("macros::EFFECT_FLIP(") {
                 if t.len() > 10 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name   = extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
-                    let x     = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let y     = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let z     = t[6].trim().parse::<f32>().unwrap_or(0.0);
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let bone_name =
+                        extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
+                    let x = t[4].trim().parse::<f32>().unwrap_or(0.0);
+                    let y = t[5].trim().parse::<f32>().unwrap_or(0.0);
+                    let z = t[6].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_x = t[7].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_y = t[8].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_z = t[9].trim().parse::<f32>().unwrap_or(0.0);
                     let scale = t[10].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
-                        effect_name, bone_name,
+                        effect_name,
+                        bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
                         scale,
@@ -283,17 +344,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                 // args[1]=effect_hash, args[2]=bone_hash, args[3]=x, args[4]=y, args[5]=z
                 // args[6]=rot_x, args[7]=rot_y, args[8]=rot_z, args[9]=scale
                 if t.len() > 9 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name   = extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x     = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y     = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z     = t[5].trim().parse::<f32>().unwrap_or(0.0);
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let bone_name =
+                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
+                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
+                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
+                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
-                        effect_name, bone_name,
+                        effect_name,
+                        bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
                         scale,
@@ -307,17 +371,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
         if line.contains("macros::EFFECT(") {
             if let Some(t) = try_extract("macros::EFFECT(") {
                 if t.len() > 9 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name   = extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x     = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y     = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z     = t[5].trim().parse::<f32>().unwrap_or(0.0);
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let bone_name =
+                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
+                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
+                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
+                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
-                        effect_name, bone_name,
+                        effect_name,
+                        bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
                         scale,
@@ -331,17 +398,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
         if line.contains("macros::FOOT_EFFECT(") {
             if let Some(t) = try_extract("macros::FOOT_EFFECT(") {
                 if t.len() > 9 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name   = extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x     = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y     = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z     = t[5].trim().parse::<f32>().unwrap_or(0.0);
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let bone_name =
+                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
+                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
+                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
+                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
-                        effect_name, bone_name,
+                        effect_name,
+                        bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
                         scale,
@@ -355,17 +425,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
         if line.contains("macros::LANDING_EFFECT(") {
             if let Some(t) = try_extract("macros::LANDING_EFFECT(") {
                 if t.len() > 9 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name   = extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x     = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y     = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z     = t[5].trim().parse::<f32>().unwrap_or(0.0);
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let bone_name =
+                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
+                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
+                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
+                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
                     let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
-                        effect_name, bone_name,
+                        effect_name,
+                        bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
                         scale,
@@ -379,7 +452,8 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
         if line.contains("macros::EFFECT_OFF_KIND(") {
             if let Some(t) = try_extract("macros::EFFECT_OFF_KIND(") {
                 if t.len() > 1 {
-                    let effect_name = extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
                     macros.push(EffectMacro::EffectOffKind { effect_name });
                     continue;
                 }
@@ -404,7 +478,10 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                 let bone_name = extract_hash40_string(t.get(4).map(|s| s.as_str()).unwrap_or(""))
                     .unwrap_or_else(|| t.get(4).map(|s| s.trim().to_string()).unwrap_or_default());
                 if !effect_name.is_empty() {
-                    macros.push(EffectMacro::AfterImage { effect_name, bone_name });
+                    macros.push(EffectMacro::AfterImage {
+                        effect_name,
+                        bone_name,
+                    });
                     continue;
                 }
             }
@@ -518,18 +595,26 @@ pub fn parse_effect_script(source: &str) -> crate::data::EffectScript {
         None => return EffectScript::default(),
     };
     let lines: Vec<&str> = effect_fn.lines().collect();
-    let body_lines = if lines.len() >= 2 { &lines[1..lines.len()-1] } else { &lines[..] };
+    let body_lines = if lines.len() >= 2 {
+        &lines[1..lines.len() - 1]
+    } else {
+        &lines[..]
+    };
     let (stmts, _) = parse_effect_stmts(body_lines, 0);
     EffectScript { stmts }
 }
 
 fn parse_for_loop_header(line: &str) -> Option<usize> {
     let line = line.trim();
-    if !line.starts_with("for ") || !line.contains("in 0..") { return None; }
+    if !line.starts_with("for ") || !line.contains("in 0..") {
+        return None;
+    }
     let range_start = line.find("in 0..")? + 6;
     let rest = &line[range_start..];
     let rest = rest.strip_prefix('=').unwrap_or(rest);
-    let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let num_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     let count: usize = rest[..num_end].parse().ok()?;
     Some(count.min(20))
 }
@@ -538,8 +623,14 @@ fn parse_frame_call(line: &str) -> Option<f32> {
     let mut search_start = 0;
     while let Some(pos) = line[search_start..].find("frame(") {
         let abs_pos = search_start + pos;
-        let before = if abs_pos == 0 { ' ' } else {
-            line.as_bytes().get(abs_pos - 1).copied().map(|b| b as char).unwrap_or(' ')
+        let before = if abs_pos == 0 {
+            ' '
+        } else {
+            line.as_bytes()
+                .get(abs_pos - 1)
+                .copied()
+                .map(|b| b as char)
+                .unwrap_or(' ')
         };
         if !before.is_alphanumeric() && before != '_' {
             let inner = &line[abs_pos + 6..];
@@ -558,8 +649,14 @@ fn parse_wait_call(line: &str) -> Option<f32> {
     let mut search_start = 0;
     while let Some(pos) = line[search_start..].find("wait(") {
         let abs_pos = search_start + pos;
-        let before = if abs_pos == 0 { ' ' } else {
-            line.as_bytes().get(abs_pos - 1).copied().map(|b| b as char).unwrap_or(' ')
+        let before = if abs_pos == 0 {
+            ' '
+        } else {
+            line.as_bytes()
+                .get(abs_pos - 1)
+                .copied()
+                .map(|b| b as char)
+                .unwrap_or(' ')
         };
         if !before.is_alphanumeric() && before != '_' {
             let inner = &line[abs_pos + 5..];
@@ -580,7 +677,9 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     let end = inner.rfind(')')?;
     let inner = &inner[..end];
     let t = tokenize_args(inner);
-    if t.len() < 13 { return None; }
+    if t.len() < 13 {
+        return None;
+    }
 
     // [0]=agent [1]=id [2]=part [3]=bone [4]=damage [5]=angle [6]=kb_scaling
     // [7]=fkb [8]=kb_base [9]=size [10]=ox [11]=oy [12]=oz
@@ -593,60 +692,95 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     // [32]=no_finish_camera [33]=collision_attr [34]=sound_level
     // [35]=sound_attr [36]=attack_region
 
-    let id: u32       = t[1].trim().parse().ok()?;
-    let part: u32     = t[2].trim().parse().ok()?;
-    let bone_name     = extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
-    let damage: f32   = t[4].trim().parse().ok()?;
-    let angle: i32    = t[5].trim().parse::<i32>()
+    let id: u32 = t[1].trim().parse().ok()?;
+    let part: u32 = t[2].trim().parse().ok()?;
+    let bone_name = extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
+    let damage: f32 = t[4].trim().parse().ok()?;
+    let angle: i32 = t[5]
+        .trim()
+        .parse::<i32>()
         .or_else(|_| t[5].trim().parse::<f32>().map(|f| f as i32))
         .unwrap_or(0);
     let kb_scaling: i32 = t[6].trim().parse().ok()?;
-    let fkb: i32      = t[7].trim().parse().ok()?;
-    let kb_base: i32  = t[8].trim().parse().ok()?;
-    let size: f32     = t[9].trim().parse().ok()?;
+    let fkb: i32 = t[7].trim().parse().ok()?;
+    let kb_base: i32 = t[8].trim().parse().ok()?;
+    let size: f32 = t[9].trim().parse().ok()?;
     let offset_x: f32 = t[10].trim().parse().ok()?;
     let offset_y: f32 = t[11].trim().parse().ok()?;
     let offset_z: f32 = t[12].trim().parse().ok()?;
 
     let capsule_end = if t.len() >= 16 {
-        match (parse_option_f32(t[13].trim()), parse_option_f32(t[14].trim()), parse_option_f32(t[15].trim())) {
+        match (
+            parse_option_f32(t[13].trim()),
+            parse_option_f32(t[14].trim()),
+            parse_option_f32(t[15].trim()),
+        ) {
             (Some(x), Some(y), Some(z)) => Some([x, y, z]),
             _ => None,
         }
-    } else { None };
+    } else {
+        None
+    };
 
     let get = |i: usize| t.get(i).map(|s| s.trim()).unwrap_or("");
 
-    let hitlag_mult: f32   = get(16).parse().unwrap_or(1.0);
-    let sdi_mult: f32      = get(17).parse().unwrap_or(1.0);
-    let setoff_kind        = strip_deref(get(18));
-    let lr_check           = strip_deref(get(19));
-    let is_clang           = get(20) == "true";
+    let hitlag_mult: f32 = get(16).parse().unwrap_or(1.0);
+    let sdi_mult: f32 = get(17).parse().unwrap_or(1.0);
+    let setoff_kind = strip_deref(get(18));
+    let lr_check = strip_deref(get(19));
+    let is_clang = get(20) == "true";
     let is_add_attack: i32 = get(21).parse().unwrap_or(0);
-    let hitbox_attr: f32   = get(22).parse().unwrap_or(0.0);
+    let hitbox_attr: f32 = get(22).parse().unwrap_or(0.0);
     let ground_or_air: i32 = get(23).parse().unwrap_or(0);
-    let is_mtk             = get(24) == "true";
-    let is_shield_disable  = get(25) == "true";
-    let is_reflectable     = get(26) == "true";
-    let is_absorbable      = get(27) == "true";
-    let is_landing_attack  = get(28) == "true";
-    let situation_mask     = strip_deref(get(29));
-    let category_mask      = strip_deref(get(30));
-    let part_mask          = strip_deref(get(31));
-    let no_finish_camera   = get(32) == "true";
-    let collision_attr     = extract_hash40_string(get(33)).unwrap_or_else(|| strip_deref(get(33)));
-    let sound_level        = strip_deref(get(34));
-    let sound_attr         = strip_deref(get(35));
-    let attack_region      = strip_deref(get(36));
+    let is_mtk = get(24) == "true";
+    let is_shield_disable = get(25) == "true";
+    let is_reflectable = get(26) == "true";
+    let is_absorbable = get(27) == "true";
+    let is_landing_attack = get(28) == "true";
+    let situation_mask = strip_deref(get(29));
+    let category_mask = strip_deref(get(30));
+    let part_mask = strip_deref(get(31));
+    let no_finish_camera = get(32) == "true";
+    let collision_attr = extract_hash40_string(get(33)).unwrap_or_else(|| strip_deref(get(33)));
+    let sound_level = strip_deref(get(34));
+    let sound_attr = strip_deref(get(35));
+    let attack_region = strip_deref(get(36));
 
     Some(AttackCall {
-        id, part, bone_name, damage, angle, kb_scaling, fkb, kb_base,
-        size, offset_x, offset_y, offset_z, capsule_end,
-        hitlag_mult, sdi_mult, setoff_kind, lr_check,
-        is_clang, is_add_attack, hitbox_attr, ground_or_air,
-        is_mtk, is_shield_disable, is_reflectable, is_absorbable, is_landing_attack,
-        situation_mask, category_mask, part_mask, no_finish_camera,
-        collision_attr, sound_level, sound_attr, attack_region,
+        id,
+        part,
+        bone_name,
+        damage,
+        angle,
+        kb_scaling,
+        fkb,
+        kb_base,
+        size,
+        offset_x,
+        offset_y,
+        offset_z,
+        capsule_end,
+        hitlag_mult,
+        sdi_mult,
+        setoff_kind,
+        lr_check,
+        is_clang,
+        is_add_attack,
+        hitbox_attr,
+        ground_or_air,
+        is_mtk,
+        is_shield_disable,
+        is_reflectable,
+        is_absorbable,
+        is_landing_attack,
+        situation_mask,
+        category_mask,
+        part_mask,
+        no_finish_camera,
+        collision_attr,
+        sound_level,
+        sound_attr,
+        attack_region,
     })
 }
 
@@ -658,7 +792,9 @@ fn strip_deref(s: &str) -> String {
 /// Parse `Some(3.0)` → `Some(3.0)`, `None` → `None`.
 fn parse_option_f32(s: &str) -> Option<f32> {
     let s = s.trim();
-    if s == "None" { return None; }
+    if s == "None" {
+        return None;
+    }
     let inner = s.strip_prefix("Some(")?.strip_suffix(')')?;
     inner.trim().parse().ok()
 }
@@ -669,13 +805,23 @@ fn tokenize_args(s: &str) -> Vec<String> {
     let mut current = String::new();
     for ch in s.chars() {
         match ch {
-            '(' => { depth += 1; current.push(ch); }
-            ')' => { if depth > 0 { depth -= 1; } current.push(ch); }
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+                current.push(ch);
+            }
             ',' if depth == 0 => {
                 tokens.push(current.trim().to_string());
                 current = String::new();
             }
-            _ => { current.push(ch); }
+            _ => {
+                current.push(ch);
+            }
         }
     }
     if !current.trim().is_empty() {
@@ -775,24 +921,31 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
 }
 
 fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<String> {
-    stmts.iter().map(|s| match s {
-        crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
-        crate::data::ExcuteStmt::ClearAll =>
-            format!("{indent}AttackModule::clear_all(agent.module_accessor);"),
-        crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
-    }).collect()
+    stmts
+        .iter()
+        .map(|s| match s {
+            crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
+            crate::data::ExcuteStmt::ClearAll => {
+                format!("{indent}AttackModule::clear_all(agent.module_accessor);")
+            }
+            crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
+        })
+        .collect()
 }
 
 fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
     let mut lines = Vec::new();
     for stmt in stmts {
         match stmt {
-            crate::data::AcmdStmt::Frame(f) =>
-                lines.push(format!("{indent}frame(agent.lua_state_agent, {f:.1});")),
-            crate::data::AcmdStmt::Wait(w) =>
-                lines.push(format!("{indent}wait(agent.lua_state_agent, {w:.1});")),
-            crate::data::AcmdStmt::WaitLoopClear =>
-                lines.push(format!("{indent}wait_loop_clear(agent.lua_state_agent);")),
+            crate::data::AcmdStmt::Frame(f) => {
+                lines.push(format!("{indent}frame(agent.lua_state_agent, {f:.1});"))
+            }
+            crate::data::AcmdStmt::Wait(w) => {
+                lines.push(format!("{indent}wait(agent.lua_state_agent, {w:.1});"))
+            }
+            crate::data::AcmdStmt::WaitLoopClear => {
+                lines.push(format!("{indent}wait_loop_clear(agent.lua_state_agent);"))
+            }
             crate::data::AcmdStmt::Excute(inner) => {
                 lines.push(format!("{indent}if macros::is_excute(agent) {{"));
                 lines.extend(emit_excute_stmts(inner, &format!("{indent}    ")));
@@ -803,8 +956,7 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
                 lines.extend(emit_stmts(body, &format!("{indent}    ")));
                 lines.push(format!("{indent}}}"));
             }
-            crate::data::AcmdStmt::Raw(line) =>
-                lines.push(format!("{indent}{line}")),
+            crate::data::AcmdStmt::Raw(line) => lines.push(format!("{indent}{line}")),
         }
     }
     lines
@@ -814,10 +966,15 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
 /// `(fn_name, source_block)`.
 fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, String) {
     // Function name matches the ACMD script convention: game_{movename_no_underscores}
-    let fn_name = format!("game_{}", move_name.to_lowercase().replace('_', "").replace(' ', ""));
+    let fn_name = format!(
+        "game_{}",
+        move_name.to_lowercase().replace('_', "").replace(' ', "")
+    );
     let body = emit_stmts(&script.stmts, "    ");
     let mut out = String::new();
-    out.push_str(&format!("unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n"));
+    out.push_str(&format!(
+        "unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n"
+    ));
     for line in &body {
         out.push_str(line);
         out.push('\n');
@@ -851,8 +1008,7 @@ fn emit_effect_move_fn(
         "effect_{}",
         move_name.to_lowercase().replace('_', "").replace(' ', "")
     );
-    let mut active: Vec<&crate::data::EffectCall> =
-        calls.iter().filter(|c| !c.disabled).collect();
+    let mut active: Vec<&crate::data::EffectCall> = calls.iter().filter(|c| !c.disabled).collect();
     active.sort_by_key(|c| c.active_start);
 
     let mut out = String::new();
@@ -934,7 +1090,8 @@ pub fn build_mod_project_full(
     // Group by fighter
     let mut by_fighter: HashMap<&str, Vec<(&str, &crate::data::AcmdScript)>> = HashMap::new();
     for (fighter, move_name, script) in edits {
-        by_fighter.entry(fighter.as_str())
+        by_fighter
+            .entry(fighter.as_str())
             .or_default()
             .push((move_name.as_str(), script));
     }
@@ -959,7 +1116,8 @@ pub fn build_mod_project_full(
         rel_path: "rust-toolchain.toml".into(),
         contents: r#"[toolchain]
 channel = "nightly"
-"#.to_string(),
+"#
+        .to_string(),
     });
 
     // ── Cargo.toml ────────────────────────────────────────────────────────
@@ -1000,17 +1158,19 @@ codegen-units = 1
     let mut fighter_names: Vec<&str> = by_fighter.keys().copied().collect();
     fighter_names.sort();
 
-    let mod_decls: String = fighter_names.iter()
+    let mod_decls: String = fighter_names
+        .iter()
         .map(|f| format!("mod {f};\n"))
         .collect();
-    let installs: String = fighter_names.iter()
+    let installs: String = fighter_names
+        .iter()
         .map(|f| format!("    {f}::install();\n"))
         .collect();
 
     files.push(GeneratedFile {
         rel_path: "src/lib.rs".into(),
         contents: format!(
-r#"// Auto-generated by SSBU Hitbox Editor
+            r#"// Auto-generated by Visionary
 #![feature(proc_macro_hygiene)]
 #![allow(unused_macros, unused_imports)]
 
@@ -1033,7 +1193,7 @@ pub fn main() {{
         files.push(GeneratedFile {
             rel_path: format!("src/{fighter}/mod.rs"),
             contents: format!(
-r#"mod acmd;
+                r#"mod acmd;
 
 pub fn install() {{
     let agent = &mut smashline::Agent::new("{fighter}");
@@ -1067,7 +1227,10 @@ pub fn install() {{
         for (move_name, script) in &sorted_moves {
             let (fn_name, fn_src) = emit_move_fn(script, move_name);
             // The acmd script name used in agent.acmd() is "game_{movename_no_underscores}"
-            let acmd_name = format!("game_{}", move_name.to_lowercase().replace('_', "").replace(' ', ""));
+            let acmd_name = format!(
+                "game_{}",
+                move_name.to_lowercase().replace('_', "").replace(' ', "")
+            );
             acmd_src.push_str(&fn_src);
             acmd_src.push('\n');
             fn_entries.push((fn_name, acmd_name));
@@ -1101,7 +1264,8 @@ pub fn install() {{
     }
 
     // ── README.md ─────────────────────────────────────────────────────────
-    let move_list: String = edits.iter()
+    let move_list: String = edits
+        .iter()
         .map(|(f, m, _)| format!("- {f}: {m}"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -1152,11 +1316,11 @@ Download and place these in the same `plugins/` folder:
     files.push(GeneratedFile {
         rel_path: "info.toml".into(),
         contents: format!(
-r#"display_name = "{plugin_name}"
-authors = "SSBU Hitbox Editor"
+            r#"display_name = "{plugin_name}"
+authors = "Visionary"
 version = "1.0"
 description = """
-Hitbox mod generated by SSBU Hitbox Editor.
+Hitbox mod generated by Visionary.
 Edited moves:
 {move_list}
 """
@@ -1248,7 +1412,8 @@ echo Done! Your plugin is in target\aarch64-skyline-switch\release\
 echo Copy the .nro file to:
 echo   atmosphere\contents\01006A800016E000\romfs\skyline\plugins\
 pause
-"#.to_string(),
+"#
+        .to_string(),
     });
 
     ModProject {
@@ -1268,7 +1433,9 @@ pub fn export_acmd_source(
     let edits = vec![(fighter.to_string(), move_name.to_string(), script.clone())];
     let project = build_mod_project(&edits, &format!("{fighter}_{move_name}_mod"));
     // Return all files joined with separators for single-file save (legacy path)
-    project.files.iter()
+    project
+        .files
+        .iter()
         .map(|f| format!("// === {} ===\n{}", f.rel_path, f.contents))
         .collect::<Vec<_>>()
         .join("\n")
@@ -1277,8 +1444,6 @@ pub fn export_acmd_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::EffectScript;
-
     // ═══ Generated-source compile golden ════════════════════════════════════
 
     fn sample_project() -> ModProject {
@@ -1363,14 +1528,17 @@ mod tests {
     }
 
     /// Always materializes the generated project under the editor cache dir; with
-    /// HITBOX_COMPILE_GOLDEN=1 it additionally runs cargo-skyline on it (slow, network)
+    /// VISIONARY_COMPILE_GOLDEN=1 it additionally runs cargo-skyline on it (slow, network)
     /// to prove the codegen actually builds.
     #[test]
     fn generated_source_project_compiles() {
         let project = sample_project();
         assert!(project.files.iter().any(|f| f.rel_path == "Cargo.toml"));
         assert!(project.files.iter().any(|f| f.rel_path == "src/lib.rs"));
-        assert!(project.files.iter().any(|f| f.rel_path == "src/mario/acmd.rs"));
+        assert!(project
+            .files
+            .iter()
+            .any(|f| f.rel_path == "src/mario/acmd.rs"));
 
         let root = crate::scratch_dirs::app_storage_root().join("source-golden");
         let proj_root = root.join(&project.name);
@@ -1379,7 +1547,7 @@ mod tests {
             std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
             std::fs::write(&dest, &f.contents).unwrap();
         }
-        if std::env::var("HITBOX_COMPILE_GOLDEN").is_err() {
+        if std::env::var("VISIONARY_COMPILE_GOLDEN").is_err() {
             return;
         }
         let out = std::process::Command::new("cargo")
@@ -1400,9 +1568,7 @@ mod tests {
 
     // ── Helper: wrap a body line in a minimal effect function ─────────────────
     fn wrap_effect_fn(body: &str) -> String {
-        format!(
-            "unsafe extern \"C\" fn effect_test(agent: &mut L2CAgentBase) {{\n    {body}\n}}\n"
-        )
+        format!("unsafe extern \"C\" fn effect_test(agent: &mut L2CAgentBase) {{\n    {body}\n}}\n")
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1420,9 +1586,15 @@ mod tests {
         );
         let script = parse_effect_script(&src);
         let calls = script.to_effect_calls();
-        assert!(!calls.is_empty(), "bare EFFECT should produce at least one EffectCall, got 0");
-        assert_eq!(calls[0].effect_name, "test_effect",
-            "effect_name should be 'test_effect', got '{}'", calls[0].effect_name);
+        assert!(
+            !calls.is_empty(),
+            "bare EFFECT should produce at least one EffectCall, got 0"
+        );
+        assert_eq!(
+            calls[0].effect_name, "test_effect",
+            "effect_name should be 'test_effect', got '{}'",
+            calls[0].effect_name
+        );
     }
 
     /// Property 1b: bare EFFECT_FOLLOW produces EffectCall with follows_bone=true
@@ -1433,8 +1605,14 @@ mod tests {
         );
         let script = parse_effect_script(&src);
         let calls = script.to_effect_calls();
-        assert!(!calls.is_empty(), "bare EFFECT_FOLLOW should produce EffectCall");
-        assert!(calls[0].follows_bone, "EFFECT_FOLLOW should set follows_bone=true");
+        assert!(
+            !calls.is_empty(),
+            "bare EFFECT_FOLLOW should produce EffectCall"
+        );
+        assert!(
+            calls[0].follows_bone,
+            "EFFECT_FOLLOW should set follows_bone=true"
+        );
         assert_eq!(calls[0].effect_name, "follow_eff");
     }
 
@@ -1447,7 +1625,10 @@ mod tests {
         );
         let script = parse_effect_script(&src);
         let calls = script.to_effect_calls();
-        assert!(!calls.is_empty(), "bare AFTER_IMAGE4_ON_arg29 should produce EffectCall");
+        assert!(
+            !calls.is_empty(),
+            "bare AFTER_IMAGE4_ON_arg29 should produce EffectCall"
+        );
         assert_eq!(calls[0].effect_name, "sword_trail");
     }
 
@@ -1468,7 +1649,10 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 "#;
         let script = parse_effect_script(src);
         let calls = script.to_effect_calls();
-        assert!(!calls.is_empty(), "is_excute-wrapped EFFECT should produce EffectCall");
+        assert!(
+            !calls.is_empty(),
+            "is_excute-wrapped EFFECT should produce EffectCall"
+        );
         assert_eq!(calls[0].effect_name, "wrapped_eff");
     }
 
@@ -1485,8 +1669,14 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 "#;
         let script = parse_effect_script(src);
         let calls = script.to_effect_calls();
-        assert!(!calls.is_empty(), "should produce EffectCall after frame(10)");
-        assert_eq!(calls[0].active_start, 10, "active_start should be 10 after frame(10)");
+        assert!(
+            !calls.is_empty(),
+            "should produce EffectCall after frame(10)"
+        );
+        assert_eq!(
+            calls[0].active_start, 10,
+            "active_start should be 10 after frame(10)"
+        );
     }
 
     /// Preservation: non-EFFECT bare lines stay as Raw (no EffectCall produced)
@@ -1499,7 +1689,11 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 "#;
         let script = parse_effect_script(src);
         let calls = script.to_effect_calls();
-        assert!(calls.is_empty(), "non-EFFECT bare line should produce no EffectCall, got {}", calls.len());
+        assert!(
+            calls.is_empty(),
+            "non-EFFECT bare line should produce no EffectCall, got {}",
+            calls.len()
+        );
     }
 
     /// Preservation: for loop with is_excute still works
@@ -1518,7 +1712,12 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let script = parse_effect_script(src);
         let calls = script.to_effect_calls();
         // Loop runs 2 times, each spawning 1 effect at frames 4 and 8
-        assert_eq!(calls.len(), 2, "for loop should produce 2 EffectCalls, got {}", calls.len());
+        assert_eq!(
+            calls.len(),
+            2,
+            "for loop should produce 2 EffectCalls, got {}",
+            calls.len()
+        );
         assert_eq!(calls[0].active_start, 4);
         assert_eq!(calls[1].active_start, 8);
     }

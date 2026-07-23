@@ -1,3 +1,4 @@
-#!/bin/bash
-cargo build 2>&1 | tee tmp/hitbox_build.txt
-echo "Exit: $?"
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build "$@"
