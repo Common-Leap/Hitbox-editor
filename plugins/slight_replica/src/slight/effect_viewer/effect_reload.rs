@@ -6,7 +6,7 @@
 //! UNLOAD then LOAD the slot — forcing a real re-parse of the (arcrop-redirected) file.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
@@ -98,7 +98,6 @@ static DRAIN_FIRES: AtomicU64 = AtomicU64::new(0);
 /// the a4d90 call it makes as the working reference to diff our co-load against.
 static GAME_ALUCARD_LOADING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-
 #[skyline::hook(offset = DRAIN_QUEUE_OFFSET)]
 fn hook_drain_queue(obj: *mut u64) {
     // Capture the queue object the game drains so our pump can drive the same one.
@@ -147,12 +146,7 @@ fn build_effect_set(
     zero: u64,
 ) -> u64;
 
-/// OBSERVE the emitter builder (a4d90). The set diff proved our co-loaded set is built only
-/// PARTIALLY — its effect-parameter region (inside the 0x540-byte object) stays stale, while the
-/// assist's identical load fills it. a4d90 builds the set from `effect_data` (param_3) using the
-/// mode `flag` (param_5 = *(byte*)mgr+0x194b8). Log both loads' args + the first bytes of the
-/// effect-data section: if `effect_data` content or `flag` differ between the assist and our
-/// co-load, that's the root cause of the params-less build. Read-only — always calls original.
+/// Observe emitter-set construction for the donor co-load diagnostics.
 #[skyline::hook(offset = 0xa4d90)]
 fn hook_build_effect_set(
     p1: u64,
@@ -226,9 +220,25 @@ pub static TEX_FORCE_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 
 #[skyline::hook(offset = 0x93f10)]
 fn hook_tex_guard(param_1: *mut u8) -> bool {
-    // Force DISABLED: overriding a running effect's state byte froze the game. Pass through.
+    // Force DISABLED: overriding a running effect's state byte froze the game. Observe the
+    // carrier only; reaching this hook proves the manager scheduled its texture-upload pass.
     let _ = &TEX_FORCE_BUDGET;
-    original!()(param_1)
+    let result = original!()(param_1);
+    if param_1 as usize == AUTO_CARRIER_SET.load(Ordering::Relaxed) {
+        static LAST_SET: AtomicUsize = AtomicUsize::new(0);
+        static N: AtomicU64 = AtomicU64::new(0);
+        let set = param_1 as usize;
+        if LAST_SET.swap(set, Ordering::Relaxed) != set {
+            N.store(0, Ordering::Relaxed);
+        }
+        if N.fetch_add(1, Ordering::Relaxed) < 40 {
+            let state = unsafe { *param_1.add(0x20) };
+            dlog(&format!(
+                "TEX_GUARD carrier set={set:#x} state=0x{state:02x} result={result}"
+            ));
+        }
+    }
+    result
 }
 
 #[skyline::hook(offset = 0x44de70)]
@@ -654,34 +664,6 @@ const FILESYSTEM_INFO_OFFSET: usize = 0x5331f20;
 #[skyline::from_offset(ENSURE_DIR_LOADED_OFFSET)]
 fn ensure_dir_loaded(filesystem: *mut u64, dir_index: u32) -> u64;
 
-/// The REAL dir-load ENQUEUE (FUN_03540860). `ensure_dir_loaded` only calls this when the dir
-/// descriptor's `+8 & 1 == 0` (not loaded); our alucard dir has `+8 = 0x01` (bit0 set) so it
-/// short-circuits to a refcount and NEVER enqueues — which is exactly why PURE_GAME_LOADER never
-/// completed. Calling 3540860 DIRECTLY forces the enqueue: it marks the descriptor loading and
-/// queues the dir's files onto the async res worker, which loads them through the proper pipeline
-/// (real resource handles → set readiness → state advance → texture upload). Must be called under
-/// the service lock (ensure_dir_loaded wraps it in 39c1490/39c14a0 on `*service`).
-#[skyline::from_offset(0x3540860)]
-fn enqueue_dir_load(filesystem: *mut u64, dir_index: u32) -> u64;
-#[skyline::from_offset(0x39c1490)]
-fn res_svc_lock(mutex: u64);
-#[skyline::from_offset(0x39c14a0)]
-fn res_svc_unlock(mutex: u64);
-
-/// Force the REAL async load of a dir (bypassing ensure_dir_loaded's "already loaded" refcount
-/// short-circuit) by calling the enqueue directly under the service lock. Returns the descriptor.
-unsafe fn force_enqueue_dir(dir_index: u32) -> u64 {
-    let svc = filesystem();
-    if svc.is_null() {
-        return 0;
-    }
-    let mutex = *(svc as *const u64); // *service = the lock object ensure_dir_loaded locks
-    res_svc_lock(mutex);
-    let r = enqueue_dir_load(svc, dir_index);
-    res_svc_unlock(mutex);
-    r
-}
-
 /// OBSERVE the game's OWN dir-load requests. When something loads mid-match successfully (an
 /// Assist Trophy / Poké Ball summon), the game calls this — capturing the dir_index + the
 /// returned group's state byte reveals the working load path to replicate. Logs to a
@@ -787,9 +769,15 @@ fn hook_readiness(
             dlog(&format!("READY_CHK_GLOBAL fired total={}", g + 1));
         }
     }
-    let target = COLOAD_TICK_SET.load(Ordering::Relaxed);
-    if target != 0 && set as usize == target {
+    let coload = COLOAD_TICK_SET.load(Ordering::Relaxed);
+    let carrier = AUTO_CARRIER_SET.load(Ordering::Relaxed);
+    let target = set as usize;
+    if target != 0 && (target == coload || target == carrier) {
+        static LAST_SET: AtomicUsize = AtomicUsize::new(0);
         static N: AtomicU64 = AtomicU64::new(0);
+        if LAST_SET.swap(target, Ordering::Relaxed) != target {
+            N.store(0, Ordering::Relaxed);
+        }
         if N.fetch_add(1, Ordering::Relaxed) < 80 {
             unsafe {
                 let result = *out;
@@ -806,8 +794,13 @@ fn hook_readiness(
                 };
                 let state20 = *((set as usize + 0x20) as *const u8);
                 let setu = set as usize;
+                let owner = if target == carrier {
+                    "carrier"
+                } else {
+                    "coload"
+                };
                 dlog(&format!(
-                    "READY_CHK set={setu:#x} state20=0x{state20:02x} result={result:#x} busy610={busy610:#x} ha={handle_a:#x} ha+18={a18:#x} hb={handle_b:#x} hb+18={b18:#x}"
+                    "READY_CHK owner={owner} set={setu:#x} state20=0x{state20:02x} result={result:#x} busy610={busy610:#x} ha={handle_a:#x} ha+18={a18:#x} hb={handle_b:#x} hb+18={b18:#x}"
                 ));
             }
         }
@@ -872,17 +865,29 @@ extern "C" fn donor_serve_cb(
     capacity: usize,
     out_size: &mut usize,
 ) -> bool {
-    let bytes = match DONOR_BYTES.lock().get(&hash) {
-        Some(b) if b.len() <= capacity => b.clone(),
-        _ => return false,
-    };
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-    *out_size = bytes.len();
-    crate::slight::diag::note(format!("donor served {} B for {hash:#x}", bytes.len()));
-    mark(&format!(
-        "donor_served hash={hash:#x} bytes={}",
+    let size = {
+        let buffers = DONOR_BYTES.lock();
+        let bytes = match buffers.get(&hash) {
+            Some(bytes) if bytes.len() <= capacity => bytes,
+            _ => return false,
+        };
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
         bytes.len()
-    ));
+    };
+    *out_size = size;
+    if AUTO_CARRIER_PATH
+        .lock()
+        .as_deref()
+        .is_some_and(|path| smash::hash40(path) == hash)
+    {
+        let generation = DONOR_BYTES_GEN.load(Ordering::Acquire);
+        CARRIER_DISK_LOADED_GEN.store(generation, Ordering::Release);
+        mark(&format!(
+            "carrier_genuine_read hash={hash:#x} bytes={size} gen={generation}"
+        ));
+    }
+    crate::slight::diag::note(format!("donor served {size} B for {hash:#x}"));
+    mark(&format!("donor_served hash={hash:#x} bytes={size}",));
     true
 }
 
@@ -1104,6 +1109,21 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
 
 #[skyline::hook(offset = UNLOAD_EFFECTS_OFFSET)]
 fn hook_unload_effects(manager: *mut u64, handle: u32) {
+    // A retiring carrier's effect unload is what a swap has to wait for. It removes every entry
+    // name this folder registered, so a replacement created before it lands gets its own
+    // registrations wiped a few frames later — measured, every kind including the carrier's own
+    // went missing at frame 30 and never came back. The object being gone is not the same event:
+    // `get_num_of_active_item` reached zero well before this ran.
+    let carrier_unload = AUTO_CARRIER_PENDING_UNLOAD.load(Ordering::Relaxed) == handle as u64;
+    if AUTO_CARRIER_STATE.load(Ordering::Relaxed) == 2
+        && crate::slight::agent_extender::driver_has_ticked()
+    {
+        let slot = ACTIVE_SLOTS.lock().get(&handle).copied();
+        dlog(&format!(
+            "GAME_EFF_UNLOAD while_carrier_held handle={handle} slot={:?}",
+            slot.map(|s| (s.search_index, s.path_hash, s.result))
+        ));
+    }
     // Donor resources ride on the target's handle — release them when it goes.
     let derived: Vec<u32> = DONORS_LOADED
         .lock()
@@ -1115,6 +1135,16 @@ fn hook_unload_effects(manager: *mut u64, handle: u32) {
     }
     original!()(manager, handle);
     untrack_slot(handle);
+    // Acknowledge only after the game's unload has returned. The carrier pump runs on a game
+    // thread too, so its next observation now proves the effect owner finished releasing the
+    // resident file rather than merely entering this hook.
+    if carrier_unload
+        && AUTO_CARRIER_PENDING_UNLOAD
+            .compare_exchange(handle as u64, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        dlog(&format!("CARRIER_UNLOAD_SEEN handle={handle}"));
+    }
 }
 
 // ── Cross-fighter donor eff loading (smashline's "effect transplant" mechanism) ──
@@ -1143,6 +1173,196 @@ static DONORS_LOADED: LazyLock<Mutex<HashMap<u32, HashMap<u64, u32>>>> =
 /// can't read vanilla donor files, so the editor sends the bytes to inject as resident data).
 static DONOR_BYTES: LazyLock<Mutex<HashMap<u64, Vec<u8>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Whether the most recent donor-bytes snapshot actually changed. The editor legitimately
+/// repeats the same snapshot when it updates aliases/rules; treating that as new data needlessly
+/// destroys and recreates the live carrier.
+static DONOR_BYTES_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// A game-owned assist used to prove and then host the live donor load. State:
+/// 0 = disarmed, 1 = waiting for donor bytes/replacement, 2 = live,
+/// 3 = cleanup pending, 4 = waiting for the old same-path effect set to unload,
+/// 5 = waiting for the game's resource worker to finish the queued directory release.
+///
+/// Unlike the detached co-loader, this asks the game's ItemModule to create the donor's owning
+/// object. Its normal initialization then performs the blessed effect load that was already
+/// proven to populate texture/resource state correctly.
+static AUTO_CARRIER_PATH: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+static AUTO_CARRIER_STATE: AtomicU64 = AtomicU64::new(0);
+static AUTO_CARRIER_POLL: AtomicU64 = AtomicU64::new(0);
+/// Frames spent draining live effects from the carrier before its battle object is destroyed.
+/// Follow effects can outlive the fighter motion that spawned them; killing their EffectModule
+/// owner in the same frame leaves deferred GPU work pointing at a dead item.
+static AUTO_CARRIER_EFFECT_DRAIN: AtomicU64 = AtomicU64::new(0);
+static AUTO_CARRIER_ID: AtomicU64 = AtomicU64::new(0);
+static AUTO_CARRIER_RETIRING_ID: AtomicU64 = AtomicU64::new(0);
+static AUTO_CARRIER_WAIT: AtomicU64 = AtomicU64::new(0);
+/// Item kind of the carrier currently live or being retired. Teardown (state 3) runs after the
+/// editor has already withdrawn the carrier path, so the kind can no longer be derived from it —
+/// but it is exactly what proves a battle-object id still refers to our carrier.
+static AUTO_CARRIER_ITEM_KIND: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+/// Item kind of the carrier being retired. Separate from [`AUTO_CARRIER_ITEM_KIND`] because the
+/// replacement is now created before the outgoing object is gone, so the live kind has already
+/// moved on by the time the retired one needs identifying.
+static AUTO_CARRIER_RETIRING_KIND: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(-1);
+/// Real effect-kind hashes whose resource set belongs to the current carrier file.
+static AUTO_CARRIER_KINDS: LazyLock<Mutex<std::collections::HashSet<u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+/// Kinds registered by the outgoing carrier. `unload_effects` returns before the effect
+/// manager's deferred unregister removes them, so a replacement must wait until these hashes
+/// actually disappear. Loading the replacement sooner reuses the same handle and the delayed
+/// unregister then erases every newly registered kind about 30 frames later.
+static AUTO_CARRIER_RETIRING_KINDS: LazyLock<Mutex<std::collections::HashSet<u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+/// Reserve slot keeps the carrier out of Kirby's normal usable-item slot.
+const AUTO_CARRIER_SLOT: i32 = 1;
+/// Diagnostic threshold for a carrier swap. A stuck teardown is logged but never bypassed:
+/// building over a resource tree that still has an owner produces the invisible second-load
+/// state and leaks another parsed set, so it cannot be part of an indefinitely repeatable cycle.
+const CARRIER_SWAP_MAX_WAIT: u64 = 1800;
+
+/// Drop the effect manager's cached entry for the carrier folder so the next load of it fully
+/// re-parses. Returns how many handles were evicted.
+///
+/// Effect sets are cached per FOLDER, not per object: `load_effects` refcount-bumps and returns
+/// early once the handle is in the map at `mgr+0x193b0`, and `unload_effects` never removes it.
+/// So recreating the carrier object cannot pick up new content — measured directly, a brand-new
+/// object (`0x40000001`) came back with the same handle (`1463`) and the previous entry table,
+/// with the effect that had just been added absent. That is why every swap kept playing the
+/// first transplant. No amount of waiting for the old object helps; nothing about the old object
+/// is what is being reused.
+///
+/// Mangling the key makes the next lookup miss, so the load takes its full path and re-hashes
+/// every entry name. Crucially we do NOT reload here: the load that follows is the carrier
+/// item's own, which schedules its dependency dirs into the resource worker and gets the
+/// resulting GPU upload. A manual `load_effects` skips that and leaves the set invisible — the
+/// wall that stopped [`do_force_reread`].
+///
+/// The handle is resolved through the manager's KIND map, not through [`ACTIVE_SLOTS`]. Our own
+/// slot table is cleared by `untrack_slot` as soon as the outgoing object unloads, so by the time
+/// a swap gets here it is always empty for the carrier — the first attempt at this reported
+/// `evicted=0` for exactly that reason. The kind map is the table that outlives the object, which
+/// is what makes it both the cause of the staleness and the way to find it.
+unsafe fn evict_carrier_effect_handle(ef_file: &str) -> usize {
+    let manager = effect_manager();
+    if manager.is_null() {
+        return 0;
+    }
+    let mut handles: Vec<u32> = Vec::new();
+    // The handle observed while the previous carrier was live. Held separately because a swap to
+    // an entirely different effect shares no kind name with the content being replaced, so the
+    // current kinds alone would resolve nothing.
+    let remembered = AUTO_CARRIER_HANDLE.swap(0, Ordering::Relaxed) as u32;
+    if remembered != 0 {
+        handles.push(remembered);
+    }
+    for kind in AUTO_CARRIER_KINDS.lock().iter() {
+        if let Some((handle, _)) = kind_lookup(manager, *kind) {
+            handles.push(handle);
+        }
+    }
+    handles.sort_unstable();
+    handles.dedup();
+    let folder = eff_dir(ef_file).to_string();
+    let mut evicted = 0;
+    for handle in handles {
+        if evict_handle_from_manager_map(manager, handle) {
+            evicted += 1;
+            dlog(&format!(
+                "CARRIER_EVICT folder={folder} handle={handle} (next load re-parses)"
+            ));
+        }
+    }
+    evicted
+}
+
+/// Effect handle of the live carrier, remembered so a later swap can evict it even when the new
+/// content shares no entry name with the old. Zero when no carrier has been observed loaded.
+static AUTO_CARRIER_HANDLE: AtomicU64 = AtomicU64::new(0);
+/// Current carrier's effect-set object. Unlike the kind map, this exposes the render-resource
+/// state machine directly (`+0x20`: 0 loading, 3 ready) and lets the readiness hook distinguish
+/// "never scheduled" from "scheduled but waiting on a missing resource handle".
+static AUTO_CARRIER_SET: AtomicUsize = AtomicUsize::new(0);
+
+/// Effect handle whose `unload_effects` a pending swap is waiting to observe, or 0 when nothing
+/// is outstanding. Cleared by [`hook_unload_effects`].
+static AUTO_CARRIER_PENDING_UNLOAD: AtomicU64 = AtomicU64::new(0);
+
+/// Bumped whenever the editor stages different carrier bytes.
+static DONOR_BYTES_GEN: AtomicU64 = AtomicU64::new(0);
+/// The donor generation most recently delivered by Arcropolis through a genuine resource read.
+/// A changed snapshot must advance this through [`donor_serve_cb`] before it can be considered
+/// GPU-ready; hand-repointing the resident buffer only rebuilds CPU-side entry registrations.
+static CARRIER_DISK_LOADED_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Preserve the live carrier's kind names before an editor snapshot replaces the current
+/// mapping. A remove followed immediately by an add produces two snapshots; do not overwrite
+/// the first snapshot with the second one's not-yet-loaded kinds.
+fn remember_retiring_carrier_kinds() {
+    let current = AUTO_CARRIER_KINDS.lock();
+    if current.is_empty() {
+        return;
+    }
+    let mut retiring = AUTO_CARRIER_RETIRING_KINDS.lock();
+    if retiring.is_empty() {
+        retiring.extend(current.iter().copied());
+    }
+}
+
+/// Count outgoing kind names still present in the effect manager. The hook return only marks
+/// the start of the manager's deferred release; disappearance from this map is the completion
+/// event that makes it safe to reuse the carrier handle.
+unsafe fn retiring_carrier_kinds_present() -> usize {
+    let manager = effect_manager();
+    if manager.is_null() {
+        return AUTO_CARRIER_RETIRING_KINDS.lock().len();
+    }
+    AUTO_CARRIER_RETIRING_KINDS
+        .lock()
+        .iter()
+        .filter(|kind| kind_lookup(manager, **kind).is_some())
+        .count()
+}
+
+/// Record the effect handle the carrier's blessed load produced, by resolving any of its entry
+/// names through the manager's kind map.
+unsafe fn remember_carrier_handle() {
+    let manager = effect_manager();
+    if manager.is_null() {
+        return;
+    }
+    let handle = AUTO_CARRIER_KINDS
+        .lock()
+        .iter()
+        .find_map(|kind| kind_lookup(manager, *kind))
+        .map(|(handle, _)| handle);
+    if let Some(handle) = handle {
+        AUTO_CARRIER_HANDLE.store(handle as u64, Ordering::Relaxed);
+        let set = unsafe { set_object_for_handle(manager, handle) };
+        AUTO_CARRIER_SET.store(set, Ordering::Release);
+        let (slot, state, tex4e0) = unsafe {
+            (
+                manager_slot_for_handle(manager, handle),
+                (set != 0).then(|| *((set + 0x20) as *const u8)),
+                (set != 0).then(|| *((set + 0x4e0) as *const usize)),
+            )
+        };
+        dlog(&format!(
+            "AUTO_CARRIER_HANDLE handle={handle} slot={slot:?} set={set:#x} state={state:?} tex4e0={tex4e0:?}"
+        ));
+    }
+}
+
+fn carrier_item_kind(ef_file: &str) -> Option<i32> {
+    let path = ef_file.to_lowercase();
+    if path.contains("/assist/bomberman/") {
+        Some(*smash::lib::lua_const::ITEM_KIND_BOMBERMAN)
+    } else if path.contains("/assist/alucard/") {
+        Some(*smash::lib::lua_const::ITEM_KIND_ALUCARD)
+    } else {
+        None
+    }
+}
 
 /// Overwrite the immediate-flush freeze marker: the LAST value written names the last step
 /// reached before a hang (diag notes are ring-buffered and lost on freeze; this isn't).
@@ -1162,17 +1382,33 @@ pub fn mark(step: &str) {
 
 /// Store editor-supplied stripped donor buffers (keyed by donor eff FILE path).
 pub fn set_donor_bytes(list: Vec<(String, Vec<u8>)>) {
+    // Each editor snapshot starts a clean diagnostic trail. The old append-only file made
+    // an earlier Alucard experiment look like it was still part of a later Bomberman load.
+    let _ = std::fs::write("sd:/effect_viewer_marks.txt", "");
     let sizes: Vec<usize> = list.iter().map(|(_, b)| b.len()).collect();
     mark(&format!(
         "recv_donor_bytes count={} sizes={sizes:?}",
         list.len()
     ));
-    let mut map = DONOR_BYTES.lock();
+    let mut next = HashMap::new();
     for (path, bytes) in list {
-        map.insert(smash::hash40(&path.to_lowercase()), bytes);
+        next.insert(smash::hash40(&path.to_lowercase()), bytes);
     }
+    let mut map = DONOR_BYTES.lock();
+    let changed = *map != next;
+    if changed {
+        *map = next;
+        // Carrier bytes can change size/content while retaining the same stable Bomberman path.
+        // Force Arcropolis registration to be refreshed before the replacement object loads.
+        DONOR_SERVED.lock().clear();
+        DONOR_BYTES_GEN.fetch_add(1, Ordering::Relaxed);
+    }
+    DONOR_BYTES_CHANGED.store(changed, Ordering::Release);
     crate::slight::diag::note(format!("donor bytes: {} buffer(s) staged", map.len()));
-    mark(&format!("staged_donor_bytes count={}", map.len()));
+    mark(&format!(
+        "staged_donor_bytes count={} changed={changed}",
+        map.len()
+    ));
 }
 
 /// Minimal standard-alphabet base64 decoder (no crate dep in the plugin build).
@@ -1226,8 +1462,6 @@ struct PendingDonor {
     subres_done: bool,
     /// Consecutive arcrop read-misses on the .eff (bytes not served) → give up (stale donor).
     read_misses: u32,
-    /// Forced the REAL async dir-load enqueue (FUN_03540860) — one-shot.
-    enqueue_forced: bool,
     tries: u32,
 }
 
@@ -1392,11 +1626,7 @@ pub fn dump_text_windows() {
 /// Long window (~60s) to test whether the game's OWN async resource worker ever completes a
 /// mid-match folder load (vs our manual byte-fill, which bypasses the resource-handle setup).
 const DONOR_MAX_TRIES: u32 = 600;
-/// When true, do NOT manually fill the resident slot — let the game's real loader do it, so
-/// resource handles get set up properly (the readiness check the render gate needs). Tests
-/// "reuse the game's loader" end-to-end. Build aw2: now paired with force_enqueue_dir (the REAL
-/// FUN_03540860 enqueue) which the old ensure_dir_loaded refcount-short-circuit was skipping — so
-/// this finally exercises the true async pipeline. Poll whether the worker makes the eff resident.
+/// Use the game's asynchronous loader end-to-end without manually filling resident buffers.
 const PURE_GAME_LOADER: bool = false;
 /// ASSIST-STYLE co-load (build 2026-07-21ac): replicate the exact assist-summon recipe traced
 /// on-device — call `ensure_dir_loaded(dir)` each try then `load_effects(handle, idx)` IMMEDIATELY,
@@ -1444,6 +1674,78 @@ fn eff_dir(path: &str) -> &str {
 /// (executed on the game thread by [`pump_donor_queue`]). Keys + donors are normalized
 /// to effect FOLDERS (the unit load_effects actually works in).
 pub fn set_donor_specs(specs: Vec<DonorSpec>) {
+    let carrier_path = specs.iter().find_map(|spec| {
+        let target = eff_dir(&spec.target.to_lowercase()).to_string();
+        if target != "effect/fighter/kirby" {
+            return None;
+        }
+        spec.donors
+            .iter()
+            .map(|path| path.to_lowercase())
+            .find(|path| carrier_item_kind(path).is_some())
+    });
+    // The editor pushes bytes first, then specs. Some editor actions publish a spec snapshot
+    // that omits the carrier target while its bytes are still staged; that is a partial push,
+    // not a removal. Honouring it destroys the live carrier and recreates it on the next
+    // snapshot, and every ACMD request made in that window escapes to the fighter's original
+    // effect — the "transplant takes several attempts to become live" symptom. A carrier is
+    // retired only when its bytes are genuinely withdrawn.
+    let carrier_path = carrier_path.or_else(|| {
+        let current = AUTO_CARRIER_PATH.lock().clone()?;
+        let staged = DONOR_BYTES.lock().contains_key(&smash::hash40(&current));
+        if staged {
+            dlog(&format!(
+                "carrier_spec_missing_but_bytes_staged path={current}"
+            ));
+        }
+        staged.then_some(current)
+    });
+    let bytes_changed = DONOR_BYTES_CHANGED.swap(false, Ordering::AcqRel);
+    let preserve_carrier = {
+        let mut current = AUTO_CARRIER_PATH.lock();
+        let had_carrier = current.is_some()
+            || AUTO_CARRIER_ID.load(Ordering::Relaxed) != 0
+            || AUTO_CARRIER_RETIRING_ID.load(Ordering::Relaxed) != 0
+            || AUTO_CARRIER_PENDING_UNLOAD.load(Ordering::Relaxed) != 0
+            || !AUTO_CARRIER_RETIRING_KINDS.lock().is_empty();
+        let state = AUTO_CARRIER_STATE.load(Ordering::Relaxed);
+        let preserve = carrier_path.is_some()
+            && *current == carrier_path
+            && !bytes_changed
+            && matches!(state, 1 | 2 | 4 | 5);
+        if !preserve {
+            *current = carrier_path.clone();
+            AUTO_CARRIER_STATE.store(
+                if carrier_path.is_some() {
+                    // A quick remove→transplant can arrive before the old item finishes its DEAD
+                    // transition. Wait for that resource owner to disappear before creating the
+                    // replacement, or load_effects hands back the old kind table.
+                    if had_carrier {
+                        4
+                    } else {
+                        1
+                    }
+                } else if had_carrier {
+                    3
+                } else {
+                    0
+                },
+                Ordering::Relaxed,
+            );
+            AUTO_CARRIER_POLL.store(0, Ordering::Relaxed);
+        }
+        preserve
+    };
+
+    // A specs message is a full editor snapshot. Drop work and remaps from the prior snapshot
+    // before installing it so changing donors cannot keep an old effect armed.
+    PENDING_DONORS.lock().clear();
+    DONOR_QUEUE.lock().clear();
+    if !preserve_carrier {
+        remember_retiring_carrier_kinds();
+        CO_LOADED_REMAP.lock().clear();
+        AUTO_CARRIER_KINDS.lock().clear();
+    }
     {
         let mut map = DONOR_SPECS.lock();
         map.clear();
@@ -1461,9 +1763,585 @@ pub fn set_donor_specs(specs: Vec<DonorSpec>) {
         .iter()
         .map(|(h, s)| (*h, s.path_hash))
         .collect();
-    if !active.is_empty() {
-        *DONOR_QUEUE.lock() = active;
+    *DONOR_QUEUE.lock() = active;
+    // Populate the requested `_os` → stored-real mapping as soon as the snapshot arrives. The
+    // carrier may still need a few game frames to replace its resource object; ACMD requests in
+    // that short window can now be recognized and buffered instead of escaping to Kirby.
+    if !preserve_carrier {
+        if let Some(path) = carrier_path.as_deref() {
+            build_remap_from_served(path);
+        }
     }
+    dlog(&format!(
+        "carrier_snapshot path={carrier_path:?} bytes_changed={bytes_changed} preserve={preserve_carrier}"
+    ));
+}
+
+/// Ask Kirby's ItemModule to create a game-owned carrier for a supported assist
+/// donor. This intentionally runs once from Kirby's own game-thread line callback. The donor
+/// callback and `_os` remap are installed before item creation, so the object's normal resource
+/// load sees the editor-supplied bytes from its first read. It lives in reserve item slot 1,
+/// outside Kirby's usable hand, and its battle-object model is hidden every frame. If the game
+/// expires it, the missing reserve object automatically re-arms the carrier on the next frame.
+pub unsafe fn pump_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccessor) {
+    if boma.is_null() {
+        return;
+    }
+    if smash::app::utility::get_kind(&mut *boma) != *smash::lib::lua_const::FIGHTER_KIND_KIRBY {
+        return;
+    }
+
+    let state = AUTO_CARRIER_STATE.load(Ordering::Relaxed);
+    if state == 0 {
+        return;
+    }
+    if state == 3 {
+        if !remove_auto_carrier(boma) {
+            return;
+        }
+        let retiring = AUTO_CARRIER_RETIRING_ID.load(Ordering::Relaxed);
+        let retiring_kind = AUTO_CARRIER_RETIRING_KIND.load(Ordering::Relaxed) as i32;
+        if carrier_boma_for_id(retiring, retiring_kind).is_some() {
+            conceal_auto_carrier(retiring, retiring_kind);
+            return;
+        }
+        AUTO_CARRIER_RETIRING_ID.store(0, Ordering::Relaxed);
+        AUTO_CARRIER_WAIT.store(0, Ordering::Relaxed);
+        AUTO_CARRIER_STATE.store(0, Ordering::Relaxed);
+        return;
+    }
+    let Some(ef_file) = AUTO_CARRIER_PATH.lock().clone() else {
+        AUTO_CARRIER_STATE.store(0, Ordering::Relaxed);
+        return;
+    };
+    let Some(item_kind) = carrier_item_kind(&ef_file) else {
+        AUTO_CARRIER_STATE.store(0, Ordering::Relaxed);
+        return;
+    };
+
+    if state == 4 {
+        // The replacement snapshot may have arrived before cleanup state 3 got a game
+        // frame. Retire the still-current object first, then use the normal unload wait.
+        if AUTO_CARRIER_ID.load(Ordering::Relaxed) != 0 {
+            if AUTO_CARRIER_HANDLE.load(Ordering::Relaxed) == 0 {
+                remember_carrier_handle();
+                if AUTO_CARRIER_HANDLE.load(Ordering::Relaxed) == 0 {
+                    let stalled = AUTO_CARRIER_POLL.fetch_add(1, Ordering::Relaxed);
+                    if stalled % 120 == 0 {
+                        dlog(&format!(
+                            "AUTO_CARRIER_AWAIT_HANDLE stalled={stalled}; carrier kept live"
+                        ));
+                    }
+                    return;
+                }
+            }
+            remove_auto_carrier(boma);
+            return;
+        }
+        // The replacement cannot be created until the outgoing carrier's effect handle has been
+        // fully released. The unload hook returns before the manager's deferred unregister;
+        // reusing the handle during that gap makes the old cleanup erase the replacement's kinds.
+        let stalled = AUTO_CARRIER_POLL.fetch_add(1, Ordering::Relaxed);
+        if stalled == CARRIER_SWAP_MAX_WAIT {
+            dlog("AUTO_CARRIER_SWAP_STALLED old effect owner has not released");
+        }
+        // Keep the outgoing carrier hidden while it dies, but never gate on it. Battle-object
+        // ids are recycled, so once it stops naming our carrier the reference is dropped rather
+        // than left to match some unrelated object later.
+        let retiring = AUTO_CARRIER_RETIRING_ID.load(Ordering::Relaxed);
+        let retiring_kind = AUTO_CARRIER_RETIRING_KIND.load(Ordering::Relaxed) as i32;
+        if carrier_boma_for_id(retiring, retiring_kind).is_some() {
+            conceal_auto_carrier(retiring, retiring_kind);
+            return;
+        }
+        AUTO_CARRIER_RETIRING_ID.store(0, Ordering::Relaxed);
+        AUTO_CARRIER_RETIRING_KIND.store(-1, Ordering::Relaxed);
+        let active = smash::app::lua_bind::ItemManager::get_num_of_active_item(item_kind);
+        if active != 0 {
+            return;
+        }
+        // The object being gone is NOT the same event as its effect handle being released: the
+        // item count reached zero while the unload was still ~30 frames out, and the replacement
+        // built in that window had every one of its kinds purged. Wait for the unload itself.
+        let pending = AUTO_CARRIER_PENDING_UNLOAD.load(Ordering::Relaxed);
+        if pending != 0 {
+            if stalled % 120 == 0 {
+                dlog(&format!(
+                    "AUTO_CARRIER_AWAIT_UNLOAD handle={pending} stalled={stalled}"
+                ));
+            }
+            return;
+        }
+        let registered = retiring_carrier_kinds_present();
+        if registered != 0 {
+            if stalled % 30 == 0 {
+                dlog(&format!(
+                    "AUTO_CARRIER_AWAIT_KIND_UNREGISTER registered={registered} stalled={stalled}"
+                ));
+            }
+            return;
+        }
+        if AUTO_CARRIER_WAIT.load(Ordering::Relaxed) == 0 {
+            dlog(&format!("AUTO_CARRIER_KIND_UNREGISTERED stalled={stalled}"));
+        }
+        // Give the manager two more frames after the kind map is empty before reusing its handle.
+        let waited = AUTO_CARRIER_WAIT.fetch_add(1, Ordering::Relaxed);
+        if waited < 2 {
+            return;
+        }
+        AUTO_CARRIER_WAIT.store(0, Ordering::Relaxed);
+        AUTO_CARRIER_RETIRING_KINDS.lock().clear();
+        AUTO_CARRIER_SET.store(0, Ordering::Release);
+        // Submit the same recursive release used by the game's resource-owner destructor.
+        // Usually the item's own teardown has already dropped this count to zero; the wrapper
+        // detects that and does not underflow it. Either way, state 5 waits for the worker to
+        // make the file genuinely non-resident before another first-load cycle can begin.
+        let dir_hash = smash::hash40(eff_dir(&ef_file));
+        let release =
+            crate::slight::effect_viewer::resource_reload::release_resident_directory(dir_hash);
+        mark(&format!(
+            "carrier_native_directory_release hash={dir_hash:#x} result={release:?}"
+        ));
+        AUTO_CARRIER_POLL.store(0, Ordering::Relaxed);
+        AUTO_CARRIER_STATE.store(5, Ordering::Release);
+        return;
+    }
+
+    if state == 5 {
+        use crate::slight::effect_viewer::resource_reload as rr;
+        let file_hash = smash::hash40(&ef_file.to_lowercase());
+        let dir_hash = smash::hash40(eff_dir(&ef_file));
+        let file = rr::resident_file_state(file_hash);
+        let directory = rr::resident_directory_state(dir_hash);
+        let file_released = file
+            .as_ref()
+            .map_or(true, |state| {
+                !state.filepath_loaded && state.data == 0 && state.ref_count == 0
+            });
+        let directory_released = directory
+            .as_ref()
+            .map_or(true, |state| {
+                state.ref_count == 0 && state.incoming_request_count == 0
+            });
+        let waited = AUTO_CARRIER_POLL.fetch_add(1, Ordering::Relaxed);
+        if waited % 120 == 0 || (file_released && directory_released) {
+            dlog(&format!(
+                "AUTO_CARRIER_RESOURCE_RELEASE wait={waited} file={file:?} directory={directory:?}"
+            ));
+        }
+        if !file_released || !directory_released {
+            if waited == CARRIER_SWAP_MAX_WAIT {
+                dlog("AUTO_CARRIER_RESOURCE_RELEASE_STALLED; preserving old ownership boundary");
+            }
+            return;
+        }
+        mark(&format!(
+            "carrier_native_release_complete file={file:?} directory={directory:?}"
+        ));
+        AUTO_CARRIER_POLL.store(0, Ordering::Relaxed);
+        AUTO_CARRIER_STATE.store(1, Ordering::Release);
+        return;
+    }
+
+    if state == 2 {
+        let held_kind =
+            smash::app::lua_bind::ItemModule::get_have_item_kind(boma, AUTO_CARRIER_SLOT);
+        let held_id = smash::app::lua_bind::ItemModule::get_have_item_id(boma, AUTO_CARRIER_SLOT);
+        let expected_id = AUTO_CARRIER_ID.load(Ordering::Relaxed);
+        if held_kind != item_kind
+            || held_id != expected_id
+            || !smash::app::sv_battle_object::is_active(held_id as u32)
+        {
+            dlog(&format!(
+                "AUTO_CARRIER_LOST held_kind={held_kind:#x} held_id={held_id:#x} expected_id={expected_id:#x}; rearming"
+            ));
+            AUTO_CARRIER_ID.store(0, Ordering::Relaxed);
+            AUTO_CARRIER_PENDING_UNLOAD.store(
+                AUTO_CARRIER_HANDLE.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            remember_retiring_carrier_kinds();
+            AUTO_CARRIER_RETIRING_ID.store(expected_id, Ordering::Relaxed);
+            AUTO_CARRIER_RETIRING_KIND.store(item_kind as i64, Ordering::Relaxed);
+            retire_auto_carrier_id(expected_id, item_kind);
+            AUTO_CARRIER_POLL.store(0, Ordering::Relaxed);
+            AUTO_CARRIER_WAIT.store(0, Ordering::Relaxed);
+            AUTO_CARRIER_STATE.store(4, Ordering::Relaxed);
+            return;
+        }
+        stabilize_auto_carrier(held_id, item_kind);
+        let retiring = AUTO_CARRIER_RETIRING_ID.load(Ordering::Relaxed);
+        if retiring != 0
+            && carrier_boma_for_id(
+                retiring,
+                AUTO_CARRIER_RETIRING_KIND.load(Ordering::Relaxed) as i32,
+            )
+            .is_none()
+        {
+            AUTO_CARRIER_RETIRING_ID.store(0, Ordering::Relaxed);
+            AUTO_CARRIER_RETIRING_KIND.store(-1, Ordering::Relaxed);
+        }
+        let poll = AUTO_CARRIER_POLL.fetch_add(1, Ordering::Relaxed);
+        // The blessed load can register kinds a frame or two after `have_item` returns, so keep
+        // retrying until the handle is known. A swap that finds it still zero cannot evict, and
+        // silently keeps serving the previous content.
+        if AUTO_CARRIER_HANDLE.load(Ordering::Relaxed) == 0 && poll < 120 {
+            remember_carrier_handle();
+        }
+        if matches!(poll, 0 | 30 | 120) || poll % 600 == 0 {
+            log_carrier_state(&format!("reserve_frame_{poll}"), boma, item_kind, &ef_file);
+        }
+        return;
+    }
+
+    if !register_donor_serve(&ef_file) {
+        return;
+    }
+    build_remap_from_served(&ef_file);
+
+    // Never invalidate an assist file while another real object of that kind can still own it.
+    // The hidden carrier is already gone before a swap reaches state 1, so a non-zero count here
+    // belongs to game activity outside this state machine.
+    let active = smash::app::lua_bind::ItemManager::get_num_of_active_item(item_kind);
+    if active != 0 {
+        let stalled = AUTO_CARRIER_POLL.fetch_add(1, Ordering::Relaxed);
+        if stalled % 120 == 0 {
+            dlog(&format!(
+                "AUTO_CARRIER_AWAIT_KIND_FREE item_kind={item_kind:#x} active={active}"
+            ));
+        }
+        return;
+    }
+
+    if AUTO_CARRIER_STATE
+        .compare_exchange(1, 2, Ordering::SeqCst, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    if AUTO_CARRIER_ID.load(Ordering::Relaxed) != 0 {
+        remove_auto_carrier(boma);
+        // POLL deliberately keeps counting: it is reset when the swap starts, so bouncing
+        // between states 1 and 4 cannot reset the backstop and spin forever.
+        AUTO_CARRIER_STATE.store(4, Ordering::Relaxed);
+        return;
+    }
+    // The resource tree reached this state only through the game's queued release and the state-5
+    // completion poll. Do not raw-clear its file/directory records here: those records contain
+    // the worker's dependency ownership, and reconstructing over half-torn-down vectors is what
+    // made every second load register kinds but leave their render resources invisible.
+    //
+    // The parsed effect-manager entry is a separate cache. Its old slot has completed unload and
+    // kind unregister by now; make the next blessed item load miss that cache and fully parse the
+    // freshly read EFF.
+    AUTO_CARRIER_PENDING_UNLOAD.store(0, Ordering::Relaxed);
+    let generation = DONOR_BYTES_GEN.load(Ordering::Acquire);
+    let disk_generation = CARRIER_DISK_LOADED_GEN.load(Ordering::Acquire);
+    let file_hash = smash::hash40(&ef_file.to_lowercase());
+    let file_state =
+        crate::slight::effect_viewer::resource_reload::resident_file_state(file_hash);
+    let dir_state = crate::slight::effect_viewer::resource_reload::resident_directory_state(
+        smash::hash40(eff_dir(&ef_file)),
+    );
+    let evicted = evict_carrier_effect_handle(&ef_file);
+    mark(&format!(
+        "auto_carrier_pre_reserve path={ef_file} item_kind={item_kind:#x} gen={generation} disk_gen={disk_generation} file={file_state:?} directory={dir_state:?} handle_evicted={evicted}"
+    ));
+    let have_result = smash::app::lua_bind::ItemModule::have_item(
+        boma,
+        smash::app::ItemKind(item_kind),
+        0,
+        AUTO_CARRIER_SLOT,
+        false,
+        false,
+    );
+    let held_kind = smash::app::lua_bind::ItemModule::get_have_item_kind(boma, AUTO_CARRIER_SLOT);
+    let held_id = smash::app::lua_bind::ItemModule::get_have_item_id(boma, AUTO_CARRIER_SLOT);
+    AUTO_CARRIER_ID.store(held_id, Ordering::Relaxed);
+    AUTO_CARRIER_ITEM_KIND.store(item_kind as i64, Ordering::Relaxed);
+    mark(&format!(
+        "auto_carrier_after_reserve result={have_result:#x} held_kind={held_kind:#x} held_id={held_id:#x}"
+    ));
+    smash::app::lua_bind::ItemModule::set_have_item_visibility(boma, false, AUTO_CARRIER_SLOT);
+    smash::app::lua_bind::ItemModule::set_have_item_hold_anim(boma, false, AUTO_CARRIER_SLOT);
+    stabilize_auto_carrier(held_id, item_kind);
+    remember_carrier_handle();
+    AUTO_CARRIER_POLL.store(0, Ordering::Relaxed);
+    log_carrier_state("after_reserve_hidden", boma, item_kind, &ef_file);
+    mark("auto_carrier_kept_in_hidden_reserve");
+    dlog(&format!(
+        "AUTO_CARRIER_RESERVE path={ef_file} item_kind={item_kind:#x} have={have_result:#x} held_kind={held_kind:#x} held_id={held_id:#x}"
+    ));
+}
+
+/// Resolve a carrier battle-object id, but ONLY if it still refers to an item of the carrier's
+/// kind. Battle-object ids are recycled, so a stale id can name a completely different object —
+/// including a fighter. Everything that hides, pins or kills the carrier goes through here: an
+/// unguarded id once drove `set_pos` to y=-1000 and a forced DEAD status onto whatever had
+/// inherited it, which left Kirby respawning under the stage forever.
+unsafe fn carrier_boma_for_id(
+    held_id: u64,
+    item_kind: i32,
+) -> Option<*mut smash::app::BattleObjectModuleAccessor> {
+    if held_id == 0
+        || held_id > u32::MAX as u64
+        || !smash::app::sv_battle_object::is_active(held_id as u32)
+    {
+        return None;
+    }
+    let boma = smash::app::sv_battle_object::module_accessor(held_id as u32);
+    if boma.is_null() {
+        return None;
+    }
+    let category = smash::app::utility::get_category(&mut *boma);
+    if category != *smash::lib::lua_const::BATTLE_OBJECT_CATEGORY_ITEM {
+        return None;
+    }
+    (smash::app::utility::get_kind(&mut *boma) == item_kind).then_some(boma)
+}
+
+unsafe fn conceal_auto_carrier(held_id: u64, item_kind: i32) {
+    if let Some(item_boma) = carrier_boma_for_id(held_id, item_kind) {
+        smash::app::lua_bind::VisibilityModule::set_whole(item_boma, false);
+    }
+}
+
+unsafe fn stabilize_auto_carrier(held_id: u64, item_kind: i32) {
+    let Some(item_boma) = carrier_boma_for_id(held_id, item_kind) else {
+        return;
+    };
+    smash::app::lua_bind::VisibilityModule::set_whole(item_boma, false);
+    // `have_item` gives assist items the generic item lifetime even in the reserve slot.
+    // Refresh it before it reaches LOST, and disable the generic lost-effect flag. Without
+    // this, Bomberman expires every ~20 seconds and the automatic replacement visibly pulses.
+    const CARRIER_LIFE: i32 = 60 * 60 * 60;
+    smash::app::lua_bind::WorkModule::set_int(
+        item_boma,
+        CARRIER_LIFE,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_INT_LIFE_TIME,
+    );
+    smash::app::lua_bind::WorkModule::set_int(
+        item_boma,
+        CARRIER_LIFE,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_INT_LIFE_TIME_MAX,
+    );
+    smash::app::lua_bind::WorkModule::on_flag(
+        item_boma,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_FLAG_IMMORTAL,
+    );
+    smash::app::lua_bind::WorkModule::off_flag(
+        item_boma,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_FLAG_AUTO_PLAY_LOST_EFFECT,
+    );
+}
+
+unsafe fn retire_auto_carrier_id(held_id: u64, item_kind: i32) {
+    let Some(item_boma) = carrier_boma_for_id(held_id, item_kind) else {
+        return;
+    };
+    smash::app::lua_bind::VisibilityModule::set_whole(item_boma, false);
+    // Some item-death visuals bypass the public EffectModule request family. Retire the hidden
+    // storage object far below the stage so those native bursts cannot flash beside Kirby while
+    // a genuinely changed carrier snapshot is being swapped in.
+    let offstage = smash::phx::Vector3f {
+        x: 0.0,
+        y: -1000.0,
+        z: 0.0,
+    };
+    smash::app::lua_bind::PostureModule::set_pos(item_boma, &offstage);
+    smash::app::lua_bind::WorkModule::off_flag(
+        item_boma,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_FLAG_AUTO_PLAY_LOST_EFFECT,
+    );
+    // stabilize_auto_carrier makes the hidden item immortal. Clear that before DEAD or a
+    // detached carrier can remain active forever, blocking every later same-path replacement.
+    smash::app::lua_bind::WorkModule::off_flag(
+        item_boma,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_FLAG_IMMORTAL,
+    );
+    smash::app::lua_bind::WorkModule::set_int(
+        item_boma,
+        0,
+        *smash::lib::lua_const::ITEM_INSTANCE_WORK_INT_LIFE_TIME,
+    );
+    smash::app::lua_bind::StatusModule::change_status_force(
+        item_boma,
+        *smash::lib::lua_const::ITEM_STATUS_KIND_DEAD,
+        false,
+    );
+}
+
+/// Drain every live carrier-owned effect, wait for deferred effect/GPU cleanup to advance, then
+/// retire the item. Returns true once retirement has been submitted (or no carrier remains).
+unsafe fn remove_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccessor) -> bool {
+    let expected = AUTO_CARRIER_ID.load(Ordering::Relaxed);
+    if expected == 0 {
+        AUTO_CARRIER_EFFECT_DRAIN.store(0, Ordering::Relaxed);
+        return true;
+    }
+    let item_kind = AUTO_CARRIER_ITEM_KIND.load(Ordering::Relaxed) as i32;
+    let drain = AUTO_CARRIER_EFFECT_DRAIN.load(Ordering::Relaxed);
+    if drain == 0 {
+        if let Some(item_boma) = carrier_boma_for_id(expected, item_kind) {
+            // Pickel's FOLLOW_NO_STOP emitters remain live until explicitly killed. The effect
+            // owner must survive their teardown; retiring it in this same frame caused removal
+            // to hang at kind unregister and eventually crash inside deferred GPU cleanup.
+            smash::app::lua_bind::EffectModule::kill_all(item_boma, 0, false, false);
+            AUTO_CARRIER_EFFECT_DRAIN.store(1, Ordering::Release);
+            dlog(&format!(
+                "AUTO_CARRIER_EFFECT_DRAIN id={expected:#x} frame=0"
+            ));
+            return false;
+        }
+    } else if drain < 4 {
+        conceal_auto_carrier(expected, item_kind);
+        AUTO_CARRIER_EFFECT_DRAIN.store(drain + 1, Ordering::Release);
+        return false;
+    }
+    AUTO_CARRIER_EFFECT_DRAIN.store(0, Ordering::Relaxed);
+    let expected = AUTO_CARRIER_ID.swap(0, Ordering::Relaxed);
+    if expected == 0 {
+        return true;
+    }
+    // Arm the unload wait before anything else: the replacement must not be created until this
+    // carrier's effect handle has actually been released.
+    AUTO_CARRIER_PENDING_UNLOAD.store(
+        AUTO_CARRIER_HANDLE.load(Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
+    let retiring_kind = AUTO_CARRIER_ITEM_KIND.load(Ordering::Relaxed);
+    AUTO_CARRIER_RETIRING_KIND.store(retiring_kind, Ordering::Relaxed);
+    AUTO_CARRIER_RETIRING_ID.store(expected, Ordering::Relaxed);
+    AUTO_CARRIER_WAIT.store(0, Ordering::Relaxed);
+    retire_auto_carrier_id(expected, retiring_kind as i32);
+    let held_id = smash::app::lua_bind::ItemModule::get_have_item_id(boma, AUTO_CARRIER_SLOT);
+    if held_id == expected {
+        let result = smash::app::lua_bind::ItemModule::remove_item(boma, AUTO_CARRIER_SLOT);
+        dlog(&format!(
+            "AUTO_CARRIER_REMOVE id={held_id:#x} result={result:#x}"
+        ));
+    } else {
+        dlog(&format!(
+            "AUTO_CARRIER_RETIRE detached_id={expected:#x} current_held={held_id:#x}"
+        ));
+    }
+    true
+}
+
+unsafe fn log_carrier_state(
+    stage: &str,
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    item_kind: i32,
+    ef_file: &str,
+) {
+    let held_kind = smash::app::lua_bind::ItemModule::get_have_item_kind(boma, AUTO_CARRIER_SLOT);
+    let held_id = smash::app::lua_bind::ItemModule::get_have_item_id(boma, AUTO_CARRIER_SLOT);
+    let active = smash::app::lua_bind::ItemManager::get_num_of_active_item(item_kind);
+    let life =
+        if held_id <= u32::MAX as u64 && smash::app::sv_battle_object::is_active(held_id as u32) {
+            let item_boma = smash::app::sv_battle_object::module_accessor(held_id as u32);
+            (!item_boma.is_null()).then(|| {
+                smash::app::lua_bind::WorkModule::get_int(
+                    item_boma,
+                    *smash::lib::lua_const::ITEM_INSTANCE_WORK_INT_LIFE_TIME,
+                )
+            })
+        } else {
+            None
+        };
+    let visible =
+        if held_id <= u32::MAX as u64 && smash::app::sv_battle_object::is_active(held_id as u32) {
+            let item_boma = smash::app::sv_battle_object::module_accessor(held_id as u32);
+            (!item_boma.is_null())
+                .then(|| smash::app::lua_bind::VisibilityModule::is_visible(item_boma))
+        } else {
+            None
+        };
+    let manager = effect_manager();
+    let mut kinds = Vec::new();
+    if !manager.is_null() {
+        let hash = smash::hash40(&ef_file.to_lowercase());
+        let buffers = DONOR_BYTES.lock();
+        if let Some(bytes) = buffers.get(&hash) {
+            for (name, _) in eff_entry_names(bytes.as_ptr()) {
+                let h = smash::hash40(&name.to_lowercase());
+                kinds.push(format!("{name}:{:?}", kind_lookup(manager, h)));
+            }
+        }
+    }
+    let set = AUTO_CARRIER_SET.load(Ordering::Acquire);
+    let render_state = if set == 0 {
+        None
+    } else {
+        Some((
+            *((set + 0x20) as *const u8),
+            *((set + 0x4e0) as *const usize),
+            *((set + 0x608) as *const u64),
+            *((set + 0x610) as *const u64),
+        ))
+    };
+    dlog(&format!(
+        "AUTO_CARRIER_STATE stage={stage} held_kind={held_kind:#x} held_id={held_id:#x} active={active} visible={visible:?} life={life:?} set={set:#x} render={render_state:?} kinds=[{}]",
+        kinds.join(", ")
+    ));
+}
+
+/// True for the hidden live-resource carrier or an old carrier being retired. Effect hooks use
+/// this to suppress the carrier object's own fuse/lost/dead visuals without touching Kirby.
+pub unsafe fn is_auto_carrier_boma(boma: *mut smash::app::BattleObjectModuleAccessor) -> bool {
+    if boma.is_null() {
+        return false;
+    }
+    let id = (*boma).battle_object_id as u64;
+    // Zero is our "no carrier" sentinel, but it is also a valid battle-object ID (most
+    // notably the first fighter). Never let an empty carrier slot match a real object 0:
+    // doing so suppresses Kirby's EffectModule calls and returns from the ACMD hooks before
+    // the live spawn line can be captured.
+    let active = AUTO_CARRIER_ID.load(Ordering::Relaxed);
+    let retiring = AUTO_CARRIER_RETIRING_ID.load(Ordering::Relaxed);
+    (active != 0 && id == active) || (retiring != 0 && id == retiring)
+}
+
+/// Return the live carrier object only when `kind` belongs to the EFF loaded by that carrier.
+/// The effect request must execute through this object's EffectModule: resolving the carrier's
+/// kind globally and then requesting it on Kirby creates a handle against the wrong resource
+/// owner, which is registered but renders invisibly.
+pub unsafe fn auto_carrier_boma_for_kind(
+    kind: u64,
+) -> Option<*mut smash::app::BattleObjectModuleAccessor> {
+    let kind = kind & 0xff_ffff_ffff;
+    if !AUTO_CARRIER_KINDS.lock().contains(&kind) || AUTO_CARRIER_STATE.load(Ordering::Relaxed) != 2
+    {
+        return None;
+    }
+    let id = AUTO_CARRIER_ID.load(Ordering::Relaxed);
+    if id == 0 || id > u32::MAX as u64 || !smash::app::sv_battle_object::is_active(id as u32) {
+        return None;
+    }
+    let boma = smash::app::sv_battle_object::module_accessor(id as u32);
+    (!boma.is_null()).then_some(boma)
+}
+
+/// True when the newest carrier snapshot contains this real kind, including while the old
+/// carrier is being retired and the replacement object is not ready yet.
+pub fn is_staged_carrier_kind(kind: u64) -> bool {
+    AUTO_CARRIER_STATE.load(Ordering::Relaxed) != 0
+        && AUTO_CARRIER_KINDS.lock().contains(&(kind & 0xff_ffff_ffff))
+}
+
+/// The current live carrier regardless of kind, used to mirror broad cleanup calls.
+pub unsafe fn auto_carrier_boma() -> Option<*mut smash::app::BattleObjectModuleAccessor> {
+    let id = AUTO_CARRIER_ID.load(Ordering::Relaxed);
+    if AUTO_CARRIER_STATE.load(Ordering::Relaxed) != 2
+        || id == 0
+        || id > u32::MAX as u64
+        || !smash::app::sv_battle_object::is_active(id as u32)
+    {
+        return None;
+    }
+    let boma = smash::app::sv_battle_object::module_accessor(id as u32);
+    (!boma.is_null()).then_some(boma)
 }
 
 /// Game-thread pump (called from the per-frame agent line callback): apply queued donor
@@ -1497,12 +2375,7 @@ pub fn pump_donor_queue() {
 /// managed) handles load AND unload — no manual refcount fiddling. This is the only mechanism
 /// proven to load a foreign effect's resources mid-match.
 const CARRIER_MODE: bool = false;
-/// BAKE-ONLY (build ba): do NO donor co-load and NO carrier redirect at all. Rely purely on the
-/// editor's MERGED eff (donor entries + textures baked into the fighter's own eff, served via
-/// live_eff) which the fighter's OWN blessed load picks up at fighter-load — the proven path that
-/// renders correctly. This restores normal assist spawning (we no longer hijack any dir) and gives
-/// a clean baseline to confirm cross-fighter one-slots render on a fresh match entry, before we
-/// tackle triggering that reload automatically.
+/// Disable live donor loading and rely on a merged eff loaded at fighter entry.
 const BAKE_ONLY: bool = true;
 /// The carrier object's effect dir path we hijack: the user summons the Alucard assist, and we
 /// serve the DONOR's bytes under alucard's eff path — so the carrier's blessed load pulls the
@@ -1514,16 +2387,27 @@ const CARRIER_EFF_PATH: &str = "effect/assist/alucard/ef_alucard.eff";
 /// without co-loading. Lets the carrier's own load provide the real (renderable) kinds.
 fn build_remap_from_served(ef_file: &str) {
     let hash = smash::hash40(&ef_file.to_lowercase());
-    let bytes = match DONOR_BYTES.lock().get(&hash) {
-        Some(b) if b.len() >= 0x10 && &b[..4] == b"EFFN" => b.clone(),
-        _ => return,
+    // The runtime carrier can be several megabytes. Borrow it only long enough to parse
+    // the tiny entry-name table: cloning the whole buffer here (and in the 120-frame carrier
+    // diagnostic) exhausted Skyline's plugin heap after a large effect first spawned.
+    let names = {
+        let buffers = DONOR_BYTES.lock();
+        match buffers.get(&hash) {
+            Some(bytes) if bytes.len() >= 0x10 && &bytes[..4] == b"EFFN" => unsafe {
+                eff_entry_names(bytes.as_ptr())
+            },
+            _ => return,
+        }
     };
-    let names = unsafe { eff_entry_names(bytes.as_ptr()) };
     let mut remap = CO_LOADED_REMAP.lock();
+    let mut carrier_kinds = AUTO_CARRIER_KINDS.lock();
+    carrier_kinds.clear();
     let mut n = 0;
     for (name, _) in &names {
         let lo = name.to_lowercase();
-        remap.insert(smash::hash40(&format!("{lo}_os")), smash::hash40(&lo));
+        let real = smash::hash40(&lo);
+        remap.insert(smash::hash40(&format!("{lo}_os")), real);
+        carrier_kinds.insert(real);
         n += 1;
     }
     dlog(&format!("carrier_remap built {n} entries from {ef_file}"));
@@ -1602,7 +2486,6 @@ fn enqueue_donors_for(target_handle: u32, target_path_hash: u64) {
             drain_done: false,
             subres_done: false,
             read_misses: 0,
-            enqueue_forced: false,
             tries: 0,
         });
     }
@@ -1866,28 +2749,6 @@ fn retry_pending_donors(manager: *mut u64) {
                 p.ef_file, p.tries
             ));
             p.dir_requested = true;
-        }
-        // ── PIPELINE LOAD (build aw): FORCE the real async dir-load enqueue ──────────────────
-        // ensure_dir_loaded short-circuits to a refcount because our dir's descriptor +8 has bit0
-        // set ("already loaded"), so it never enqueues — that's why the worker never loaded our
-        // resources and the set's handles stay not-ready. Call FUN_03540860 DIRECTLY (once) to
-        // force the enqueue, then poll the descriptor state each frame so we can SEE the worker
-        // pick it up and advance it (bit0=loading → real data), setting up proper resource handles.
-        // Re-force the real enqueue every 60 frames until the eff is resident (one enqueue may be
-        // dropped; the worker may need re-kicking). Poll the descriptor + residency each time.
-        if !p.filled && (!p.enqueue_forced || p.tries % 60 == 0) {
-            if let Some(dir_index) = rr::dir_info_index_for_path_hash(p.folder_hash) {
-                let desc = unsafe { force_enqueue_dir(dir_index) };
-                let ef_hash = smash::hash40(&p.ef_file.to_lowercase());
-                let resident = rr::resident_buffer(ef_hash).is_some();
-                let d8 = if desc != 0 {
-                    unsafe { *((desc as usize + 8) as *const u64) }
-                } else {
-                    0
-                };
-                p.enqueue_forced = true;
-                dlog(&format!("force_enqueue {} dir_index={dir_index} tries={} desc={desc:#x} +8={d8:#x} eff_resident={resident}", p.ef_file, p.tries));
-            }
         }
         // ── RENDER PUSH (build ak): drive the game's deferred-load QUEUE DRAIN ourselves ─────
         // The set's +0x540 render block only fills when load_effects builds the set with the

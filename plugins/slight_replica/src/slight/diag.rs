@@ -30,6 +30,15 @@ static FLUSHED: AtomicU64 = AtomicU64::new(0);
 static EDITS_OK: AtomicU64 = AtomicU64::new(0);
 static EDITS_FAIL: AtomicU64 = AtomicU64::new(0);
 
+/// Start a bounded diagnostic session. This file used to append across every game boot and grew
+/// into hundreds of megabytes, turning routine effect edits into emulator filesystem work.
+pub fn start_session() {
+    if let Some(mut buffer) = BUF.try_lock() {
+        buffer.clear();
+    }
+    let _ = std::fs::write(DIAG_FILE, "SLight diagnostic session\n");
+}
+
 fn push(line: String) {
     // try_lock, never park: this buffer is written from BOTH the game thread and the
     // server/sender threads, and parked lock-waiters never wake in this environment

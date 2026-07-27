@@ -83,6 +83,10 @@ pub fn install() {
 unsafe extern "C" fn fighter_line_main(agent: &mut L2CFighterBase) {
     let lua_state = agent.agent.lua_state_agent;
     handle_init(lua_state);
+    if let Some(boma) = boma_from_lua(lua_state) {
+        crate::slight::effect_viewer::effect_reload::pump_auto_carrier(boma);
+        crate::slight::effect_viewer::acmd_hooks::pump_carrier_follows(boma);
+    }
     // Queued donor eff co-loads must run HERE (game thread) — load_effects from the TCP
     // thread never completes its async resource work.
     crate::slight::effect_viewer::effect_reload::pump_donor_queue();

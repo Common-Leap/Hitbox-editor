@@ -42,6 +42,631 @@ pub fn rebuild_eff_bytes_for_slot(
     })
 }
 
+/// Build a runtime carrier from its game-owned EFF plus only the requested donor entries.
+///
+/// What comes back holds the transplants and nothing else. The carrier's own entry names survive
+/// so the item's effect requests still resolve, but their emitters are cleared and every texture,
+/// primitive and shader variation left unreferenced is dropped — for two transplants that is
+/// 463 KB where transferring the pools whole gave 6.3 MB.
+///
+/// Each donor's shader containers are merged in once, the copied emitters are relocated onto
+/// them, and the result is then compacted down to the variations something actually references.
+/// The compaction matters: a donor ships its whole fighter's shader library, so without it the
+/// carrier for one Pickel effect would haul all 370 of Pickel's variations into memory.
+pub fn rebuild_runtime_carrier_eff_bytes(
+    carrier_bytes: &[u8],
+    carrier_rel: &str,
+    ops: &[OneSlotOp],
+    donor_root: &std::path::Path,
+) -> Result<Vec<u8>> {
+    // A carrier-native selection needs no transplant. The runtime remap already turns an `_os`
+    // request into the carrier's existing real entry, so parsing, pruning, and repacking these
+    // resource pools only introduces risk. Preserve the game's known-good payload byte-for-byte.
+    if !ops.is_empty()
+        && ops
+            .iter()
+            .all(|op| op.src_file_rel.eq_ignore_ascii_case(carrier_rel))
+    {
+        return Ok(carrier_bytes.to_vec());
+    }
+
+    let mut carrier = effect_library::NamcoEffectFile::load(carrier_bytes)
+        .context("effect_library failed to parse the carrier .eff")?;
+
+    // The compute container is engine-global rather than per-file: ef_bomberman, ef_pickel,
+    // ef_alucard and ef_kirby all ship the byte-identical single-variation GRSC. Daisy is the
+    // exception, and blindly adopting its two-variation container is what froze the carrier load.
+    let carrier_compute = carrier
+        .ptcl_file
+        .as_ref()
+        .and_then(|ptcl| ptcl.shader_info.as_ref())
+        .and_then(|shader| shader.compute_binary.clone());
+
+    // Load every donor once, then decide which shader strategy the whole carrier uses.
+    let mut donors: Vec<(String, effect_library::NamcoEffectFile)> = Vec::new();
+    let mut plan: Vec<(&OneSlotOp, usize)> = Vec::new();
+    for op in ops {
+        // A selected native carrier effect is already present in the required scaffold.
+        if op.src_file_rel.eq_ignore_ascii_case(carrier_rel) {
+            continue;
+        }
+        let key = op.src_file_rel.to_lowercase();
+        let index = match donors.iter().position(|(existing, _)| *existing == key) {
+            Some(index) => index,
+            None => {
+                let bytes =
+                    std::fs::read(donor_root.join(&op.src_file_rel)).with_context(|| {
+                        format!("transplant donor '{}' is unreadable", op.src_file_rel)
+                    })?;
+                let donor = effect_library::NamcoEffectFile::load(&bytes)
+                    .context("effect_library failed to parse a transplant donor .eff")?;
+                donors.push((key, donor));
+                donors.len() - 1
+            }
+        };
+        plan.push((op, index));
+    }
+
+    // Merge each donor's containers ONCE up front and hand every op the base its variations
+    // landed on. Letting each op merge would append the same container once per transplanted
+    // effect — three effects from two files produced 892 variations where 522 suffice.
+    let mut bases: Vec<(i32, i32)> = vec![(0, 0); donors.len()];
+    {
+        let mut standard = carrier
+            .ptcl_file
+            .as_ref()
+            .and_then(|ptcl| ptcl.shader_info.as_ref())
+            .and_then(|shader| shader.binary_data.clone())
+            .unwrap_or_default();
+        let mut compute = carrier_compute.clone().unwrap_or_default();
+        for (index, (_, donor)) in donors.iter().enumerate() {
+            let donor_shader = donor
+                .ptcl_file
+                .as_ref()
+                .and_then(|ptcl| ptcl.shader_info.as_ref())
+                .ok_or_else(|| anyhow!("transplant donor has no shader section"))?;
+            bases[index] = (
+                variation_count(&standard)? as i32,
+                variation_count(&compute)? as i32,
+            );
+            if let Some(donor_bin) = donor_shader.binary_data.as_ref() {
+                standard = if standard.is_empty() {
+                    donor_bin.clone()
+                } else {
+                    effect_library::bnsh::merge_variation_files(&[standard, donor_bin.clone()])
+                        .context("merging a donor's shader container into the carrier")?
+                };
+            }
+            // Only take a donor's compute container when one of its transplanted effects
+            // actually addresses it. The engine-global single-variation container is the shape
+            // every loading carrier has had, so it is not worth disturbing for donors that make
+            // no use of compute shaders.
+            let donor_uses_compute = plan
+                .iter()
+                .any(|(op, other)| *other == index && donor_compute_demand(donor, op).is_some());
+            if donor_uses_compute {
+                if let Some(donor_bin) = donor_shader.compute_binary.as_ref() {
+                    compute = if compute.is_empty() {
+                        donor_bin.clone()
+                    } else {
+                        effect_library::bnsh::merge_variation_files(&[compute, donor_bin.clone()])
+                            .context("merging a donor's compute-shader container into the carrier")?
+                    };
+                }
+            }
+        }
+        if let Some(shader) = carrier
+            .ptcl_file
+            .as_mut()
+            .and_then(|ptcl| ptcl.shader_info.as_mut())
+        {
+            shader.binary_data = (!standard.is_empty()).then_some(standard);
+            shader.compute_binary = (!compute.is_empty()).then_some(compute);
+        }
+    }
+
+    for (op, donor_index) in &plan {
+        let donor = &donors[*donor_index].1;
+        let (standard_base, compute_base) = bases[*donor_index];
+        apply_one_slot_cross_file(
+            &mut carrier,
+            donor,
+            op,
+            false,
+            ShaderStrategy::AlreadyMerged {
+                standard_base,
+                compute_base,
+            },
+        )?;
+    }
+
+    // The Rust BFRES writer round-trips model topology and vertex/index data, but its rebuilt
+    // primitive container has not proven GPU-valid in game: effects made entirely of those
+    // primitives construct and return handles, then draw nothing. When one donor owns the
+    // snapshot's primitive-only effects, retain that donor's original PRMA/BFRES pool exactly.
+    // Descriptor IDs remain the emitter-facing lookup key, so unused donor models are harmless.
+    let preserve_raw_primitives = donors.len() == 1
+        && ops
+            .iter()
+            .all(|op| !op.src_file_rel.eq_ignore_ascii_case(carrier_rel))
+        && plan
+            .iter()
+            .any(|(op, donor_index)| donor_effect_is_primitive_only(&donors[*donor_index].1, op));
+    if preserve_raw_primitives {
+        let mut donor_primitives = donors[0]
+            .1
+            .ptcl_file
+            .as_ref()
+            .and_then(|ptcl| ptcl.primitive_info.clone())
+            .ok_or_else(|| anyhow!("primitive-only donor has no primitive pool"))?;
+        donor_primitives.preserve_binary_data = true;
+        carrier
+            .ptcl_file
+            .as_mut()
+            .ok_or_else(|| anyhow!("carrier has no PTCL"))?
+            .primitive_info = Some(donor_primitives);
+    }
+
+    let transplanted: Vec<&str> = plan
+        .iter()
+        .map(|(op, _)| op.new_entry_name.as_str())
+        .chain(
+            ops.iter()
+                .filter(|op| op.src_file_rel.eq_ignore_ascii_case(carrier_rel))
+                // Native carrier effects are spawned through an alias to their existing real
+                // name, so retain that set rather than looking for the editor-facing `_os`
+                // name. Omitting it creates a zero-emitter EFF; the game's set builder panics
+                // while loading that degenerate resource container.
+                .map(|op| op.src_set_name.as_str()),
+        )
+        .collect();
+    silence_carrier_native_effects(&mut carrier, &transplanted);
+    prune_unreferenced_resources(&mut carrier, preserve_raw_primitives)?;
+    compact_shader_containers(&mut carrier)?;
+
+    // No emitter may address a shader variation the final containers lack.
+    let (standard_variations, compute_variations) = {
+        let shader = carrier
+            .ptcl_file
+            .as_ref()
+            .and_then(|ptcl| ptcl.shader_info.as_ref());
+        let count = |binary: Option<&Vec<u8>>| match binary {
+            Some(bnsh) => effect_library::bnsh::BnshFile::read(bnsh)
+                .map(|file| file.variations.len())
+                .unwrap_or(0),
+            None => 0,
+        };
+        match shader {
+            Some(shader) => (
+                count(shader.binary_data.as_ref()),
+                count(shader.compute_binary.as_ref()),
+            ),
+            None => (0, 0),
+        }
+    };
+    if let Some(ptcl) = carrier.ptcl_file.as_ref() {
+        for set in &ptcl.emitter_list.emitter_sets {
+            let mut bad: Option<(&'static str, i32, usize)> = None;
+            visit_emitters_ref(&set.emitters, &mut |em| {
+                let refs = &em.data.shader_references;
+                for index in [
+                    refs.shader_index,
+                    refs.user_shader_index1,
+                    refs.user_shader_index2,
+                ] {
+                    if !shader_index_fits(index, standard_variations) {
+                        bad = Some(("shader", index, standard_variations));
+                    }
+                }
+                if !shader_index_fits(refs.compute_shader_index, compute_variations) {
+                    bad = Some((
+                        "compute-shader",
+                        refs.compute_shader_index,
+                        compute_variations,
+                    ));
+                }
+            });
+            if let Some((kind, index, available)) = bad {
+                anyhow::bail!(
+                    "live carrier safety: '{}' addresses {kind} variation {index}, but the \
+                     carrier's container only holds {available}. Shipping that would hang the \
+                     game's loader, so the carrier was not built.",
+                    set.name
+                );
+            }
+        }
+    }
+
+    carrier
+        .save()
+        .context("effect_library failed to encode the runtime carrier .eff")
+}
+
+/// Empty every emitter set the transplants did not create, leaving the carrier's own effects as
+/// resolvable-but-silent entries.
+///
+/// The carrier is a game-owned assist EFF borrowed for its blessed load path — its native effects
+/// are never played, but they are what holds the file open: Bomberman's four sets reference all
+/// nineteen of its textures, 2.9 MB of a 3.4 MB base. Clearing their emitters makes those
+/// textures, primitives and shader variations collectable by the passes that follow.
+///
+/// The entries and the sets themselves stay. The item still requests its own effects by name at
+/// spawn, and a name that resolves to an empty set yields a valid handle that emits nothing —
+/// whereas deleting the entry would leave those requests resolving against nothing at all.
+fn silence_carrier_native_effects(
+    carrier: &mut effect_library::NamcoEffectFile,
+    transplanted: &[&str],
+) {
+    let keep: std::collections::HashSet<usize> = carrier
+        .entry_names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            transplanted
+                .iter()
+                .any(|new| new.eq_ignore_ascii_case(name))
+        })
+        .filter_map(|(index, _)| {
+            carrier
+                .entries
+                .get(index)
+                .and_then(|entry| (entry.emitter_set_id as usize).checked_sub(1))
+        })
+        .collect();
+    let Some(ptcl) = carrier.ptcl_file.as_mut() else {
+        return;
+    };
+    for (index, set) in ptcl.emitter_list.emitter_sets.iter_mut().enumerate() {
+        if !keep.contains(&index) {
+            set.emitters.clear();
+        }
+    }
+}
+
+/// Drop every texture and primitive no surviving emitter samples.
+///
+/// Both pools are GUID-keyed, so dropping an entry moves nothing: the emitters that remain keep
+/// referring to exactly the resources they already did. Shader variations are index-keyed and so
+/// need renumbering — [`compact_shader_containers`] handles those separately.
+fn prune_unreferenced_resources(
+    carrier: &mut effect_library::NamcoEffectFile,
+    preserve_raw_primitives: bool,
+) -> Result<()> {
+    let Some(ptcl) = carrier.ptcl_file.as_mut() else {
+        return Ok(());
+    };
+    let mut used_textures: Vec<u64> = Vec::new();
+    let mut used_primitives: Vec<u64> = Vec::new();
+    for set in &ptcl.emitter_list.emitter_sets {
+        visit_emitters_ref(&set.emitters, &mut |em| {
+            let d = &em.data;
+            append_unique_resource_ids(
+                &mut used_textures,
+                [
+                    d.sampler0.as_ref().map(|s| s.texture_id),
+                    d.sampler1.as_ref().map(|s| s.texture_id),
+                    d.sampler2.as_ref().map(|s| s.texture_id),
+                    d.sampler3.as_ref().map(|s| s.texture_id),
+                    d.sampler4.as_ref().map(|s| s.texture_id),
+                    d.sampler5.as_ref().map(|s| s.texture_id),
+                ],
+            );
+            append_unique_resource_ids(
+                &mut used_primitives,
+                [
+                    Some(d.particle_data.primitive_id),
+                    Some(d.particle_data.primitive_ex_id),
+                    Some(d.shape_info.primitive_index),
+                ],
+            );
+        });
+    }
+
+    if let Some(textures) = ptcl.texture_info.as_mut() {
+        // Descriptor order matches BNTX texture order: the serializer sorts the descriptor table
+        // and reorders the archive to match (`reorder_and_save`), so index i addresses both.
+        let keep: Vec<usize> = (0..textures.descriptors.len())
+            .filter(|index| used_textures.contains(&textures.descriptors[*index].id))
+            .collect();
+        if keep.len() < textures.descriptors.len() {
+            let binary = textures
+                .binary_data
+                .as_ref()
+                .ok_or_else(|| anyhow!("carrier has texture descriptors but no BNTX"))?;
+            let scratch = crate::scratch_dirs::app_scratch_dir("carrier-tex")?;
+            let mut blobs = Vec::with_capacity(keep.len());
+            for index in &keep {
+                let name = textures.descriptors[*index].name.clone();
+                let path = scratch.path().join(format!("{name}.bntx"));
+                effect_library::bntx::export_single_texture(binary, *index, &name, &path)
+                    .with_context(|| format!("extracting carrier texture '{name}'"))?;
+                blobs.push(std::fs::read(&path)?);
+            }
+            textures.binary_data = match blobs.len() {
+                0 => None,
+                1 => blobs.pop(),
+                _ => Some(
+                    effect_library::bntx::merge_texture_files(&blobs)
+                        .context("repacking the carrier's texture pool")?,
+                ),
+            };
+            let kept: std::collections::HashSet<usize> = keep.into_iter().collect();
+            let mut index = 0;
+            textures.descriptors.retain(|_| {
+                index += 1;
+                kept.contains(&(index - 1))
+            });
+        }
+    }
+
+    if !preserve_raw_primitives {
+        let Some(primitives) = ptcl.primitive_info.as_mut() else {
+            return Ok(());
+        };
+        let keep: Vec<usize> = (0..primitives.descriptors.len())
+            .filter(|index| used_primitives.contains(&primitives.descriptors[*index].id))
+            .collect();
+        if keep.len() < primitives.descriptors.len() {
+            let binary = primitives
+                .binary_data
+                .as_ref()
+                .ok_or_else(|| anyhow!("carrier has primitive descriptors but no BFRES"))?;
+            let mut blobs = Vec::with_capacity(keep.len());
+            for index in &keep {
+                blobs.push(
+                    effect_library::bfres::export_single_model(binary, *index).with_context(
+                        || {
+                            format!(
+                                "extracting carrier primitive {:#x}",
+                                primitives.descriptors[*index].id
+                            )
+                        },
+                    )?,
+                );
+            }
+            primitives.binary_data = match blobs.len() {
+                0 => None,
+                1 => blobs.pop(),
+                _ => Some(
+                    effect_library::bfres::ResFile::merge_model_files(&blobs)
+                        .context("repacking the carrier's primitive pool")?,
+                ),
+            };
+            let kept: std::collections::HashSet<usize> = keep.into_iter().collect();
+            let mut index = 0;
+            primitives.descriptors.retain(|_| {
+                index += 1;
+                kept.contains(&(index - 1))
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Drop every shader variation no emitter addresses, then renumber the emitters onto the
+/// compacted containers.
+///
+/// A donor's BNSH holds its whole fighter's shader library — Pickel ships 370 variations and a
+/// single transplanted effect uses twelve of them — and once merged that library is the largest
+/// thing in the carrier. Keeping only what is referenced is what lets the carrier hold just the
+/// effects the user asked to transplant.
+///
+/// Repacking variations was tried once before and produced handles with no pixels, which is why
+/// the containers used to be transferred whole. That has since been diagnosed: `BnshFile::write`
+/// emitted a relocation table listing slots that hold no offset, so the runtime turned each into
+/// a pointer to the image base and every container the writer touched was corrupt. With the
+/// writer fixed it reproduces the game's own pointer set exactly, so repacking is sound again.
+fn compact_shader_containers(carrier: &mut effect_library::NamcoEffectFile) -> Result<()> {
+    let Some(ptcl) = carrier.ptcl_file.as_mut() else {
+        return Ok(());
+    };
+    let mut used_standard: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    let mut used_compute: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    for set in &ptcl.emitter_list.emitter_sets {
+        visit_emitters_ref(&set.emitters, &mut |em| {
+            let refs = &em.data.shader_references;
+            for index in [
+                refs.shader_index,
+                refs.user_shader_index1,
+                refs.user_shader_index2,
+            ] {
+                if index >= 0 {
+                    used_standard.insert(index);
+                }
+            }
+            if refs.compute_shader_index >= 0 {
+                used_compute.insert(refs.compute_shader_index);
+            }
+        });
+    }
+
+    let (standard_map, compute_map) = {
+        let Some(shader) = ptcl.shader_info.as_mut() else {
+            return Ok(());
+        };
+        (
+            subset_container(shader.binary_data.as_mut(), &used_standard, "shader")?,
+            subset_container(
+                shader.compute_binary.as_mut(),
+                &used_compute,
+                "compute-shader",
+            )?,
+        )
+    };
+
+    for set in &mut ptcl.emitter_list.emitter_sets {
+        let name = set.name.clone();
+        let mut failed = None;
+        visit_emitters(&mut set.emitters, &mut 0, &mut |_, em| {
+            let refs = &mut em.data.shader_references;
+            for (index, map, kind) in [
+                (&mut refs.shader_index, &standard_map, "shader"),
+                (&mut refs.user_shader_index1, &standard_map, "shader"),
+                (&mut refs.user_shader_index2, &standard_map, "shader"),
+                (
+                    &mut refs.compute_shader_index,
+                    &compute_map,
+                    "compute-shader",
+                ),
+            ] {
+                if *index < 0 || map.is_empty() {
+                    continue;
+                }
+                match map.get(index) {
+                    Some(new) => *index = *new,
+                    None => failed = Some((kind, *index)),
+                }
+            }
+            // `custom_shader_index` is deliberately untouched: it is a small custom-shader mode,
+            // not an index into the variation array.
+            em.cached_binary = None; // indices moved → the cached EMTR blob is stale
+        });
+        if let Some((kind, index)) = failed {
+            anyhow::bail!(
+                "compacting shader containers: '{name}' addresses {kind} variation {index}, \
+                 which the merged container does not hold"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `binary` keeping only the listed variations, returning the old-index → new-index map.
+/// An empty map means the container was left exactly as it was and its indices still apply.
+fn subset_container(
+    binary: Option<&mut Vec<u8>>,
+    used: &std::collections::BTreeSet<i32>,
+    kind: &str,
+) -> Result<std::collections::HashMap<i32, i32>> {
+    let Some(binary) = binary else {
+        return Ok(std::collections::HashMap::new());
+    };
+    // An unused container is left alone rather than removed: the engine-global single-variation
+    // compute container is the shape every carrier that has ever loaded was built with.
+    if used.is_empty() || binary.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut file = effect_library::bnsh::BnshFile::read(binary)
+        .with_context(|| format!("reading the merged {kind} container"))?;
+    // Already exactly 0..n with nothing to drop — leave the bytes untouched rather than putting
+    // a game-authored container through the writer for no gain.
+    if used.len() == file.variations.len()
+        && used.iter().enumerate().all(|(i, old)| *old as usize == i)
+    {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut kept = Vec::with_capacity(used.len());
+    let mut map = std::collections::HashMap::with_capacity(used.len());
+    for old in used {
+        let variation = file
+            .variations
+            .get(*old as usize)
+            .ok_or_else(|| anyhow!("an emitter addresses {kind} variation {old}, which the merged container does not hold"))?
+            .clone();
+        map.insert(*old, kept.len() as i32);
+        kept.push(variation);
+    }
+    file.variations = kept;
+    *binary = file.write();
+    Ok(map)
+}
+
+/// Variation count of a BNSH container; an absent container holds none.
+fn variation_count(bnsh: &[u8]) -> Result<usize> {
+    if bnsh.is_empty() {
+        return Ok(0);
+    }
+    Ok(effect_library::bnsh::BnshFile::read(bnsh)
+        .context("reading a shader container's variation count")?
+        .variations
+        .len())
+}
+
+/// How many compute-shader variations a donor entry needs (`highest index + 1`), or None when it
+/// uses no compute shader at all.
+fn donor_compute_demand(donor: &effect_library::NamcoEffectFile, op: &OneSlotOp) -> Option<usize> {
+    let ptcl = donor.ptcl_file.as_ref()?;
+    let entry_index = donor
+        .entry_names
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(&op.src_set_name))?;
+    let set_index = (donor.entries[entry_index].emitter_set_id as usize).checked_sub(1)?;
+    let set = ptcl.emitter_list.emitter_sets.get(set_index)?;
+    let mut highest = -1i32;
+    visit_emitters_ref(&set.emitters, &mut |em| {
+        highest = highest.max(em.data.shader_references.compute_shader_index);
+    });
+    // `then_some` would evaluate the argument even for the -1 "unused" sentinel, wrapping to
+    // usize::MAX before overflowing.
+    (highest >= 0).then(|| highest as usize + 1)
+}
+
+/// True when every emitter in the selected donor set renders through a donor-owned primitive.
+/// These are the effects for which a GPU-invalid rewritten BFRES means complete invisibility,
+/// rather than one missing layer among otherwise visible quad particles.
+fn donor_effect_is_primitive_only(donor: &effect_library::NamcoEffectFile, op: &OneSlotOp) -> bool {
+    let Some(ptcl) = donor.ptcl_file.as_ref() else {
+        return false;
+    };
+    let Some(primitives) = ptcl.primitive_info.as_ref() else {
+        return false;
+    };
+    let Some(entry_index) = donor
+        .entry_names
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(&op.src_set_name))
+    else {
+        return false;
+    };
+    let Some(set_index) = (donor.entries[entry_index].emitter_set_id as usize).checked_sub(1)
+    else {
+        return false;
+    };
+    let Some(set) = ptcl.emitter_list.emitter_sets.get(set_index) else {
+        return false;
+    };
+    let mut count = 0usize;
+    let mut all_primitive = true;
+    visit_emitters_ref(&set.emitters, &mut |em| {
+        count += 1;
+        let ids = [
+            em.data.particle_data.primitive_id,
+            em.data.particle_data.primitive_ex_id,
+            em.data.shape_info.primitive_index,
+        ];
+        let has_local_primitive = ids.iter().any(|id| {
+            *id != 0
+                && *id != u64::MAX
+                && primitives
+                    .descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.id == *id)
+        });
+        all_primitive &= has_local_primitive;
+    });
+    count != 0 && all_primitive
+}
+
+/// How a transplant's emitters relate to the destination's shader containers.
+#[derive(Clone, Copy)]
+enum ShaderStrategy {
+    /// Append the donor's container to the destination's, relocating by the destination's count.
+    Merge,
+    /// The destination already holds this donor's variations at these bases, so the containers
+    /// must not be touched again — only the copied emitters' indices are relocated. Merging a
+    /// donor once per transplanted effect instead of once per file duplicated whole containers.
+    AlreadyMerged {
+        standard_base: i32,
+        compute_base: i32,
+    },
+}
+
+/// A negative index is the "no shader" sentinel; anything else must address a variation the
+/// container actually holds.
+fn shader_index_fits(index: i32, variations: usize) -> bool {
+    index < 0 || (index as usize) < variations
+}
+
 fn rebuild_eff_bytes_filtered(
     src_bytes: &[u8],
     eff: &EffMod,
@@ -50,6 +675,10 @@ fn rebuild_eff_bytes_filtered(
 ) -> Result<Vec<u8>> {
     let mut namco = effect_library::NamcoEffectFile::load(src_bytes)
         .context("effect_library failed to parse the source .eff")?;
+    let destination_is_fighter = eff
+        .source_rel
+        .to_ascii_lowercase()
+        .starts_with("effect/fighter/");
     // One-slot ops FIRST (they only append sets, so pre-existing set indices are
     // stable), then authored edits — which may target a freshly cloned set by name
     // (editing the copy in the eff editor). Cross-fighter donors bake in here too: the
@@ -71,7 +700,13 @@ fn rebuild_eff_bytes_filtered(
             })?;
             let donor = effect_library::NamcoEffectFile::load(&donor_bytes)
                 .context("effect_library failed to parse the donor .eff")?;
-            apply_one_slot_cross_file(&mut namco, &donor, op)?;
+            apply_one_slot_cross_file(
+                &mut namco,
+                &donor,
+                op,
+                destination_is_fighter,
+                ShaderStrategy::Merge,
+            )?;
         }
     }
     {
@@ -211,6 +846,8 @@ fn apply_one_slot_cross_file(
     namco: &mut effect_library::NamcoEffectFile,
     donor: &effect_library::NamcoEffectFile,
     op: &OneSlotOp,
+    destination_is_fighter: bool,
+    shader_strategy: ShaderStrategy,
 ) -> Result<()> {
     if op.replace_entry.is_none()
         && namco
@@ -291,26 +928,21 @@ fn apply_one_slot_cross_file(
     for set in &donor_sets {
         visit_emitters_ref(&set.emitters, &mut |em| {
             let d = &em.data;
-            for s in [&d.sampler0, &d.sampler1, &d.sampler2]
-                .into_iter()
-                .flatten()
-            {
-                // 0 and u64::MAX are "no texture" sentinels.
-                if s.texture_id != 0 && s.texture_id != u64::MAX && !tex_ids.contains(&s.texture_id)
-                {
-                    tex_ids.push(s.texture_id);
-                }
-            }
-            if d.shader_references.shader_index >= 0
+            append_unique_resource_ids(
+                &mut tex_ids,
+                [
+                    d.sampler0.as_ref().map(|s| s.texture_id),
+                    d.sampler1.as_ref().map(|s| s.texture_id),
+                    d.sampler2.as_ref().map(|s| s.texture_id),
+                    d.sampler3.as_ref().map(|s| s.texture_id),
+                    d.sampler4.as_ref().map(|s| s.texture_id),
+                    d.sampler5.as_ref().map(|s| s.texture_id),
+                ],
+            );
+            uses_shader |= d.shader_references.shader_index >= 0
                 || d.shader_references.user_shader_index1 >= 0
-                || d.shader_references.user_shader_index2 >= 0
-                || d.shader_references.custom_shader_index >= 0
-            {
-                uses_shader = true;
-            }
-            if d.shader_references.compute_shader_index >= 0 {
-                uses_compute = true;
-            }
+                || d.shader_references.user_shader_index2 >= 0;
+            uses_compute |= d.shader_references.compute_shader_index >= 0;
             for pid in [
                 d.particle_data.primitive_id,
                 d.particle_data.primitive_ex_id,
@@ -329,10 +961,9 @@ fn apply_one_slot_cross_file(
     // (verified against the crate's dumper/creator). Emitters reference primitives by
     // GUID, so appending donor models + their descriptors in lockstep needs no emitter
     // rewrites. Cases:
-    //  (a) target already has every referenced GUID → nothing to do;
-    //  (b) target has NO primitive table → transplant the donor's whole PRMA section;
-    //  (c) BOTH have tables → extract each missing donor primitive as a single-model
-    //      BFRES and append (this was the "sys donor into fighter" ⚠ failure).
+    // Each missing donor primitive is extracted as a single-model BFRES and appended.
+    // This deliberately avoids copying the donor's whole PRMA when the destination pool
+    // is empty: the runtime carrier should retain only resources the selected effect uses.
     if !prim_ids.is_empty() {
         let dest_has = |id: u64| {
             namco
@@ -342,67 +973,77 @@ fn apply_one_slot_cross_file(
                 .map(|pi| pi.descriptors.iter().any(|d| d.id == id))
                 .unwrap_or(false)
         };
-        let dest_has_table = namco
-            .ptcl_file
-            .as_ref()
-            .and_then(|p| p.primitive_info.as_ref())
-            .map(|pi| !pi.descriptors.is_empty())
-            .unwrap_or(false);
+        // Some vanilla emitters retain nonzero values in inactive primitive fields (and some
+        // refer to globally-owned primitives). If the donor itself has no descriptor for an
+        // ID, there is no local model to transplant; vanilla already resolves or ignores it.
+        // Only donor-owned descriptors belong in the merged PRMA.
+        let donor_prim = donor_ptcl.primitive_info.as_ref();
         let missing: Vec<u64> = prim_ids
             .iter()
             .copied()
-            .filter(|id| !dest_has(*id))
+            .filter(|id| {
+                !dest_has(*id)
+                    && donor_prim
+                        .map(|p| p.descriptors.iter().any(|d| d.id == *id))
+                        .unwrap_or(false)
+            })
             .collect();
         if !missing.is_empty() {
-            let donor_prim = donor_ptcl.primitive_info.as_ref().ok_or_else(|| {
-                anyhow!("donor references primitives but has no PRMA section to transfer")
-            })?;
+            let donor_prim = donor_prim.expect("missing IDs were filtered through donor PRMA");
             let dest_ptcl = namco
                 .ptcl_file
                 .as_mut()
                 .ok_or_else(|| anyhow!("target eff has no embedded PTCL"))?;
-            if !dest_has_table {
-                // Safe transplant: take the donor's whole PRMA section.
-                dest_ptcl.primitive_info = Some(donor_prim.clone());
-            } else {
-                let donor_bin = donor_prim
-                    .binary_data
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("donor PRMA has descriptors but no BFRES binary"))?;
-                let dest_prim = dest_ptcl.primitive_info.as_mut().unwrap();
-                let dest_count = dest_prim.descriptors.len();
-                let mut files: Vec<Vec<u8>> =
-                    vec![dest_prim.binary_data.clone().unwrap_or_default()];
-                for id in &missing {
-                    let idx = effect_library::bfres::descriptor_index_for_id(
-                        &donor_prim.descriptors,
-                        *id,
-                    )
-                    .ok_or_else(|| anyhow!("donor primitive {id:#x} has no descriptor"))?;
-                    let blob = effect_library::bfres::export_single_model(donor_bin, idx)
-                        .with_context(|| format!("extracting donor primitive {id:#x}"))?;
-                    files.push(blob);
-                    dest_prim
-                        .descriptors
-                        .push(donor_prim.descriptors[idx].clone());
-                }
-                let merged = effect_library::bfres::ResFile::merge_model_files(&files)
-                    .context("merging donor primitives into the target PRMA")?;
-                // Sanity: descriptor index i must still map to model index i — a model
-                // NAME collision would make the container replace-instead-of-append and
-                // silently desync every primitive after it.
-                let last = dest_count + missing.len() - 1;
-                if effect_library::bfres::export_single_model(&merged, last).is_err()
-                    || effect_library::bfres::export_single_model(&merged, last + 1).is_ok()
-                {
-                    anyhow::bail!(
-                        "one-slot '{}': donor primitive model name collides with the target's \
-                         (PRMA merge would desync) — not merged",
-                        op.new_entry_name
-                    );
-                }
-                dest_prim.binary_data = Some(merged);
+            if dest_ptcl.primitive_info.is_none() {
+                let mut empty = donor_prim.clone();
+                empty.descriptors.clear();
+                empty.binary_data = None;
+                dest_ptcl.primitive_info = Some(empty);
             }
+            let donor_bin = donor_prim
+                .binary_data
+                .as_ref()
+                .ok_or_else(|| anyhow!("donor PRMA has descriptors but no BFRES binary"))?;
+            let dest_prim = dest_ptcl.primitive_info.as_mut().unwrap();
+            let dest_count = dest_prim.descriptors.len();
+            let mut files: Vec<Vec<u8>> = dest_prim
+                .binary_data
+                .as_ref()
+                .filter(|b| !b.is_empty())
+                .cloned()
+                .into_iter()
+                .collect();
+            for id in &missing {
+                let idx =
+                    effect_library::bfres::descriptor_index_for_id(&donor_prim.descriptors, *id)
+                        .ok_or_else(|| anyhow!("donor primitive {id:#x} has no descriptor"))?;
+                let blob = effect_library::bfres::export_single_model(donor_bin, idx)
+                    .with_context(|| format!("extracting donor primitive {id:#x}"))?;
+                files.push(blob);
+                dest_prim
+                    .descriptors
+                    .push(donor_prim.descriptors[idx].clone());
+            }
+            let merged = if files.len() == 1 {
+                files.pop().unwrap()
+            } else {
+                effect_library::bfres::ResFile::merge_model_files(&files)
+                    .context("merging donor primitives into the target PRMA")?
+            };
+            // Sanity: descriptor index i must still map to model index i — a model
+            // NAME collision would make the container replace-instead-of-append and
+            // silently desync every primitive after it.
+            let last = dest_count + missing.len() - 1;
+            if effect_library::bfres::export_single_model(&merged, last).is_err()
+                || effect_library::bfres::export_single_model(&merged, last + 1).is_ok()
+            {
+                anyhow::bail!(
+                    "transplant '{}': donor primitive model name collides with the target's \
+                     (PRMA merge would desync) — not merged",
+                    op.new_entry_name
+                );
+            }
+            dest_prim.binary_data = Some(merged);
         }
     }
 
@@ -446,20 +1087,25 @@ fn apply_one_slot_cross_file(
         }
         if !new_blobs.is_empty() {
             let mut files: Vec<Vec<u8>> = Vec::with_capacity(new_blobs.len() + 1);
-            files.push(dest_tex.binary_data.clone().unwrap_or_default());
+            if let Some(existing) = dest_tex.binary_data.as_ref().filter(|b| !b.is_empty()) {
+                files.push(existing.clone());
+            }
             files.extend(new_blobs);
-            dest_tex.binary_data = Some(
+            dest_tex.binary_data = Some(if files.len() == 1 {
+                files.pop().unwrap()
+            } else {
                 effect_library::bntx::merge_texture_files(&files)
-                    .context("merging donor textures into the target BNTX")?,
-            );
+                    .context("merging donor textures into the target BNTX")?
+            });
         }
     }
 
-    // Shaders: append the donor's whole variation container after ours and shift the
-    // cloned emitters' indices by our original count. Correct (indices stay valid);
-    // costs some file size, which a one-slot can afford.
-    let mut shader_index_base: i32 = 0;
-    let mut compute_index_base: i32 = 0;
+    // Donor shader containers are appended whole here and the copied emitters relocated onto
+    // them. Narrowing to the variations actually referenced is a separate, later pass
+    // (`compact_shader_containers`) so it can see every transplant at once; doing it per-donor
+    // would have to guess which of the destination's own variations stay reachable.
+    let mut shader_index_base = 0i32;
+    let mut compute_index_base = 0i32;
     if uses_shader || uses_compute {
         let dest_ptcl = namco.ptcl_file.as_mut().unwrap();
         let dest_shader = dest_ptcl
@@ -476,13 +1122,28 @@ fn apply_one_slot_cross_file(
                 .binary_data
                 .as_ref()
                 .ok_or_else(|| anyhow!("donor shader section has no binary"))?;
-            shader_index_base = effect_library::bnsh::BnshFile::read(&dest_bin)
-                .map(|f| f.variations.len() as i32)
-                .unwrap_or(0);
-            dest_shader.binary_data = Some(
-                effect_library::bnsh::merge_variation_files(&[dest_bin, donor_bin.clone()])
-                    .context("merging donor shader variations")?,
-            );
+            match shader_strategy {
+                ShaderStrategy::AlreadyMerged { standard_base, .. } => {
+                    shader_index_base = standard_base;
+                }
+                ShaderStrategy::Merge => {
+                    if dest_bin.is_empty() {
+                        dest_shader.binary_data = Some(donor_bin.clone());
+                    } else {
+                        shader_index_base = effect_library::bnsh::BnshFile::read(&dest_bin)
+                            .context("reading destination shader variations")?
+                            .variations
+                            .len() as i32;
+                        dest_shader.binary_data = Some(
+                            effect_library::bnsh::merge_variation_files(&[
+                                dest_bin,
+                                donor_bin.clone(),
+                            ])
+                            .context("merging the donor shader container")?,
+                        );
+                    }
+                }
+            }
         }
         if uses_compute {
             let dest_bin = dest_shader.compute_binary.clone().unwrap_or_default();
@@ -490,17 +1151,28 @@ fn apply_one_slot_cross_file(
                 .compute_binary
                 .as_ref()
                 .ok_or_else(|| anyhow!("donor compute-shader section has no binary"))?;
-            compute_index_base = if dest_bin.is_empty() {
-                0
-            } else {
-                effect_library::bnsh::BnshFile::read(&dest_bin)
-                    .map(|f| f.variations.len() as i32)
-                    .unwrap_or(0)
-            };
-            dest_shader.compute_binary = Some(
-                effect_library::bnsh::merge_variation_files(&[dest_bin, donor_bin.clone()])
-                    .context("merging donor compute shaders")?,
-            );
+            match shader_strategy {
+                ShaderStrategy::AlreadyMerged { compute_base, .. } => {
+                    compute_index_base = compute_base;
+                }
+                ShaderStrategy::Merge => {
+                    if dest_bin.is_empty() {
+                        dest_shader.compute_binary = Some(donor_bin.clone());
+                    } else {
+                        compute_index_base = effect_library::bnsh::BnshFile::read(&dest_bin)
+                            .context("reading destination compute-shader variations")?
+                            .variations
+                            .len() as i32;
+                        dest_shader.compute_binary = Some(
+                            effect_library::bnsh::merge_variation_files(&[
+                                dest_bin,
+                                donor_bin.clone(),
+                            ])
+                            .context("merging the donor compute-shader container")?,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -509,19 +1181,19 @@ fn apply_one_slot_cross_file(
     let remap = |set: &mut effect_library::structs::EmitterSet| {
         visit_emitters(&mut set.emitters, &mut 0, &mut |_, em| {
             let s = &mut em.data.shader_references;
-            for idx in [
+            remap_shader_indices(
                 &mut s.shader_index,
                 &mut s.user_shader_index1,
                 &mut s.user_shader_index2,
-                &mut s.custom_shader_index,
-            ] {
-                if *idx >= 0 {
-                    *idx += shader_index_base;
-                }
-            }
-            if s.compute_shader_index >= 0 {
-                s.compute_shader_index += compute_index_base;
-            }
+                &mut s.compute_shader_index,
+                shader_index_base,
+                compute_index_base,
+            );
+            // `custom_shader_index` is NOT an index into the BNSH variation array. Its values
+            // are small custom-shader modes (typically 0, 4, or 8) shared by emitters whose
+            // real `shader_index` spans the whole file. Relocating it by the destination's
+            // variation count makes otherwise valid effects invisible (Daisy's petals exposed
+            // this by changing mode 0 into the invalid value 38 in the Bomberman carrier).
             em.cached_binary = None; // indices moved → cached EMTR blob is stale
         });
     };
@@ -576,14 +1248,11 @@ fn apply_one_slot_cross_file(
     // The donor's external-model handle indexes the DONOR file's model table — it
     // dangles here. Cross-file model transfer is unsupported; drop the reference.
     new_entry.external_model_idx = 0;
-    // Non-fighter donors (assists/items — e.g. ef_alucard) mark entries type 0 in the kind
-    // u16's high byte; fighter tables use 0x01xx for particle entries, and the fighter
-    // spawn path REJECTS type-0 entries: the kind resolves (name registered, entry found)
-    // but never instantiates — verified live: kirby_dash entry=0x0100 spawns, the appended
-    // alucard entry=0x0000 returns handle 0. Normalize to the particle type.
-    if new_entry.kind & 0xff00 == 0 {
-        new_entry.kind |= 0x0100;
-    }
+    // Non-fighter donors (assists/items — e.g. ef_alucard) commonly use type 0 in the
+    // kind u16's high byte. A FIGHTER destination needs 0x01xx: the fighter spawn path
+    // rejects type-0 entries. An assist-owned carrier needs the inverse normalization:
+    // fighter-type 0x01xx entries are not registered by the assist loader.
+    new_entry.kind = destination_entry_kind(new_entry.kind, destination_is_fighter);
     if new_entry.variant_count == 0 {
         new_entry.emitter_set_id = new_set_ids[0];
     } else {
@@ -599,6 +1268,356 @@ fn apply_one_slot_cross_file(
         new_entry.variant_start_idx = new_start;
     }
     finish_one_slot_entry(namco, op, new_entry)
+}
+
+fn destination_entry_kind(kind: u16, destination_is_fighter: bool) -> u16 {
+    if destination_is_fighter {
+        if kind & 0xff00 == 0 {
+            kind | 0x0100
+        } else {
+            kind
+        }
+    } else {
+        // Assist/item owners register type-0 entries. Leaving a fighter donor as 0x01xx
+        // makes load_effects succeed while omitting the entry from the live kind table.
+        kind & 0x00ff
+    }
+}
+
+fn remap_shader_indices(
+    shader: &mut i32,
+    user1: &mut i32,
+    user2: &mut i32,
+    compute: &mut i32,
+    shader_base: i32,
+    compute_base: i32,
+) {
+    for index in [shader, user1, user2] {
+        if *index >= 0 {
+            *index += shader_base;
+        }
+    }
+    if *compute >= 0 {
+        *compute += compute_base;
+    }
+}
+
+fn append_unique_resource_ids<const N: usize>(out: &mut Vec<u64>, ids: [Option<u64>; N]) {
+    for id in ids.into_iter().flatten() {
+        // 0 and u64::MAX are the EFF "no resource" sentinels.
+        if id != 0 && id != u64::MAX && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        append_unique_resource_ids, destination_entry_kind, remap_shader_indices, shader_index_fits,
+    };
+
+    #[test]
+    fn carrier_rejects_shader_variations_its_container_lacks() {
+        // The engine-global compute container ships a single variation. -1 means "unused".
+        assert!(shader_index_fits(-1, 1));
+        assert!(shader_index_fits(0, 1));
+        // Daisy's DAISY_KINOPIO_BULLET wants variation 1 from Daisy's two-variation container;
+        // shipping that container in a Bomberman carrier froze the game.
+        assert!(!shader_index_fits(1, 1));
+        assert!(!shader_index_fits(0, 0));
+    }
+
+    #[test]
+    fn assist_carrier_preserves_donor_entry_type() {
+        assert_eq!(destination_entry_kind(0x0005, false), 0x0005);
+        assert_eq!(destination_entry_kind(0x0100, false), 0x0000);
+        assert_eq!(destination_entry_kind(0x0105, false), 0x0005);
+    }
+
+    #[test]
+    fn fighter_destination_promotes_non_fighter_entry_type() {
+        assert_eq!(destination_entry_kind(0x0005, true), 0x0105);
+        assert_eq!(destination_entry_kind(0x0105, true), 0x0105);
+    }
+
+    #[test]
+    fn shader_relocation_moves_only_bnsh_variation_indices() {
+        let (mut shader, mut user1, mut user2, mut compute) = (88, -1, 3, 1);
+        let custom_shader_mode = 0;
+        remap_shader_indices(&mut shader, &mut user1, &mut user2, &mut compute, 38, 1);
+        assert_eq!((shader, user1, user2, compute), (126, -1, 41, 2));
+        assert_eq!(custom_shader_mode, 0);
+    }
+
+    #[test]
+    fn texture_collection_covers_all_six_sampler_slots() {
+        let mut ids = vec![10];
+        append_unique_resource_ids(
+            &mut ids,
+            [Some(10), Some(11), None, Some(13), Some(14), Some(15)],
+        );
+        assert_eq!(ids, vec![10, 11, 13, 14, 15]);
+    }
+
+    /// End-to-end carrier builds against the real game files, which is the only way to exercise
+    /// resource stripping: BNSH variations and BNTX textures are opaque blobs that cannot be
+    /// synthesized. Point `VISIONARY_EFF_ROOT` at a directory holding the extracted `effect/`
+    /// tree to run this; it skips otherwise so a checkout without game assets still passes.
+    #[test]
+    fn stripped_carrier_holds_only_what_was_transplanted() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const CARRIER: &str = "effect/assist/bomberman/ef_bomberman.eff";
+        let carrier_base = std::fs::read(root.join(CARRIER)).expect("carrier eff");
+        let op = |file: &str, set: &str| crate::mod_project::OneSlotOp {
+            new_entry_name: set.to_string(),
+            src_file_rel: file.to_string(),
+            src_set_name: set.to_string(),
+            src_set_idx: 0,
+            slots: Vec::new(),
+            replace_entry: None,
+        };
+        const PICKEL: &str = "effect/fighter/pickel/ef_pickel.eff";
+        const DAISY: &str = "effect/fighter/daisy/ef_daisy.eff";
+        let cases: [(&str, Vec<crate::mod_project::OneSlotOp>); 3] = [
+            ("one donor", vec![op(PICKEL, "pickel_tnt")]),
+            (
+                // DAISY_KINOPIO_BULLET is the one known effect that samples a compute shader.
+                "compute shader",
+                vec![op(DAISY, "daisy_kinopio_bullet")],
+            ),
+            (
+                "two donor files",
+                vec![
+                    op(PICKEL, "pickel_tnt"),
+                    op(DAISY, "daisy_flower_petals"),
+                    op(DAISY, "daisy_kinopio_bullet"),
+                ],
+            ),
+        ];
+
+        for (label, ops) in cases {
+            let built =
+                super::rebuild_runtime_carrier_eff_bytes(&carrier_base, CARRIER, &ops, &root)
+                    .unwrap_or_else(|err| panic!("{label}: carrier build failed: {err:#}"));
+            let carrier = effect_library::NamcoEffectFile::load(&built)
+                .unwrap_or_else(|err| panic!("{label}: carrier does not re-read: {err:#}"));
+            let ptcl = carrier.ptcl_file.as_ref().expect("carrier has a PTCL");
+            let shader = ptcl
+                .shader_info
+                .as_ref()
+                .expect("carrier has a shader section");
+            let count = |binary: Option<&Vec<u8>>| {
+                binary
+                    .map(|b| {
+                        effect_library::bnsh::BnshFile::read(b)
+                            .expect("container re-reads")
+                            .variations
+                            .len()
+                    })
+                    .unwrap_or(0)
+            };
+            let standard = count(shader.binary_data.as_ref());
+            let compute = count(shader.compute_binary.as_ref());
+
+            // Each transplant must have arrived as a named entry backed by a populated set.
+            for want in &ops {
+                let index = carrier
+                    .entry_names
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case(&want.new_entry_name))
+                    .unwrap_or_else(|| panic!("{label}: '{}' is missing", want.new_entry_name));
+                let set_id = carrier.entries[index].emitter_set_id as usize;
+                let set = ptcl.emitter_list.emitter_sets[set_id - 1].clone();
+                assert!(
+                    !set.emitters.is_empty(),
+                    "{label}: '{}' was silenced along with the carrier's own effects",
+                    want.new_entry_name
+                );
+            }
+            // The carrier's own entries stay resolvable, and stay silent.
+            let native = carrier
+                .entry_names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case("bomberman_bomb"))
+                .expect("carrier keeps its own entry names");
+            let native_set = carrier.entries[native].emitter_set_id as usize;
+            assert!(
+                ptcl.emitter_list.emitter_sets[native_set - 1]
+                    .emitters
+                    .is_empty(),
+                "{label}: the carrier's own effect still has emitters"
+            );
+
+            // Every surviving reference must resolve, and every retained resource must be
+            // referenced — the second half is what makes this a stripping test rather than a
+            // repeat of the pre-encode safety check.
+            let mut seen_shaders = std::collections::BTreeSet::new();
+            let mut seen_textures: Vec<u64> = Vec::new();
+            for set in &ptcl.emitter_list.emitter_sets {
+                super::visit_emitters_ref(&set.emitters, &mut |em| {
+                    let refs = &em.data.shader_references;
+                    for index in [
+                        refs.shader_index,
+                        refs.user_shader_index1,
+                        refs.user_shader_index2,
+                    ] {
+                        assert!(
+                            shader_index_fits(index, standard),
+                            "{label}: {}: shader variation {index} of {standard}",
+                            set.name
+                        );
+                        if index >= 0 {
+                            seen_shaders.insert(index);
+                        }
+                    }
+                    assert!(
+                        shader_index_fits(refs.compute_shader_index, compute),
+                        "{label}: {}: compute variation {} of {compute}",
+                        set.name,
+                        refs.compute_shader_index
+                    );
+                    let d = &em.data;
+                    append_unique_resource_ids(
+                        &mut seen_textures,
+                        [
+                            d.sampler0.as_ref().map(|s| s.texture_id),
+                            d.sampler1.as_ref().map(|s| s.texture_id),
+                            d.sampler2.as_ref().map(|s| s.texture_id),
+                            d.sampler3.as_ref().map(|s| s.texture_id),
+                            d.sampler4.as_ref().map(|s| s.texture_id),
+                            d.sampler5.as_ref().map(|s| s.texture_id),
+                        ],
+                    );
+                });
+            }
+            assert_eq!(
+                seen_shaders.len(),
+                standard,
+                "{label}: {} shader variations nothing references survived",
+                standard - seen_shaders.len()
+            );
+            let textures = ptcl.texture_info.as_ref().expect("carrier has textures");
+            for descriptor in &textures.descriptors {
+                assert!(
+                    seen_textures.contains(&descriptor.id),
+                    "{label}: texture '{}' survived unreferenced",
+                    descriptor.name
+                );
+            }
+            assert!(
+                seen_textures
+                    .iter()
+                    .all(|id| textures.descriptors.iter().any(|d| d.id == *id)),
+                "{label}: an emitter samples a texture that was stripped"
+            );
+
+            eprintln!(
+                "{label}: {} B, {standard} standard / {compute} compute variations, {} textures",
+                built.len(),
+                textures.descriptors.len()
+            );
+            // Bomberman's base is 3.4 MB before a donor is merged in and Pickel alone ships 370
+            // shader variations. Guard the order of magnitude, not the exact figure.
+            assert!(
+                built.len() < 1_500_000,
+                "{label}: carrier is {} B — stripping regressed",
+                built.len()
+            );
+        }
+    }
+
+    #[test]
+    fn native_carrier_transplant_keeps_its_emitter_resources() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const CARRIER: &str = "effect/assist/bomberman/ef_bomberman.eff";
+        let carrier_base = std::fs::read(root.join(CARRIER)).expect("carrier eff");
+        let op = crate::mod_project::OneSlotOp {
+            new_entry_name: "bomberman_bomb_os".into(),
+            src_file_rel: CARRIER.into(),
+            src_set_name: "bomberman_bomb".into(),
+            src_set_idx: 0,
+            slots: Vec::new(),
+            replace_entry: None,
+        };
+        let built = super::rebuild_runtime_carrier_eff_bytes(&carrier_base, CARRIER, &[op], &root)
+            .expect("native carrier build");
+        assert_eq!(
+            built, carrier_base,
+            "a carrier-native selection must preserve the game's EFF exactly"
+        );
+        let carrier =
+            effect_library::NamcoEffectFile::load(&built).expect("native carrier re-read");
+        let index = carrier
+            .entry_names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case("bomberman_bomb"))
+            .expect("native entry");
+        let set_id = carrier.entries[index].emitter_set_id as usize;
+        assert!(
+            !carrier
+                .ptcl_file
+                .as_ref()
+                .expect("carrier PTCL")
+                .emitter_list
+                .emitter_sets[set_id - 1]
+                .emitters
+                .is_empty(),
+            "the selected native carrier set must not be silenced"
+        );
+    }
+
+    #[test]
+    fn primitive_only_carrier_preserves_the_game_bfres() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const CARRIER: &str = "effect/assist/bomberman/ef_bomberman.eff";
+        const DAISY: &str = "effect/fighter/daisy/ef_daisy.eff";
+        let carrier_base = std::fs::read(root.join(CARRIER)).expect("carrier eff");
+        let donor_bytes = std::fs::read(root.join(DAISY)).expect("Daisy eff");
+        let donor = effect_library::NamcoEffectFile::load(&donor_bytes).expect("Daisy parse");
+        let op = crate::mod_project::OneSlotOp {
+            new_entry_name: "daisy_flower_petals".into(),
+            src_file_rel: DAISY.into(),
+            src_set_name: "daisy_flower_petals".into(),
+            src_set_idx: 0,
+            slots: Vec::new(),
+            replace_entry: None,
+        };
+        let built = super::rebuild_runtime_carrier_eff_bytes(&carrier_base, CARRIER, &[op], &root)
+            .expect("Daisy carrier build");
+        let output = effect_library::NamcoEffectFile::load(&built).expect("Daisy carrier re-read");
+        let source_primitives = donor
+            .ptcl_file
+            .as_ref()
+            .and_then(|ptcl| ptcl.primitive_info.as_ref())
+            .expect("Daisy primitive pool");
+        let output_primitives = output
+            .ptcl_file
+            .as_ref()
+            .and_then(|ptcl| ptcl.primitive_info.as_ref())
+            .expect("carrier primitive pool");
+        assert_eq!(
+            output_primitives.binary_data, source_primitives.binary_data,
+            "primitive-only effects must retain the donor's game-authored BFRES"
+        );
+        assert_eq!(
+            output_primitives.descriptors.len(),
+            source_primitives.descriptors.len(),
+            "the raw BFRES must retain its matching descriptor table"
+        );
+    }
 }
 
 /// Read-only recursive emitter visit (children after parent).

@@ -250,10 +250,41 @@ pub fn pinned_kinds() -> Vec<(u64, Pinned)> {
         .collect()
 }
 
-/// Flag a kind as ACMD-spawned (see KindState::acmd).
+/// Flag a kind as ACMD-spawned (see KindState::acmd) and remove legacy kind-global
+/// position/rotation pins. ACMD transforms are now scoped through spawn rules. Retaining an
+/// old script-local offset as a kind pin is unsafe for transplanted effects because their
+/// carrier handle is world-space and would be pulled toward the stage origin.
 pub fn mark_acmd(eff_hash: u64) {
-    if let Some(k) = KINDS.lock().get_mut(&eff_hash) {
-        k.acmd = true;
+    let mut changed = false;
+    {
+        if let Some(k) = KINDS.lock().get_mut(&eff_hash) {
+            k.acmd = true;
+            let had_pos = k.pinned.pos.take().is_some();
+            let had_rot = k.pinned.rot.take().is_some();
+            if had_pos || had_rot {
+                k.dirty = true;
+                changed = true;
+            }
+        }
+    }
+    {
+        let mut pending = PENDING_PINS.lock();
+        let remove_empty = if let Some(pins) = pending.get_mut(&eff_hash) {
+            let had_pos = pins.pos.take().is_some();
+            let had_rot = pins.rot.take().is_some();
+            changed |= had_pos || had_rot;
+            !pins.any()
+        } else {
+            false
+        };
+        if remove_empty {
+            pending.remove(&eff_hash);
+        }
+        // Drop the pending lock before save_pins acquires it again.
+        drop(pending);
+    }
+    if changed {
+        save_pins();
     }
 }
 

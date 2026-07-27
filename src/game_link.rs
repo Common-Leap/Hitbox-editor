@@ -2,8 +2,8 @@
 // Speaks the plugin's `<TCP_MESSAGE>{json}</TCP_MESSAGE>` framing (formerly RPM's role):
 //  - inbound  `{"header":"Notify","body":"{\"Notify\":{id,name,value_in_json}}"}` = live
 //    effect-kind tabs (id = hash40 of the effect name, value = RpmEffectData JSON)
-//  - outbound `{"id":<hash>,"newValue":"<RpmEffectData JSON>"}` = an edit; the plugin
-//    diffs the form against what it last notified and pins only the changed fields.
+//  - outbound `{"id":<hash>,"newValue":"<sparse JSON>"}` = an edit; only controls the
+//    user actually changed are sent and pinned.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -279,10 +279,19 @@ pub struct HitboxRuleWire {
 
 const OVERRIDE_DEBOUNCE_MS: u128 = 200;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirtyEdit {
+    /// Authored EFF modifiers: size plus color/speed multipliers.
+    Modifiers,
+    /// User live tweaks: color/speed multipliers only.
+    Tweak,
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveOverride {
     pub form: RpmEffectData,
     dirty_at: Option<Instant>,
+    dirty_edit: Option<DirtyEdit>,
     /// The USER set this entry's color×/speed (vs. values derived from authored edits) —
     /// only these export as LAST_EFFECT_SET_* tweaks and persist in the project.
     user_tweaked: bool,
@@ -293,6 +302,7 @@ impl LiveOverride {
         Self {
             form,
             dirty_at: None,
+            dirty_edit: None,
             user_tweaked: false,
         }
     }
@@ -317,20 +327,25 @@ impl LiveOverrides {
             .form
     }
 
-    /// Overwrite the form (Effects-panel path) and schedule a send.
+    /// Adopt a form already reported by the game. Importing the game's current pins does not
+    /// need to echo the complete form back; doing so could race a new spawn observation.
     pub fn set_form(&mut self, hash: u64, form: RpmEffectData) {
         let e = self
             .entries
             .entry(hash)
             .or_insert_with(|| LiveOverride::new(form.clone()));
         e.form = form;
-        e.dirty_at = Some(Instant::now());
+        e.dirty_at = None;
+        e.dirty_edit = None;
     }
 
-    /// Schedule a send after an in-place `form_mut` edit.
+    /// Schedule authored size/color/speed modifiers after an in-place `form_mut` edit.
+    /// Transform fields are intentionally omitted from the wire edit: ACMD position and
+    /// rotation are per-spawn values and must never be inferred from this kind-level form.
     pub fn mark_dirty(&mut self, hash: u64) {
         if let Some(e) = self.entries.get_mut(&hash) {
             e.dirty_at = Some(Instant::now());
+            e.dirty_edit = Some(DirtyEdit::Modifiers);
         }
     }
 
@@ -341,7 +356,10 @@ impl LiveOverrides {
             if let Some(t) = e.dirty_at {
                 if t.elapsed().as_millis() > OVERRIDE_DEBOUNCE_MS {
                     e.dirty_at = None;
-                    link.send_edit(*hash, &e.form);
+                    match e.dirty_edit.take().unwrap_or(DirtyEdit::Tweak) {
+                        DirtyEdit::Modifiers => link.send_modifier_edit(*hash, &e.form, true),
+                        DirtyEdit::Tweak => link.send_modifier_edit(*hash, &e.form, false),
+                    }
                     sent += 1;
                 }
             }
@@ -353,7 +371,10 @@ impl LiveOverrides {
     pub fn flush_one(&mut self, hash: u64, link: &GameLink) {
         if let Some(e) = self.entries.get_mut(&hash) {
             e.dirty_at = None;
-            link.send_edit(hash, &e.form);
+            match e.dirty_edit.take().unwrap_or(DirtyEdit::Tweak) {
+                DirtyEdit::Modifiers => link.send_modifier_edit(hash, &e.form, true),
+                DirtyEdit::Tweak => link.send_modifier_edit(hash, &e.form, false),
+            }
         }
     }
 
@@ -366,6 +387,10 @@ impl LiveOverrides {
     pub fn mark_tweak(&mut self, hash: u64) {
         if let Some(e) = self.entries.get_mut(&hash) {
             e.dirty_at = Some(Instant::now());
+            e.dirty_edit = Some(match e.dirty_edit {
+                Some(DirtyEdit::Modifiers) => DirtyEdit::Modifiers,
+                _ => DirtyEdit::Tweak,
+            });
             e.user_tweaked = true;
         }
     }
@@ -386,6 +411,7 @@ impl LiveOverrides {
             e.form.speed = 1.0;
             e.user_tweaked = false;
             e.dirty_at = Some(Instant::now());
+            e.dirty_edit = Some(DirtyEdit::Tweak);
         }
     }
 
@@ -403,6 +429,7 @@ impl LiveOverrides {
         }
         e.user_tweaked = true;
         e.dirty_at = Some(Instant::now());
+        e.dirty_edit = Some(DirtyEdit::Tweak);
     }
 }
 
@@ -738,14 +765,21 @@ impl GameLink {
         }
     }
 
-    /// Queue a full-form edit for a kind. The plugin pins whichever fields differ from
-    /// the form it last sent us, so unchanged fields are a no-op.
-    pub fn send_edit(&self, id: u64, data: &RpmEffectData) {
-        let value = match serde_json::to_string(data) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let payload = serde_json::json!({ "id": id, "newValue": value });
+    /// Queue a sparse kind-modifier edit. Color/speed controls must not upload the live
+    /// form's position/rotation: those values are ACMD script offsets, while a carrier-owned
+    /// transplant is physically world-space, so accidentally pinning them moves it to the
+    /// stage origin. Authored EFF modifiers may additionally include kind-global scale.
+    pub fn send_modifier_edit(&self, id: u64, data: &RpmEffectData, include_scale: bool) {
+        let mut value = serde_json::json!({
+            "speed": data.speed,
+            "rainbow": {
+                "color": data.rainbow.color,
+            },
+        });
+        if include_scale {
+            value["scale"] = serde_json::json!(data.scale);
+        }
+        let payload = serde_json::json!({ "id": id, "newValue": value.to_string() });
         let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
         if let Ok(mut s) = self.shared.lock() {
             s.outbox.push(frame);
@@ -1147,17 +1181,53 @@ mod tests {
     }
 
     #[test]
-    fn outbound_edit_matches_plugin_inbound_format() {
+    fn outbound_live_tweak_omits_spawn_transform_fields() {
         let link = GameLink::default();
-        link.send_edit(0x1154cb72bf, &RpmEffectData::default());
+        let mut data = RpmEffectData::default();
+        data.pos = Point3D {
+            x: 6.0,
+            y: -2.0,
+            z: 1.5,
+        };
+        data.rot = Point3D {
+            x: 0.0,
+            y: 110.0,
+            z: 0.0,
+        };
+        data.scale = 0.7;
+        data.speed = 1.25;
+        data.rainbow.color.red = 0.5;
+        link.send_modifier_edit(0x1311e844a4, &data, false);
+
         let frame = link.shared.lock().unwrap().outbox[0].clone();
-        assert!(frame.starts_with("<TCP_MESSAGE>") && frame.ends_with("</TCP_MESSAGE>"));
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
-        // Must parse the way the plugin's parse_tcp_payload does: {id, newValue:"<json>"}
-        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
-        assert_eq!(v.get("id").and_then(|i| i.as_u64()), Some(0x1154cb72bf));
-        let nv = v.get("newValue").and_then(|n| n.as_str()).unwrap();
-        let parsed: RpmEffectData = serde_json::from_str(nv).unwrap();
-        assert_eq!(parsed, RpmEffectData::default());
+        let outer: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let edit: serde_json::Value =
+            serde_json::from_str(outer["newValue"].as_str().unwrap()).unwrap();
+
+        assert_eq!(edit["speed"].as_f64(), Some(1.25));
+        assert_eq!(edit["rainbow"]["color"]["red"].as_f64(), Some(0.5));
+        assert!(edit.get("pos").is_none());
+        assert!(edit.get("rot").is_none());
+        assert!(edit.get("scale").is_none());
+    }
+
+    #[test]
+    fn outbound_authored_modifiers_only_add_scale() {
+        let link = GameLink::default();
+        let mut data = RpmEffectData::default();
+        data.scale = 1.75;
+        data.pos.x = 99.0;
+        link.send_modifier_edit(0x109297479a, &data, true);
+
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let outer: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let edit: serde_json::Value =
+            serde_json::from_str(outer["newValue"].as_str().unwrap()).unwrap();
+
+        assert_eq!(edit["scale"].as_f64(), Some(1.75));
+        assert!(edit.get("pos").is_none());
+        assert!(edit.get("rot").is_none());
     }
 }

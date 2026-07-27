@@ -74,6 +74,26 @@ pub struct EditSource {
     pub merged: Option<PathBuf>,
     pub one_slots: usize,
     pub authored: usize,
+    pub transplants: Vec<EffTransplant>,
+}
+
+/// Project metadata for one entry shown in the merged EFF view.
+#[derive(Clone, PartialEq)]
+pub struct EffTransplant {
+    pub op_index: usize,
+    /// The entry visible in the editor (the new name, or replacement target).
+    pub entry_name: String,
+    pub donor_name: String,
+    pub donor_file: String,
+    pub slots: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct EffTransplantRemoval {
+    pub fighter: String,
+    pub op_index: usize,
+    pub entry_name: String,
+    pub donor_name: String,
 }
 
 /// Runtime modifiers derived from authored edits: what to send the game so the live effect
@@ -136,6 +156,9 @@ pub struct EffEditor {
     target_fighter: Option<String>,
     /// Recorded one-slot ops, drained by the app into the project store.
     pending_one_slots: Vec<OneSlotOp>,
+    /// Entry-level removals requested from the EFF editor, drained by the app so it can
+    /// rebuild project state, live aliases, and the runtime carrier atomically.
+    pending_transplant_removals: Vec<EffTransplantRemoval>,
 
     // Live-preview state
     pub auto_apply: bool,
@@ -167,6 +190,7 @@ impl Default for EffEditor {
             selected_emitter: 0,
             target_fighter: None,
             pending_one_slots: Vec::new(),
+            pending_transplant_removals: Vec::new(),
             auto_apply: true,
             eff_dirty_at: None,
             last_sent_note: None,
@@ -347,6 +371,29 @@ impl EffEditor {
     /// One-slot ops recorded since the last drain (the app owns the project store).
     pub fn take_one_slots(&mut self) -> Vec<OneSlotOp> {
         std::mem::take(&mut self.pending_one_slots)
+    }
+
+    pub fn take_transplant_removals(&mut self) -> Vec<EffTransplantRemoval> {
+        std::mem::take(&mut self.pending_transplant_removals)
+    }
+
+    fn current_edit_source(&self) -> Option<&EditSource> {
+        let loaded = self.loaded_path.as_ref()?;
+        self.edit_sources.iter().find(|source| {
+            loaded == &source.base
+                || source.alt_base.as_ref() == Some(loaded)
+                || source.merged.as_ref() == Some(loaded)
+        })
+    }
+
+    fn current_transplant_for_entry(&self, entry_name: &str) -> Option<(String, EffTransplant)> {
+        let source = self.current_edit_source()?;
+        source
+            .transplants
+            .iter()
+            .find(|item| item.entry_name.eq_ignore_ascii_case(entry_name))
+            .cloned()
+            .map(|item| (source.fighter.clone(), item))
     }
 
     /// Diff the working PTCL against the pristine snapshots → absolute-value edit records.
@@ -667,21 +714,21 @@ impl EffEditor {
     /// Select this entry (by name, case-insensitive) once the pending/current eff is
     /// loaded — used to land on a freshly one-slotted or replaced entry.
     pub fn queue_select(&mut self, name: &str) {
+        // Never leave the previous donor highlighted while a new merged preview is pending.
+        // If the rebuild/load fails, an empty selection is truthful; showing the old entry
+        // made a Bomberman request appear to have one-slotted Alucard.
+        self.selected_entry = None;
+        self.selected_emitter = 0;
         self.pending_select = Some(name.to_lowercase());
         self.open = true; // surface the result
-        if self.pending_load.is_none() {
-            self.apply_pending_select();
-        }
     }
 
     fn apply_pending_select(&mut self) {
         let Some(want) = self.pending_select.take() else {
             return;
         };
-        if let Some(pos) = self.entries.iter().position(|e| e.name == want) {
-            self.selected_entry = Some(pos);
-            self.selected_emitter = 0;
-        }
+        self.selected_entry = self.entries.iter().position(|e| e.name == want);
+        self.selected_emitter = 0;
     }
 
     pub fn show(&mut self, ctx: &egui::Context, link: &GameLink, overrides: &mut LiveOverrides) {
@@ -701,6 +748,9 @@ impl EffEditor {
                 }
                 self.apply_pending_select();
             }
+        }
+        if self.pending_select.is_some() {
+            self.apply_pending_select();
         }
 
         // Debounced auto-apply of authored edits. (Direct-form sends are debounced by the
@@ -797,7 +847,7 @@ impl EffEditor {
             if self.edit_sources.is_empty() {
                 ui.label(
                     egui::RichText::new(
-                        "nothing yet — one-slot an effect or tweak an emitter to start",
+                        "nothing yet — transplant an effect or tweak an emitter to start",
                     )
                     .small()
                     .color(egui::Color32::GRAY),
@@ -811,7 +861,7 @@ impl EffEditor {
                 let mut badges: Vec<String> = Vec::new();
                 if src.one_slots > 0 {
                     badges.push(format!(
-                        "{} one-slot{}",
+                        "{} transplant{}",
                         src.one_slots,
                         if src.one_slots == 1 { "" } else { "s" }
                     ));
@@ -833,7 +883,7 @@ impl EffEditor {
                     egui::RichText::new(label)
                 };
                 let resp = ui.selectable_label(selected, text).on_hover_text(if broken {
-                    "one-slot merge output missing — check the status bar for the merge error, then re-slot"
+                    "EFF transplant merge output missing — check the status bar for the merge error, then transplant again"
                         .to_string()
                 } else {
                     format!("open {}'s eff with its edits applied", src.fighter)
@@ -863,7 +913,7 @@ impl EffEditor {
                 .map(|n| {
                     let n = n.to_string_lossy();
                     if self.loaded_is_merged {
-                        format!("{n} (+ one-slots)")
+                        format!("{n} (+ transplants)")
                     } else {
                         n.to_string()
                     }
@@ -915,6 +965,17 @@ impl EffEditor {
                 .desired_width(f32::INFINITY),
         );
         let filter = self.entry_filter.to_lowercase();
+        let transplant_entries: std::collections::HashMap<String, EffTransplant> = self
+            .current_edit_source()
+            .map(|source| {
+                source
+                    .transplants
+                    .iter()
+                    .cloned()
+                    .map(|item| (item.entry_name.to_lowercase(), item))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut clicked = None;
         egui::ScrollArea::vertical()
             .id_salt("eff_entries")
@@ -932,14 +993,22 @@ impl EffEditor {
                         };
                         ui.colored_label(dot, "●");
                         let selected = self.selected_entry == Some(i);
-                        if ui
+                        let response = ui
                             .selectable_label(
                                 selected,
                                 egui::RichText::new(&entry.name).monospace(),
                             )
-                            .on_hover_text(format!("hash40 0x{:010x}", entry.hash))
-                            .clicked()
-                        {
+                            .on_hover_text(format!("hash40 0x{:010x}", entry.hash));
+                        if transplant_entries.contains_key(&entry.name) {
+                            ui.label(
+                                egui::RichText::new("TRANSPLANTED")
+                                    .small()
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(190, 140, 255)),
+                            )
+                            .on_hover_text("This entry came from an EFF transplant");
+                        }
+                        if response.clicked() {
                             clicked = Some(i);
                         }
                     });
@@ -1219,15 +1288,59 @@ impl EffEditor {
             let e = &self.entries[entry_idx];
             (e.hash, e.set_idx, e.name.clone())
         };
+        let transplant = self.current_transplant_for_entry(&entry_name);
 
         let kind = link.kind(hash);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&entry_name).monospace());
+            if transplant.is_some() {
+                ui.colored_label(egui::Color32::from_rgb(190, 140, 255), "EFF TRANSPLANT");
+            }
             match &kind {
                 Some(_) => ui.colored_label(egui::Color32::from_rgb(90, 220, 90), "live"),
                 None => ui.colored_label(egui::Color32::GRAY, "not seen in game yet"),
             };
         });
+        if let Some((fighter, item)) = transplant {
+            let scope = if item.slots.len() == 1 {
+                format!("one-slot c0{}", item.slots[0])
+            } else if item.slots.is_empty() {
+                "all skins".to_string()
+            } else {
+                format!(
+                    "skins {}",
+                    item.slots
+                        .iter()
+                        .map(|slot| format!("c0{slot}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "From {} ({}) · {scope}",
+                    item.donor_name, item.donor_file
+                ))
+                .small()
+                .color(egui::Color32::from_rgb(190, 140, 255)),
+            );
+            if ui
+                .button("Remove this transplanted effect from the game")
+                .on_hover_text(
+                    "Remove this entry from the project, rebuild the merged EFF, and unload \
+                     its runtime carrier resources immediately",
+                )
+                .clicked()
+            {
+                self.pending_transplant_removals.push(EffTransplantRemoval {
+                    fighter,
+                    op_index: item.op_index,
+                    entry_name: item.entry_name,
+                    donor_name: item.donor_name,
+                });
+            }
+            ui.separator();
+        }
 
         // Derived modifiers from authored edits
         let mods = self.entry_mods(set_idx);
@@ -1392,12 +1505,12 @@ impl EffEditor {
     }
 
     fn draw_one_slot_section(&mut self, ui: &mut Ui, entry_name: &str, _set_idx: usize) {
-        // One-slotting moved to the One-Slot Studio (Windows menu in the main editor):
+        // Transplanting moved to the EFF Transplant Studio (Windows menu in the main editor):
         // it can pick a donor from ANY eff (pool-wide search) and redirect existing uses.
         ui.label(
             egui::RichText::new(format!(
-                "To one-slot '{entry_name}' (or any other effect), open Windows → \
-                 One-Slot Studio in the main window."
+                "To transplant '{entry_name}' (or any other effect), open Windows → \
+                 EFF Transplant Studio in the main window."
             ))
             .small()
             .color(egui::Color32::GRAY),

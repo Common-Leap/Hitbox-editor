@@ -283,6 +283,42 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             Some(tokenize_args(&after[..end]))
         };
 
+        // All of these dumped macro families begin with the same editable spawn payload:
+        // agent, graphic[, flipped graphic], joint, position xyz, rotation xyz, scale.
+        // Their remaining alpha/attribute/random/contact arguments do not alter the timeline
+        // transform. Parse the broad family before the older individual cases below.
+        if let Some((name, flip, follows_bone)) = effect_spawn_macro_layout(line) {
+            let prefix = format!("macros::{name}(");
+            if let Some(t) = try_extract(&prefix) {
+                let off = usize::from(flip);
+                if t.len() > 9 + off {
+                    let effect_name =
+                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                    let effect_name_alt = flip.then(|| {
+                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string())
+                    });
+                    let bone_name = extract_hash40_string(&t[2 + off])
+                        .unwrap_or_else(|| t[2 + off].trim().to_string());
+                    let num = |i: usize, default: f32| {
+                        t.get(i)
+                            .and_then(|value| value.trim().parse::<f32>().ok())
+                            .unwrap_or(default)
+                    };
+                    macros.push(EffectMacro::Effect {
+                        effect_name,
+                        effect_name_alt,
+                        spawn_func: name.to_string(),
+                        bone_name,
+                        offset: [num(3 + off, 0.0), num(4 + off, 0.0), num(5 + off, 0.0)],
+                        rotation: [num(6 + off, 0.0), num(7 + off, 0.0), num(8 + off, 0.0)],
+                        scale: num(9 + off, 1.0),
+                        follows_bone,
+                    });
+                    continue;
+                }
+            }
+        }
+
         if line.contains("macros::EFFECT_FOLLOW_FLIP(") {
             if let Some(t) = try_extract("macros::EFFECT_FOLLOW_FLIP(") {
                 // args[1]=effect_hash, args[2]=effect_hash2 (ignore), args[3]=bone_hash
@@ -301,6 +337,10 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     let scale = t[10].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
                         effect_name,
+                        effect_name_alt: Some(
+                            extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string()),
+                        ),
+                        spawn_func: "EFFECT_FOLLOW_FLIP".into(),
                         bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
@@ -328,6 +368,10 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     let scale = t[10].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
                         effect_name,
+                        effect_name_alt: Some(
+                            extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string()),
+                        ),
+                        spawn_func: "EFFECT_FLIP".into(),
                         bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
@@ -357,6 +401,8 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
                         effect_name,
+                        effect_name_alt: None,
+                        spawn_func: "EFFECT_FOLLOW".into(),
                         bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
@@ -384,6 +430,8 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
                         effect_name,
+                        effect_name_alt: None,
+                        spawn_func: "EFFECT".into(),
                         bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
@@ -411,6 +459,8 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
                         effect_name,
+                        effect_name_alt: None,
+                        spawn_func: "FOOT_EFFECT".into(),
                         bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
@@ -438,6 +488,8 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
                     macros.push(EffectMacro::Effect {
                         effect_name,
+                        effect_name_alt: None,
+                        spawn_func: "LANDING_EFFECT".into(),
                         bone_name,
                         offset: [x, y, z],
                         rotation: [rot_x, rot_y, rot_z],
@@ -558,12 +610,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         // Check for bare EFFECT macro calls (outside is_excute blocks).
         // Some effect functions place EFFECT macros directly in the function body
         // without an is_excute wrapper — route them through parse_excute_block_effects.
-        let is_effect_macro = line.contains("macros::EFFECT(")
-            || line.contains("macros::EFFECT_FOLLOW(")
-            || line.contains("macros::EFFECT_FLIP(")
-            || line.contains("macros::EFFECT_FOLLOW_FLIP(")
-            || line.contains("macros::FOOT_EFFECT(")
-            || line.contains("macros::LANDING_EFFECT(")
+        let is_effect_macro = effect_spawn_macro_layout(line).is_some()
             || line.contains("macros::EFFECT_OFF_KIND(")
             || line.contains("macros::AFTER_IMAGE4_ON")
             || line.contains("macros::AFTER_IMAGE_ON")
@@ -585,6 +632,41 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
     }
 
     (stmts, pos)
+}
+
+/// Dumped effect spawn macros that share the common graphic/joint/transform prefix.
+/// Returns `(macro name, has second flipped graphic, follows bone)`.
+fn effect_spawn_macro_layout(line: &str) -> Option<(&'static str, bool, bool)> {
+    const LAYOUTS: &[(&str, bool, bool)] = &[
+        ("EFFECT_FOLLOW_NO_STOP_FLIP", true, true),
+        ("EFFECT_FOLLOW_FLIP_ALPHA", true, true),
+        ("EFFECT_FOLLOW_FLIP_COLOR", true, true),
+        ("EFFECT_FOLLOW_FLIP_RND", true, true),
+        ("EFFECT_FOLLOW_FLIP", true, true),
+        ("EFFECT_FOLLOW_NO_SCALE", false, true),
+        ("EFFECT_FOLLOW_NO_STOP", false, true),
+        ("EFFECT_FOLLOW_ALPHA", false, true),
+        ("EFFECT_FOLLOW_COLOR", false, true),
+        ("EFFECT_FLW_POS_UNSYNC_VIS", false, true),
+        ("EFFECT_FLW_POS_NO_STOP", false, true),
+        ("EFFECT_FLW_UNSYNC_VIS", false, true),
+        ("EFFECT_FLW_POS", false, true),
+        ("EFFECT_FOLLOW", false, true),
+        ("LANDING_EFFECT_FLIP", true, false),
+        ("FOOT_EFFECT_FLIP", true, false),
+        ("EFFECT_FLIP_ALPHA", true, false),
+        ("EFFECT_FLIP", true, false),
+        ("LANDING_EFFECT", false, false),
+        ("FOOT_EFFECT", false, false),
+        ("DOWN_EFFECT", false, false),
+        ("EFFECT_ALPHA", false, false),
+        ("EFFECT_ATTR", false, false),
+        ("EFFECT", false, false),
+    ];
+    LAYOUTS
+        .iter()
+        .copied()
+        .find(|(name, _, _)| line.contains(&format!("macros::{name}(")))
 }
 
 /// Parse an effect_ script source into an `EffectScript` IR.
@@ -1008,47 +1090,86 @@ fn emit_effect_move_fn(
         "effect_{}",
         move_name.to_lowercase().replace('_', "").replace(' ', "")
     );
-    let mut active: Vec<&crate::data::EffectCall> = calls.iter().filter(|c| !c.disabled).collect();
-    active.sort_by_key(|c| c.active_start);
+    // A follow effect's end frame is an ACMD event, not an intrinsic particle lifetime.
+    // Keep starts and stops in one ordered timeline so a finite `active_end` actually emits
+    // EFFECT_OFF_KIND. Stops for an older instance run before starts at the same frame; a
+    // zero-duration call stops after its own start.
+    let mut events: std::collections::BTreeMap<
+        u32,
+        (Vec<&crate::data::EffectCall>, Vec<&crate::data::EffectCall>),
+    > = std::collections::BTreeMap::new();
+    for call in calls.iter().filter(|call| !call.disabled) {
+        events.entry(call.active_start).or_default().1.push(call);
+        if call.follows_bone && call.active_end != 9999 {
+            events
+                .entry(call.active_end.max(call.active_start))
+                .or_default()
+                .0
+                .push(call);
+        }
+    }
 
     let mut out = String::new();
     out.push_str(&format!(
         "unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n"
     ));
-    let mut current_frame: Option<u32> = None;
-    for c in active {
-        if current_frame != Some(c.active_start) {
-            out.push_str(&format!(
-                "    frame(agent.lua_state_agent, {}.0);\n",
-                c.active_start
-            ));
-            current_frame = Some(c.active_start);
-        }
+    for (frame, (stops, starts)) in events {
+        out.push_str(&format!("    frame(agent.lua_state_agent, {frame}.0);\n"));
         out.push_str("    if macros::is_excute(agent) {\n");
-        let (r0, r1, r2) = (c.rotation[0], c.rotation[1], c.rotation[2]);
-        if c.follows_bone {
-            out.push_str(&format!(
-                "        macros::EFFECT_FOLLOW(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, true);\n",
-                c.effect_name, c.bone_name,
-                c.offset[0], c.offset[1], c.offset[2], r0, r1, r2, c.scale
-            ));
-        } else {
-            // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
-            out.push_str(&format!(
-                "        macros::EFFECT(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, 0, 0, 0, 0, 0, 0, false);\n",
-                c.effect_name, c.bone_name,
-                c.offset[0], c.offset[1], c.offset[2], r0, r1, r2, c.scale
-            ));
-        }
-        if let Some(tw) = tweaks.get(&tweak_hash(&c.effect_name)) {
-            if let Some([r, g, b, _a]) = tw.color {
+
+        let mut emitted_stops = std::collections::HashSet::new();
+        for call in stops
+            .iter()
+            .copied()
+            .filter(|call| call.active_start < frame)
+        {
+            if emitted_stops.insert(call.effect_name.as_str()) {
                 out.push_str(&format!(
-                    "        macros::LAST_EFFECT_SET_COLOR(agent, {r:.4}, {g:.4}, {b:.4});\n"
+                    "        macros::EFFECT_OFF_KIND(agent, Hash40::new(\"{}\"), false, true);\n",
+                    call.effect_name
                 ));
             }
-            if let Some(rate) = tw.speed {
+        }
+
+        for call in starts {
+            let (r0, r1, r2) = (call.rotation[0], call.rotation[1], call.rotation[2]);
+            if call.follows_bone {
                 out.push_str(&format!(
-                    "        macros::LAST_EFFECT_SET_RATE(agent, {rate:.4});\n"
+                    "        macros::EFFECT_FOLLOW(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, true);\n",
+                    call.effect_name, call.bone_name,
+                    call.offset[0], call.offset[1], call.offset[2], r0, r1, r2, call.scale
+                ));
+            } else {
+                // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
+                out.push_str(&format!(
+                    "        macros::EFFECT(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, 0, 0, 0, 0, 0, 0, false);\n",
+                    call.effect_name, call.bone_name,
+                    call.offset[0], call.offset[1], call.offset[2], r0, r1, r2, call.scale
+                ));
+            }
+            if let Some(tw) = tweaks.get(&tweak_hash(&call.effect_name)) {
+                if let Some([r, g, b, _a]) = tw.color {
+                    out.push_str(&format!(
+                        "        macros::LAST_EFFECT_SET_COLOR(agent, {r:.4}, {g:.4}, {b:.4});\n"
+                    ));
+                }
+                if let Some(rate) = tw.speed {
+                    out.push_str(&format!(
+                        "        macros::LAST_EFFECT_SET_RATE(agent, {rate:.4});\n"
+                    ));
+                }
+            }
+        }
+
+        for call in stops
+            .iter()
+            .copied()
+            .filter(|call| call.active_start >= frame)
+        {
+            if emitted_stops.insert(call.effect_name.as_str()) {
+                out.push_str(&format!(
+                    "        macros::EFFECT_OFF_KIND(agent, Hash40::new(\"{}\"), false, true);\n",
+                    call.effect_name
                 ));
             }
         }
@@ -1494,6 +1615,8 @@ mod tests {
         let fx = vec![
             crate::data::EffectCall {
                 effect_name: "sys_attack_arc".into(),
+                effect_name_alt: None,
+                spawn_func: "EFFECT".into(),
                 bone_name: "top".into(),
                 offset: [0.0, 8.0, 0.0],
                 rotation: [0.0, 90.0, 0.0],
@@ -1505,6 +1628,8 @@ mod tests {
             },
             crate::data::EffectCall {
                 effect_name: "sys_flash".into(),
+                effect_name_alt: None,
+                spawn_func: "EFFECT_FOLLOW".into(),
                 bone_name: "haver".into(),
                 offset: [0.0, 0.0, 0.0],
                 rotation: [0.0, 0.0, 0.0],
@@ -1539,6 +1664,24 @@ mod tests {
             .files
             .iter()
             .any(|f| f.rel_path == "src/mario/acmd.rs"));
+        let generated_acmd = project
+            .files
+            .iter()
+            .find(|f| f.rel_path == "src/mario/acmd.rs")
+            .map(|f| f.contents.as_str())
+            .expect("generated fighter ACMD");
+        assert!(
+            generated_acmd.contains("frame(agent.lua_state_agent, 20.0);")
+                && generated_acmd.contains(
+                    "macros::EFFECT_OFF_KIND(agent, Hash40::new(\"sys_flash\"), false, true);"
+                ),
+            "a finite follow-effect end frame must emit EFFECT_OFF_KIND"
+        );
+        assert!(
+            !generated_acmd
+                .contains("macros::EFFECT_OFF_KIND(agent, Hash40::new(\"sys_attack_arc\")"),
+            "one-shot effects must retain their intrinsic lifetime"
+        );
 
         let root = crate::scratch_dirs::app_storage_root().join("source-golden");
         let proj_root = root.join(&project.name);
@@ -1614,6 +1757,44 @@ mod tests {
             "EFFECT_FOLLOW should set follows_bone=true"
         );
         assert_eq!(calls[0].effect_name, "follow_eff");
+    }
+
+    #[test]
+    fn dumped_effect_variants_and_kill_kind_are_fully_timed() {
+        let src = wrap_effect_fn(
+            r#"
+frame(agent.lua_state_agent, 3.0);
+if macros::is_excute(agent) {
+    macros::EFFECT_FOLLOW_NO_STOP_FLIP(agent, Hash40::new("moon_explosion"), Hash40::new("moon_explosion"), Hash40::new("top"), 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.7, true, *EF_FLIP_YZ);
+    macros::EFFECT_FOLLOW_ALPHA(agent, Hash40::new("moon_explosion"), Hash40::new("top"), 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 0.8, true, 0.5);
+    macros::EFFECT_ATTR(agent, Hash40::new("trace"), Hash40::new("rot"), 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1.2, 0, 0, 0, 0, 0, 0, true, *EFFECT_SUB_ATTRIBUTE_NO_JOINT_SCALE);
+    macros::LANDING_EFFECT_FLIP(agent, Hash40::new("smoke_l"), Hash40::new("smoke_r"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0, 0, 0, 0, 0, false, *EF_FLIP_NONE);
+}
+frame(agent.lua_state_agent, 18.0);
+if macros::is_excute(agent) {
+    macros::EFFECT_OFF_KIND(agent, Hash40::new("moon_explosion"), false, true);
+}"#,
+        );
+        let calls = parse_effect_script(&src).to_effect_calls();
+        assert_eq!(calls.len(), 4);
+        let moon: Vec<_> = calls
+            .iter()
+            .filter(|call| call.effect_name == "moon_explosion")
+            .collect();
+        assert_eq!(moon.len(), 2);
+        assert!(moon.iter().all(|call| call.active_end == 18));
+        assert!(calls
+            .iter()
+            .any(|call| call.effect_name == "trace" && call.active_end == call.active_start));
+        assert!(calls
+            .iter()
+            .any(|call| call.effect_name == "smoke_l" && call.active_end == call.active_start));
+        let landing = calls
+            .iter()
+            .find(|call| call.spawn_func == "LANDING_EFFECT_FLIP")
+            .unwrap();
+        assert_eq!(landing.effect_name, "smoke_l");
+        assert_eq!(landing.effect_name_alt.as_deref(), Some("smoke_r"));
     }
 
     /// Property 1c: bare AFTER_IMAGE4_ON_arg29 produces EffectCall (AfterImage)

@@ -11,6 +11,9 @@ public class DumpA4d90 extends GhidraScript {
     fm=currentProgram.getFunctionManager(); dec=new DecompInterface(); dec.openProgram(currentProgram);
     out=new PrintWriter(new FileWriter("a4d90_decomp.txt"));
     dump(0xa4d90L,"effect_set_create_a4d90");
+    dump(0x99da0L,"effect_set_destroy_99da0");
+    dump(0x99560L,"effect_set_construct_99560");
+    dump(0x93660L,"effect_set_slot_release_93660");
     out.close(); println("done");
   }
 }

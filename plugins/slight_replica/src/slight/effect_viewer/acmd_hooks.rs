@@ -93,12 +93,407 @@ unsafe fn arg_num(agent: &mut smash::lib::L2CAgent, index: i32, default: f32) ->
     }
 }
 
+unsafe fn arg_bool(agent: &mut smash::lib::L2CAgent, index: i32, default: bool) -> bool {
+    let v: L2CValue = agent.pop_lua_stack(index);
+    match v.val_type {
+        L2CValueType::Bool | L2CValueType::Int => v.inner.raw & 1 != 0,
+        _ => default,
+    }
+}
+
+#[derive(Clone, Copy)]
 struct ParsedEffectArgs {
     eff_hash: u64,
     bone_hash: u64,
     pos: Vector3f,
     rot: Vector3f,
     size: f32,
+}
+
+struct PendingCarrierSpawn {
+    source_id: u32,
+    logical_hash: u64,
+    args: ParsedEffectArgs,
+    /// Script/scoped transform before global kind pins are overlaid.
+    base_args: ParsedEffectArgs,
+    is_follow: bool,
+    ttl: u16,
+}
+
+static PENDING_CARRIER_SPAWNS: std::sync::LazyLock<parking_lot::Mutex<Vec<PendingCarrierSpawn>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
+
+/// A follow effect cannot be attached directly to Kirby without making Kirby its resource
+/// owner. Spawn it as a world-space carrier effect, then mirror Kirby's authored joint transform
+/// onto the carrier-owned handle every frame.
+struct CarrierFollow {
+    source_id: u32,
+    owner_id: u32,
+    handle: u32,
+    logical_hash: u64,
+    bone_hash: u64,
+    /// Script/scoped values, used again when a global pin is cleared.
+    base_local_pos: Vector3f,
+    base_local_rot: Vector3f,
+}
+
+static CARRIER_FOLLOWS: std::sync::LazyLock<parking_lot::Mutex<Vec<CarrierFollow>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
+
+unsafe fn source_world_transform(
+    source: *mut smash::app::BattleObjectModuleAccessor,
+    bone_hash: u64,
+    local_pos: &Vector3f,
+    local_rot: &Vector3f,
+) -> Option<(Vector3f, Vector3f)> {
+    if source.is_null() {
+        return None;
+    }
+
+    if bone_hash == 0 {
+        let posture_pos = smash::app::lua_bind::PostureModule::pos(source);
+        if posture_pos.is_null() {
+            return None;
+        }
+        return Some((
+            Vector3f {
+                x: (*posture_pos).x + local_pos.x,
+                y: (*posture_pos).y + local_pos.y,
+                z: (*posture_pos).z + local_pos.z,
+            },
+            Vector3f {
+                x: local_rot.x,
+                y: local_rot.y,
+                z: local_rot.z,
+            },
+        ));
+    }
+
+    let bone = smash::phx::Hash40 { hash: bone_hash };
+    let mut world_pos = Vector3f {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    smash::app::lua_bind::ModelModule::joint_global_position_with_offset(
+        source,
+        bone,
+        local_pos,
+        &mut world_pos,
+        true,
+    );
+    let mut joint_rot = Vector3f {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    smash::app::lua_bind::ModelModule::joint_global_rotation(source, bone, &mut joint_rot, true);
+    Some((
+        world_pos,
+        Vector3f {
+            x: joint_rot.x + local_rot.x,
+            y: joint_rot.y + local_rot.y,
+            z: joint_rot.z + local_rot.z,
+        },
+    ))
+}
+
+/// Keep carrier-owned EFFECT_FOLLOW instances attached to the source fighter's requested joint.
+/// Called from that fighter's game-thread line callback.
+pub unsafe fn pump_carrier_follows(source: *mut smash::app::BattleObjectModuleAccessor) {
+    if source.is_null() {
+        return;
+    }
+    let source_id = (*source).battle_object_id;
+
+    // A changed carrier needs a short unload/reload window. Preserve requests made during that
+    // window and dispatch them on the first frame their stored real kind becomes available.
+    let mut ready = Vec::new();
+    {
+        let mut pending = PENDING_CARRIER_SPAWNS.lock();
+        let old = std::mem::take(&mut *pending);
+        for mut spawn in old {
+            if spawn.source_id != source_id {
+                pending.push(spawn);
+                continue;
+            }
+            if crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(
+                spawn.args.eff_hash,
+            )
+            .is_some()
+            {
+                ready.push(spawn);
+            } else if spawn.ttl > 0
+                && crate::slight::effect_viewer::effect_reload::is_staged_carrier_kind(
+                    spawn.args.eff_hash,
+                )
+            {
+                spawn.ttl -= 1;
+                pending.push(spawn);
+            }
+        }
+    }
+    for spawn in ready {
+        if spawn_via_carrier(
+            source,
+            &spawn.args,
+            &spawn.base_args,
+            spawn.is_follow,
+            spawn.logical_hash,
+            false,
+        ) {
+            crate::slight::effect_viewer::kinds::mark_acmd(spawn.logical_hash);
+        }
+    }
+
+    let current_owner = crate::slight::effect_viewer::effect_reload::auto_carrier_boma();
+    let mut follows = CARRIER_FOLLOWS.lock();
+    follows.retain(|follow| {
+        let Some(owner) = current_owner else {
+            return false;
+        };
+        if (*owner).battle_object_id != follow.owner_id {
+            return false;
+        }
+        if follow.source_id != source_id {
+            return true;
+        }
+        if !smash::app::lua_bind::EffectModule::is_exist_effect(owner, follow.handle) {
+            return false;
+        }
+        // Carrier handles are physically world-space, but the editor exposes the same
+        // joint-local offset/rotation values as a normal ACMD follow effect. Resolve the
+        // current pin into world space here instead of letting generic live editing feed a
+        // local offset directly to EffectModule::set_pos.
+        let pins = crate::slight::effect_viewer::kinds::pinned_of(follow.logical_hash);
+        let local_pos = pins
+            .as_ref()
+            .and_then(|p| p.pos.as_ref())
+            .map(|p| Vector3f {
+                x: p.x,
+                y: p.y,
+                z: p.z,
+            })
+            .unwrap_or(follow.base_local_pos);
+        let local_rot = pins
+            .as_ref()
+            .and_then(|p| p.rot.as_ref())
+            .map(|r| Vector3f {
+                x: r.x,
+                y: r.y,
+                z: r.z,
+            })
+            .unwrap_or(follow.base_local_rot);
+        let Some((world_pos, world_rot)) =
+            source_world_transform(source, follow.bone_hash, &local_pos, &local_rot)
+        else {
+            return false;
+        };
+        smash::app::lua_bind::EffectModule::set_pos(owner, follow.handle, &world_pos);
+        smash::app::lua_bind::EffectModule::set_rot(owner, follow.handle, &world_rot);
+        true
+    });
+}
+
+/// Stop every carrier-owned follow handle that originated from this fighter and logical effect
+/// kind. The game's EFFECT_OFF_KIND runs against the source fighter's EffectModule, but
+/// transplanted follow effects physically belong to the hidden carrier. Killing the concrete
+/// handles here preserves the script's stop semantics across that ownership boundary.
+unsafe fn kill_carrier_follow_kind(
+    source: *mut smash::app::BattleObjectModuleAccessor,
+    logical_hash: u64,
+    fade: bool,
+    detach: bool,
+) {
+    if source.is_null() {
+        return;
+    }
+    let source_id = (*source).battle_object_id;
+    let current_owner = crate::slight::effect_viewer::effect_reload::auto_carrier_boma();
+    let owner_id = current_owner.map(|owner| (*owner).battle_object_id);
+
+    let mut handles = Vec::new();
+    {
+        let mut follows = CARRIER_FOLLOWS.lock();
+        let old = std::mem::take(&mut *follows);
+        for follow in old {
+            if follow.source_id == source_id
+                && follow.logical_hash == logical_hash
+                && Some(follow.owner_id) == owner_id
+            {
+                handles.push(follow.handle);
+            } else {
+                follows.push(follow);
+            }
+        }
+    }
+
+    // A stop can arrive while a carrier replacement is still becoming ready. Do not let that
+    // delayed request appear after the script has already turned the effect off.
+    PENDING_CARRIER_SPAWNS
+        .lock()
+        .retain(|spawn| !(spawn.source_id == source_id && spawn.logical_hash == logical_hash));
+
+    if let Some(owner) = current_owner {
+        for handle in handles {
+            smash::app::lua_bind::EffectModule::kill(owner, handle, fade, detach);
+        }
+    }
+}
+
+/// Spawn a carrier-owned kind through the carrier's own EffectModule. ACMD's EFFECT family
+/// bypasses the public EffectModule req shims, so rewriting Kirby's lua hash still leaves Kirby
+/// as the resource owner. That produces a real handle against the carrier's table but no pixels.
+/// Returning true tells the ACMD hook to skip its Kirby-owned original call.
+unsafe fn spawn_via_carrier(
+    source_boma: *mut smash::app::BattleObjectModuleAccessor,
+    args: &ParsedEffectArgs,
+    base_args: &ParsedEffectArgs,
+    is_follow: bool,
+    logical_hash: u64,
+    queue_if_unready: bool,
+) -> bool {
+    let Some((world_pos, world_rot)) =
+        source_world_transform(source_boma, args.bone_hash, &args.pos, &args.rot)
+    else {
+        return false;
+    };
+    let Some(carrier) =
+        crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(args.eff_hash)
+    else {
+        if queue_if_unready
+            && !source_boma.is_null()
+            && crate::slight::effect_viewer::effect_reload::is_staged_carrier_kind(args.eff_hash)
+        {
+            let mut pending = PENDING_CARRIER_SPAWNS.lock();
+            if pending.len() >= 64 {
+                pending.remove(0);
+            }
+            pending.push(PendingCarrierSpawn {
+                source_id: (*source_boma).battle_object_id,
+                logical_hash,
+                args: *args,
+                base_args: *base_args,
+                is_follow,
+                ttl: 300,
+            });
+            crate::slight::effect_viewer::effect_reload::mark(&format!(
+                "carrier_spawn_buffered logical={logical_hash:#x} real={:#x}",
+                args.eff_hash
+            ));
+            return true;
+        }
+        return false;
+    };
+
+    let before = smash::app::lua_bind::EffectModule::get_last_handle(carrier) as u32;
+    let effect = smash::phx::Hash40 {
+        hash: args.eff_hash,
+    };
+    let _guard = super::CarrierProxyGuard::new(logical_hash);
+    // The carrier does not share Kirby's skeleton, so attaching the effect to the same joint name
+    // puts it on the carrier's `top` (or fails for fighter-only joints). A non-follow request with
+    // an absolute transform preserves carrier ownership; follow behavior is mirrored below.
+    let result = smash::app::lua_bind::EffectModule::req(
+        carrier, effect, &world_pos, &world_rot, args.size, 0, 0, false, 0,
+    );
+    let after = smash::app::lua_bind::EffectModule::get_last_handle(carrier) as u32;
+    record_spawn(logical_hash, before, after);
+    let handle = if result != 0 {
+        result as u32
+    } else if after != before {
+        after
+    } else {
+        0
+    };
+    if handle != 0 {
+        // Force the absolute transform after creation as well: set_pos/set_rot are explicitly
+        // world-space for non-follow handles.
+        smash::app::lua_bind::EffectModule::set_pos(carrier, handle, &world_pos);
+        smash::app::lua_bind::EffectModule::set_rot(carrier, handle, &world_rot);
+        super::remember_proxy_handle(source_boma, carrier, handle as u64, logical_hash);
+        // The underlying carrier request is deliberately non-follow/world-space, so its
+        // EffectModule hook initially observes world coordinates. Replace that observation
+        // with the user-facing ACMD values: joint-local offset/rotation and original scale.
+        // This also marks the tracked instance as follow, preventing generic live editing
+        // from applying local offsets as absolute world positions.
+        super::track_spawn(
+            carrier,
+            handle as u64,
+            logical_hash,
+            base_args.bone_hash,
+            is_follow,
+            &base_args.pos,
+            &base_args.rot,
+            base_args.size,
+        );
+        if is_follow && !source_boma.is_null() {
+            let source_id = (*source_boma).battle_object_id;
+            let owner_id = (*carrier).battle_object_id;
+            let mut follows = CARRIER_FOLLOWS.lock();
+            if follows.len() >= 512 {
+                follows.retain(|follow| {
+                    follow.owner_id == owner_id
+                        && smash::app::lua_bind::EffectModule::is_exist_effect(
+                            carrier,
+                            follow.handle,
+                        )
+                });
+            }
+            follows.push(CarrierFollow {
+                source_id,
+                owner_id,
+                handle,
+                logical_hash,
+                bone_hash: base_args.bone_hash,
+                base_local_pos: Vector3f {
+                    x: base_args.pos.x,
+                    y: base_args.pos.y,
+                    z: base_args.pos.z,
+                },
+                base_local_rot: Vector3f {
+                    x: base_args.rot.x,
+                    y: base_args.rot.y,
+                    z: base_args.rot.z,
+                },
+            });
+        }
+    }
+
+    static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64 {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("sd:/effect_viewer_carrier_spawn.txt")
+        {
+            let source_id = if source_boma.is_null() {
+                0
+            } else {
+                (*source_boma).battle_object_id
+            };
+            let owner_id = (*carrier).battle_object_id;
+            let _ = writeln!(
+                file,
+                "ACMD_PROXY logical={logical_hash:#x} real={:#x} source={source_id:#x} owner={owner_id:#x} result={result:#x} before={before:#x} after={after:#x} handle={handle:#x} follow={is_follow} bone={:#x} local=({:.2},{:.2},{:.2}) base=({:.2},{:.2},{:.2}) scale={:.3} base_scale={:.3} world=({:.2},{:.2},{:.2})",
+                args.eff_hash,
+                args.bone_hash,
+                args.pos.x,
+                args.pos.y,
+                args.pos.z,
+                base_args.pos.x,
+                base_args.pos.y,
+                base_args.pos.z,
+                args.size,
+                base_args.size,
+                world_pos.x,
+                world_pos.y,
+                world_pos.z,
+            );
+        }
+    }
+    true
 }
 
 /// Parse EFFECT-family args. MUST run BEFORE original — the sv_animcmd implementation
@@ -320,11 +715,24 @@ macro_rules! effect_hook {
     ($hook_name:ident, $target:path, $follow:expr, $flip:expr) => {
         #[skyline::hook(replace = $target)]
         unsafe fn $hook_name(lua_state: u64) {
+            let source_boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                as *mut smash::app::BattleObjectModuleAccessor;
+            if crate::slight::effect_viewer::effect_reload::is_auto_carrier_boma(source_boma) {
+                return;
+            }
             // Read args BEFORE original consumes the lua stack. `parsed` keeps the SCRIPT'S
             // authored values (pre-rewrite) — the tracked/observed data must never be
             // contaminated by the user's pins.
             let parsed = parse_args(lua_state, $flip);
             if let Some(args) = parsed.as_ref() {
+                // Mark this as ACMD before consulting saved pins. This also migrates away
+                // legacy kind-global pos/rot pins before a carrier-owned transplant can
+                // mistake those script offsets for absolute world coordinates.
+                crate::slight::effect_viewer::kinds::mark_acmd(args.eff_hash);
+                // Preserve the script-space transform separately from the final rewritten
+                // request. Carrier follow handles need this baseline so clearing a global pin
+                // restores the move's own offset/rotation instead of retaining the old pin.
+                let mut carrier_base_args = *args;
                 // Live-ACMD capture: record the pristine script line (typed args) so the
                 // editor can reconstruct the move's effect script from the game itself.
                 {
@@ -381,6 +789,9 @@ macro_rules! effect_hook {
                             ..Default::default()
                         };
                         rewrite_args(lua_state, &pins, $flip);
+                        if let Some(scoped_args) = parse_args(lua_state, $flip) {
+                            carrier_base_args = scoped_args;
+                        }
                         scoped_transform = true;
                     }
                 }
@@ -436,6 +847,22 @@ macro_rules! effect_hook {
                         rewrite_kind(lua_state, args.eff_hash, real, $flip);
                     }
                 }
+                // A transplanted kind is owned by the hidden storage carrier, not Kirby.
+                // Re-read the final rewritten args (pins + remaps + alias included), spawn them
+                // through the carrier's EffectModule, and skip the Kirby-owned ACMD original.
+                if let Some(final_args) = parse_args(lua_state, $flip) {
+                    if spawn_via_carrier(
+                        source_boma,
+                        &final_args,
+                        &carrier_base_args,
+                        $follow,
+                        args.eff_hash,
+                        true,
+                    ) {
+                        crate::slight::effect_viewer::kinds::mark_acmd(args.eff_hash);
+                        return;
+                    }
+                }
             }
             // Handle BEFORE the spawn — if get_last_handle is unchanged after original ran,
             // this kind created NO effect (NOT-FOUND); if it changed, it really spawned.
@@ -474,7 +901,23 @@ macro_rules! effect_hook {
 }
 
 effect_hook!(hook_eff, smash::app::sv_animcmd::EFFECT, false);
+effect_hook!(
+    hook_eff_alpha,
+    smash::app::sv_animcmd::EFFECT_ALPHA,
+    false
+);
+effect_hook!(hook_eff_attr, smash::app::sv_animcmd::EFFECT_ATTR, false);
 effect_hook!(hook_eff_follow, smash::app::sv_animcmd::EFFECT_FOLLOW, true);
+effect_hook!(
+    hook_eff_follow_alpha,
+    smash::app::sv_animcmd::EFFECT_FOLLOW_ALPHA,
+    true
+);
+effect_hook!(
+    hook_eff_follow_color,
+    smash::app::sv_animcmd::EFFECT_FOLLOW_COLOR,
+    true
+);
 effect_hook!(
     hook_eff_follow_no_scale,
     smash::app::sv_animcmd::EFFECT_FOLLOW_NO_SCALE,
@@ -486,8 +929,29 @@ effect_hook!(
     true
 );
 effect_hook!(
+    hook_eff_follow_no_stop_flip,
+    smash::app::sv_animcmd::EFFECT_FOLLOW_NO_STOP_FLIP,
+    true,
+    true
+);
+effect_hook!(
     hook_eff_flw_pos,
     smash::app::sv_animcmd::EFFECT_FLW_POS,
+    true
+);
+effect_hook!(
+    hook_eff_flw_pos_no_stop,
+    smash::app::sv_animcmd::EFFECT_FLW_POS_NO_STOP,
+    true
+);
+effect_hook!(
+    hook_eff_flw_pos_unsync_vis,
+    smash::app::sv_animcmd::EFFECT_FLW_POS_UNSYNC_VIS,
+    true
+);
+effect_hook!(
+    hook_eff_flw_unsync_vis,
+    smash::app::sv_animcmd::EFFECT_FLW_UNSYNC_VIS,
     true
 );
 effect_hook!(
@@ -497,11 +961,84 @@ effect_hook!(
     true
 );
 effect_hook!(
+    hook_eff_flip_alpha,
+    smash::app::sv_animcmd::EFFECT_FLIP_ALPHA,
+    false,
+    true
+);
+effect_hook!(
     hook_eff_follow_flip,
     smash::app::sv_animcmd::EFFECT_FOLLOW_FLIP,
     true,
     true
 );
+effect_hook!(
+    hook_eff_follow_flip_alpha,
+    smash::app::sv_animcmd::EFFECT_FOLLOW_FLIP_ALPHA,
+    true,
+    true
+);
+effect_hook!(
+    hook_eff_follow_flip_color,
+    smash::app::sv_animcmd::EFFECT_FOLLOW_FLIP_COLOR,
+    true,
+    true
+);
+effect_hook!(
+    hook_eff_follow_flip_rnd,
+    smash::app::sv_animcmd::EFFECT_FOLLOW_FLIP_RND,
+    true,
+    true
+);
+effect_hook!(
+    hook_foot_eff,
+    smash::app::sv_animcmd::FOOT_EFFECT,
+    false
+);
+effect_hook!(
+    hook_foot_eff_flip,
+    smash::app::sv_animcmd::FOOT_EFFECT_FLIP,
+    false,
+    true
+);
+effect_hook!(
+    hook_landing_eff,
+    smash::app::sv_animcmd::LANDING_EFFECT,
+    false
+);
+effect_hook!(
+    hook_landing_eff_flip,
+    smash::app::sv_animcmd::LANDING_EFFECT_FLIP,
+    false,
+    true
+);
+effect_hook!(
+    hook_down_eff,
+    smash::app::sv_animcmd::DOWN_EFFECT,
+    false
+);
+
+/// EFFECT_OFF_KIND is both timeline data and a lifetime command. Capture its pristine typed
+/// arguments, preserve the game's original call, then bridge the stop to concrete carrier-owned
+/// follow handles.
+#[skyline::hook(replace = smash::app::sv_animcmd::EFFECT_OFF_KIND)]
+unsafe fn hook_effect_off_kind(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 3);
+    crate::slight::hitbox_viewer::record(lua_state, "EFFECT_OFF_KIND", &typed);
+
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    let logical_hash = arg_hash(&mut agent, 1);
+    let fade = arg_bool(&mut agent, 2, false);
+    let detach = arg_bool(&mut agent, 3, true);
+
+    original!()(lua_state);
+
+    if let Some(logical_hash) = logical_hash {
+        let source = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        kill_carrier_follow_kind(source, logical_hash, fade, detach);
+    }
+}
 
 // ── Live retime injection (per-frame, from the agent line callback) ──────────
 
@@ -515,12 +1052,30 @@ static EFF_FIRED: std::sync::LazyLock<
 unsafe fn dispatch_effect(func: &str, lua_state_agent: u64) {
     use smash::app::sv_animcmd as sv;
     match func {
+        "EFFECT_OFF_KIND" => sv::EFFECT_OFF_KIND(lua_state_agent),
+        "DOWN_EFFECT" => sv::DOWN_EFFECT(lua_state_agent),
+        "FOOT_EFFECT" => sv::FOOT_EFFECT(lua_state_agent),
+        "FOOT_EFFECT_FLIP" => sv::FOOT_EFFECT_FLIP(lua_state_agent),
+        "LANDING_EFFECT" => sv::LANDING_EFFECT(lua_state_agent),
+        "LANDING_EFFECT_FLIP" => sv::LANDING_EFFECT_FLIP(lua_state_agent),
+        "EFFECT_ALPHA" => sv::EFFECT_ALPHA(lua_state_agent),
+        "EFFECT_ATTR" => sv::EFFECT_ATTR(lua_state_agent),
         "EFFECT_FOLLOW" => sv::EFFECT_FOLLOW(lua_state_agent),
+        "EFFECT_FOLLOW_ALPHA" => sv::EFFECT_FOLLOW_ALPHA(lua_state_agent),
+        "EFFECT_FOLLOW_COLOR" => sv::EFFECT_FOLLOW_COLOR(lua_state_agent),
         "EFFECT_FOLLOW_NO_SCALE" => sv::EFFECT_FOLLOW_NO_SCALE(lua_state_agent),
         "EFFECT_FOLLOW_NO_STOP" => sv::EFFECT_FOLLOW_NO_STOP(lua_state_agent),
+        "EFFECT_FOLLOW_NO_STOP_FLIP" => sv::EFFECT_FOLLOW_NO_STOP_FLIP(lua_state_agent),
         "EFFECT_FLW_POS" => sv::EFFECT_FLW_POS(lua_state_agent),
+        "EFFECT_FLW_POS_NO_STOP" => sv::EFFECT_FLW_POS_NO_STOP(lua_state_agent),
+        "EFFECT_FLW_POS_UNSYNC_VIS" => sv::EFFECT_FLW_POS_UNSYNC_VIS(lua_state_agent),
+        "EFFECT_FLW_UNSYNC_VIS" => sv::EFFECT_FLW_UNSYNC_VIS(lua_state_agent),
         "EFFECT_FLIP" => sv::EFFECT_FLIP(lua_state_agent),
+        "EFFECT_FLIP_ALPHA" => sv::EFFECT_FLIP_ALPHA(lua_state_agent),
         "EFFECT_FOLLOW_FLIP" => sv::EFFECT_FOLLOW_FLIP(lua_state_agent),
+        "EFFECT_FOLLOW_FLIP_ALPHA" => sv::EFFECT_FOLLOW_FLIP_ALPHA(lua_state_agent),
+        "EFFECT_FOLLOW_FLIP_COLOR" => sv::EFFECT_FOLLOW_FLIP_COLOR(lua_state_agent),
+        "EFFECT_FOLLOW_FLIP_RND" => sv::EFFECT_FOLLOW_FLIP_RND(lua_state_agent),
         _ => sv::EFFECT(lua_state_agent),
     }
 }
@@ -588,13 +1143,31 @@ pub unsafe fn inject_tick(lua_state: u64) {
 pub fn install() {
     skyline::install_hooks!(
         hook_eff,
+        hook_eff_alpha,
+        hook_eff_attr,
         hook_eff_follow,
+        hook_eff_follow_alpha,
+        hook_eff_follow_color,
         hook_eff_follow_no_scale,
         hook_eff_follow_no_stop,
+        hook_eff_follow_no_stop_flip,
         hook_eff_flw_pos,
+        hook_eff_flw_pos_no_stop,
+        hook_eff_flw_pos_unsync_vis,
+        hook_eff_flw_unsync_vis,
         hook_eff_flip,
+        hook_eff_flip_alpha,
         hook_eff_follow_flip,
+        hook_eff_follow_flip_alpha,
+        hook_eff_follow_flip_color,
+        hook_eff_follow_flip_rnd,
+        hook_foot_eff,
+        hook_foot_eff_flip,
+        hook_landing_eff,
+        hook_landing_eff_flip,
+        hook_down_eff,
+        hook_effect_off_kind,
     );
-    skyline::println!("[SLight] ACMD EFFECT hooks installed (7 variants)");
+    skyline::println!("[SLight] ACMD effect hooks installed (25 spawn/stop variants)");
     crate::slight::diag::note("ACMD hooks installed");
 }

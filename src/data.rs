@@ -601,6 +601,12 @@ pub enum EffectMacro {
     /// FOOT_EFFECT / LANDING_EFFECT — all share the same data shape.
     Effect {
         effect_name: String,
+        /// Second graphic used by FLIP variants (left/right or facing alternatives).
+        #[serde(default)]
+        effect_name_alt: Option<String>,
+        /// Exact sv_animcmd spawn function, retained for live replay and editing.
+        #[serde(default = "default_effect_spawn_func")]
+        spawn_func: String,
         bone_name: String,
         offset: [f32; 3],
         rotation: [f32; 3],
@@ -643,6 +649,12 @@ pub struct EffectScript {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EffectCall {
     pub effect_name: String,
+    /// Second graphic for FLIP variants. `None` for single-graphic spawn functions.
+    #[serde(default)]
+    pub effect_name_alt: Option<String>,
+    /// Exact ACMD spawn function (`EFFECT`, `FOOT_EFFECT`, `EFFECT_FOLLOW_ALPHA`, ...).
+    #[serde(default = "default_effect_spawn_func")]
+    pub spawn_func: String,
     pub bone_name: String,
     pub offset: [f32; 3],
     pub rotation: [f32; 3],
@@ -656,6 +668,10 @@ pub struct EffectCall {
     /// Soft-removed by the user (kept in place so edit indices stay stable).
     #[serde(default)]
     pub disabled: bool,
+}
+
+fn default_effect_spawn_func() -> String {
+    String::new()
 }
 
 /// One user edit to a move's effect-call list. `index` refers to the PRISTINE
@@ -702,6 +718,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                     match m {
                         EffectMacro::Effect {
                             effect_name,
+                            effect_name_alt,
+                            spawn_func,
                             bone_name,
                             offset,
                             rotation,
@@ -711,6 +729,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             let active_end = if *follows_bone { 9999 } else { frame as u32 };
                             calls.push(EffectCall {
                                 effect_name: effect_name.clone(),
+                                effect_name_alt: effect_name_alt.clone(),
+                                spawn_func: spawn_func.clone(),
                                 bone_name: bone_name.clone(),
                                 offset: *offset,
                                 rotation: *rotation,
@@ -722,12 +742,10 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             });
                         }
                         EffectMacro::EffectOffKind { effect_name } => {
-                            // Close the most recent open following effect with this name.
-                            if let Some(call) = calls
-                                .iter_mut()
-                                .rev()
-                                .find(|c| &c.effect_name == effect_name && c.active_end == 9999)
-                            {
+                            // EffectModule::kill_kind closes every live instance of this kind.
+                            for call in calls.iter_mut().filter(|call| {
+                                &call.effect_name == effect_name && call.active_end == 9999
+                            }) {
                                 call.active_end = frame as u32;
                             }
                         }
@@ -738,6 +756,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             // Sword/weapon trail — active until AfterImageOff
                             calls.push(EffectCall {
                                 effect_name: effect_name.clone(),
+                                effect_name_alt: None,
+                                spawn_func: "AFTER_IMAGE_ON".into(),
                                 bone_name: bone_name.clone(),
                                 offset: [0.0; 3],
                                 rotation: [0.0; 3],

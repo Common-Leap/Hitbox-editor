@@ -425,14 +425,164 @@ fn effect_name_hash(name: &str) -> u64 {
     hash40::hash40(&name.to_lowercase()).0
 }
 
+/// ACMD effect functions whose first arguments use the common
+/// `(graphic[, graphic_flip], joint, pos, rot, scale, ...)` layout.
+///
+/// Keeping this explicit prevents control functions such as EFFECT_OFF_KIND from being
+/// misread as spawns while accounting for the alpha/attribute/random, ground-contact, and
+/// no-stop variants emitted by the game's dumped scripts.
+fn effect_capture_layout(func: &str) -> Option<(bool, bool)> {
+    let layout = match func {
+        // (flip layout, follows source bone)
+        "EFFECT" | "EFFECT_ALPHA" | "EFFECT_ATTR" | "DOWN_EFFECT" | "FOOT_EFFECT"
+        | "LANDING_EFFECT" => (false, false),
+        "EFFECT_FLIP" | "EFFECT_FLIP_ALPHA" | "FOOT_EFFECT_FLIP" | "LANDING_EFFECT_FLIP" => {
+            (true, false)
+        }
+        "EFFECT_FOLLOW"
+        | "EFFECT_FOLLOW_ALPHA"
+        | "EFFECT_FOLLOW_COLOR"
+        | "EFFECT_FOLLOW_NO_SCALE"
+        | "EFFECT_FOLLOW_NO_STOP"
+        | "EFFECT_FLW_POS"
+        | "EFFECT_FLW_POS_NO_STOP"
+        | "EFFECT_FLW_POS_UNSYNC_VIS"
+        | "EFFECT_FLW_UNSYNC_VIS" => (false, true),
+        "EFFECT_FOLLOW_FLIP"
+        | "EFFECT_FOLLOW_FLIP_ALPHA"
+        | "EFFECT_FOLLOW_FLIP_COLOR"
+        | "EFFECT_FOLLOW_FLIP_RND"
+        | "EFFECT_FOLLOW_NO_STOP_FLIP" => (true, true),
+        _ => return None,
+    };
+    Some(layout)
+}
+
+/// Runtime fighter kind for an extracted fighter directory name. Live ACMD capture is global;
+/// filtering by this id prevents another fighter performing the same motion (for example
+/// `catch_dash`) from contaminating the selected fighter's timeline.
+fn fighter_kind_id(name: &str) -> Option<i32> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "mario" => 0x00,
+        "donkey" => 0x01,
+        "link" => 0x02,
+        "samus" => 0x03,
+        "samusd" => 0x04,
+        "yoshi" => 0x05,
+        "kirby" => 0x06,
+        "fox" => 0x07,
+        "pikachu" => 0x08,
+        "luigi" => 0x09,
+        "ness" => 0x0a,
+        "captain" => 0x0b,
+        "purin" => 0x0c,
+        "peach" => 0x0d,
+        "daisy" => 0x0e,
+        "koopa" => 0x0f,
+        "sheik" => 0x10,
+        "zelda" => 0x11,
+        "mariod" => 0x12,
+        "pichu" => 0x13,
+        "falco" => 0x14,
+        "marth" => 0x15,
+        "lucina" => 0x16,
+        "younglink" => 0x17,
+        "ganon" => 0x18,
+        "mewtwo" => 0x19,
+        "roy" => 0x1a,
+        "chrom" => 0x1b,
+        "gamewatch" => 0x1c,
+        "metaknight" => 0x1d,
+        "pit" => 0x1e,
+        "pitb" => 0x1f,
+        "szerosuit" => 0x20,
+        "wario" => 0x21,
+        "snake" => 0x22,
+        "ike" => 0x23,
+        "pzenigame" | "zenigame" => 0x24,
+        "pfushigisou" | "fushigisou" => 0x25,
+        "plizardon" | "lizardon" => 0x26,
+        "diddy" => 0x27,
+        "lucas" => 0x28,
+        "sonic" => 0x29,
+        "dedede" => 0x2a,
+        "pikmin" => 0x2b,
+        "lucario" => 0x2c,
+        "robot" => 0x2d,
+        "toonlink" => 0x2e,
+        "wolf" => 0x2f,
+        "murabito" => 0x30,
+        "rockman" => 0x31,
+        "wiifit" => 0x32,
+        "rosetta" => 0x33,
+        "littlemac" => 0x34,
+        "gekkouga" => 0x35,
+        "palutena" => 0x36,
+        "pacman" => 0x37,
+        "reflet" => 0x38,
+        "shulk" => 0x39,
+        "koopajr" => 0x3a,
+        "duckhunt" => 0x3b,
+        "ryu" => 0x3c,
+        "ken" => 0x3d,
+        "cloud" => 0x3e,
+        "kamui" => 0x3f,
+        "bayonetta" => 0x40,
+        "inkling" => 0x41,
+        "ridley" => 0x42,
+        "simon" => 0x43,
+        "richter" => 0x44,
+        "krool" => 0x45,
+        "shizue" => 0x46,
+        "gaogaen" => 0x47,
+        "miifighter" => 0x48,
+        "miiswordsman" => 0x49,
+        "miigunner" => 0x4a,
+        "popo" | "ice_climber" => 0x4b,
+        "packun" => 0x51,
+        "jack" => 0x52,
+        "brave" => 0x53,
+        "buddy" => 0x54,
+        "dolly" => 0x55,
+        "master" => 0x56,
+        "tantan" => 0x57,
+        "pickel" => 0x58,
+        "edge" => 0x59,
+        "eflame" => 0x5a,
+        "elight" => 0x5b,
+        "demon" => 0x5c,
+        "trail" => 0x5d,
+        _ => return None,
+    })
+}
+
 /// Spawn identity for matching effect calls across reloads: (kind hash, frame, bone).
 /// Case-insensitive via the lowercase hashes.
-fn call_sig(c: &crate::data::EffectCall) -> (u64, u32, u64) {
+fn call_sig(c: &crate::data::EffectCall) -> (u64, u64, u64, u32, u64) {
     (
         effect_name_hash(&c.effect_name),
+        c.effect_name_alt
+            .as_deref()
+            .map(effect_name_hash)
+            .unwrap_or(0),
+        hash40::hash40(&c.spawn_func).0,
         c.active_start,
         hash40::hash40(&c.bone_name.to_lowercase()).0,
     )
+}
+
+fn effect_call_display_name(call: &crate::data::EffectCall) -> String {
+    match call
+        .effect_name_alt
+        .as_deref()
+        .filter(|alternate| *alternate != call.effect_name)
+    {
+        Some(alternate) if call.effect_name == "null" => {
+            format!("{alternate} (flip; other side none)")
+        }
+        Some(alternate) => format!("{} / {alternate}", call.effect_name),
+        None => call.effect_name.clone(),
+    }
 }
 
 fn is_system_bone(name: &str) -> bool {
@@ -603,6 +753,15 @@ pub struct VisionaryApp {
     live_overrides: crate::game_link::LiveOverrides,
     /// Authored .eff edits per fighter (project store; synced from the eff editor).
     eff_mods: HashMap<String, crate::mod_project::EffMod>,
+    /// Call sites that asked to publish a donor/carrier snapshot this UI frame. Publication is
+    /// coalesced to one per frame: several handlers can run in a single frame and the earlier
+    /// ones observe half-updated project state. The editor's one-slot drain, for instance,
+    /// publishes before `record_one_slot` has attached the op to the target fighter, so it ships
+    /// an EMPTY carrier — which the plugin correctly reads as "user removed the transplant" and
+    /// tears the live carrier down, only to rebuild it microseconds later. That destroy/recreate
+    /// is the entire transplant delay, and recreating the same assist kind while the previous
+    /// object is still dying can hang the game's loader outright.
+    carrier_push_callers: Vec<String>,
     project_name: String,
 }
 
@@ -674,6 +833,7 @@ impl VisionaryApp {
             game_link: crate::game_link::GameLink::default(),
             live_overrides: crate::game_link::LiveOverrides::default(),
             eff_mods: HashMap::new(),
+            carrier_push_callers: Vec::new(),
             project_name: "unnamed_mod".into(),
         };
 
@@ -1344,12 +1504,17 @@ impl VisionaryApp {
                                     });
                                 }
                                 for os in &eff.one_slot {
+                                    let operation = if os.slots.len() == 1 {
+                                        format!("one-slot c0{}", os.slots[0])
+                                    } else {
+                                        "EFF transplant".to_string()
+                                    };
                                     ui.horizontal(|ui| {
                                         ui.add_space(24.0);
                                         ui.label(
                                             egui::RichText::new(format!(
-                                                "one-slot: {} ← {}",
-                                                os.new_entry_name, os.src_set_name
+                                                "{operation}: {} ← {}",
+                                                os.new_entry_name, os.src_set_name,
                                             ))
                                             .small()
                                             .color(egui::Color32::from_rgb(190, 160, 255)),
@@ -1735,7 +1900,7 @@ impl VisionaryApp {
                 }
                 let has_capture = self
                     .current_motion_hash()
-                    .map(|m| !self.game_link.captures_for(m).is_empty())
+                    .map(|m| !self.captures_for_selected_fighter(m).is_empty())
                     .unwrap_or(false);
                 if ui
                     .add_enabled(has_capture, egui::Button::new("⟳ Live"))
@@ -2050,15 +2215,19 @@ impl VisionaryApp {
                                 };
                                 ui.colored_label(dot_color, "●");
                                 let selected = self.state.selected_effect_call == Some(i);
-                                let mut text = egui::RichText::new(&effect.effect_name).monospace();
+                                let display_name = effect_call_display_name(effect);
+                                let mut text = egui::RichText::new(display_name).monospace();
                                 if effect.disabled {
                                     text = text.strikethrough().color(egui::Color32::DARK_GRAY);
                                 }
                                 if ui
                                     .selectable_label(selected, text)
                                     .on_hover_text(format!(
-                                        "bone {} · f{}-{}",
-                                        effect.bone_name, effect.active_start, effect.active_end
+                                        "{} · bone {} · f{}-{}",
+                                        effect.spawn_func,
+                                        effect.bone_name,
+                                        effect.active_start,
+                                        effect.active_end
                                     ))
                                     .clicked()
                                 {
@@ -2073,6 +2242,8 @@ impl VisionaryApp {
             if ui.small_button("＋ Add effect call").clicked() {
                 let call = crate::data::EffectCall {
                     effect_name: "sys_hit_elec".into(),
+                    effect_name_alt: None,
+                    spawn_func: "EFFECT_FOLLOW".into(),
                     bone_name: "top".into(),
                     offset: [0.0; 3],
                     rotation: [0.0; 3],
@@ -2158,6 +2329,66 @@ impl VisionaryApp {
                                         .small()
                                         .color(egui::Color32::GRAY),
                                 );
+                            }
+                            ui.end_row();
+
+                            if ec.effect_name_alt.is_some() {
+                                ui.label("Flip effect");
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::singleline(
+                                            ec.effect_name_alt.as_mut().unwrap(),
+                                        )
+                                        .desired_width(140.0),
+                                    )
+                                    .on_hover_text(
+                                        "Alternate graphic selected by the ACMD flip command",
+                                    )
+                                    .changed();
+                                if let Some(p) = &pristine {
+                                    orig(
+                                        ui,
+                                        format!(
+                                            "orig {}",
+                                            p.effect_name_alt.as_deref().unwrap_or("none")
+                                        ),
+                                    );
+                                } else {
+                                    ui.label("");
+                                }
+                                ui.end_row();
+                            }
+
+                            ui.label("Spawn command");
+                            let spawn_command = if ec.spawn_func.is_empty() {
+                                if ec.follows_bone {
+                                    "EFFECT_FOLLOW (legacy)"
+                                } else {
+                                    "EFFECT (legacy)"
+                                }
+                            } else {
+                                &ec.spawn_func
+                            };
+                            ui.label(egui::RichText::new(spawn_command).monospace())
+                                .on_hover_text(
+                                    "Exact ACMD function detected live. Its alpha, attribute, \
+                                     contact, random, flip, and no-stop arguments are preserved \
+                                     when this spawn is replayed.",
+                                );
+                            if let Some(p) = &pristine {
+                                orig(
+                                    ui,
+                                    format!(
+                                        "orig {}",
+                                        if p.spawn_func.is_empty() {
+                                            "legacy"
+                                        } else {
+                                            &p.spawn_func
+                                        }
+                                    ),
+                                );
+                            } else {
+                                ui.label("");
                             }
                             ui.end_row();
 
@@ -2299,7 +2530,7 @@ impl VisionaryApp {
                 // ── Foreign-effect warning: effect folders only load with their OWNER
                 // (fighter in match / assist summoned), so a spawn naming another
                 // character's effect is invisible both live and in an exported mod.
-                // One-slotting bakes the donor content into THIS fighter's eff instead.
+                // EFF transplanting bakes the donor content into THIS fighter's eff instead.
                 {
                     let name = self.state.effects[i].effect_name.to_lowercase();
                     let fighter = self
@@ -2324,7 +2555,7 @@ impl VisionaryApp {
                             ui.colored_label(
                                 egui::Color32::from_rgb(255, 170, 60),
                                 "⚠ foreign effect — it belongs to another character. \
-                                 One-slot it: baked into this fighter's eff for the \
+                                 Transplant it into this fighter's EFF for the \
                                  export, and loaded as a stripped-down copy for the live \
                                  preview.",
                             );
@@ -2335,9 +2566,9 @@ impl VisionaryApp {
                             {
                                 Some(rel) => {
                                     if ui
-                                        .small_button(format!("One-slot into {fighter}"))
+                                        .small_button(format!("Transplant into {fighter}"))
                                         .on_hover_text(
-                                            "Copy the donor entry into this fighter (baked \
+                                            "Transplant the donor entry into this fighter (baked \
                                              into the exported eff; a stripped copy loaded \
                                              live), then redirect this spawn to it.",
                                         )
@@ -2842,13 +3073,13 @@ impl VisionaryApp {
                     }
                     if ok {
                         let mut msg = format!(
-                            "{fighter}: eff written ({} authored, {} one-slot",
+                            "{fighter}: eff written ({} authored, {} transplant",
                             eff.authored.len(),
                             eff.one_slot.len()
                         );
                         if !slots.is_empty() {
                             msg.push_str(&format!(
-                                ", slotted: {}",
+                                ", skin EFFs: {}",
                                 slots
                                     .iter()
                                     .map(|s| format!("c{s:02}"))
@@ -3305,6 +3536,26 @@ impl VisionaryApp {
             .map(|m| hash40::hash40(&m.name.to_lowercase()).0)
     }
 
+    fn current_fighter_kind(&self) -> Option<i32> {
+        self.state
+            .selected_fighter
+            .and_then(|index| self.state.fighters.get(index))
+            .and_then(|fighter| fighter_kind_id(&fighter.name))
+    }
+
+    /// Captures for the selected fighter only. Motion hashes are shared across the roster, so
+    /// using the global motion bucket directly can merge unrelated ATTACK/EFFECT scripts.
+    fn captures_for_selected_fighter(&self, motion: u64) -> Vec<crate::game_link::CaptureLine> {
+        let captures = self.game_link.captures_for(motion);
+        let Some(kind) = self.current_fighter_kind() else {
+            return captures;
+        };
+        captures
+            .into_iter()
+            .filter(|capture| capture.kind == kind)
+            .collect()
+    }
+
     /// Reverse-lookup maps: hash40(lowercase bone) → canonical bone name; effect hashes
     /// resolve through the loaded eff handles.
     fn bone_reverse_map(&self) -> HashMap<u64, String> {
@@ -3318,7 +3569,19 @@ impl VisionaryApp {
         // Resolved names are LOWERCASE everywhere (matches live-kind names and the case
         // the hashes are computed on) — the file's original case leaked UPPERCASE names
         // into the effects panel for captured spawns.
-        let mut m = HashMap::new();
+        //
+        // ParamLabels is the broad fallback for system/common and foreign-fighter effects
+        // that are not present in the currently opened EFF. Prefer concrete EFF/live names
+        // below, but never discard this already-loaded hash dictionary.
+        let mut m: HashMap<u64, String> = self
+            .state
+            .labels
+            .iter()
+            .filter_map(|(hash, label)| {
+                let label = label.trim();
+                (!label.is_empty()).then(|| (*hash, label.to_lowercase()))
+            })
+            .collect();
         if let Some(idx) = self
             .current_eff_path
             .as_deref()
@@ -3330,7 +3593,14 @@ impl VisionaryApp {
             }
         }
         for (h, k) in self.game_link.kinds() {
-            m.entry(h).or_insert(k.name.to_lowercase());
+            let name = k.name.to_lowercase();
+            // The plugin also falls back to `0x...`; do not let that replace a cracked
+            // ParamLabels name for the same hash.
+            if name.starts_with("0x") {
+                m.entry(h).or_insert(name);
+            } else {
+                m.insert(h, name);
+            }
         }
         m
     }
@@ -3341,7 +3611,7 @@ impl VisionaryApp {
         let Some(motion) = self.current_motion_hash() else {
             return;
         };
-        let captures = self.game_link.captures_for(motion);
+        let captures = self.captures_for_selected_fighter(motion);
         if captures.is_empty() {
             self.state.status = "No live capture yet — perform the move in game first.".into();
             return;
@@ -3350,8 +3620,13 @@ impl VisionaryApp {
         let eff_rev = self.effect_reverse_map();
 
         let mut hitboxes: Vec<crate::data::Hitbox> = Vec::new();
-        let mut effects: Vec<crate::data::EffectCall> = Vec::new();
-        for line in &captures {
+        let mut effects = Self::effect_calls_from_captures(&captures, &bone_rev, &eff_rev);
+        // Capture entries arrive as each runtime branch is observed. Sort them into script
+        // time while retaining capture order at equal frames, so a same-frame OFF/SPAWN pair
+        // keeps the ordering the game actually executed.
+        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
+        for (_, line) in ordered {
             if line.func.starts_with("ATTACK") {
                 if let Some(hb) = Self::hitbox_from_capture(&line.args, line.frame, &bone_rev) {
                     // Same id re-captured (multi-part moves): keep the earliest frame.
@@ -3380,12 +3655,6 @@ impl VisionaryApp {
                         hitboxes.push(hb);
                     }
                 }
-            } else if line.func.starts_with("EFFECT") {
-                if let Some(ec) = Self::effect_call_from_capture(
-                    &line.func, &line.args, line.frame, &bone_rev, &eff_rev,
-                ) {
-                    effects.push(ec);
-                }
             }
         }
         // Scrub our own ghosts: live retime/rename/add rules re-fire spawns through the
@@ -3396,7 +3665,7 @@ impl VisionaryApp {
         // effect shows up once as "original" and once as the edit.
         if let Some(mv) = self.current_move_key() {
             if let Some(edits) = self.state.effect_call_edits.get(&mv) {
-                let ghost_sigs: Vec<(u64, u32, u64)> = edits
+                let ghost_sigs: Vec<(u64, u64, u64, u32, u64)> = edits
                     .iter()
                     .filter_map(|e| match &e.op {
                         crate::data::EffectCallOp::Add(c) => Some(call_sig(c)),
@@ -3599,18 +3868,30 @@ impl VisionaryApp {
         bone_rev: &HashMap<u64, String>,
         eff_rev: &HashMap<u64, String>,
     ) -> Option<crate::data::EffectCall> {
-        let flip = func.contains("FLIP");
+        let (flip, follows) = effect_capture_layout(func)?;
         let off = usize::from(flip);
         let eff_hash = args.first().and_then(|a| a.as_hash())?;
+        let effect_name_alt = flip.then(|| {
+            args.get(1)
+                .and_then(|arg| arg.as_hash())
+                .and_then(|hash| {
+                    eff_rev
+                        .get(&hash)
+                        .cloned()
+                        .or_else(|| Some(format!("{hash:#x}")))
+                })
+                .unwrap_or_else(|| "null".into())
+        });
         let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32()).unwrap_or(0.0);
         let bone_hash = args.get(1 + off).and_then(|a| a.as_hash()).unwrap_or(0);
-        let follows = func.contains("FOLLOW") || func.contains("FLW");
         let start = frame.max(0.0).round() as u32;
         Some(crate::data::EffectCall {
             effect_name: eff_rev
                 .get(&eff_hash)
                 .cloned()
                 .unwrap_or_else(|| format!("{eff_hash:#x}")),
+            effect_name_alt,
+            spawn_func: func.to_string(),
             bone_name: bone_rev
                 .get(&bone_hash)
                 .cloned()
@@ -3623,6 +3904,55 @@ impl VisionaryApp {
             active_end: if follows { 9999 } else { start },
             disabled: false,
         })
+    }
+
+    /// Reconstruct effect timeline spans from live spawn and stop events. Runtime capture can
+    /// accumulate mutually exclusive branches over several move executions, so every distinct
+    /// observed spawn is retained; time ordering and kill-kind semantics are then applied to
+    /// that complete observed set.
+    fn effect_calls_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+        bone_rev: &HashMap<u64, String>,
+        eff_rev: &HashMap<u64, String>,
+    ) -> Vec<crate::data::EffectCall> {
+        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
+
+        let mut effects = Vec::new();
+        for (_, line) in ordered {
+            if effect_capture_layout(&line.func).is_some() {
+                if let Some(effect) = Self::effect_call_from_capture(
+                    &line.func, &line.args, line.frame, bone_rev, eff_rev,
+                ) {
+                    // `null` is an explicit no-effect sentinel used by FOOT/LANDING scripts.
+                    // Keep a FLIP call when its alternate side is real, but do not present a
+                    // no-op as an editable smoke/effect spawn.
+                    let primary_null = effect.effect_name == "null";
+                    let alternate_real = effect
+                        .effect_name_alt
+                        .as_deref()
+                        .is_some_and(|name| name != "null");
+                    if !primary_null || alternate_real {
+                        effects.push(effect);
+                    }
+                }
+                continue;
+            }
+            if line.func != "EFFECT_OFF_KIND" {
+                continue;
+            }
+            let Some(stop_hash) = line.args.first().and_then(|arg| arg.as_hash()) else {
+                continue;
+            };
+            let stop_frame = line.frame.max(0.0).round() as u32;
+            // EffectModule::kill_kind terminates every live instance of the kind.
+            for effect in effects.iter_mut().filter(|effect| {
+                effect.active_end == 9999 && effect_name_hash(&effect.effect_name) == stop_hash
+            }) {
+                effect.active_end = stop_frame.max(effect.active_start);
+            }
+        }
+        effects
     }
 
     /// Derive + push the full live hitbox-rule set, matched PER-OCCURRENCE so multi-hit
@@ -3638,7 +3968,7 @@ impl VisionaryApp {
         let Some(motion) = self.current_motion_hash() else {
             return;
         };
-        let captures = self.game_link.captures_for(motion);
+        let captures = self.captures_for_selected_fighter(motion);
         // Donor capture (for injecting added/retimed collisions) matched by family + id.
         let fam_prefix = |cat: u8| match cat {
             1 => "CATCH",
@@ -3845,10 +4175,10 @@ impl VisionaryApp {
         Some(args)
     }
 
-    // ── One-Slot studio ───────────────────────────────────────────────────────
+    // ── EFF Transplant Studio ─────────────────────────────────────────────────
 
-    /// The One-Slot studio: pick ANY effect from any eff (pool), copy it into the current
-    /// fighter's eff under a new name, then choose per-use which spawns redirect to it.
+    /// Pick any effect from any EFF, transplant it into the current fighter's EFF, and
+    /// optionally scope the replacement to one or more skins.
     fn draw_one_slot_studio(&mut self, ctx: &egui::Context) {
         if !self.show_one_slot {
             return;
@@ -3878,18 +4208,13 @@ impl VisionaryApp {
         let target = self.one_slot_target.clone().or(selected_fighter);
         let mut open = self.show_one_slot;
         let mut do_slot: Option<(String, String, String)> = None; // (rel, donor, new name)
-                                                                  // Snapshot the one-slots ALREADY recorded for the target, so the studio shows what
+                                                                  // Snapshot the transplants ALREADY recorded for the target, so the studio shows what
                                                                   // will actually be baked (they ACCUMULATE — a stale donor from a prior pick otherwise
                                                                   // silently rides along). `remove_op` / `clear_ops` are applied after the window.
-        let recorded: Vec<(String, String)> = target
+        let recorded: Vec<crate::mod_project::OneSlotOp> = target
             .as_ref()
             .and_then(|f| self.eff_mods.get(f))
-            .map(|e| {
-                e.one_slot
-                    .iter()
-                    .map(|op| (op.new_entry_name.clone(), op.src_set_name.clone()))
-                    .collect()
-            })
+            .map(|e| e.one_slot.clone())
             .unwrap_or_default();
         // Global view across ALL fighters — so "Clear every fighter" is reachable even when the
         // CURRENT fighter has no recorded one-slots (stale donors on OTHER fighters were the bug).
@@ -3924,7 +4249,7 @@ impl VisionaryApp {
         let mut clear_ops = false;
         let mut clear_ops_all = false;
         let mut clear_foreign_edits = false;
-        egui::Window::new("One-Slot Studio")
+        egui::Window::new("EFF Transplant Studio")
             .open(&mut open)
             .default_width(430.0)
             .show(ctx, |ui| {
@@ -3963,24 +4288,53 @@ impl VisionaryApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(format!("Recorded one-slots ({}):", recorded.len()))
+                            egui::RichText::new(format!("Transplanted effects ({}):", recorded.len()))
                                 .strong()
                                 .small(),
                         );
                         if ui
                             .small_button("Clear this fighter")
-                            .on_hover_text("Remove the one-slots listed above (this fighter only)")
+                            .on_hover_text(
+                                "Remove every transplanted effect listed above from this fighter \
+                                 and unload them from the game",
+                            )
                             .clicked()
                         {
                             clear_ops = true;
                         }
                     });
-                    for (i, (name, donor)) in recorded.iter().enumerate() {
+                    for (i, op) in recorded.iter().enumerate() {
+                        let scope = if op.slots.len() == 1 {
+                            format!("one-slot c0{}", op.slots[0])
+                        } else if op.slots.is_empty() {
+                            "EFF transplant, all skins".to_string()
+                        } else {
+                            format!(
+                                "skin-scoped transplant: {}",
+                                op.slots
+                                    .iter()
+                                    .map(|s| format!("c0{s}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        };
                         ui.horizontal(|ui| {
-                            if ui.small_button("✕").clicked() {
+                            if ui
+                                .small_button("Remove")
+                                .on_hover_text(
+                                    "Remove this transplant and immediately rebuild the live carrier",
+                                )
+                                .clicked()
+                            {
                                 remove_op = Some(i);
                             }
-                            ui.label(egui::RichText::new(format!("{donor} → {name}")).small());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} → {} ({scope})",
+                                    op.src_set_name, op.new_entry_name
+                                ))
+                                .small(),
+                            );
                         });
                     }
                     ui.separator();
@@ -3992,7 +4346,7 @@ impl VisionaryApp {
                 ui.separator();
                 ui.label(
                     egui::RichText::new(format!(
-                        "Staged for co-load — {all_os_total} one-slot(s) on {all_os_fighters} fighter(s), \
+                        "Staged for the game — {all_os_total} transplant(s) on {all_os_fighters} fighter(s), \
                          {foreign_spawn_donors} foreign spawn-edit(s)"
                     ))
                     .small()
@@ -4002,8 +4356,8 @@ impl VisionaryApp {
                     if ui
                         .add_enabled(all_os_total > 0, egui::Button::new("Clear every fighter").small())
                         .on_hover_text(
-                            "Remove ALL recorded one-slots across every fighter — stops stale \
-                             donors from other fighters riding along into the game",
+                            "Remove ALL recorded transplants across every fighter and unload \
+                             their runtime carriers",
                         )
                         .clicked()
                     {
@@ -4025,10 +4379,10 @@ impl VisionaryApp {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("Costumes:");
+                    ui.label("Apply to:");
                     if ui
-                        .selectable_label(self.one_slot_slots == 0, "All")
-                        .on_hover_text("Lands in the base ef file — every costume")
+                        .selectable_label(self.one_slot_slots == 0, "All skins")
+                        .on_hover_text("Transplant into the base EFF for every skin")
                         .clicked()
                     {
                         self.one_slot_slots = 0;
@@ -4041,13 +4395,19 @@ impl VisionaryApp {
                     }
                 });
                 if self.one_slot_slots != 0 {
+                    let selected_skin_count = self.one_slot_slots.count_ones();
+                    let scope_term = if selected_skin_count == 1 {
+                        "One-slot"
+                    } else {
+                        "Skin-scoped transplant"
+                    };
                     ui.label(
-                        egui::RichText::new(
-                            "Skin-scoped: the donor REPLACES a chosen entry in place (all its \
+                        egui::RichText::new(format!(
+                            "{scope_term}: the donor REPLACES a chosen entry in place (all its \
                              uses switch on those costumes, no redirect step) and exports as \
-                             ef_<fighter>_cXX.eff — loading those in-game needs the One-Slot \
-                             Effects plugin.",
-                        )
+                             ef_<fighter>_cXX.eff — loading costume-specific EFF files in-game \
+                             requires costume-specific EFF loading support."
+                        ))
                         .small()
                         .color(egui::Color32::from_rgb(200, 200, 120)),
                     );
@@ -4056,11 +4416,16 @@ impl VisionaryApp {
                     ui.colored_label(egui::Color32::GRAY, "Pick a target fighter.");
                     return;
                 };
-                ui.add(
+                let search_response = ui.add(
                     egui::TextEdit::singleline(&mut self.one_slot_search)
                         .hint_text("Search every effect entry (all fighters + sys/common)…")
                         .desired_width(f32::INFINITY),
                 );
+                if search_response.changed() {
+                    self.one_slot_sel = None;
+                    self.one_slot_new_name.clear();
+                    self.one_slot_replace = None;
+                }
 
                 // Live kinds that match — effects the running game has actually used.
                 let q = self.one_slot_search.to_lowercase();
@@ -4156,8 +4521,8 @@ impl VisionaryApp {
                     if cross {
                         ui.label(
                             egui::RichText::new(
-                                "Cross-file: textures + shaders transfer automatically. \
-                                 Donors using primitive models are refused (shown in status).",
+                                "EFF transplant: only this effect and its referenced textures, \
+                                 primitives, and shaders are copied into runtime storage.",
                             )
                             .small()
                             .color(egui::Color32::from_rgb(200, 200, 120)),
@@ -4198,25 +4563,33 @@ impl VisionaryApp {
                     } else {
                         ui.label(
                             egui::RichText::new(
-                                "One-slotting previews the merged eff in-app immediately, then lets \
-                                 you pick which uses redirect to the copy.",
+                                "EFF transplanting previews the merged EFF immediately, then lets \
+                                 you choose which spawns redirect to the transplanted copy.",
                             )
                             .small()
                             .color(egui::Color32::GRAY),
                         );
                     }
+                    let selected_skin_count = self.one_slot_slots.count_ones();
                     let (valid, button_label) = if slot_mode {
                         (
                             self.one_slot_replace.is_some(),
-                            format!(
-                                "Replace {} on selected costumes + preview",
-                                self.one_slot_replace.as_deref().unwrap_or("…")
-                            ),
+                            if selected_skin_count == 1 {
+                                format!(
+                                    "One-slot {} + preview",
+                                    self.one_slot_replace.as_deref().unwrap_or("…")
+                                )
+                            } else {
+                                format!(
+                                    "Transplant {} into selected skins + preview",
+                                    self.one_slot_replace.as_deref().unwrap_or("…")
+                                )
+                            },
                         )
                     } else {
                         (
                             !self.one_slot_new_name.trim().is_empty(),
-                            format!("One-slot into {target} + preview"),
+                            format!("Transplant into {target} + preview"),
                         )
                     };
                     if ui.add_enabled(valid, egui::Button::new(button_label)).clicked() {
@@ -4238,15 +4611,30 @@ impl VisionaryApp {
         self.show_one_slot = open;
 
         // Apply recorded-op edits (remove one / clear all) requested in the studio.
+        // Every affected fighter is refreshed below so project state, preview, staged EFF,
+        // aliases, and the runtime carrier all stop retaining the removed effect together.
+        let mut changed_fighters: Vec<String> = Vec::new();
+        let mut removed_spawn_names: Vec<(String, String)> = Vec::new();
+        let mut change_status: Option<String> = None;
         if clear_ops_all {
             // Purge EVERY fighter's recorded one-slots + any direct spawn-edit donors. This is the
             // fix for stale cross-fighter donors (ridley/bomberman) silently riding along into the
             // co-load because they were recorded on a fighter other than the one being tested.
             let n: usize = self.eff_mods.values().map(|e| e.one_slot.len()).sum();
-            for e in self.eff_mods.values_mut() {
-                e.one_slot.clear();
+            for (fighter, e) in &mut self.eff_mods {
+                if !e.one_slot.is_empty() {
+                    removed_spawn_names.extend(
+                        e.one_slot
+                            .iter()
+                            .map(|op| (fighter.clone(), op.new_entry_name.clone())),
+                    );
+                    changed_fighters.push(fighter.clone());
+                    e.one_slot.clear();
+                }
             }
-            self.state.status = format!("Cleared {n} recorded one-slot(s) across ALL fighters");
+            change_status = Some(format!(
+                "Removed {n} transplanted effect(s) across all fighters and refreshed the game"
+            ));
         } else if clear_foreign_edits {
             // Remove every spawn edit that references a foreign effect (the other stale-donor
             // source). Keep sys_/own-fighter edits + Removes; drop now-empty move entries.
@@ -4269,22 +4657,57 @@ impl VisionaryApp {
             self.state
                 .effect_call_edits
                 .retain(|_, edits| !edits.is_empty());
-            self.state.status = format!("Cleared {removed} foreign spawn-edit donor(s)");
+            self.push_effect_rules();
+            self.push_effect_aliases();
+            change_status = Some(format!(
+                "Removed {removed} foreign spawn-edit donor(s) from the game"
+            ));
         } else if let Some(f) = target.as_ref() {
             if clear_ops {
                 if let Some(e) = self.eff_mods.get_mut(f) {
-                    e.one_slot.clear();
+                    if !e.one_slot.is_empty() {
+                        removed_spawn_names.extend(
+                            e.one_slot
+                                .iter()
+                                .map(|op| (f.clone(), op.new_entry_name.clone())),
+                        );
+                        e.one_slot.clear();
+                        changed_fighters.push(f.clone());
+                    }
                 }
-                self.state.status = format!("Cleared all recorded one-slots for {f}");
+                change_status = Some(format!(
+                    "Removed all transplanted effects from {f} and refreshed the game"
+                ));
             } else if let Some(i) = remove_op {
                 if let Some(e) = self.eff_mods.get_mut(f) {
                     if i < e.one_slot.len() {
                         let removed = e.one_slot.remove(i);
-                        self.state.status =
-                            format!("Removed one-slot '{}' from {f}", removed.new_entry_name);
+                        removed_spawn_names.push((f.clone(), removed.new_entry_name.clone()));
+                        changed_fighters.push(f.clone());
+                        change_status = Some(format!(
+                            "Removed transplanted effect '{}' from {f} and refreshed the game",
+                            removed.new_entry_name
+                        ));
                     }
                 }
             }
+        }
+        if !changed_fighters.is_empty() {
+            self.remove_transplant_spawn_edits(&removed_spawn_names);
+            changed_fighters.sort();
+            changed_fighters.dedup();
+            for fighter in &changed_fighters {
+                self.refresh_transplant_preview(fighter);
+            }
+            // Empty lists are meaningful: the plugin drops the old carrier bytes/spec and
+            // destroys its hidden object, releasing the removed effect resources.
+            self.push_effect_aliases();
+            for fighter in &changed_fighters {
+                self.deploy_live_eff(fighter);
+            }
+        }
+        if let Some(status) = change_status {
+            self.state.status = status;
         }
 
         if let (Some((rel, donor, new_name)), Some(fighter)) = (do_slot, target) {
@@ -4299,6 +4722,144 @@ impl VisionaryApp {
             };
             self.record_one_slot(&fighter, &rel, &donor, &new_name, slots, replace);
         }
+    }
+
+    /// Drop spawn redirects that point at entries being removed. Redirect creation mutates
+    /// both the saved edit and the cached full move snapshot, so restore both and invalidate
+    /// the corresponding live rule sets before the carrier disappears.
+    fn remove_transplant_spawn_edits(&mut self, removed: &[(String, String)]) {
+        let mut by_fighter: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (fighter, name) in removed {
+            by_fighter
+                .entry(fighter.to_lowercase())
+                .or_default()
+                .insert(name.to_lowercase());
+        }
+        let mut restores: Vec<(String, usize, crate::data::EffectCall)> = Vec::new();
+        let mut affected_moves: Vec<String> = Vec::new();
+        for (move_key, edits) in &mut self.state.effect_call_edits {
+            let fighter = move_key.split('/').next().unwrap_or("").to_lowercase();
+            let Some(names) = by_fighter.get(&fighter) else {
+                continue;
+            };
+            let before = edits.len();
+            edits.retain(|edit| {
+                let referenced = match &edit.op {
+                    crate::data::EffectCallOp::Modify(call)
+                    | crate::data::EffectCallOp::Add(call) => {
+                        names.contains(&call.effect_name.to_lowercase())
+                    }
+                    crate::data::EffectCallOp::Remove => false,
+                };
+                if referenced {
+                    if let Some(pristine) = &edit.pristine {
+                        restores.push((move_key.clone(), edit.index, pristine.clone()));
+                    }
+                }
+                !referenced
+            });
+            if edits.len() != before {
+                affected_moves.push(move_key.clone());
+            }
+        }
+        self.state
+            .effect_call_edits
+            .retain(|_, edits| !edits.is_empty());
+        for (move_key, index, pristine) in restores {
+            if let Some(call) = self
+                .state
+                .effect_call_full
+                .get_mut(&move_key)
+                .and_then(|calls| calls.get_mut(index))
+            {
+                *call = pristine;
+            }
+        }
+        for move_key in &affected_moves {
+            self.effect_rules_store.remove(move_key);
+        }
+        let current_affected = self
+            .current_move_key()
+            .as_ref()
+            .map(|key| affected_moves.contains(key))
+            .unwrap_or(false);
+        if current_affected {
+            self.apply_effect_call_edits_to_current();
+            self.push_effect_rules();
+        } else if !affected_moves.is_empty() {
+            let all: Vec<crate::game_link::SpawnRuleWire> = self
+                .effect_rules_store
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            self.game_link.send_spawn_rules(&all);
+        }
+    }
+
+    fn refresh_transplant_preview(&mut self, fighter: &str) {
+        let Some(eff) = self.eff_mods.get(fighter).cloned() else {
+            return;
+        };
+        if !eff.one_slot.is_empty() {
+            self.build_merged_preview(fighter);
+            return;
+        }
+        let base = self.eff_editor.export_root().join(&eff.source_rel);
+        self.eff_editor.set_merged_overlay(&base, None);
+        if let Some(dir) = base.parent() {
+            let _ = std::fs::remove_file(dir.join("_oneslot_preview.eff"));
+        }
+    }
+
+    fn remove_transplant_from_editor(&mut self, request: crate::eff_editor::EffTransplantRemoval) {
+        let Some(eff) = self.eff_mods.get_mut(&request.fighter) else {
+            self.state.status = format!(
+                "Couldn't remove '{}': its transplant record is no longer present",
+                request.entry_name
+            );
+            return;
+        };
+        // The index is from this frame's project snapshot. Fall back to entry+donor matching
+        // if another UI action changed ordering before the request was drained.
+        let at_index_matches = eff
+            .one_slot
+            .get(request.op_index)
+            .map(|op| {
+                let visible = op.replace_entry.as_deref().unwrap_or(&op.new_entry_name);
+                visible.eq_ignore_ascii_case(&request.entry_name)
+                    && op.src_set_name.eq_ignore_ascii_case(&request.donor_name)
+            })
+            .unwrap_or(false);
+        let remove_index = if at_index_matches {
+            Some(request.op_index)
+        } else {
+            eff.one_slot.iter().position(|op| {
+                let visible = op.replace_entry.as_deref().unwrap_or(&op.new_entry_name);
+                visible.eq_ignore_ascii_case(&request.entry_name)
+                    && op.src_set_name.eq_ignore_ascii_case(&request.donor_name)
+            })
+        };
+        let Some(remove_index) = remove_index else {
+            self.state.status = format!(
+                "Couldn't remove '{}': its transplant record changed",
+                request.entry_name
+            );
+            return;
+        };
+        let removed = eff.one_slot.remove(remove_index);
+        self.merged_build_failed.remove(&request.fighter);
+        self.remove_transplant_spawn_edits(&[(
+            request.fighter.clone(),
+            removed.new_entry_name.clone(),
+        )]);
+        self.refresh_transplant_preview(&request.fighter);
+        self.push_effect_aliases();
+        self.deploy_live_eff(&request.fighter);
+        self.state.status = format!(
+            "Removed transplanted effect '{}' from {} and refreshed the game",
+            request.entry_name, request.fighter
+        );
     }
 
     /// Build the fighter's one-slotted eff IN MEMORY (source eff + recorded one-slot ops via
@@ -4324,23 +4885,48 @@ impl VisionaryApp {
         eff.authored.clear();
         let root = self.eff_editor.export_root().to_path_buf();
         let src_path = root.join(&eff.source_rel);
-        let src_bytes = std::fs::read(&src_path).ok()?;
+        let tmp = src_path
+            .parent()
+            .map(|dir| dir.join("_oneslot_preview.eff"))
+            .unwrap_or_else(|| {
+                crate::scratch_dirs::app_storage_root().join("_oneslot_preview.eff")
+            });
+        let src_bytes = match std::fs::read(&src_path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.eff_editor.set_merged_overlay(&src_path, None);
+                let _ = std::fs::remove_file(&tmp);
+                self.state.status = format!(
+                    "EFF transplant preview failed: couldn't read '{}': {e}",
+                    src_path.display()
+                );
+                return None;
+            }
+        };
         match crate::eff_export::rebuild_eff_bytes(&src_bytes, &eff, Some(&root)) {
             Ok(merged) => {
-                let tmp = src_path
-                    .parent()
-                    .map(|dir| dir.join("_oneslot_preview.eff"))
-                    .unwrap_or_else(|| {
-                        crate::scratch_dirs::app_storage_root().join("_oneslot_preview.eff")
-                    });
-                if std::fs::write(&tmp, &merged).is_err() {
+                // Publish only a complete new preview. A failed/partial write must never leave
+                // the editor pointed at the previous donor's bytes.
+                let next = tmp.with_extension("eff.next");
+                if let Err(e) =
+                    std::fs::write(&next, &merged).and_then(|_| std::fs::rename(&next, &tmp))
+                {
+                    let _ = std::fs::remove_file(&next);
+                    self.eff_editor.set_merged_overlay(&src_path, None);
+                    let _ = std::fs::remove_file(&tmp);
+                    self.state.status = format!(
+                        "EFF transplant preview failed writing '{}': {e}",
+                        tmp.display()
+                    );
                     return None;
                 }
                 self.eff_editor.set_merged_overlay(&src_path, Some(&tmp));
                 Some((src_path, tmp))
             }
             Err(e) => {
-                self.state.status = format!("One-slot merge failed: {e}");
+                self.eff_editor.set_merged_overlay(&src_path, None);
+                let _ = std::fs::remove_file(&tmp);
+                self.state.status = format!("EFF transplant merge failed: {e}");
                 None
             }
         }
@@ -4353,7 +4939,7 @@ impl VisionaryApp {
         let Some((base, _tmp)) = self.build_merged_preview(fighter) else {
             if !eff.one_slot.is_empty() {
                 self.state.status =
-                    "One-slot recorded, but the target eff isn't on disk to preview — export to apply.".into();
+                    "EFF transplant recorded, but the target EFF isn't on disk to preview — export to apply.".into();
             }
             return;
         };
@@ -4367,7 +4953,7 @@ impl VisionaryApp {
                 .unwrap_or_else(|| op.new_entry_name.clone());
             self.eff_editor.queue_select(&focus);
         }
-        self.state.status = format!("One-slot applied — previewing merged eff for {fighter}");
+        self.state.status = format!("EFF transplant applied — previewing merged EFF for {fighter}");
     }
 
     /// Push the full live-alias list to the plugin: every one-slot op maps its
@@ -4375,10 +4961,28 @@ impl VisionaryApp {
     /// exist after export are LIVE-substituted by their (content-identical) donor —
     /// the running game matches the export. Costume-scoped ops carry their slots.
     ///
-    /// Cross-fighter ops are EXCLUDED once the fighter's merged eff is live-served
-    /// (deploy_live_eff): the real entry loads with the fighter on match re-entry, and
-    /// an alias pointing at the absent donor fighter's kind would mask it.
+    /// Kirby's cross-file ops remain aliased because the hidden live carrier makes every
+    /// transplanted ORIGINAL kind resident. Other fighters still exclude foreign aliases.
+    ///
+    /// `#[track_caller]` so `donor_send_log.txt` records which of the ~10 call sites produced
+    /// each snapshot: a snapshot that omits the carrier target destroys and recreates the live
+    /// carrier in-game, and the caller identifies the path that publishes an incomplete one.
+    /// Request a donor/carrier publication. The snapshot is built and sent once per UI frame by
+    /// [`Self::flush_effect_aliases`], from the final project state.
+    #[track_caller]
     fn push_effect_aliases(&mut self) {
+        let caller = std::panic::Location::caller();
+        let caller = format!("{}:{}", caller.file(), caller.line());
+        if !self.carrier_push_callers.contains(&caller) {
+            self.carrier_push_callers.push(caller);
+        }
+    }
+
+    fn flush_effect_aliases(&mut self) {
+        if self.carrier_push_callers.is_empty() {
+            return;
+        }
+        let caller = std::mem::take(&mut self.carrier_push_callers).join(",");
         let mut aliases: Vec<crate::game_link::EffectAliasWire> = Vec::new();
         for (fighter, eff) in &self.eff_mods {
             let own_rel = format!("effect/fighter/{fighter}/ef_{fighter}.eff");
@@ -4391,13 +4995,9 @@ impl VisionaryApp {
                     || rel == own_rel
                     || op.src_set_name.to_lowercase().starts_with("sys_")
                     || rel.starts_with(&format!("effect/fighter/{fighter}/"));
-                // For a FOREIGN donor the `_os` copy is baked into the fighter's merged eff
-                // and made resident by the live re-read; aliasing `_os → <absent original>`
-                // would redirect the spawn to a kind that ISN'T loaded → invisible (this was
-                // the cross-fighter one-slot bug). So DROP the alias and let the resident
-                // merged `_os` entry render directly. Resident donors keep the alias (its
-                // content ≡ the copy, and it's a harmless fallback if the re-read is skipped).
-                if !donor_resident {
+                // Kirby's carrier below stores all selected foreign originals, so both default
+                // `<donor>_os` and custom one-slot names can safely alias to those loaded kinds.
+                if !donor_resident && fighter != "kirby" {
                     continue;
                 }
                 let to = effect_name_hash(&op.src_set_name);
@@ -4426,6 +5026,24 @@ impl VisionaryApp {
             .flat_map(|eff| eff.one_slot.iter().map(|op| op.new_entry_name.clone()))
             .collect();
         self.game_link.send_effect_names(&names);
+        const LIVE_CARRIER_REL: &str = "effect/assist/bomberman/ef_bomberman.eff";
+        let kirby_carrier_ops: Vec<crate::mod_project::OneSlotOp> = self
+            .eff_mods
+            .get("kirby")
+            .map(|eff| {
+                eff.one_slot
+                    .iter()
+                    .filter(|op| {
+                        let rel = op.src_file_rel.to_lowercase();
+                        !rel.is_empty()
+                            && !rel.starts_with("effect/system")
+                            && !rel.starts_with("effect/fighter/kirby/")
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let live_carrier_rel = LIVE_CARRIER_REL;
         // Cross-fighter donors: have the plugin co-load each donor's VANILLA eff with the
         // target fighter (system effs are always resident — no need to co-load those).
         let mut per_target: HashMap<String, Vec<String>> = HashMap::new();
@@ -4480,6 +5098,14 @@ impl VisionaryApp {
                 }
             }
         }
+        if !kirby_carrier_ops.is_empty() {
+            // The old detached co-loader is deliberately disabled. For Kirby, send only the
+            // selected fresh carrier path to the plugin; its bytes are built below.
+            per_target.insert(
+                "effect/fighter/kirby/ef_kirby.eff".into(),
+                vec![live_carrier_rel.into()],
+            );
+        }
         let mut donor_specs: Vec<crate::game_link::DonorEffWire> = Vec::new();
         for (target, mut donors) in per_target {
             donors.retain(|rel| {
@@ -4492,7 +5118,6 @@ impl VisionaryApp {
             }
         }
         donor_specs.sort_by(|a, b| a.target.cmp(&b.target));
-        self.game_link.send_donor_effs(&donor_specs);
 
         // Build the stripped donor buffers the plugin injects as resident data (arcrop_load_file
         // can't read vanilla donor files, so we must supply the bytes). Each carries only the
@@ -4515,8 +5140,107 @@ impl VisionaryApp {
         }
         let mut donor_bytes: Vec<crate::game_link::DonorBytesWire> = Vec::new();
         let mut dbg = String::new();
+        let mut carrier_added = false;
+        // A refused carrier build (unsafe shader container, incompatible compute variation) drops
+        // every live transplant. That must be visible, not just a line in the debug dump.
+        let mut carrier_error: Option<String> = None;
+        if !kirby_carrier_ops.is_empty() {
+            use base64::Engine;
+
+            let shared_root = roots.iter().find(|root| {
+                root.join(live_carrier_rel).is_file()
+                    && kirby_carrier_ops
+                        .iter()
+                        .all(|op| root.join(op.src_file_rel.to_lowercase()).is_file())
+            });
+            if let Some(root) = shared_root {
+                match std::fs::read(root.join(live_carrier_rel)) {
+                    Ok(carrier_base) => {
+                        let mut seen_names = std::collections::HashSet::new();
+                        let carrier_transplants: Vec<crate::mod_project::OneSlotOp> =
+                            kirby_carrier_ops
+                                .iter()
+                                .filter_map(|op| {
+                                    let donor_rel = op.src_file_rel.to_lowercase();
+                                    let donor_name = op.src_set_name.to_lowercase();
+                                    // Multiple Kirby copies of one donor need only one stored kind.
+                                    if !seen_names.insert(donor_name.clone()) {
+                                        return None;
+                                    }
+                                    Some(crate::mod_project::OneSlotOp {
+                                        new_entry_name: donor_name.clone(),
+                                        src_file_rel: donor_rel,
+                                        src_set_name: donor_name,
+                                        src_set_idx: op.src_set_idx,
+                                        slots: Vec::new(),
+                                        replace_entry: None,
+                                    })
+                                })
+                                .collect();
+                        let carrier_bytes = crate::eff_export::rebuild_runtime_carrier_eff_bytes(
+                            &carrier_base,
+                            live_carrier_rel,
+                            &carrier_transplants,
+                            root,
+                        );
+                        match carrier_bytes {
+                            Ok(bytes) => {
+                                // Preserve the exact outbound carrier for post-test structural
+                                // inspection. This is cache-only and is replaced on every build.
+                                let _ = std::fs::write(
+                                    crate::scratch_dirs::app_storage_root()
+                                        .join("carrier_send_debug.eff"),
+                                    &bytes,
+                                );
+                                let stored = kirby_carrier_ops
+                                    .iter()
+                                    .map(|op| {
+                                        format!("{} from {}", op.src_set_name, op.src_file_rel)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                dbg.push_str(&format!(
+                                    "CARRIER {live_carrier_rel}: {} stored effect(s) [{stored}] = {} B\n",
+                                    kirby_carrier_ops.len(),
+                                    bytes.len()
+                                ));
+                                donor_bytes.push(crate::game_link::DonorBytesWire {
+                                    path: live_carrier_rel.into(),
+                                    b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                                });
+                                carrier_added = true;
+                            }
+                            Err(e) => {
+                                dbg.push_str(&format!("CARRIER MULTI-FILE MERGE FAILED: {e}\n"));
+                                carrier_error = Some(format!("{e}"));
+                            }
+                        }
+                    }
+                    Err(e) => dbg.push_str(&format!(
+                        "CARRIER BASE READ FAILED {live_carrier_rel}: {e}\n"
+                    )),
+                }
+            } else {
+                let needed = kirby_carrier_ops
+                    .iter()
+                    .map(|op| op.src_file_rel.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                dbg.push_str(&format!(
+                    "CARRIER ROOT MISS: need {live_carrier_rel} and [{needed}] under one effect root\n"
+                ));
+            }
+        }
         for (rel, mut names) in donor_wants {
             if rel.is_empty() || rel.starts_with("effect/system") {
+                continue;
+            }
+            if carrier_added
+                && (rel == live_carrier_rel
+                    || kirby_carrier_ops
+                        .iter()
+                        .any(|op| op.src_file_rel.eq_ignore_ascii_case(&rel)))
+            {
                 continue;
             }
             names.sort();
@@ -4562,9 +5286,63 @@ impl VisionaryApp {
             crate::scratch_dirs::app_storage_root().join("donor_send_debug.txt"),
             format!("sending {} donor buffer(s)\n{dbg}", donor_bytes.len()),
         );
-        if !donor_bytes.is_empty() {
-            donor_bytes.sort_by(|a, b| a.path.cmp(&b.path));
-            self.game_link.send_donor_bytes(&donor_bytes);
+        if !kirby_carrier_ops.is_empty() && !carrier_added {
+            // Never arm the stable carrier path with bytes left over from an older selection.
+            donor_specs.retain(|spec| spec.target != "effect/fighter/kirby/ef_kirby.eff");
+            if let Some(e) = &carrier_error {
+                self.state.status = format!("Live transplant carrier not built — {e}");
+            }
+        }
+        // Bytes first: a same-path carrier replacement must be staged before the game-thread
+        // receives the new spec and creates its object. Empty is meaningful and clears old data.
+        donor_bytes.sort_by(|a, b| a.path.cmp(&b.path));
+        self.log_donor_push(&caller, &kirby_carrier_ops, carrier_added, &donor_specs);
+        self.game_link.send_donor_bytes(&donor_bytes);
+        self.game_link.send_donor_effs(&donor_specs);
+    }
+
+    /// Append one line per published donor snapshot to `donor_send_log.txt`. Pairs each push
+    /// with its call site so a snapshot that silently drops the Kirby carrier target can be
+    /// traced back to the action that produced it, and records the exact recorded transplant
+    /// names so a mismatch between the editor's display and the runtime carrier is attributable
+    /// to one side or the other.
+    fn log_donor_push(
+        &self,
+        caller: &str,
+        kirby_carrier_ops: &[crate::mod_project::OneSlotOp],
+        carrier_added: bool,
+        donor_specs: &[crate::game_link::DonorEffWire],
+    ) {
+        use std::io::Write;
+        let has_kirby_spec = donor_specs
+            .iter()
+            .any(|spec| spec.target == "effect/fighter/kirby/ef_kirby.eff");
+        let targets = donor_specs
+            .iter()
+            .map(|spec| spec.target.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let path = crate::scratch_dirs::app_storage_root().join("donor_send_log.txt");
+        // Keep the file bounded: it is written on every user action for the whole session.
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+            let _ = std::fs::remove_file(&path);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let ops = kirby_carrier_ops
+                .iter()
+                .map(|op| format!("{}<-{}", op.new_entry_name, op.src_set_name))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(
+                f,
+                "caller={caller} kirby_carrier_ops={} carrier_added={carrier_added} \
+                 kirby_spec={has_kirby_spec} ops=[{ops}] targets=[{targets}]",
+                kirby_carrier_ops.len(),
+            );
         }
     }
 
@@ -4577,9 +5355,9 @@ impl VisionaryApp {
         let Some(eff) = self.eff_mods.get(fighter).cloned() else {
             return false;
         };
-        if eff.is_empty() {
-            return false;
-        }
+        // An edit-free EffMod is intentional after the last transplant is removed: serving
+        // the pristine source bytes replaces the previously merged resident file and makes
+        // removal take effect immediately instead of leaving the old live payload staged.
         let root = self.eff_editor.export_root().to_path_buf();
         let src = root.join(&eff.source_rel);
         let Ok(bytes) = std::fs::read(&src) else {
@@ -4721,13 +5499,21 @@ impl VisionaryApp {
                 .collect::<Vec<_>>()
                 .join(", ");
             self.preview_one_slot_result(fighter);
-            self.state.status = format!(
-                "'{donor}' now replaces '{}' on {slot_list} — {live_note}; export writes the slotted eff files",
-                replace.as_deref().unwrap_or("?")
-            );
+            self.state.status = if slots.len() == 1 {
+                format!(
+                    "One-slot: '{donor}' now replaces '{}' on {slot_list} — {live_note}; export writes the skin EFF",
+                    replace.as_deref().unwrap_or("?")
+                )
+            } else {
+                format!(
+                    "Skin-scoped EFF transplant: '{donor}' now replaces '{}' on {slot_list} — {live_note}; export writes the skin EFFs",
+                    replace.as_deref().unwrap_or("?")
+                )
+            };
             return;
         }
-        self.state.status = format!("One-slot '{new_name}' recorded for {fighter} — {live_note}");
+        self.state.status =
+            format!("EFF transplant '{new_name}' recorded for {fighter} — {live_note}");
 
         // Full use discovery: reconstruct EVERY move performed live that spawns the donor
         // (not just moves already opened) into effect_call_full, so all real uses are listed
@@ -4741,12 +5527,14 @@ impl VisionaryApp {
                 .collect();
             let bone_rev = self.bone_reverse_map();
             let eff_rev = self.effect_reverse_map();
+            let fighter_kind = self.current_fighter_kind();
             let mut motions: Vec<u64> = self
                 .game_link
                 .all_captures()
                 .into_iter()
                 .filter(|(_, l)| {
-                    l.func.starts_with("EFFECT")
+                    fighter_kind.is_none_or(|kind| l.kind == kind)
+                        && effect_capture_layout(&l.func).is_some()
                         && l.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
                 })
                 .map(|(m, _)| m)
@@ -4761,16 +5549,8 @@ impl VisionaryApp {
                 if self.state.effect_call_full.contains_key(&key) {
                     continue;
                 }
-                let mut calls: Vec<crate::data::EffectCall> = Vec::new();
-                for line in self.game_link.captures_for(m) {
-                    if line.func.starts_with("EFFECT") {
-                        if let Some(ec) = Self::effect_call_from_capture(
-                            &line.func, &line.args, line.frame, &bone_rev, &eff_rev,
-                        ) {
-                            calls.push(ec);
-                        }
-                    }
-                }
+                let motion_captures = self.captures_for_selected_fighter(m);
+                let calls = Self::effect_calls_from_captures(&motion_captures, &bone_rev, &eff_rev);
                 if !calls.is_empty() {
                     self.state.effect_call_full.insert(key, calls);
                 }
@@ -4943,7 +5723,7 @@ impl VisionaryApp {
             return;
         };
         let mut action: Option<bool> = None; // Some(true)=apply, Some(false)=skip
-        egui::Window::new("Redirect spawns to the one-slotted effect?")
+        egui::Window::new("Redirect spawns to the transplanted effect?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -5223,6 +6003,23 @@ impl VisionaryApp {
                 });
                 continue;
             }
+            // A follow emitter has no automatic relationship to the editor's end frame.
+            // Schedule the same EFFECT_OFF_KIND that exported ACMD emits. This dispatches
+            // through the plugin's normal kill-kind hook, which redirects transplanted kinds
+            // from the fighter to their hidden carrier owner.
+            if ec.follows_bone && ec.active_end != 9999 {
+                rules.push(crate::game_link::SpawnRuleWire {
+                    eff_hash: hash,
+                    suppress: false,
+                    motion,
+                    frame_start: None,
+                    frame_end: None,
+                    pos: None,
+                    rot: None,
+                    scale: None,
+                    inject: Some(Self::build_effect_stop_inject(ec)),
+                });
+            }
             // Swap and/or retime: the effect NAME or FRAME changed → suppress the original
             // spawn and inject the new effect at the new frame (transform baked in). The
             // injected call reuses the original spawn's captured args with the graphic hash
@@ -5231,7 +6028,13 @@ impl VisionaryApp {
             let retimed = pristine
                 .map(|p| p.active_start != ec.active_start)
                 .unwrap_or(false);
-            let swapped = orig_hash != hash;
+            let swapped = pristine
+                .map(|p| {
+                    orig_hash != hash
+                        || p.effect_name_alt != ec.effect_name_alt
+                        || p.spawn_func != ec.spawn_func
+                })
+                .unwrap_or(true);
             if retimed || swapped {
                 if let Some(inject) = self.build_effect_inject(ec, motion, orig_hash) {
                     rules.push(crate::game_link::SpawnRuleWire {
@@ -5313,12 +6116,12 @@ impl VisionaryApp {
         use crate::game_link::LuaArgWire as A;
         let motion = motion?;
         let new_hash = effect_name_hash(&ec.effect_name);
-        let captures = self.game_link.captures_for(motion);
+        let captures = self.captures_for_selected_fighter(motion);
         let donor = captures.iter().find(|c| {
-            c.func.starts_with("EFFECT")
+            effect_capture_layout(&c.func).is_some()
                 && c.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
         })?;
-        let flip = donor.func.contains("FLIP");
+        let (flip, _) = effect_capture_layout(&donor.func)?;
         let off = usize::from(flip);
         let mut args = donor.args.clone();
         // Vec layout (0-based, +off for flip): 0 gfx (0/1 for FLIP: gfxL/gfxR), 1 bone,
@@ -5326,10 +6129,16 @@ impl VisionaryApp {
         if args.len() < 9 + off {
             return None;
         }
-        // Swap the graphic to the new effect (both left/right for FLIP variants).
+        // Swap each graphic independently for FLIP variants. One side is often `null`, so
+        // collapsing both slots to the primary name changes the move's facing-dependent VFX.
         args[0] = A::Hash(new_hash);
         if flip {
-            args[1] = A::Hash(new_hash);
+            args[1] = A::Hash(
+                ec.effect_name_alt
+                    .as_deref()
+                    .map(effect_name_hash)
+                    .unwrap_or(new_hash),
+            );
         }
         args[1 + off] = A::Hash(hash40::hash40(&ec.bone_name.to_lowercase()).0);
         args[2 + off] = A::Num(ec.offset[0]);
@@ -5341,9 +6150,28 @@ impl VisionaryApp {
         args[8 + off] = A::Num(ec.scale);
         Some(crate::game_link::SpawnInjectWire {
             frame: ec.active_start as f32,
-            func: donor.func.clone(),
+            // Existing captures carry the exact trailing args for this command. Preserve that
+            // command unless an authored call explicitly supplies another compatible type.
+            func: if ec.spawn_func.is_empty() {
+                donor.func.clone()
+            } else {
+                ec.spawn_func.clone()
+            },
             args,
         })
+    }
+
+    fn build_effect_stop_inject(ec: &crate::data::EffectCall) -> crate::game_link::SpawnInjectWire {
+        use crate::game_link::LuaArgWire as A;
+        crate::game_link::SpawnInjectWire {
+            frame: ec.active_end.max(ec.active_start) as f32,
+            func: "EFFECT_OFF_KIND".into(),
+            args: vec![
+                A::Hash(effect_name_hash(&ec.effect_name)),
+                A::Bool(false),
+                A::Bool(true),
+            ],
+        }
     }
 
     fn draw_scrubber(&mut self, ui: &mut Ui) {
@@ -5737,10 +6565,10 @@ impl eframe::App for VisionaryApp {
                     }
                     ui.checkbox(&mut self.state.show_effects_panel, "Effects panel")
                         .on_hover_text("Effect spawns of the current move");
-                    ui.checkbox(&mut self.show_one_slot, "One-Slot Studio")
+                    ui.checkbox(&mut self.show_one_slot, "EFF Transplant Studio")
                         .on_hover_text(
-                            "Copy any effect (any fighter / sys) into the current fighter's \
-                             eff and redirect its uses",
+                            "Transplant any effect from another EFF into the current fighter's \
+                             EFF and redirect its uses",
                         );
                     let has_log = !self.state.edit_log.is_empty() || self.show_edit_log;
                     ui.add_enabled_ui(has_log, |ui| {
@@ -5772,7 +6600,7 @@ impl eframe::App for VisionaryApp {
                     }
                     ui.separator();
                     if ui.button("Deploy live eff to Eden")
-                        .on_hover_text("Serve this fighter's merged eff (one-slots + authored edits) to the running game AND make the plugin unload/reload-reparse it in the current match — changes show without leaving the match or restarting. Needs the fighter to have been loaded once this session (effect-manager slot tracked).")
+                        .on_hover_text("Serve this fighter's merged EFF (transplants + authored edits) to the running game AND make the plugin unload/reload-reparse it in the current match — changes show without leaving the match or restarting. Needs the fighter to have been loaded once this session (effect-manager slot tracked).")
                         .clicked()
                     {
                         let fighter = self
@@ -5908,6 +6736,25 @@ impl eframe::App for VisionaryApp {
                         merged,
                         one_slots: e.one_slot.len(),
                         authored: e.authored.len(),
+                        transplants: e
+                            .one_slot
+                            .iter()
+                            .enumerate()
+                            .map(|(op_index, op)| crate::eff_editor::EffTransplant {
+                                op_index,
+                                entry_name: op
+                                    .replace_entry
+                                    .clone()
+                                    .unwrap_or_else(|| op.new_entry_name.clone()),
+                                donor_name: op.src_set_name.clone(),
+                                donor_file: if op.src_file_rel.is_empty() {
+                                    e.source_rel.clone()
+                                } else {
+                                    op.src_file_rel.clone()
+                                },
+                                slots: op.slots.clone(),
+                            })
+                            .collect(),
                     }
                 })
                 .collect();
@@ -5915,6 +6762,9 @@ impl eframe::App for VisionaryApp {
         }
         self.eff_editor
             .show(&ctx, &self.game_link, &mut self.live_overrides);
+        for removal in self.eff_editor.take_transplant_removals() {
+            self.remove_transplant_from_editor(removal);
+        }
 
         // Single debounced sender for every live override (color/speed kind multipliers;
         // per-spawn transforms go through push_effect_rules, not this store).
@@ -5996,7 +6846,7 @@ impl eframe::App for VisionaryApp {
                 && self.state.effects.is_empty()
             {
                 if let Some(m) = self.current_motion_hash() {
-                    if !self.game_link.captures_for(m).is_empty() {
+                    if !self.captures_for_selected_fighter(m).is_empty() {
                         self.load_from_capture();
                     }
                 }
@@ -6072,6 +6922,7 @@ impl eframe::App for VisionaryApp {
         }
         // Drain one-slot ops recorded in the eff editor into the project store.
         let ops = self.eff_editor.take_one_slots();
+        let mut editor_slot_fighter = None;
         if !ops.is_empty() {
             if let Some(fighter) = current_fighter {
                 let entry = self.eff_mods.entry(fighter.clone()).or_default();
@@ -6079,11 +6930,29 @@ impl eframe::App for VisionaryApp {
                     entry.source_rel = format!("effect/fighter/{fighter}/ef_{fighter}.eff");
                 }
                 for op in ops {
-                    self.state.status =
-                        format!("One-slot '{}' recorded for {fighter}", op.new_entry_name);
+                    self.state.status = if op.slots.len() == 1 {
+                        format!(
+                            "One-slot '{}' recorded for {fighter} c0{}",
+                            op.new_entry_name, op.slots[0]
+                        )
+                    } else {
+                        format!(
+                            "EFF transplant '{}' recorded for {fighter}",
+                            op.new_entry_name
+                        )
+                    };
                     entry.one_slot.push(op);
                 }
+                editor_slot_fighter = Some(fighter);
             }
+        }
+        if let Some(fighter) = editor_slot_fighter {
+            // The EFF editor can create one-slots directly, bypassing One-Slot Studio. This
+            // path must publish the same complete live snapshot; previously Daisy appeared in
+            // the merged preview but the plugin kept the older Bomberman carrier indefinitely.
+            self.push_effect_aliases();
+            self.deploy_live_eff(&fighter);
+            self.preview_one_slot_result(&fighter);
         }
 
         // Effects panel (right side, shown when toggled)
@@ -6161,7 +7030,11 @@ impl eframe::App for VisionaryApp {
                 if let Some(wgpu_state) = frame.wgpu_render_state() {
                     let renderer = wgpu_state.renderer.read();
                     if let Some(rs) = renderer.callback_resources.get::<HitboxRenderState>() {
-                        let bone_matrices = rs.bone_world_matrices();
+                        // The WGPU model callback runs after egui builds these overlays, so
+                        // `last_frame` is one paint behind. Evaluate the requested frame
+                        // directly to keep moving bones/root motion and grabboxes synchronized.
+                        let bone_matrices =
+                            rs.bone_world_matrices_at(self.state.current_frame as f32);
                         // Keep a positions map for debug display
                         let bone_positions: std::collections::HashMap<String, glam::Vec3> =
                             bone_matrices
@@ -6401,6 +7274,9 @@ impl eframe::App for VisionaryApp {
                 });
             }
         });
+        // Every handler for this frame has run, so the project state is final: publish at most
+        // one donor/carrier snapshot rather than the transient sequence the handlers produce.
+        self.flush_effect_aliases();
     }
 }
 
@@ -6840,5 +7716,128 @@ fn save_recent_effs(list: &[PathBuf]) {
             .collect::<Vec<_>>()
             .join("\n");
         let _ = std::fs::write(&dest, body);
+    }
+}
+
+#[cfg(test)]
+mod live_effect_capture_tests {
+    use super::*;
+    use crate::game_link::{CaptureLine, LuaArgWire as A};
+
+    fn spawn(func: &str, frame: f32, effect: u64) -> CaptureLine {
+        let flip = effect_capture_layout(func).unwrap().0;
+        let mut args = vec![A::Hash(effect)];
+        if flip {
+            args.push(A::Hash(effect));
+        }
+        args.extend([
+            A::Hash(hash40::hash40("top").0),
+            A::Num(1.0),
+            A::Num(2.0),
+            A::Num(3.0),
+            A::Num(4.0),
+            A::Num(5.0),
+            A::Num(6.0),
+            A::Num(0.75),
+        ]);
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: func.into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn live_effect_layout_accounts_for_dumped_spawn_families() {
+        for func in [
+            "EFFECT",
+            "EFFECT_ALPHA",
+            "EFFECT_ATTR",
+            "EFFECT_FLIP_ALPHA",
+            "EFFECT_FOLLOW",
+            "EFFECT_FOLLOW_ALPHA",
+            "EFFECT_FOLLOW_COLOR",
+            "EFFECT_FOLLOW_NO_SCALE",
+            "EFFECT_FOLLOW_NO_STOP",
+            "EFFECT_FOLLOW_NO_STOP_FLIP",
+            "EFFECT_FOLLOW_FLIP_RND",
+            "EFFECT_FLW_POS",
+            "EFFECT_FLW_POS_NO_STOP",
+            "DOWN_EFFECT",
+            "FOOT_EFFECT",
+            "FOOT_EFFECT_FLIP",
+            "LANDING_EFFECT",
+            "LANDING_EFFECT_FLIP",
+        ] {
+            assert!(
+                effect_capture_layout(func).is_some(),
+                "{func} must be reconstructed as an effect spawn"
+            );
+        }
+        assert!(effect_capture_layout("EFFECT_OFF_KIND").is_none());
+        assert!(effect_capture_layout("LAST_EFFECT_SET_RATE").is_none());
+        assert_eq!(fighter_kind_id("kirby"), Some(6));
+        assert_eq!(fighter_kind_id("mario"), Some(0));
+    }
+
+    #[test]
+    fn live_flip_effect_keeps_both_graphics_and_null_noops_are_hidden() {
+        let null = hash40::hash40("null").0;
+        let smoke = hash40::hash40("sys_dash_smoke").0;
+        let mut flip = spawn("LANDING_EFFECT_FLIP", 4.0, null);
+        flip.args[1] = A::Hash(smoke);
+        let no_op = spawn("FOOT_EFFECT", 7.0, null);
+
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([(null, "null".into()), (smoke, "sys_dash_smoke".into())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&[flip, no_op], &bones, &effects);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].effect_name, "null");
+        assert_eq!(calls[0].effect_name_alt.as_deref(), Some("sys_dash_smoke"));
+        assert_eq!(calls[0].spawn_func, "LANDING_EFFECT_FLIP");
+        assert_eq!(
+            effect_call_display_name(&calls[0]),
+            "sys_dash_smoke (flip; other side none)"
+        );
+    }
+
+    #[test]
+    fn live_effect_stop_closes_every_open_instance_of_the_kind() {
+        let effect = hash40::hash40("moon_explosion").0;
+        let mut captures = vec![
+            spawn("EFFECT_FOLLOW_NO_STOP", 10.0, effect),
+            spawn("LANDING_EFFECT", 7.0, hash40::hash40("sys_down_smoke").0),
+            spawn("EFFECT_FOLLOW_ALPHA", 5.0, effect),
+        ];
+        captures.push(CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame: 20.0,
+            func: "EFFECT_OFF_KIND".into(),
+            args: vec![A::Hash(effect), A::Bool(false), A::Bool(true)],
+        });
+
+        let mut bones = HashMap::new();
+        bones.insert(hash40::hash40("top").0, "top".into());
+        let mut effects = HashMap::new();
+        effects.insert(effect, "moon_explosion".into());
+        effects.insert(hash40::hash40("sys_down_smoke").0, "sys_down_smoke".into());
+
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 3);
+        let moon: Vec<_> = calls
+            .iter()
+            .filter(|call| call.effect_name == "moon_explosion")
+            .collect();
+        assert_eq!(moon.len(), 2);
+        assert!(moon.iter().all(|call| call.active_end == 20));
+        let landing = calls
+            .iter()
+            .find(|call| call.effect_name == "sys_down_smoke")
+            .unwrap();
+        assert_eq!(landing.active_start, 7);
+        assert_eq!(landing.active_end, 7);
     }
 }

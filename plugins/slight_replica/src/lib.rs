@@ -13,6 +13,7 @@ pub const PLUGIN_VERSION: &str = "0.1.0-slight-replica";
 pub fn smashline_install() {
     skyline::println!("[SLight] Start preinstall");
     slight::smash_utils::ensure_slight_dirs();
+    slight::diag::start_session();
     let _ = std::fs::write(
         format!("{}/effect_viewer_boot.txt", slight::smash_utils::ERROR_LOGS),
         format!("lib_effect_viewer v{PLUGIN_VERSION}\n"),

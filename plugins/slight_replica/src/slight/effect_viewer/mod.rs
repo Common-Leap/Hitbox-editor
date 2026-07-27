@@ -23,6 +23,116 @@ use effect_data::Point3D;
 const SYNTH_HANDLE_BASE: u32 = 0x8000_0000;
 static SYNTH_HANDLE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
+/// A carrier-owned handle returned to a different source object's ACMD call. Cleanup calls arrive
+/// on the source module, so retain the true owner for handle-based kill/remove operations.
+static PROXY_HANDLES: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<(usize, u32), usize>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+/// Allows an intentional ACMD proxy request through the carrier-effect suppression hooks.
+static CARRIER_PROXY_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Editor-facing one-slot hash for the current carrier request. The carrier instantiates the
+/// donor's real kind, but live tracking and pins must remain keyed to `<copy>_os`.
+static CARRIER_PROXY_LOGICAL_HASH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub struct CarrierProxyGuard;
+
+impl CarrierProxyGuard {
+    pub fn new(logical_hash: u64) -> Self {
+        CARRIER_PROXY_LOGICAL_HASH.store(
+            logical_hash & 0xff_ffff_ffff,
+            std::sync::atomic::Ordering::Release,
+        );
+        CARRIER_PROXY_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for CarrierProxyGuard {
+    fn drop(&mut self) {
+        CARRIER_PROXY_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        CARRIER_PROXY_LOGICAL_HASH.store(0, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn carrier_proxy_logical_hash(actual_hash: u64) -> u64 {
+    if !CARRIER_PROXY_ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
+        return actual_hash;
+    }
+    let logical = CARRIER_PROXY_LOGICAL_HASH.load(std::sync::atomic::Ordering::Acquire);
+    if logical == 0 {
+        actual_hash
+    } else {
+        logical
+    }
+}
+
+fn suppress_carrier_request(module_accessor: *mut smash::app::BattleObjectModuleAccessor) -> bool {
+    (unsafe { crate::slight::effect_viewer::effect_reload::is_auto_carrier_boma(module_accessor) })
+        && !CARRIER_PROXY_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+unsafe fn spawn_owner(
+    source: *mut smash::app::BattleObjectModuleAccessor,
+    eff_hash: u64,
+) -> *mut smash::app::BattleObjectModuleAccessor {
+    crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(eff_hash)
+        .unwrap_or(source)
+}
+
+unsafe fn remember_proxy_handle(
+    source: *mut smash::app::BattleObjectModuleAccessor,
+    owner: *mut smash::app::BattleObjectModuleAccessor,
+    result: u64,
+    eff_hash: u64,
+) {
+    if source.is_null() || owner.is_null() || source == owner {
+        return;
+    }
+    let handle = if result != 0 {
+        result as u32
+    } else {
+        EffectModule::get_last_handle(owner) as u32
+    };
+    if handle == 0 {
+        return;
+    }
+    PROXY_HANDLES
+        .lock()
+        .insert((source as usize, handle), owner as usize);
+
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("sd:/effect_viewer_carrier_spawn.txt")
+        {
+            let source_id = (*source).battle_object_id;
+            let owner_id = (*owner).battle_object_id;
+            let _ = writeln!(
+                file,
+                "kind={eff_hash:#x} source={source_id:#x} owner={owner_id:#x} handle={handle:#x}"
+            );
+        }
+    }
+}
+
+fn proxy_owner_for_handle(
+    source: *mut smash::app::BattleObjectModuleAccessor,
+    handle: u32,
+) -> Option<*mut smash::app::BattleObjectModuleAccessor> {
+    let owner = PROXY_HANDLES
+        .lock()
+        .get(&(source as usize, handle))
+        .copied()
+        .map(|owner| owner as *mut smash::app::BattleObjectModuleAccessor)?;
+    let current = unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() };
+    (current == Some(owner)).then_some(owner)
+}
+
 pub fn init_fighter(boid: u32) {
     crate::slight::systems::main_module::on_init_fighter(boid);
 }
@@ -270,9 +380,15 @@ fn hook_req(
     a8: bool,
     a9: i32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
+    let logical_hash = carrier_proxy_logical_hash(eff_hash.hash);
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(module_accessor, eff_hash, pos, rot, size, a6, a7, a8, a9);
-    track_spawn(module_accessor, r, eff_hash.hash, 0, false, pos, rot, size);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, pos, rot, size, a6, a7, a8, a9);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, logical_hash) };
+    track_spawn(owner, r, logical_hash, 0, false, pos, rot, size);
     r
 }
 
@@ -321,25 +437,17 @@ fn hook_req_follow(
     a13: bool,
     a14: bool,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(
-        module_accessor,
-        eff_hash,
-        bone_hash,
-        pos,
-        rot,
-        size,
-        a7,
-        a8,
-        a9,
-        a10,
-        a11,
-        a12,
-        a13,
-        a14,
+        owner, eff_hash, bone_hash, pos, rot, size, a7, a8, a9, a10, a11, a12, a13, a14,
     );
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
     track_spawn(
-        module_accessor,
+        owner,
         r,
         eff_hash.hash,
         bone_hash.hash,
@@ -366,23 +474,17 @@ fn hook_req_on_joint(
     a11: i32,
     a12: i32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(
-        module_accessor,
-        eff_hash,
-        bone_hash,
-        pos,
-        rot,
-        size,
-        a7,
-        a8,
-        a9,
-        a10,
-        a11,
-        a12,
+        owner, eff_hash, bone_hash, pos, rot, size, a7, a8, a9, a10, a11, a12,
     );
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
     track_spawn(
-        module_accessor,
+        owner,
         r,
         eff_hash.hash,
         bone_hash.hash,
@@ -400,10 +502,15 @@ fn hook_req_emit(
     eff_hash: phx::Hash40,
     a3: u32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(module_accessor, eff_hash, a3);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, a3);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
     track_spawn(
-        module_accessor,
+        owner,
         r,
         eff_hash.hash,
         0,
@@ -424,9 +531,14 @@ fn hook_req_2d(
     size: f32,
     a6: u32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(module_accessor, eff_hash, pos, rot, size, a6);
-    track_spawn(module_accessor, r, eff_hash.hash, 0, false, pos, rot, size);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, pos, rot, size, a6);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
+    track_spawn(owner, r, eff_hash.hash, 0, false, pos, rot, size);
     r
 }
 
@@ -436,10 +548,15 @@ fn hook_req_common(
     eff_hash: phx::Hash40,
     size: f32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(module_accessor, eff_hash, size);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, size);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
     track_spawn(
-        module_accessor,
+        owner,
         r,
         eff_hash.hash,
         0,
@@ -460,10 +577,15 @@ fn hook_req_continual(
     a5: u32,
     a6: i32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(module_accessor, eff_hash, bone_hash, size, a5, a6);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, bone_hash, size, a5, a6);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
     track_spawn(
-        module_accessor,
+        owner,
         r,
         eff_hash.hash,
         bone_hash.hash,
@@ -487,9 +609,14 @@ fn hook_req_time(
     a8: bool,
     a9: bool,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(module_accessor, eff_hash, a3, pos, rot, size, a7, a8, a9);
-    track_spawn(module_accessor, r, eff_hash.hash, 0, false, pos, rot, size);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, a3, pos, rot, size, a7, a8, a9);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
+    track_spawn(owner, r, eff_hash.hash, 0, false, pos, rot, size);
     r
 }
 
@@ -505,20 +632,15 @@ fn hook_req_time_follow(
     a8: bool,
     a9: u32,
 ) -> u64 {
+    if suppress_carrier_request(module_accessor) {
+        return 0;
+    }
     let eff_hash = remap_eff(eff_hash);
-    let r = original!()(
-        module_accessor,
-        eff_hash,
-        bone_hash,
-        a4,
-        pos,
-        rot,
-        size,
-        a8,
-        a9,
-    );
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, bone_hash, a4, pos, rot, size, a8, a9);
+    unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
     track_spawn(
-        module_accessor,
+        owner,
         r,
         eff_hash.hash,
         bone_hash.hash,
@@ -537,8 +659,12 @@ fn hook_kill(
     a3: bool,
     a4: bool,
 ) {
-    original!()(module_accessor, handle, a3, a4);
-    handle_kill(module_accessor, handle);
+    let owner = proxy_owner_for_handle(module_accessor, handle).unwrap_or(module_accessor);
+    original!()(owner, handle, a3, a4);
+    handle_kill(owner, handle);
+    PROXY_HANDLES
+        .lock()
+        .remove(&(module_accessor as usize, handle));
 }
 
 #[skyline::hook(replace = EffectModule::kill_kind)]
@@ -548,8 +674,10 @@ fn hook_kill_kind(
     a3: bool,
     a4: bool,
 ) -> u64 {
-    let r = original!()(module_accessor, eff_hash, a3, a4);
-    handle_kill_hash(module_accessor, eff_hash.hash);
+    let eff_hash = remap_eff(eff_hash);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash, a3, a4);
+    handle_kill_hash(owner, eff_hash.hash);
     r
 }
 
@@ -560,8 +688,20 @@ fn hook_kill_all(
     a3: bool,
     a4: bool,
 ) -> u64 {
+    if let Some(carrier) =
+        unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() }
+    {
+        if carrier != module_accessor {
+            original!()(carrier, a2, a3, a4);
+            handle_kill_all(carrier);
+        }
+    }
     let r = original!()(module_accessor, a2, a3, a4);
     handle_kill_all(module_accessor);
+    let module_addr = module_accessor as usize;
+    PROXY_HANDLES
+        .lock()
+        .retain(|(source, _), owner| *source != module_addr && *owner != module_addr);
     r
 }
 
@@ -571,11 +711,15 @@ fn hook_remove(
     a2: u32,
     a3: u32,
 ) -> u64 {
-    let r = original!()(module_accessor, a2, a3);
-    handle_kill(module_accessor, a2);
+    let owner = proxy_owner_for_handle(module_accessor, a2).unwrap_or(module_accessor);
+    let r = original!()(owner, a2, a3);
+    handle_kill(owner, a2);
     if a3 != a2 {
-        handle_kill(module_accessor, a3);
+        let owner3 = proxy_owner_for_handle(module_accessor, a3).unwrap_or(module_accessor);
+        handle_kill(owner3, a3);
     }
+    PROXY_HANDLES.lock().remove(&(module_accessor as usize, a2));
+    PROXY_HANDLES.lock().remove(&(module_accessor as usize, a3));
     r
 }
 
@@ -584,8 +728,10 @@ fn hook_remove_common(
     module_accessor: *mut smash::app::BattleObjectModuleAccessor,
     eff_hash: phx::Hash40,
 ) -> u64 {
-    let r = original!()(module_accessor, eff_hash);
-    handle_kill_hash(module_accessor, eff_hash.hash);
+    let eff_hash = remap_eff(eff_hash);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash);
+    handle_kill_hash(owner, eff_hash.hash);
     r
 }
 
@@ -594,12 +740,15 @@ fn hook_remove_time(
     module_accessor: *mut smash::app::BattleObjectModuleAccessor,
     eff_hash: phx::Hash40,
 ) -> u64 {
-    let r = original!()(module_accessor, eff_hash);
-    handle_kill_hash(module_accessor, eff_hash.hash);
+    let eff_hash = remap_eff(eff_hash);
+    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
+    let r = original!()(owner, eff_hash);
+    handle_kill_hash(owner, eff_hash.hash);
     r
 }
 
 pub fn install_hooks() {
+    let _ = std::fs::write("sd:/effect_viewer_carrier_spawn.txt", "");
     skyline::install_hook!(hook_req);
     skyline::install_hook!(hook_req_2d);
     skyline::install_hook!(hook_req_follow);

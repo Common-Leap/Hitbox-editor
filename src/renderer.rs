@@ -7,6 +7,14 @@ use ssbh_wgpu::{
 /// Uses egui-wgpu paint callbacks to render directly into the egui surface.
 use std::path::Path;
 
+fn synthetic_top_matrix(bones: &std::collections::HashMap<String, glam::Mat4>) -> glam::Mat4 {
+    bones
+        .get("Trans")
+        .or_else(|| bones.get("trans"))
+        .map(|matrix| glam::Mat4::from_translation(matrix.col(3).truncate()))
+        .unwrap_or(glam::Mat4::IDENTITY)
+}
+
 #[allow(dead_code)]
 pub struct Camera {
     pub translation: Vec3,
@@ -415,13 +423,12 @@ impl HitboxRenderState {
             }
         }
 
-        // `top` = character root (feet), identity matrix
-        result
-            .entry("top".to_string())
-            .or_insert(glam::Mat4::IDENTITY);
-        result
-            .entry("Top".to_string())
-            .or_insert(glam::Mat4::IDENTITY);
+        // ACMD's synthetic `top` joint is the character origin. It is not present in nusktb;
+        // offline animations instead carry root motion on `Trans`. Using identity left
+        // top-bound hitboxes (most grabs) behind while the rendered fighter moved.
+        let top = synthetic_top_matrix(&result);
+        result.insert("top".to_string(), top);
+        result.insert("Top".to_string(), top);
 
         // ── Weapon skeletons ──────────────────────────────────────────────────
         for (_, weapon_skel, attach_bone) in &self.weapon_skels {
@@ -500,6 +507,25 @@ impl HitboxRenderState {
         let center_screen = self.world_to_screen(world_pos, viewport)?;
         let edge_screen = self.world_to_screen(edge, viewport)?;
         Some((edge_screen - center_screen).length())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn synthetic_top_uses_animated_trans_translation() {
+        let expected = glam::Vec3::new(8.0, 1.5, -3.0);
+        let bones = std::collections::HashMap::from([(
+            "Trans".to_string(),
+            glam::Mat4::from_scale_rotation_translation(
+                glam::Vec3::splat(2.0),
+                glam::Quat::from_rotation_y(1.0),
+                expected,
+            ),
+        )]);
+        let top = super::synthetic_top_matrix(&bones);
+        assert_eq!(top.col(3).truncate(), expected);
+        assert_eq!(top.x_axis.truncate(), glam::Vec3::X);
     }
 }
 

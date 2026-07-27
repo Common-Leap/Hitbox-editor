@@ -5,6 +5,7 @@
 //! search index / loaded-data buffer.
 
 use smash_arc::{ArcLookup, Hash40, Region, SearchLookup};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // SSBU 13.0.4 — pointer-to-FilesystemInfo (smashline `resources::types::FilesystemInfo::instance`).
 const FILESYSTEM_INFO_PTR_OFFSET: usize = 0x5331f20;
@@ -23,8 +24,39 @@ struct LoadedFilepath {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 struct LoadedData {
     data: *const u8,
+    ref_count: AtomicU32,
+    is_used: bool,
+    state: LoadState,
+    file_flags2: u8,
+    flags: u8,
+    version: u32,
+    unk: u8,
+}
+
+#[repr(u8)]
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LoadState {
+    Unused = 0,
+    Unloaded = 1,
+    Unknown = 2,
+    Loaded = 3,
+}
+
+#[repr(C)]
+struct LoadedDirectory {
+    file_group_index: u32,
+    ref_count: AtomicU32,
+    flags: u8,
+    state: LoadState,
+    _padding: [u8; 2],
+    incoming_request_count: AtomicU32,
+    _child_path_indices: CppVector,
+    _child_folders: CppVector,
+    _redirection_directory: *mut LoadedDirectory,
 }
 
 #[repr(C)]
@@ -44,7 +76,7 @@ struct FilesystemInfo {
     loaded_filepath_count: u32,
     loaded_data_count: u32,
     _loaded_filepath_list: CppVector,
-    _loaded_directories: *const u8,
+    loaded_directories: *mut LoadedDirectory,
     _loaded_directory_len: u32,
     _unk: u32,
     _unk2: CppVector,
@@ -68,6 +100,32 @@ fn filesystem_info() -> Option<&'static FilesystemInfo> {
     }
     Some(unsafe { &*fs_info })
 }
+
+#[derive(Copy, Clone, Debug)]
+pub struct ResidentFileState {
+    pub filepath_index: u32,
+    pub data_index: u32,
+    pub data: usize,
+    pub ref_count: u32,
+    pub is_used: bool,
+    pub state: u8,
+    pub filepath_loaded: bool,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct ResidentDirectoryState {
+    pub directory_index: u32,
+    pub ref_count: u32,
+    pub flags: u8,
+    pub state: u8,
+    pub incoming_request_count: u32,
+}
+
+/// The game's directory-release routine. It recursively decrements the directory tree's
+/// ownership counts and queues every group whose count reaches zero for the resource worker.
+/// Its callers hold `FilesystemInfo::_mutex`; this wrapper does the same.
+#[skyline::from_offset(0x353eff0)]
+fn queue_directory_release(filesystem: *mut FilesystemInfo, directory: *mut LoadedDirectory);
 
 pub fn loaded_arc() -> Option<&'static smash_arc::LoadedArc> {
     let fs_info = filesystem_info()?;
@@ -233,6 +291,110 @@ pub fn resident_buffer(file_hash: u64) -> Option<*const u8> {
     }
 }
 
+pub fn resident_file_state(file_hash: u64) -> Option<ResidentFileState> {
+    let fs = filesystem_info()?;
+    let arc = loaded_arc()?;
+    let fp = arc.get_file_path_index_from_hash(Hash40(file_hash)).ok()?.0 as usize;
+    if fs.loaded_filepaths.is_null() || fp >= fs.loaded_filepath_len as usize {
+        return None;
+    }
+    let filepath = unsafe { &*fs.loaded_filepaths.add(fp) };
+    let di = filepath.loaded_data_index;
+    if di == 0x00ff_ffff || fs.loaded_datas.is_null() || di as usize >= fs.loaded_data_len as usize
+    {
+        return Some(ResidentFileState {
+            filepath_index: fp as u32,
+            data_index: di,
+            data: 0,
+            ref_count: 0,
+            is_used: false,
+            state: LoadState::Unused as u8,
+            filepath_loaded: filepath.is_loaded != 0,
+        });
+    }
+    let data = unsafe { &*fs.loaded_datas.add(di as usize) };
+    Some(ResidentFileState {
+        filepath_index: fp as u32,
+        data_index: di,
+        data: data.data as usize,
+        ref_count: data.ref_count.load(Ordering::Acquire),
+        is_used: data.is_used,
+        state: data.state as u8,
+        filepath_loaded: filepath.is_loaded != 0,
+    })
+}
+
+pub fn resident_directory_state(dir_hash: u64) -> Option<ResidentDirectoryState> {
+    let fs = filesystem_info()?;
+    let directory_index = dir_info_index_for_path_hash(dir_hash)?;
+    if fs.loaded_directories.is_null()
+        || directory_index as usize >= fs._loaded_directory_len as usize
+    {
+        return None;
+    }
+    let directory = unsafe { &*fs.loaded_directories.add(directory_index as usize) };
+    Some(ResidentDirectoryState {
+        directory_index,
+        ref_count: directory.ref_count.load(Ordering::Acquire),
+        flags: directory.flags,
+        state: directory.state as u8,
+        incoming_request_count: directory.incoming_request_count.load(Ordering::Acquire),
+    })
+}
+
+/// Release one live owner of a directory through the same recursive queue used by the game.
+///
+/// Returns `(before, after, released)`. A zero count means the retiring item already submitted
+/// its release, so calling the routine again would underflow the count; in that case this only
+/// reports the state and lets the caller wait for the worker.
+pub fn release_resident_directory(
+    dir_hash: u64,
+) -> Option<(
+    ResidentDirectoryState,
+    ResidentDirectoryState,
+    bool,
+)> {
+    let fs = filesystem_info()?;
+    let directory_index = dir_info_index_for_path_hash(dir_hash)?;
+    if fs.loaded_directories.is_null()
+        || directory_index as usize >= fs._loaded_directory_len as usize
+        || fs._mutex.is_null()
+    {
+        return None;
+    }
+    let filesystem = fs as *const FilesystemInfo as *mut FilesystemInfo;
+    let directory = unsafe { fs.loaded_directories.add(directory_index as usize) };
+    unsafe { skyline::nn::os::LockMutex(fs._mutex.cast()) };
+    let before = unsafe {
+        ResidentDirectoryState {
+            directory_index,
+            ref_count: (*directory).ref_count.load(Ordering::Acquire),
+            flags: (*directory).flags,
+            state: (*directory).state as u8,
+            incoming_request_count: (*directory)
+                .incoming_request_count
+                .load(Ordering::Acquire),
+        }
+    };
+    let released = before.ref_count != 0;
+    if released {
+        unsafe { queue_directory_release(filesystem, directory) };
+    }
+    let after = unsafe {
+        ResidentDirectoryState {
+            directory_index,
+            ref_count: (*directory).ref_count.load(Ordering::Acquire),
+            flags: (*directory).flags,
+            state: (*directory).state as u8,
+            incoming_request_count: (*directory)
+                .incoming_request_count
+                .load(Ordering::Acquire),
+        }
+    };
+    unsafe { skyline::nn::os::UnlockMutex(fs._mutex.cast()) };
+    Some((before, after, released))
+}
+
 /// The arc table's decomp size for `file_hash` — the length of the resident buffer the
 /// game allocated for it (arcropolis patches this up when a bigger mod file replaces it).
 pub fn resident_len(file_hash: u64) -> Option<usize> {
@@ -275,6 +437,97 @@ pub fn repoint_resident_buffer(file_hash: u64, buffer: *const u8) -> Option<(u32
         fpe.is_loaded = 1;
     }
     Some((fp as u32, di, old_null))
+}
+
+/// Mark `file_hash` as NOT resident, so the next load of it goes back to disk.
+///
+/// The inverse of [`repoint_resident_buffer`], and the only way found to make the game load
+/// changed effect bytes. A file is read from disk once per boot; after that the resident copy is
+/// reused, and while handing the effect manager fresh bytes ourselves does make it re-parse and
+/// register the new entry names, the textures and models are uploaded to the GPU only by the
+/// genuine load path — so a hand-staged effect resolves to a valid kind that draws nothing.
+/// Clearing the slot puts the file back in the state that produces a real read, which Arcropolis
+/// then serves from our registered callback.
+///
+/// The caller MUST have observed the owning handle's `unload_effects` first: this drops the
+/// game's reference to the buffer. The buffer itself is deliberately NOT freed — it belongs to
+/// the resource heap and may still be pointed at by sets that have not been torn down (the old
+/// content keeps rendering off it, which is harmless). Leaking it is a few hundred KB; freeing it
+/// under a live set would be a use-after-free.
+///
+/// Returns the old slot state on success, or None when the file has no resident slot to clear.
+pub fn evict_resident_file(file_hash: u64) -> Option<(u32, u32, usize, u32, u8)> {
+    let fs = filesystem_info()?;
+    let arc = loaded_arc()?;
+    let fp = arc.get_file_path_index_from_hash(Hash40(file_hash)).ok()?.0 as usize;
+    if fs.loaded_filepaths.is_null() || fp >= fs.loaded_filepath_len as usize {
+        return None;
+    }
+    let fpe = unsafe { &mut *fs.loaded_filepaths.add(fp) };
+    let di = fpe.loaded_data_index;
+    if di == 0x00ff_ffff || fs.loaded_datas.is_null() || di as usize >= fs.loaded_data_len as usize
+    {
+        return None;
+    }
+    if fs._mutex.is_null() {
+        return None;
+    }
+    let (old_data, old_ref_count, old_state) = unsafe {
+        skyline::nn::os::LockMutex(fs._mutex.cast());
+        let entry = &mut *fs.loaded_datas.add(di as usize);
+        let old = (
+            entry.data as usize,
+            entry.ref_count.load(Ordering::Acquire),
+            entry.state as u8,
+        );
+        entry.data = std::ptr::null();
+        entry.ref_count.store(0, Ordering::Release);
+        entry.is_used = false;
+        entry.state = LoadState::Unloaded;
+        fpe.is_loaded = 0;
+        skyline::nn::os::UnlockMutex(fs._mutex.cast());
+        old
+    };
+    Some((fp as u32, di, old_data, old_ref_count, old_state))
+}
+
+/// Mark a loaded directory incomplete so the next normal `ensure_dir_loaded` call schedules it.
+///
+/// This is paired with [`evict_resident_file`]. Clearing only the file record makes
+/// `load_effects` return 0: the directory descriptor's flag bit 0 remains set, so the resource
+/// wrapper concludes that the directory is already complete and never asks Arcropolis to read
+/// the missing file. The carrier is already gone and its effect unload has returned when this is
+/// called, so no live owner can be relying on the directory's resource reference.
+///
+/// The function does not enqueue or signal the worker. The replacement item's own loader does
+/// both through the game's normal path.
+pub fn evict_resident_directory(dir_hash: u64) -> Option<(u32, u32, u8, u8, u32)> {
+    let fs = filesystem_info()?;
+    let dir_index = dir_info_index_for_path_hash(dir_hash)?;
+    if fs.loaded_directories.is_null()
+        || dir_index as usize >= fs._loaded_directory_len as usize
+        || fs._mutex.is_null()
+    {
+        return None;
+    }
+    let old = unsafe {
+        skyline::nn::os::LockMutex(fs._mutex.cast());
+        let entry = &mut *fs.loaded_directories.add(dir_index as usize);
+        let old = (
+            dir_index,
+            entry.ref_count.load(Ordering::Acquire),
+            entry.flags,
+            entry.state as u8,
+            entry.incoming_request_count.load(Ordering::Acquire),
+        );
+        entry.ref_count.store(0, Ordering::Release);
+        entry.flags &= !1;
+        entry.state = LoadState::Unloaded;
+        entry.incoming_request_count.store(0, Ordering::Release);
+        skyline::nn::os::UnlockMutex(fs._mutex.cast());
+        old
+    };
+    Some(old)
 }
 
 /// Arc `DirInfo` index for a directory path hash — the index space the game's directory

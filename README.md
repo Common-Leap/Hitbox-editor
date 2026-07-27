@@ -1,8 +1,6 @@
 # Visionary
 
-Visionary is a desktop editor for viewing and editing Super Smash Bros. Ultimate
-hitboxes, grabs, wind areas, effect spawns, ACMD scripts, and `.eff` files. Effect
-changes are previewed in the running game through the included Skyline plugin.
+Visionary is a desktop editor for viewing and editing most things about fighters in Super Smash Bros. Ultimate except for models and animations.Changes are previewed in the running game through the included Skyline plugin.
 
 ## Components
 

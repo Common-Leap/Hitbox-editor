@@ -140,6 +140,31 @@ static CAPTURE_LOG: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::
 static CAPTURE_SEEN: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Not-yet-sent indices into CAPTURE_LOG.
 static CAPTURE_PENDING: LazyLock<Mutex<Vec<usize>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Small on-SD counters for distinguishing capture failures from editor/network failures.
+static CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static EFFECT_CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CAPTURE_DRAINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CAPTURE_LAST_MOTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CAPTURE_LAST_KIND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CAPTURE_LAST_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn write_capture_diag(stage: &str) {
+    use std::sync::atomic::Ordering;
+
+    let pending = CAPTURE_PENDING.lock().len();
+    let _ = std::fs::write(
+        "sd:/effect_viewer_capture.txt",
+        format!(
+            "stage={stage}\nrecorded={}\neffect_recorded={}\ndrained={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
+            CAPTURE_RECORDED.load(Ordering::Relaxed),
+            EFFECT_CAPTURE_RECORDED.load(Ordering::Relaxed),
+            CAPTURE_DRAINED.load(Ordering::Relaxed),
+            CAPTURE_LAST_KIND.load(Ordering::Relaxed) as i64,
+            CAPTURE_LAST_MOTION.load(Ordering::Relaxed),
+            f32::from_bits(CAPTURE_LAST_FRAME.load(Ordering::Relaxed) as u32),
+        ),
+    );
+}
 
 /// True while an inject_tick replays a captured line through the (hooked) sv_animcmd
 /// functions. The replay re-enters the capture hooks, so without this gate every live
@@ -209,6 +234,13 @@ pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     let idx = log.len();
     log.push(line);
     CAPTURE_PENDING.lock().push(idx);
+    CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if func.contains("EFFECT") {
+        EFFECT_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    CAPTURE_LAST_KIND.store(kind as u64, std::sync::atomic::Ordering::Relaxed);
+    CAPTURE_LAST_MOTION.store(motion, std::sync::atomic::Ordering::Relaxed);
+    CAPTURE_LAST_FRAME.store(frame.to_bits() as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Drain up to `max` unsent capture lines (game thread, per-frame flush).
@@ -221,9 +253,16 @@ pub fn take_pending(max: usize) -> Vec<CaptureLine> {
     let idxs: Vec<usize> = pending.drain(..n).collect();
     drop(pending);
     let log = CAPTURE_LOG.lock();
-    idxs.into_iter()
+    let lines: Vec<_> = idxs
+        .into_iter()
         .filter_map(|i| log.get(i).cloned())
-        .collect()
+        .collect();
+    drop(log);
+    if !lines.is_empty() {
+        CAPTURE_DRAINED.fetch_add(lines.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        write_capture_diag("drained");
+    }
+    lines
 }
 
 /// Re-queue the whole capture log (new editor client connected).
@@ -621,6 +660,7 @@ pub unsafe fn inject_tick(lua_state: u64) {
 }
 
 pub fn install() {
+    write_capture_diag("installed");
     skyline::install_hooks!(
         hook_attack,
         hook_attack_ignore_throw,

@@ -46,3 +46,10 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+# effect_library 1.1.0 writes a BNSH relocation table that lists slots holding no offset; the
+# runtime turns each into a pointer to the image base and the game hangs walking the container.
+# Build against the local fix until it is published. Remove this once a fixed version is on
+# crates.io and the version requirement above is bumped.
+[patch.crates-io]
+effect_library = { path = "../EffectLibraryRust/crate" }
