@@ -36,6 +36,39 @@ static CARRIER_PROXY_ACTIVE: std::sync::atomic::AtomicBool =
 static CARRIER_PROXY_LOGICAL_HASH: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Set while an ACMD spawn is being attempted on the FIGHTER itself, so [`spawn_owner`] leaves
+/// the owner alone instead of redirecting it to the carrier.
+static DIRECT_SPAWN_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Lets the fighter own a carrier-loaded effect for the duration of one request.
+///
+/// The carrier exists to LOAD resources; it does not have to own the instances. Owning them was
+/// costing correctness: the carrier is a hidden item with no fighter skeleton, so an effect
+/// spawned on it has no bone to attach to and gets an absolute world transform instead of the
+/// joint's full matrix. Billboard particles survive that (the follow pump keeps them roughly in
+/// place), but a MESH emitter takes its orientation and scale from the owner, so the model drew
+/// at the wrong basis entirely — a shapeless blob where a cone should be — and lingered in mid
+/// air when the follow record was not there to move it.
+///
+/// Effect kinds live in the effect manager's GLOBAL kind map once the carrier's load registers
+/// them, so any object may request one. The fighter is tried first and the carrier remains the
+/// fallback for kinds it genuinely cannot serve.
+pub struct DirectSpawnGuard;
+
+impl DirectSpawnGuard {
+    pub fn new() -> Self {
+        DIRECT_SPAWN_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for DirectSpawnGuard {
+    fn drop(&mut self) {
+        DIRECT_SPAWN_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub struct CarrierProxyGuard;
 
 impl CarrierProxyGuard {
@@ -77,6 +110,12 @@ unsafe fn spawn_owner(
     source: *mut smash::app::BattleObjectModuleAccessor,
     eff_hash: u64,
 ) -> *mut smash::app::BattleObjectModuleAccessor {
+    // The ACMD path asks for the fighter to own the instance (see [`DirectSpawnGuard`]).
+    // Redirecting it here would put the effect back on the skeleton-less carrier, which is the
+    // thing that broke mesh emitters.
+    if DIRECT_SPAWN_ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
+        return source;
+    }
     crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(eff_hash)
         .unwrap_or(source)
 }
@@ -384,7 +423,7 @@ fn hook_req(
         return 0;
     }
     let logical_hash = carrier_proxy_logical_hash(eff_hash.hash);
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, pos, rot, size, a6, a7, a8, a9);
     unsafe { remember_proxy_handle(module_accessor, owner, r, logical_hash) };
@@ -392,13 +431,55 @@ fn hook_req(
     r
 }
 
-/// Retarget a merged `_os` kind onto its real co-loaded donor kind at the req boundary —
-/// the robust interception point (catches every request path, not just the lua ACMD arg).
-fn remap_eff(eff_hash: phx::Hash40) -> phx::Hash40 {
-    let out = match crate::slight::effect_viewer::effect_reload::coload_remap(eff_hash.hash) {
-        Some(real) => phx::Hash40 { hash: real },
-        None => eff_hash,
+/// The kind a request should ACTUALLY use: transplant/edit alias first, then the co-loaded
+/// donor retarget.
+///
+/// Same order the ACMD path applies them, and that agreement is the point. The alias used to
+/// live only in the ACMD hook, so every EffectModule-level path disagreed with it about which
+/// kind an effect was — with two visible consequences:
+///
+///   * `kill_kind(kirby_dash)` did not match an instance spawned as `vsnedit_kirby_dash`, so an
+///     edited effect ignored its own stop command and lingered to the end of the animation, and
+///   * a re-request that did not come through ACMD spawned the VANILLA kind, so the effect
+///     flipped back to unedited for a while (notably on hit) before an ACMD spawn restored it.
+///
+/// `costume` is the fighter colour index, or -1 when it cannot be resolved — slot-gated aliases
+/// then do not match, which is the documented conservative behaviour.
+fn alias_and_remap(eff_hash: phx::Hash40, costume: i32) -> phx::Hash40 {
+    let aliased = if spawn_rules::any_alias() {
+        spawn_rules::alias_for(eff_hash.hash, costume).unwrap_or(eff_hash.hash)
+    } else {
+        eff_hash.hash
     };
+    match crate::slight::effect_viewer::effect_reload::coload_remap(aliased) {
+        Some(real) => phx::Hash40 { hash: real },
+        None => phx::Hash40 { hash: aliased },
+    }
+}
+
+/// Fighter colour index for an object, or -1 when it cannot be resolved.
+unsafe fn costume_of_boma(boma: *mut smash::app::BattleObjectModuleAccessor) -> i32 {
+    if boma.is_null() {
+        return -1;
+    }
+    smash::app::lua_bind::WorkModule::get_int(
+        boma,
+        *smash::lib::lua_const::FIGHTER_INSTANCE_WORK_ID_INT_COLOR,
+    )
+}
+
+/// Resolve a requested kind at the req boundary — the robust interception point, since it
+/// catches every request path rather than just the lua ACMD argument.
+///
+/// This applies the transplant/edit ALIAS as well as the co-loaded donor retarget, so that
+/// every EffectModule path agrees with the ACMD path about which kind an effect is. It used to
+/// apply only the retarget, and that divergence is what let a non-ACMD re-request spawn the
+/// vanilla kind over an edited one.
+fn remap_eff(
+    module_accessor: *mut smash::app::BattleObjectModuleAccessor,
+    eff_hash: phx::Hash40,
+) -> phx::Hash40 {
+    let out = alias_and_remap(eff_hash, unsafe { costume_of_boma(module_accessor) });
     // Log only when the input is a known merged `_os` kind, so we can see whether remap_eff
     // is even reached for the refused spawn and what it decided.
     if effect_names::is_transplant_label(&effect_names::label(eff_hash.hash)) {
@@ -440,7 +521,7 @@ fn hook_req_follow(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(
         owner, eff_hash, bone_hash, pos, rot, size, a7, a8, a9, a10, a11, a12, a13, a14,
@@ -477,7 +558,7 @@ fn hook_req_on_joint(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(
         owner, eff_hash, bone_hash, pos, rot, size, a7, a8, a9, a10, a11, a12,
@@ -505,7 +586,7 @@ fn hook_req_emit(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, a3);
     unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
@@ -534,7 +615,7 @@ fn hook_req_2d(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, pos, rot, size, a6);
     unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
@@ -551,7 +632,7 @@ fn hook_req_common(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, size);
     unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
@@ -580,7 +661,7 @@ fn hook_req_continual(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, bone_hash, size, a5, a6);
     unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
@@ -612,7 +693,7 @@ fn hook_req_time(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, a3, pos, rot, size, a7, a8, a9);
     unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
@@ -635,7 +716,7 @@ fn hook_req_time_follow(
     if suppress_carrier_request(module_accessor) {
         return 0;
     }
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash, bone_hash, a4, pos, rot, size, a8, a9);
     unsafe { remember_proxy_handle(module_accessor, owner, r, eff_hash.hash) };
@@ -667,6 +748,99 @@ fn hook_kill(
         .remove(&(module_accessor as usize, handle));
 }
 
+/// Bounded trace of every stop we see, one line per (function, kind). Which function actually
+/// stops a given effect is not obvious — `kill_kind` turned out to be called about once per
+/// session — so this records what really happens rather than what seems likely.
+fn trace_stop(func: &str, requested: phx::Hash40, aliased: phx::Hash40, arg: i32) {
+    static SEEN: parking_lot::Mutex<Option<Vec<(&'static str, u64)>>> =
+        parking_lot::Mutex::new(None);
+    let Some(mut g) = SEEN.try_lock() else { return };
+    let seen = g.get_or_insert_with(Vec::new);
+    // `func` is always a literal from the call sites below.
+    let key: &'static str = match func {
+        "kill_kind" => "kill_kind",
+        "end_kind" => "end_kind",
+        "detach_kind" => "detach_kind",
+        _ => "other",
+    };
+    if seen.contains(&(key, requested.hash)) || seen.len() >= 48 {
+        return;
+    }
+    seen.push((key, requested.hash));
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("sd:/effect_viewer_kill.txt")
+    {
+        let _ = writeln!(
+            f,
+            "{func} requested={} aliased={} arg={arg}",
+            effect_names::label(requested.hash),
+            effect_names::label(aliased.hash),
+        );
+    }
+}
+
+/// `EFFECT_OFF_KIND(kind, fade, detach)` stops an effect through `end_kind` / `detach_kind`,
+/// NOT through `kill_kind` — which is why aliasing only `kill_kind` changed nothing and an
+/// edited effect kept ignoring its own stop, lingering until the animation ended.
+///
+/// Both take the same shape, and both need the same two corrections as `kill_kind`: the kind
+/// may have been ALIASED at spawn (`kirby_dash` → `vsnedit_kirby_dash`), and the owner may be
+/// the fighter or the carrier. Issue against every combination; stopping a kind an object does
+/// not have is a no-op.
+macro_rules! stop_kind_hook {
+    ($hook:ident, $target:path, $label:literal) => {
+        #[skyline::hook(replace = $target)]
+        fn $hook(
+            module_accessor: *mut smash::app::BattleObjectModuleAccessor,
+            eff_hash: phx::Hash40,
+            arg3: i32,
+        ) -> u64 {
+            let costume = unsafe { costume_of_boma(module_accessor) };
+            let requested =
+                match crate::slight::effect_viewer::effect_reload::coload_remap(eff_hash.hash) {
+                    Some(real) => phx::Hash40 { hash: real },
+                    None => eff_hash,
+                };
+            let aliased = alias_and_remap(eff_hash, costume);
+            trace_stop($label, requested, aliased, arg3);
+
+            let r = original!()(module_accessor, requested, arg3);
+            handle_kill_hash(module_accessor, requested.hash);
+            if aliased.hash != requested.hash {
+                original!()(module_accessor, aliased, arg3);
+                handle_kill_hash(module_accessor, aliased.hash);
+            }
+            if let Some(carrier) =
+                unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() }
+                    .filter(|c| *c != module_accessor)
+            {
+                original!()(carrier, requested, arg3);
+                handle_kill_hash(carrier, requested.hash);
+                if aliased.hash != requested.hash {
+                    original!()(carrier, aliased, arg3);
+                    handle_kill_hash(carrier, aliased.hash);
+                }
+            }
+            r
+        }
+    };
+}
+
+stop_kind_hook!(hook_end_kind, EffectModule::end_kind, "end_kind");
+stop_kind_hook!(hook_detach_kind, EffectModule::detach_kind, "detach_kind");
+
+/// Stopping an effect has to reach it wherever it actually is.
+///
+/// Two things move under our feet here. The KIND may have been aliased at spawn
+/// (`kirby_dash` → `vsnedit_kirby_dash`), and the OWNER may be either the fighter (the normal
+/// case now) or the carrier (the fallback for kinds the fighter cannot serve). A stop issued
+/// against one combination silently misses the other.
+///
+/// So issue it against every combination. Killing a kind an object does not have is a no-op, so
+/// the extra calls cost a lookup and cannot remove anything they should not.
 #[skyline::hook(replace = EffectModule::kill_kind)]
 fn hook_kill_kind(
     module_accessor: *mut smash::app::BattleObjectModuleAccessor,
@@ -674,10 +848,35 @@ fn hook_kill_kind(
     a3: bool,
     a4: bool,
 ) -> u64 {
-    let eff_hash = remap_eff(eff_hash);
-    let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
-    let r = original!()(owner, eff_hash, a3, a4);
-    handle_kill_hash(owner, eff_hash.hash);
+    let costume = unsafe { costume_of_boma(module_accessor) };
+    // Deliberately NOT `remap_eff`: that now aliases, and the whole point here is to stop both
+    // the kind as requested AND the kind it may have been aliased to at spawn.
+    let requested = match crate::slight::effect_viewer::effect_reload::coload_remap(eff_hash.hash) {
+        Some(real) => phx::Hash40 { hash: real },
+        None => eff_hash,
+    };
+    let aliased = alias_and_remap(eff_hash, costume);
+    let carrier = unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() };
+
+    // The requested kind on the requesting object is the vanilla behaviour, and its result is
+    // what the caller gets back.
+    let r = original!()(module_accessor, requested, a3, a4);
+    handle_kill_hash(module_accessor, requested.hash);
+
+    let also = |boma: *mut smash::app::BattleObjectModuleAccessor, kind: phx::Hash40| {
+        original!()(boma, kind, a3, a4);
+        handle_kill_hash(boma, kind.hash);
+    };
+    if aliased.hash != requested.hash {
+        also(module_accessor, aliased);
+    }
+    if let Some(carrier) = carrier.filter(|c| *c != module_accessor) {
+        also(carrier, requested);
+        if aliased.hash != requested.hash {
+            also(carrier, aliased);
+        }
+    }
+    trace_stop("kill_kind", requested, aliased, a3 as i32);
     r
 }
 
@@ -728,7 +927,7 @@ fn hook_remove_common(
     module_accessor: *mut smash::app::BattleObjectModuleAccessor,
     eff_hash: phx::Hash40,
 ) -> u64 {
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash);
     handle_kill_hash(owner, eff_hash.hash);
@@ -740,7 +939,7 @@ fn hook_remove_time(
     module_accessor: *mut smash::app::BattleObjectModuleAccessor,
     eff_hash: phx::Hash40,
 ) -> u64 {
-    let eff_hash = remap_eff(eff_hash);
+    let eff_hash = remap_eff(module_accessor, eff_hash);
     let owner = unsafe { spawn_owner(module_accessor, eff_hash.hash) };
     let r = original!()(owner, eff_hash);
     handle_kill_hash(owner, eff_hash.hash);
@@ -760,6 +959,8 @@ pub fn install_hooks() {
     skyline::install_hook!(hook_req_time_follow);
     skyline::install_hook!(hook_kill);
     skyline::install_hook!(hook_kill_kind);
+    skyline::install_hook!(hook_end_kind);
+    skyline::install_hook!(hook_detach_kind);
     skyline::install_hook!(hook_kill_all);
     skyline::install_hook!(hook_remove);
     skyline::install_hook!(hook_remove_common);

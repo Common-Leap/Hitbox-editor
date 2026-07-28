@@ -90,20 +90,11 @@ unsafe extern "C" fn fighter_line_main(agent: &mut L2CFighterBase) {
     // Queued donor eff co-loads must run HERE (game thread) — load_effects from the TCP
     // thread never completes its async resource work.
     crate::slight::effect_viewer::effect_reload::pump_donor_queue();
-    // Synchronous live re-read (repoint fighter eff slot at merged bytes + reparse). MUST be
-    // on the game thread: it unloads/loads the effect manager and touches the res slot.
-    crate::slight::effect_viewer::effect_reload::pump_force_reread();
     // Drive the co-loaded set's per-frame update so its resource state machine advances + its
     // textures get set up (inactive synthetic-handle sets are never ticked otherwise).
     crate::slight::effect_viewer::effect_reload::pump_coload_tick();
-    // One-shot runtime emitter field probe (finds the per-emitter colour offset). Latches
-    // itself off after the first run, so the steady-state cost here is one relaxed load.
-    crate::slight::effect_viewer::effect_reload::probe_emitter_fields();
     // Report carrier readiness to the editor (emits only on change).
     crate::slight::effect_viewer::effect_reload::pump_carrier_status();
-    // Live per-emitter field pokes from sd:/slight/poke_emitter.txt — re-applied each frame
-    // because the game rewrites these from its own update. No file, no cost.
-    crate::slight::effect_viewer::effect_reload::pump_emitter_pokes();
     // Live hitbox + effect-retime injection need THIS agent's lua state at its motion frame.
     crate::slight::hitbox_viewer::inject_tick(lua_state);
     crate::slight::effect_viewer::acmd_hooks::inject_tick(lua_state);

@@ -367,4 +367,23 @@ mod tests {
         let back: TransplantOp = serde_json::from_str(&json).unwrap();
         assert_eq!(back.one_slot_slots, vec![8, 15, 16, 99, 255]);
     }
+
+    /// The plugin hardcodes this prefix (`acmd_hooks::EDIT_CLONE_PREFIX`) because it cannot
+    /// depend on this crate. At spawn time it is the only signal that tells an authored edit's
+    /// redirect apart from a transplant's — and they need opposite fallback behaviour when the
+    /// carrier is not up yet. If the two ever drift, transplants silently render nothing.
+    #[test]
+    fn edit_clone_prefix_matches_the_plugin_copy() {
+        let plugin_src =
+            include_str!("../plugins/slight_replica/src/slight/effect_viewer/acmd_hooks.rs");
+        let declared = plugin_src
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("const EDIT_CLONE_PREFIX: &str = "))
+            .map(|l| l.trim_end_matches(';').trim_matches('"'))
+            .expect("the plugin no longer declares EDIT_CLONE_PREFIX");
+        assert_eq!(
+            declared, EDIT_CLONE_PREFIX,
+            "editor and plugin disagree on the reserved edit-clone prefix"
+        );
+    }
 }

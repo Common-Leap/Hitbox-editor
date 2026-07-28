@@ -12,23 +12,19 @@
 //!     merged eff BIGGER than vanilla was truncated to the vanilla size — the appended
 //!     transplant entries never existed in game and their spawns were invisible. A grown
 //!     file on a later deploy is simply re-registered with the larger size.
-//!  2. `.eff` files then need BOTH halves, in this order:
-//!     a. [`resource_reload::replace_loaded_file`] pulls the merged bytes into the RESIDENT
-//!        buffer — this is the call that actually goes out through `arcrop_load_file` and
-//!        reaches our disk callback.
-//!     b. [`effect_reload::reparse_game_path`] unloads + reloads the slot to rebuild the
-//!        PARSED emitter structs from those bytes.
-//!     Non-eff files need only (a).
-//!  3. Kill + re-`req` the live tracked effects so anything already on screen respawns
-//!     from the new data.
+//!  2. Non-eff files are pulled into the resident buffer with
+//!     [`resource_reload::replace_loaded_file`].
 //!
-//! Both halves are load-bearing, and each alone was tried and failed:
-//!   * Raw-buffer patch alone did nothing — the game renders from the PARSED structs.
-//!   * Reparse alone ALSO did nothing, which is subtler: `unload_effects`/`load_effects`
-//!     rebuild from the resident buffer and never re-request the file, so the callback was
-//!     never hit (`cb_game=0` in `effect_viewer_cb.txt`) and the reparse faithfully
-//!     re-parsed the VANILLA bytes. Authored colour edits then only appeared after a full
-//!     reboot, where a genuine arc load goes through Arcropolis.
+//! `.eff` files are DELIBERATELY left alone in step 2 — registration is the whole job, and the
+//! merged bytes then load through a genuine arc request at the next match entry.
+//!
+//! There used to be a third step that reparsed a loaded eff in place
+//! (`effect_reload::reparse_game_path`, since deleted). It never worked and it was dangerous:
+//! `unload_effects`/`load_effects` rebuild the parsed structs from the RESIDENT buffer and
+//! never re-request the file, so the callback was never hit (`cb_game=0`) and the reparse
+//! faithfully re-parsed the VANILLA bytes. Driving it against a live fighter's effect slot
+//! mid-match froze the game outright. Anything that must change DURING a match goes through
+//! the carrier instead, whose eff is reloadable by design.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const MANIFEST: &str = "sd:/effect_viewer/live_eff/manifest.json";
 const DIR: &str = "sd:/effect_viewer/live_eff/";
 /// Written into every diag file so on-device logs are attributable to a specific build.
-pub const BUILD_TAG: &str = "2026-07-27l-status-heartbeat";
+pub const BUILD_TAG: &str = "2026-07-28b-off-kind-arg-rewrite";
 
 /// Times [`disk_cb`] served bytes. Split by initiator so we can DECISIVELY answer the
 /// one open question of the whole cross-fighter-live effort: does the game's own resource
@@ -177,7 +173,10 @@ fn reload_inner(apply_live: bool) {
     };
 
     let arcrop_ok = crate::slight::effect_viewer::arcrop::init();
-    let (mut registered, mut reparsed, mut refreshed) = (0usize, 0usize, 0usize);
+    let (mut registered, mut refreshed) = (0usize, 0usize);
+    // Always 0 now that eff reparsing is gone; kept in the diag line so a run can be seen to
+    // have taken the safe path rather than leaving it to be inferred.
+    let reparsed = 0usize;
     let mut served: HashMap<u64, String> = HashMap::new();
     let mut present: Vec<(String, u64)> = Vec::new();
 
@@ -230,26 +229,24 @@ fn reload_inner(apply_live: bool) {
 
     // Apply in place while the fighter is loaded — NEVER at boot (apply_live=false):
     // the game's effect manager / arc tables don't exist yet.
+    //
+    // `.eff` files are DELIBERATELY not reparsed here.
+    //
+    // Reparsing means `unload_effects` + `load_effects` on a live fighter's effect slot, and
+    // that hangs the game — a same-fighter transplant reached this path and froze on the spot
+    // (`apply_live=true reparsed=1` in effect_viewer_last_reload.txt). It never worked anyway:
+    // the reparse rebuilds the emitter structs from the RESIDENT buffer without re-requesting
+    // the file, so it re-parsed the same vanilla bytes and edits only appeared after a reboot.
+    //
+    // Refreshing SERVED (above) is the whole job here: the merged bytes then load through a
+    // genuine arc request at the next match entry. Anything that has to change MID-match goes
+    // through the carrier, whose eff is reloadable by design.
     if apply_live {
         for (path, hash) in &present {
             if is_eff_path(path) {
-                // TWO steps, and BOTH are required — this is what `cb_game=0` was telling us.
-                //
-                // The reparse below does `unload_effects` + `load_effects`, which rebuilds the
-                // parsed emitter structs FROM THE RESIDENT BUFFER. It does NOT re-request the
-                // file, so it never reaches the disk callback and happily re-parses the same
-                // VANILLA bytes — authored colour edits only appeared after a full reboot,
-                // where a genuine arc load goes through arcrop.
-                //
-                // So pull the merged bytes into the resident buffer first (this is the call
-                // that actually goes out through `arcrop_load_file` and hits our callback),
-                // THEN reparse to rebuild the structs from them. `replace_loaded_file` alone
-                // is not enough for a `.eff` — the parsed containers would still be stale.
-                if crate::slight::effect_viewer::resource_reload::replace_loaded_file(*hash) {
-                    refreshed += 1;
-                }
-                reparsed += crate::slight::effect_viewer::effect_reload::reparse_game_path(path);
-            } else if crate::slight::effect_viewer::resource_reload::replace_loaded_file(*hash) {
+                continue;
+            }
+            if crate::slight::effect_viewer::resource_reload::replace_loaded_file(*hash) {
                 refreshed += 1;
             }
         }

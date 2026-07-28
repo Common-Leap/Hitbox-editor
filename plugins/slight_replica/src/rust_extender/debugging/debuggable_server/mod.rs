@@ -191,14 +191,6 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
             "live_eff_probe" => {
                 crate::slight::effect_viewer::live_eff::probe();
             }
-            // Live re-read: synchronously swap the fighter's resident eff for the merged
-            // bytes + reparse, so a cross-fighter transplant renders mid-match (no re-entry).
-            // Payload: {"command":"force_reread","path":"effect/fighter/<f>/ef_<f>.eff"}.
-            "force_reread" => {
-                if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
-                    crate::slight::effect_viewer::effect_reload::queue_force_reread(p.to_string());
-                }
-            }
             // Live memory inspection — result hexdump lands in sd:/effect_viewer_peek.txt
             // (the Eden SD is host-visible, so the PC reads it directly). `addr` is absolute
             // hex, or text-relative when "rel":"text". Bounded to 4 KiB per request.
@@ -589,11 +581,17 @@ fn parse_new_value(id: u64, val: &serde_json::Value) -> ParsedEdit {
 /// the bytes decompress, the resource service settles and the carrier object is created
 /// asynchronously, which took visibly long enough that edits looked like they had failed.
 /// Emitting the state lets the editor show "waiting for game…" instead of guessing.
-pub fn notify_carrier_status(state: u8, kinds: usize, spawned: bool) {
+/// `gen` is the donor-bytes generation the CURRENTLY LIVE carrier was built from. The editor
+/// needs it to tell "the carrier from my previous send is still up" from "my new bytes are
+/// live" — without it, a second send saw state=2/object=up immediately and reported success
+/// before the game had taken anything.
+pub fn notify_carrier_status(state: u8, kinds: usize, spawned: bool, generation: u64) {
     emit(
         "CarrierStatus",
         &serde_json::json!({
-            "CarrierStatus": { "state": state, "kinds": kinds, "spawned": spawned }
+            "CarrierStatus": {
+                "state": state, "kinds": kinds, "spawned": spawned, "gen": generation
+            }
         }),
     );
 }

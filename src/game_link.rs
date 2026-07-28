@@ -524,6 +524,10 @@ struct Shared {
     carrier_kinds: usize,
     /// Bumped on every CarrierStatus so callers can tell "no report yet" from "reported 0".
     carrier_seq: u64,
+    /// Donor-bytes generation the LIVE carrier was built from. A send is only complete once
+    /// this exceeds whatever was live when the send started — otherwise the previous carrier,
+    /// still up and still reporting ready, reads as instant success.
+    carrier_gen: u64,
     /// (fighter kind, motion hash) → number of completed playbacks the plugin reported.
     /// A bump means "every line that motion produces has now been streamed".
     capture_ends: BTreeMap<(i32, u64), u64>,
@@ -545,6 +549,7 @@ impl Default for Shared {
             carrier_spawned: false,
             carrier_kinds: 0,
             carrier_seq: 0,
+            carrier_gen: 0,
             capture_ends: BTreeMap::new(),
             outbox: Vec::new(),
             last_error: None,
@@ -732,20 +737,6 @@ impl GameLink {
         }
     }
 
-    /// Ask the plugin to synchronously LIVE RE-READ a fighter's resident eff: swap it for
-    /// the deployed merged bytes + reparse, so a cross-fighter transplant (or authored eff
-    /// edit) renders mid-match without a re-entry. `arc_path` = "effect/fighter/<f>/ef_<f>.eff".
-    pub fn send_force_reread(&self, arc_path: &str) {
-        let frame = format!(
-            "<TCP_MESSAGE>{{\"command\":\"force_reread\",\"path\":\"{}\"}}</TCP_MESSAGE>",
-            arc_path.to_lowercase()
-        );
-        if let Ok(mut s) = self.shared.lock() {
-            s.outbox.push(frame);
-            s.edits_tx += 1;
-        }
-    }
-
     /// Ask the plugin to write `sd:/effect_viewer_probe.txt` (serving-chain diagnosis).
     pub fn send_live_eff_probe(&self) {
         let frame = "<TCP_MESSAGE>{\"command\":\"live_eff_probe\"}</TCP_MESSAGE>".to_string();
@@ -804,6 +795,11 @@ impl GameLink {
                 )
             })
             .unwrap_or((0, 0, 0, false))
+    }
+
+    /// Donor-bytes generation of the carrier currently live in game.
+    pub fn carrier_gen(&self) -> u64 {
+        self.shared.lock().map(|s| s.carrier_gen).unwrap_or(0)
     }
 
     pub fn captures_seq(&self) -> u64 {
@@ -1078,6 +1074,7 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             // `state` alone can be 2 while nothing can spawn yet.
             s.carrier_spawned = c.get("spawned").and_then(|v| v.as_bool()).unwrap_or(false);
             s.carrier_kinds = c.get("kinds").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            s.carrier_gen = c.get("gen").and_then(|v| v.as_u64()).unwrap_or(0);
             s.carrier_seq += 1;
         }
         "Remove" => {

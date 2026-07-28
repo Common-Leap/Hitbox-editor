@@ -11,6 +11,15 @@
 use smash::lib::{L2CValue, L2CValueType};
 use smash::phx::Vector3f;
 
+/// Reserved prefix the editor gives an AUTHORED EDIT's carrier clone.
+///
+/// Must stay in step with `mod_project::EDIT_CLONE_PREFIX` on the editor side. It is the one
+/// signal that tells a redirect apart at spawn time: a target under this prefix means the
+/// REQUESTED kind is a real vanilla one (so leaving the request alone still renders something),
+/// while any other target means the request is a user-invented transplant name that nothing in
+/// the game can serve.
+const EDIT_CLONE_PREFIX: &str = "vsnedit_";
+
 /// Distinct effect kinds an ACMD has requested this session (hash → request count). Written
 /// to `sd:/effect_viewer_spawn.txt` only when a NEW hash first appears (cheap), so after a
 /// move we can read which kinds it spawned by NAME — the direct check for "did the transplant
@@ -917,22 +926,30 @@ macro_rules! effect_hook {
                         // spawn renders. Falls back to the `_os` target when no co-load.
                         let real = crate::slight::effect_viewer::effect_reload::coload_remap(to)
                             .unwrap_or(to);
-                        // ONLY rewrite if the target can actually be served RIGHT NOW.
+                        // Rewrite when the target can be served RIGHT NOW — and, for a
+                        // transplant, even when it cannot.
                         //
-                        // A carrier-owned kind exists only in the carrier's resources. If the
-                        // carrier object is not live yet, `spawn_via_carrier` below returns
-                        // false and the ORIGINAL call runs with the rewritten kind — which the
-                        // fighter has no resource for, so nothing spawns at all.
+                        // A carrier-owned kind exists only in the carrier's resources, so while
+                        // the carrier is still coming up `spawn_via_carrier` cannot serve it.
+                        // What to do then depends on what the REQUESTED kind is:
                         //
-                        // For a transplant that just means the new effect is missing. For an
-                        // authored EDIT it silently destroys a vanilla effect that worked
-                        // before: the user sees their effect disappear. Leaving the kind alone
-                        // renders it unedited, which is strictly better than invisible.
+                        //  - Authored EDIT: the request names a real vanilla kind (kirby_dash)
+                        //    and the target is its `vsnedit_` clone. Leaving the request alone
+                        //    renders the effect unedited — strictly better than invisible.
+                        //  - TRANSPLANT: the request names something the user invented
+                        //    (bomberman_bomb_tp). NOTHING in the game has that kind, so leaving
+                        //    it alone renders nothing at all. Rewriting costs nothing and lets
+                        //    `spawn_via_carrier` BUFFER the spawn (queue_if_unready) so it plays
+                        //    as soon as the carrier is up.
                         let carrier_owned =
                             crate::slight::effect_viewer::effect_reload::is_staged_carrier_kind(
                                 real,
                             );
+                        let has_vanilla_fallback =
+                            crate::slight::effect_viewer::effect_names::label(real)
+                                .starts_with(EDIT_CLONE_PREFIX);
                         let servable = !carrier_owned
+                            || !has_vanilla_fallback
                             || crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(
                                 real,
                             )
@@ -972,21 +989,64 @@ macro_rules! effect_hook {
                         }
                     }
                 }
-                // A transplanted kind is owned by the hidden storage carrier, not Kirby.
-                // Re-read the final rewritten args (pins + remaps + alias included), spawn them
-                // through the carrier's EffectModule, and skip the Kirby-owned ACMD original.
-                if let Some(final_args) = parse_args(lua_state, $flip) {
-                    if spawn_via_carrier(
-                        source_boma,
-                        &final_args,
-                        &carrier_base_args,
-                        $follow,
-                        args.eff_hash,
-                        true,
-                    ) {
+                // The FIGHTER owns the spawn whenever it can.
+                //
+                // The carrier's job is to LOAD the resources; owning the instances too was a
+                // separate decision, and a costly one. It is a hidden item with no fighter
+                // skeleton, so its effects get an absolute world transform rather than the
+                // joint's matrix. Particles tolerate that; a mesh emitter takes its orientation
+                // and scale from the owner and drew as a shapeless blob instead of the dash cone.
+                //
+                // Kinds are registered in the effect manager's global map, so the fighter can
+                // request one the carrier loaded. Let the ORIGINAL ACMD run — it already passes
+                // the real bone, joint-local offsets and scale — and only fall back to carrier
+                // ownership if that produced no effect at all.
+                //
+                // Scoped strictly to CARRIER-OWNED kinds. Every other effect in the game keeps
+                // the untouched path below — this hook runs for every ACMD effect there is, and
+                // rerouting all of them to prove a point about mesh emitters would be a very
+                // large blast radius for a very small hypothesis.
+                let final_args = parse_args(lua_state, $flip);
+                let carrier_kind = final_args.as_ref().is_some_and(|a| {
+                    crate::slight::effect_viewer::effect_reload::is_staged_carrier_kind(a.eff_hash)
+                });
+                if carrier_kind {
+                    let own_handle = |boma: *mut smash::app::BattleObjectModuleAccessor| -> u32 {
+                        if boma.is_null() {
+                            0
+                        } else {
+                            smash::app::lua_bind::EffectModule::get_last_handle(boma) as u32
+                        }
+                    };
+                    let direct_before = own_handle(source_boma);
+                    {
+                        let _direct = crate::slight::effect_viewer::DirectSpawnGuard::new();
+                        original!()(lua_state);
+                    }
+                    let direct_after = own_handle(source_boma);
+                    if direct_after != direct_before && direct_after != 0 {
                         crate::slight::effect_viewer::kinds::mark_acmd(args.eff_hash);
+                        track(lua_state, *args, $follow, direct_before);
                         return;
                     }
+                    // The fighter could not serve it. Fall back to carrier ownership with an
+                    // absolute transform, which is where transplants lived before.
+                    if let Some(final_args) = final_args {
+                        if spawn_via_carrier(
+                            source_boma,
+                            &final_args,
+                            &carrier_base_args,
+                            $follow,
+                            args.eff_hash,
+                            true,
+                        ) {
+                            crate::slight::effect_viewer::kinds::mark_acmd(args.eff_hash);
+                            return;
+                        }
+                    }
+                    // Neither path produced anything. The original has already run, so returning
+                    // here is what keeps it from running twice.
+                    return;
                 }
             }
             // Handle BEFORE the spawn — if get_last_handle is unchanged after original ran,
@@ -1143,6 +1203,49 @@ unsafe fn hook_effect_off_kind(lua_state: u64) {
     let logical_hash = arg_hash(&mut agent, 1);
     let fade = arg_bool(&mut agent, 2, false);
     let detach = arg_bool(&mut agent, 3, true);
+
+    // Rewrite the KIND ARGUMENT, exactly as the spawn hooks do.
+    //
+    // Hooking `EffectModule::{kill,end,detach}_kind` does not work for this: those are the
+    // lua_bind wrappers, and the game's own call from inside EFFECT_OFF_KIND goes straight to
+    // the real method, so the hooks never fire. Measured — after adding all three, the trace
+    // file still held exactly one line, for an unrelated kind.
+    //
+    // The spawn side never had this problem because it rewrites the Lua argument BEFORE calling
+    // the original, and the original then does the right thing with it. The stop needs the same
+    // shape: hand `original!()` the kind the effect was actually spawned as. Without it the stop
+    // names `kirby_dash`, the effect exists as `vsnedit_kirby_dash`, nothing matches, and it
+    // survives until the animation ends and everything is flushed.
+    if let Some(from) = logical_hash {
+        let to = crate::slight::effect_viewer::spawn_rules::alias_for(from, costume_of(lua_state))
+            .unwrap_or(from);
+        let to = crate::slight::effect_viewer::effect_reload::coload_remap(to).unwrap_or(to);
+        if to != from {
+            rewrite_kind(lua_state, from, to, false);
+        }
+        // One line per distinct kind: whether this fires at all, and what it resolved to, is
+        // the question two builds of hook-guessing failed to answer.
+        static SEEN: parking_lot::Mutex<Option<Vec<u64>>> = parking_lot::Mutex::new(None);
+        if let Some(mut g) = SEEN.try_lock() {
+            let seen = g.get_or_insert_with(Vec::new);
+            if !seen.contains(&from) && seen.len() < 32 {
+                seen.push(from);
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("sd:/effect_viewer_kill.txt")
+                {
+                    let _ = writeln!(
+                        f,
+                        "EFFECT_OFF_KIND from={} to={} fade={fade} detach={detach}",
+                        crate::slight::effect_viewer::effect_names::label(from),
+                        crate::slight::effect_viewer::effect_names::label(to),
+                    );
+                }
+            }
+        }
+    }
 
     original!()(lua_state);
 

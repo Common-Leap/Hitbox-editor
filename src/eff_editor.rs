@@ -114,8 +114,14 @@ pub struct EffEditor {
     pending_load: Option<PathBuf>,
     /// Entry name (lowercase) to select after the next load — transplant hand-off.
     pending_select: Option<String>,
-    /// Authored edits (from a loaded project) applied once the queued eff loads.
+    /// Authored edits applied once the queued eff loads.
     pending_edits: Option<Vec<AuthoredEdit>>,
+    /// Whether applying [`Self::pending_edits`] should also push them to the running game.
+    ///
+    /// True when a project was just opened — the point is to get the game showing it. False
+    /// when the reload is one we caused ourselves (a transplant rebuild): the edits are being
+    /// carried across, not newly requested, and the user has not asked to send anything.
+    pending_edits_push_live: bool,
     export_root: PathBuf,
     eff_files: Vec<PathBuf>,
     file_filter: String,
@@ -161,6 +167,9 @@ pub struct EffEditor {
     /// True from clicking Send until the app has finished building + sending the carrier.
     /// Drives the spinner beside the button.
     pub sending: bool,
+    /// Carrier generation that was live in game when the current send started. The send is
+    /// complete only once the game reports a NEWER one — see `awaiting_game`.
+    pub gen_at_send: u64,
     /// Set once the snapshot has left the app: we are now waiting for the GAME to take it
     /// (bytes decompress, resource service settles, carrier object comes up). Cleared when
     /// the plugin reports the carrier live, or on timeout.
@@ -169,8 +178,14 @@ pub struct EffEditor {
     /// Surfaced rather than hidden because "the spinner cleared too early" has been
     /// diagnosed by guesswork twice now, and the raw signal settles it.
     pub carrier_report: (u8, usize, bool),
+    /// Carrier generation the game last reported. Compared against `gen_at_send` to tell a
+    /// freshly-taken carrier from the previous one still sitting there reporting ready.
+    pub carrier_gen_now: u64,
     /// Final carrier reading from the last send, kept on screen after the spinner clears.
     pub last_carrier_result: Option<String>,
+    /// Whether that final reading was a success — colours the persisted readout so a failed
+    /// send is not a grey line that reads like a status message.
+    pub carrier_ok: bool,
     /// The carrier rebuild is synchronous on the UI thread, so servicing the request in the
     /// same frame as the click would block before the spinner ever painted. Hold the request
     /// for one frame so the "sending" state is visible.
@@ -185,6 +200,7 @@ impl Default for EffEditor {
             pending_load: None,
             pending_select: None,
             pending_edits: None,
+            pending_edits_push_live: false,
             export_root: std::env::current_dir().unwrap_or_default(),
             eff_files: Vec::new(),
             file_filter: String::new(),
@@ -207,9 +223,12 @@ impl Default for EffEditor {
             live_deploy_request: false,
             live_deploy_at: None,
             sending: false,
+            gen_at_send: 0,
             awaiting_game: None,
             carrier_report: (0, 0, false),
+            carrier_gen_now: 0,
             last_carrier_result: None,
+            carrier_ok: false,
             deploy_defer: false,
             last_sent_note: None,
         }
@@ -394,6 +413,7 @@ impl EffEditor {
     /// Queue authored edits to apply after the next queued eff loads (project load path).
     pub fn queue_edits(&mut self, edits: Vec<AuthoredEdit>) {
         self.pending_edits = Some(edits);
+        self.pending_edits_push_live = true;
     }
 
     pub fn set_target_fighter(&mut self, fighter: Option<String>) {
@@ -539,6 +559,15 @@ impl EffEditor {
     /// carrier's eff space and reload that instead of the fighter's. Until that lands (or
     /// per-emitter runtime modifiers prove workable, which is the cheaper answer), authored
     /// colour edits are export-only and nothing is pushed live.
+    /// Note that the project now differs from what the running game was last given.
+    ///
+    /// Lights the Send button's unsent indicator. Used by changes that deliberately do NOT
+    /// deploy — recording a transplant, for one — so the divergence is visible rather than
+    /// silent, without taking the decision to send away from the user.
+    pub fn mark_unsent(&mut self) {
+        self.eff_dirty_at = Some(Instant::now());
+    }
+
     pub fn request_live_apply(&mut self) {
         self.live_deploy_request = true;
         self.sending = true;
@@ -644,6 +673,24 @@ impl EffEditor {
             }
         }
         if self.loaded_path.as_deref() == Some(base) {
+            // Carry in-progress emitter edits across the reload.
+            //
+            // The merged baseline deliberately does NOT bake authored edits in (see
+            // `build_merged_preview`), so re-parsing it resets every emitter to pristine and
+            // the working-vs-pristine diff goes empty — the edits vanish from the panel, and
+            // the next `sync_eff_mods_from_editor` then writes that empty diff back over the
+            // project's `authored` list. Capture them here, while the old working copy is
+            // still loaded, and re-apply after the load.
+            //
+            // Not `queue_edits`: this reload is ours, not a project open, so it must not also
+            // deploy to the running game.
+            if self.pending_edits.is_none() {
+                let carried = self.collect_authored_edits();
+                if !carried.is_empty() {
+                    self.pending_edits = Some(carried);
+                    self.pending_edits_push_live = false;
+                }
+            }
             self.pending_load = Some(base.to_path_buf());
         }
     }
@@ -681,10 +728,12 @@ impl EffEditor {
                 self.load_eff(&path);
                 if let Some(edits) = self.pending_edits.take() {
                     let had_edits = !edits.is_empty();
+                    let push_live = std::mem::take(&mut self.pending_edits_push_live);
                     self.apply_authored_edits(&edits);
                     // Project just loaded: get the game showing it. Rebuild-and-reload, so
                     // every emitter lands where the project says — not an averaged tint.
-                    if had_edits && link.status() == LinkStatus::Connected {
+                    // Edits merely carried across a reload we caused push nothing.
+                    if had_edits && push_live && link.status() == LinkStatus::Connected {
                         self.request_live_apply();
                     }
                 }
@@ -795,21 +844,32 @@ impl EffEditor {
                     )
                 } else {
                     // The long half: the game is decompressing the carrier and bringing its
-                    // object up. This is what the minute-long wait actually was.
+                    // object up. This is what the minute-long wait actually was. Name the
+                    // PHASE rather than dumping raw numbers — "object=down" told the user
+                    // nothing about which of three very different stalls they were in.
                     let secs = self
                         .awaiting_game
                         .map(|t| t.elapsed().as_secs())
                         .unwrap_or(0);
                     let (st, kinds, spawned) = self.carrier_report;
+                    // `took_ours` is the difference between "a carrier is up" and "MY carrier
+                    // is up". Without it the previous send's carrier answers for this one.
+                    let took_ours = self.carrier_gen_now > self.gen_at_send;
+                    let phase = match (st, spawned) {
+                        _ if secs < 2 => "waiting for game",
+                        (2, true) if took_ours => "carrier up",
+                        (2, true) => "game still serving the previous carrier",
+                        (0, _) => "waiting for the game to take the bytes",
+                        (2, false) => "carrier staged — waiting for its object",
+                        (3, _) | (4, _) => "retiring the previous carrier",
+                        (5, _) => "waiting for the old resources to release",
+                        _ => "loading the carrier",
+                    };
                     (
                         if secs >= 2 {
-                            format!(
-                                "waiting for game… {secs}s (state={st} kinds={kinds} \
-                                 object={})",
-                                if spawned { "up" } else { "down" }
-                            )
+                            format!("{phase}… {secs}s (state={st} kinds={kinds})")
                         } else {
-                            "waiting for game".to_string()
+                            phase.to_string()
                         },
                         egui::Color32::from_rgb(0xE0, 0xC0, 0x60),
                     )
@@ -822,11 +882,11 @@ impl EffEditor {
                         .color(egui::Color32::from_rgb(0xE0, 0xA0, 0x30)),
                 );
             } else if let Some(r) = &self.last_carrier_result {
-                ui.label(
-                    egui::RichText::new(r)
-                        .small()
-                        .color(egui::Color32::from_rgb(0x9A, 0x9A, 0x9A)),
-                );
+                ui.label(egui::RichText::new(r).small().color(if self.carrier_ok {
+                    egui::Color32::from_rgb(0x70, 0xB0, 0x70)
+                } else {
+                    egui::Color32::from_rgb(0xD0, 0x80, 0x60)
+                }));
             }
             if link.status() != LinkStatus::Connected {
                 if let Some(err) = link.last_error() {
@@ -1430,13 +1490,20 @@ impl EffEditor {
                 self.eff_dirty_at = None;
                 self.request_live_apply();
             }
-            if self.sending {
+            // The wait continues after the bytes leave the app, so this spinner has to track
+            // `awaiting_game` too — otherwise it clears while the carrier is still coming up,
+            // which is exactly the "loading finishes before the item spawns" complaint.
+            if self.sending || self.awaiting_game.is_some() {
                 ui.add(egui::Spinner::new().size(14.0));
-                ui.label(
-                    egui::RichText::new("sending…")
-                        .small()
-                        .color(egui::Color32::from_rgb(0x90, 0xC0, 0xF0)),
-                );
+                let (text, tint) = if self.sending {
+                    ("sending…", egui::Color32::from_rgb(0x90, 0xC0, 0xF0))
+                } else {
+                    (
+                        "waiting for game…",
+                        egui::Color32::from_rgb(0xE0, 0xC0, 0x60),
+                    )
+                };
+                ui.label(egui::RichText::new(text).small().color(tint));
             } else if !connected {
                 ui.label(
                     egui::RichText::new("game not connected")
@@ -1599,5 +1666,114 @@ impl EffEditor {
             .small()
             .color(egui::Color32::GRAY),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effects::{EmitterSet, PtclFile};
+
+    /// An editor holding one emitter set with one emitter, loaded from `path`.
+    fn editor_with_one_emitter(path: &str) -> EffEditor {
+        let emitter = EmitterDef {
+            name: "em0".into(),
+            emission_rate: 10.0,
+            lifetime: 30.0,
+            scale: 1.0,
+            color_scale: 1.0,
+            emitter_scale: glam::Vec3::ONE,
+            color0: Vec::new(),
+            color1: Vec::new(),
+            alpha0_keys: Vec::new(),
+            texture_index: 0,
+        };
+        let mut editor = EffEditor::default();
+        editor.pristine = vec![vec![EmitterSnapshot::of(&emitter)]];
+        editor.ptcl = Some(PtclFile {
+            emitter_sets: vec![EmitterSet {
+                name: "P_KirbyDash".into(),
+                emitters: vec![emitter],
+            }],
+            bntx_textures: Vec::new(),
+        });
+        editor.entries = vec![EffEntry {
+            name: "kirby_dash".into(),
+            hash: 0,
+            set_idx: 0,
+        }];
+        editor.loaded_path = Some(PathBuf::from(path));
+        editor
+    }
+
+    /// Tune the one emitter so the working copy differs from its pristine snapshot.
+    fn tune(editor: &mut EffEditor, scale: f32) {
+        editor.ptcl.as_mut().expect("ptcl").emitter_sets[0].emitters[0].scale = scale;
+    }
+
+    /// A transplant reloads the eff from a baseline that deliberately excludes authored edits,
+    /// so the edits must be carried across explicitly or they vanish from the panel — and the
+    /// next `sync_eff_mods_from_editor` then writes the empty diff back over the project.
+    #[test]
+    fn transplanting_carries_emitter_edits_across_the_reload() {
+        let base = PathBuf::from("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        tune(&mut editor, 2.5);
+        assert_eq!(
+            editor.collect_authored_edits().len(),
+            1,
+            "fixture is edited"
+        );
+
+        editor.set_merged_overlay(&base, Some(Path::new("/tmp/_transplant_preview.eff")));
+
+        let carried = editor.pending_edits.as_ref().expect("edits carried across");
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].set_name, "P_KirbyDash");
+        assert_eq!(carried[0].entry_name, "kirby_dash");
+        assert_eq!(carried[0].fields.scale, Some(2.5));
+        assert!(
+            !editor.pending_edits_push_live,
+            "a reload we caused must not deploy to the running game on its own"
+        );
+    }
+
+    /// Re-applying them lands the values back on the working copy, so the diff is non-empty
+    /// again and the project keeps its `authored` list.
+    #[test]
+    fn carried_edits_reapply_onto_the_reloaded_eff() {
+        let base = PathBuf::from("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        tune(&mut editor, 2.5);
+        editor.set_merged_overlay(&base, Some(Path::new("/tmp/_transplant_preview.eff")));
+        let carried = editor.pending_edits.take().expect("edits carried across");
+
+        // Stand in for the reload: the merged baseline has the emitter back at pristine.
+        tune(&mut editor, 1.0);
+        assert!(editor.collect_authored_edits().is_empty(), "reload resets");
+
+        editor.apply_authored_edits(&carried);
+        let after = editor.collect_authored_edits();
+        assert_eq!(after.len(), 1, "the edit is back in the panel's diff");
+        assert_eq!(after[0].fields.scale, Some(2.5));
+    }
+
+    /// A project load still pushes, so opening a project gets the game showing it.
+    #[test]
+    fn a_project_load_still_requests_a_live_push() {
+        let mut editor = EffEditor::default();
+        editor.queue_edits(vec![AuthoredEdit {
+            set_name: "P_KirbyDash".into(),
+            entry_name: "kirby_dash".into(),
+            set_idx: 0,
+            emitter_name: "em0".into(),
+            emitter_idx: 0,
+            fields: EmitterFieldEdits {
+                scale: Some(2.5),
+                ..Default::default()
+            },
+        }]);
+        assert!(editor.pending_edits.is_some());
+        assert!(editor.pending_edits_push_live);
     }
 }
