@@ -47,6 +47,11 @@ impl Facade for DebuggableServerFacade {
             for line in crate::slight::hitbox_viewer::take_pending(MAX_NOTIFY_PER_TICK) {
                 crate::rust_extender::debuggable_server::notify_acmd_capture(&line);
             }
+            // End-of-motion markers ride the same socket, but only once the backlog above
+            // is empty — the editor treats one as "this move's script is fully streamed".
+            for end in crate::slight::hitbox_viewer::take_pending_ends(MAX_NOTIFY_PER_TICK) {
+                crate::rust_extender::debuggable_server::notify_acmd_capture_end(&end);
+            }
         }
         crate::slight::pending::process();
 

@@ -13,11 +13,11 @@ use smash::phx::Vector3f;
 
 /// Distinct effect kinds an ACMD has requested this session (hash → request count). Written
 /// to `sd:/effect_viewer_spawn.txt` only when a NEW hash first appears (cheap), so after a
-/// move we can read which kinds it spawned by NAME — the direct check for "did the one-slot
+/// move we can read which kinds it spawned by NAME — the direct check for "did the transplant
 /// redirect fire?" (e.g. is `alucard_backdash_os` in the list after kirby's backdash?).
 /// eff_hash → (request count, last resolved handle). A NON-zero handle means the game found
 /// & spawned the kind; `h=0` means the kind wasn't registered (nothing to spawn) — the exact
-/// split we need for a one-slot: is `alucard_backdash_os` registered after the re-read?
+/// split we need for a transplant: is `alucard_backdash_os` registered after the re-read?
 struct SpawnStat {
     count: u32,
     created: bool,
@@ -108,6 +108,16 @@ struct ParsedEffectArgs {
     pos: Vector3f,
     rot: Vector3f,
     size: f32,
+    /// Trailing `EffectModule::req` arguments as the ACMD supplied them.
+    ///
+    /// These used to be hardcoded to `0, 0, false, 0` on the carrier proxy path, so a
+    /// proxied effect rendered with different parameters from the same effect spawned
+    /// natively — "right effect, right edits, looks wrong". Carrying the script's own values
+    /// keeps the proxy faithful.
+    arg6: u32,
+    arg7: i32,
+    arg8: bool,
+    arg9: i32,
 }
 
 struct PendingCarrierSpawn {
@@ -150,6 +160,16 @@ unsafe fn source_world_transform(
         return None;
     }
 
+    // FACING. A fighter-owned effect is mirrored by the fighter's `lr` (-1 when facing left);
+    // the carrier is a separate object with its own facing, so a proxied spawn lost the
+    // mirroring and sat on the wrong side / faced the wrong way. Apply it to the offset here.
+    let lr = smash::app::lua_bind::PostureModule::lr(source);
+    let local_pos = &Vector3f {
+        x: local_pos.x * lr,
+        y: local_pos.y,
+        z: local_pos.z,
+    };
+
     if bone_hash == 0 {
         let posture_pos = smash::app::lua_bind::PostureModule::pos(source);
         if posture_pos.is_null() {
@@ -163,7 +183,12 @@ unsafe fn source_world_transform(
             },
             Vector3f {
                 x: local_rot.x,
-                y: local_rot.y,
+                // Facing-left flips the effect's yaw, same as a fighter-owned spawn.
+                y: if lr < 0.0 {
+                    180.0 - local_rot.y
+                } else {
+                    local_rot.y
+                },
                 z: local_rot.z,
             },
         ));
@@ -188,14 +213,55 @@ unsafe fn source_world_transform(
         z: 0.0,
     };
     smash::app::lua_bind::ModelModule::joint_global_rotation(source, bone, &mut joint_rot, true);
-    Some((
-        world_pos,
-        Vector3f {
-            x: joint_rot.x + local_rot.x,
-            y: joint_rot.y + local_rot.y,
-            z: joint_rot.z + local_rot.z,
-        },
-    ))
+    // COMPOSE the rotations, do not add them.
+    //
+    // This used to be `joint_rot.x + local_rot.x` (and y, z). Euler angles only add when the
+    // rotations share an axis; for a general bone orientation the sum is a different rotation
+    // entirely, which is why carrier-proxied effects came out at the wrong angle while the
+    // effect and its edits were otherwise correct. Compose as matrices and re-extract.
+    Some((world_pos, compose_euler_zyx(&joint_rot, local_rot)))
+}
+
+/// Compose two ZYX-Euler rotations (degrees) as `joint * local`, returning ZYX Euler degrees.
+///
+/// The game's `joint_global_rotation` and the ACMD `rot` argument are both ZYX Euler in
+/// degrees, so this stays in that convention rather than exposing quaternions to callers.
+fn compose_euler_zyx(a: &Vector3f, b: &Vector3f) -> Vector3f {
+    fn to_mat(e: &Vector3f) -> [[f32; 3]; 3] {
+        let (rx, ry, rz) = (e.x.to_radians(), e.y.to_radians(), e.z.to_radians());
+        let (sx, cx) = rx.sin_cos();
+        let (sy, cy) = ry.sin_cos();
+        let (sz, cz) = rz.sin_cos();
+        // R = Rz * Ry * Rx
+        [
+            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx],
+        ]
+    }
+    let (m, n) = (to_mat(a), to_mat(b));
+    let mut r = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            r[i][j] = (0..3).map(|k| m[i][k] * n[k][j]).sum();
+        }
+    }
+    // Extract ZYX Euler. Guard gimbal lock (|sin(y)| ~ 1), where x and z are degenerate.
+    let sy = -r[2][0];
+    let (x, y, z) = if sy.abs() > 0.999_9 {
+        (r[1][2].atan2(r[1][1]), sy.clamp(-1.0, 1.0).asin(), 0.0)
+    } else {
+        (
+            r[2][1].atan2(r[2][2]),
+            sy.clamp(-1.0, 1.0).asin(),
+            r[1][0].atan2(r[0][0]),
+        )
+    };
+    Vector3f {
+        x: x.to_degrees(),
+        y: y.to_degrees(),
+        z: z.to_degrees(),
+    }
 }
 
 /// Keep carrier-owned EFFECT_FOLLOW instances attached to the source fighter's requested joint.
@@ -395,7 +461,8 @@ unsafe fn spawn_via_carrier(
     // puts it on the carrier's `top` (or fails for fighter-only joints). A non-follow request with
     // an absolute transform preserves carrier ownership; follow behavior is mirrored below.
     let result = smash::app::lua_bind::EffectModule::req(
-        carrier, effect, &world_pos, &world_rot, args.size, 0, 0, false, 0,
+        carrier, effect, &world_pos, &world_rot, args.size, args.arg6, args.arg7, args.arg8,
+        args.arg9,
     );
     let after = smash::app::lua_bind::EffectModule::get_last_handle(carrier) as u32;
     record_spawn(logical_hash, before, after);
@@ -518,12 +585,18 @@ unsafe fn parse_args(lua_state: u64, flip: bool) -> Option<ParsedEffectArgs> {
         z: arg_num(&mut agent, 6 + off, 0.0), // zr
     };
     let size = arg_num(&mut agent, 9 + off, 1.0);
+    // Trailing args, defaulted to what the old hardcoded call used so a macro variant that
+    // does not supply them behaves exactly as before.
     Some(ParsedEffectArgs {
         eff_hash,
         bone_hash,
         pos,
         rot,
         size,
+        arg6: arg_num(&mut agent, 10 + off, 0.0).max(0.0) as u32,
+        arg7: arg_num(&mut agent, 11 + off, 0.0) as i32,
+        arg8: arg_bool(&mut agent, 12 + off, false),
+        arg9: arg_num(&mut agent, 13 + off, 0.0) as i32,
     })
 }
 
@@ -579,7 +652,7 @@ unsafe fn rewrite_args(
     }
 }
 
-/// Rewrite the requested effect kind in-place (live one-slot alias): the graphic slot(s)
+/// Rewrite the requested effect kind in-place (live transplant alias): the graphic slot(s)
 /// equal to `from` become `to`. FLIP variants carry two graphics (left/right) — both are
 /// checked. All other args are pushed back verbatim.
 unsafe fn rewrite_kind(lua_state: u64, from: u64, to: u64, flip: bool) {
@@ -831,7 +904,7 @@ macro_rules! effect_hook {
                         );
                     }
                 }
-                // Live one-slot alias LAST (after rules/pins keyed on the requested
+                // Live transplant alias LAST (after rules/pins keyed on the requested
                 // hash): swap the graphic to the donor kind that actually exists in
                 // the loaded eff resources, optionally gated to costume slots.
                 if crate::slight::effect_viewer::spawn_rules::any_alias() {
@@ -844,7 +917,59 @@ macro_rules! effect_hook {
                         // spawn renders. Falls back to the `_os` target when no co-load.
                         let real = crate::slight::effect_viewer::effect_reload::coload_remap(to)
                             .unwrap_or(to);
-                        rewrite_kind(lua_state, args.eff_hash, real, $flip);
+                        // ONLY rewrite if the target can actually be served RIGHT NOW.
+                        //
+                        // A carrier-owned kind exists only in the carrier's resources. If the
+                        // carrier object is not live yet, `spawn_via_carrier` below returns
+                        // false and the ORIGINAL call runs with the rewritten kind — which the
+                        // fighter has no resource for, so nothing spawns at all.
+                        //
+                        // For a transplant that just means the new effect is missing. For an
+                        // authored EDIT it silently destroys a vanilla effect that worked
+                        // before: the user sees their effect disappear. Leaving the kind alone
+                        // renders it unedited, which is strictly better than invisible.
+                        let carrier_owned =
+                            crate::slight::effect_viewer::effect_reload::is_staged_carrier_kind(
+                                real,
+                            );
+                        let servable = !carrier_owned
+                            || crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(
+                                real,
+                            )
+                            .is_some();
+                        if servable {
+                            rewrite_kind(lua_state, args.eff_hash, real, $flip);
+                        } else {
+                            // Bounded, one line per distinct kind: this is the difference
+                            // between "the edit did not apply" and "the effect vanished",
+                            // and guessing between those has cost a lot of test runs.
+                            static SKIPPED: parking_lot::Mutex<Option<Vec<u64>>> =
+                                parking_lot::Mutex::new(None);
+                            let mut g = SKIPPED.lock();
+                            let seen = g.get_or_insert_with(Vec::new);
+                            if !seen.contains(&real) && seen.len() < 32 {
+                                seen.push(real);
+                                use std::io::Write;
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("sd:/effect_viewer_alias_skip.txt")
+                                {
+                                    let _ = writeln!(
+                                        f,
+                                        "SKIP rewrite {} -> {} (carrier_owned={carrier_owned} \
+                                         carrier_state={} kinds={}) — left vanilla so the \
+                                         effect still renders",
+                                        crate::slight::effect_viewer::effect_names::label(
+                                            args.eff_hash
+                                        ),
+                                        crate::slight::effect_viewer::effect_names::label(real),
+                                        crate::slight::effect_viewer::effect_reload::carrier_state(),
+                                        crate::slight::effect_viewer::effect_reload::carrier_kind_count(),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 // A transplanted kind is owned by the hidden storage carrier, not Kirby.
@@ -901,11 +1026,7 @@ macro_rules! effect_hook {
 }
 
 effect_hook!(hook_eff, smash::app::sv_animcmd::EFFECT, false);
-effect_hook!(
-    hook_eff_alpha,
-    smash::app::sv_animcmd::EFFECT_ALPHA,
-    false
-);
+effect_hook!(hook_eff_alpha, smash::app::sv_animcmd::EFFECT_ALPHA, false);
 effect_hook!(hook_eff_attr, smash::app::sv_animcmd::EFFECT_ATTR, false);
 effect_hook!(hook_eff_follow, smash::app::sv_animcmd::EFFECT_FOLLOW, true);
 effect_hook!(
@@ -990,11 +1111,7 @@ effect_hook!(
     true,
     true
 );
-effect_hook!(
-    hook_foot_eff,
-    smash::app::sv_animcmd::FOOT_EFFECT,
-    false
-);
+effect_hook!(hook_foot_eff, smash::app::sv_animcmd::FOOT_EFFECT, false);
 effect_hook!(
     hook_foot_eff_flip,
     smash::app::sv_animcmd::FOOT_EFFECT_FLIP,
@@ -1012,11 +1129,7 @@ effect_hook!(
     false,
     true
 );
-effect_hook!(
-    hook_down_eff,
-    smash::app::sv_animcmd::DOWN_EFFECT,
-    false
-);
+effect_hook!(hook_down_eff, smash::app::sv_animcmd::DOWN_EFFECT, false);
 
 /// EFFECT_OFF_KIND is both timeline data and a lifetime command. Capture its pristine typed
 /// arguments, preserve the game's original call, then bridge the stop to concrete carrier-owned

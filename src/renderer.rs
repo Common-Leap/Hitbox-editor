@@ -171,6 +171,13 @@ impl HitboxRenderState {
         // Scan sibling directories for weapon skeletons.
         // model_dir is e.g. fighter/link/model/body/c00
         // Weapon dirs are e.g. fighter/link/model/sword/c00
+        // Prefer the slot the body model was loaded from; a modded fighter may ship no c00,
+        // and hardcoding it rendered those fighters with no weapons at all.
+        let body_slot = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(crate::data::parse_costume_dir)
+            .unwrap_or(0);
         if let Some(model_root) = model_dir.parent().and_then(|p| p.parent()) {
             if let Ok(entries) = std::fs::read_dir(model_root) {
                 for entry in entries.flatten() {
@@ -179,10 +186,10 @@ impl HitboxRenderState {
                     if dir_name == "body" {
                         continue;
                     }
-                    let weapon_skel = entry.path().join("c00").join("model.nusktb");
-                    if !weapon_skel.exists() {
+                    let Some(weapon_skel) = crate::data::find_part_skel(&entry.path(), body_slot)
+                    else {
                         continue;
-                    }
+                    };
                     if let Ok(skel) = ssbh_data::skel_data::SkelData::from_file(&weapon_skel) {
                         // Determine the attach bone: prefer "haver" (right hand), then "havel" (left hand)
                         // This is the character body bone the weapon root is parented to at runtime.
@@ -294,168 +301,187 @@ impl HitboxRenderState {
         &self,
         frame: f32,
     ) -> std::collections::HashMap<String, glam::Mat4> {
-        let mut result = std::collections::HashMap::new();
         let skel = match self.cached_skel.as_ref() {
             Some((_, s)) => s,
             None => {
                 if crate::debug_enabled() {
                     eprintln!("[BONE] cached_skel is NONE — returning empty map");
                 }
-                return result;
+                return std::collections::HashMap::new();
             }
         };
         let anim = self.cached_anim.as_ref().map(|(_, a)| a);
-        let bone_count = skel.bones.len();
-        if crate::debug_enabled() {
-            let names: Vec<&str> = skel
-                .bones
-                .iter()
-                .map(|b| b.name.as_str())
-                .take(15)
-                .collect();
-            eprintln!(
-                "[BONE] {} bones, names={:?}, anim={}, frame={}",
-                bone_count,
-                names,
-                anim.is_some(),
-                frame
-            );
-            // Log bone 0's bind-pose translation
-            if let Some(b0) = skel.bones.first() {
-                let m = glam::Mat4::from_cols_array_2d(&b0.transform);
-                eprintln!(
-                    "[BONE] bone[0] '{}' bind_trans={:?}",
-                    b0.name,
-                    m.col(3).truncate()
-                );
-            }
-        }
+        compute_bone_world_matrices(skel, anim, &self.weapon_skels, frame)
+    }
+}
 
-        struct BoneState {
-            translation: glam::Vec3,
-            rotation: glam::Quat,
-            scale: glam::Vec3,
-            compensate_scale: bool,
-        }
-
-        let mut states: Vec<BoneState> = skel
+/// Evaluates the bone hierarchy for `frame` and returns `bone name -> world matrix`.
+///
+/// Split out of [`HitboxRenderState`] so it can be benchmarked and tested without a GPU
+/// device — this is the single hottest piece of per-frame CPU work in the editor, so it
+/// needs to stay measurable (see `src/bin/bone_bench.rs`).
+///
+/// Every bone is keyed under both its original and its lowercased name because ACMD bone
+/// names are inconsistently cased; callers look up either spelling.
+pub fn compute_bone_world_matrices(
+    skel: &ssbh_data::skel_data::SkelData,
+    anim: Option<&ssbh_data::anim_data::AnimData>,
+    weapon_skels: &[(String, ssbh_data::skel_data::SkelData, String)],
+    frame: f32,
+) -> std::collections::HashMap<String, glam::Mat4> {
+    let bone_count = skel.bones.len();
+    let mut result = std::collections::HashMap::new();
+    if crate::debug_enabled() {
+        let names: Vec<&str> = skel
             .bones
             .iter()
-            .map(|b| {
-                let m = glam::Mat4::from_cols_array_2d(&b.transform);
-                let (scale, rotation, translation) = m.to_scale_rotation_translation();
-                BoneState {
-                    translation,
-                    rotation,
-                    scale,
-                    compensate_scale: false,
-                }
-            })
+            .map(|b| b.name.as_str())
+            .take(15)
             .collect();
-
-        if let Some(anim_data) = anim {
-            for group in &anim_data.groups {
-                use ssbh_data::anim_data::GroupType;
-                if group.group_type != GroupType::Transform {
-                    continue;
-                }
-                for node in &group.nodes {
-                    let Some(idx) = skel.bones.iter().position(|b| b.name == node.name) else {
-                        continue;
-                    };
-                    let Some(track) = node.tracks.first() else {
-                        continue;
-                    };
-                    use ssbh_data::anim_data::TrackValues;
-                    if let TrackValues::Transform(values) = &track.values {
-                        if values.is_empty() {
-                            continue;
-                        }
-                        let cur = (frame.floor() as usize).clamp(0, values.len() - 1);
-                        let nxt = (frame.ceil() as usize).clamp(0, values.len() - 1);
-                        let f = frame.fract();
-                        let a = &values[cur];
-                        let b = &values[nxt];
-                        states[idx] = BoneState {
-                            translation: glam::Vec3::from(a.translation.to_array())
-                                .lerp(glam::Vec3::from(b.translation.to_array()), f),
-                            rotation: glam::Quat::from_array(a.rotation.to_array())
-                                .slerp(glam::Quat::from_array(b.rotation.to_array()), f),
-                            scale: glam::Vec3::from(a.scale.to_array())
-                                .lerp(glam::Vec3::from(b.scale.to_array()), f),
-                            compensate_scale: track.compensate_scale,
-                        };
-                    }
-                }
-            }
+        eprintln!(
+            "[BONE] {} bones, names={:?}, anim={}, frame={}",
+            bone_count,
+            names,
+            anim.is_some(),
+            frame
+        );
+        // Log bone 0's bind-pose translation
+        if let Some(b0) = skel.bones.first() {
+            let m = glam::Mat4::from_cols_array_2d(&b0.transform);
+            eprintln!(
+                "[BONE] bone[0] '{}' bind_trans={:?}",
+                b0.name,
+                m.col(3).truncate()
+            );
         }
-
-        let mut world: Vec<glam::Mat4> = vec![glam::Mat4::IDENTITY; bone_count];
-        for (i, bone) in skel.bones.iter().enumerate() {
-            let st = &states[i];
-            let comp = if st.compensate_scale {
-                bone.parent_index
-                    .map(|p| glam::Vec3::ONE / states[p].scale)
-                    .unwrap_or(glam::Vec3::ONE)
-            } else {
-                glam::Vec3::ONE
-            };
-            let local = glam::Mat4::from_translation(st.translation)
-                * glam::Mat4::from_scale(comp)
-                * glam::Mat4::from_quat(st.rotation)
-                * glam::Mat4::from_scale(st.scale);
-            let parent = bone
-                .parent_index
-                .map(|p| world[p])
-                .unwrap_or(glam::Mat4::IDENTITY);
-            world[i] = parent * local;
-            result.insert(bone.name.clone(), world[i]);
-            result.insert(bone.name.to_lowercase(), world[i]);
-        }
-
-        if crate::debug_enabled() {
-            for (name, mat) in &result {
-                let pos = mat.col(3).truncate();
-                eprintln!(
-                    "[BONE_MAT] '{}' pos=({:.3},{:.3},{:.3})",
-                    name, pos.x, pos.y, pos.z
-                );
-            }
-        }
-
-        // ACMD's synthetic `top` joint is the character origin. It is not present in nusktb;
-        // offline animations instead carry root motion on `Trans`. Using identity left
-        // top-bound hitboxes (most grabs) behind while the rendered fighter moved.
-        let top = synthetic_top_matrix(&result);
-        result.insert("top".to_string(), top);
-        result.insert("Top".to_string(), top);
-
-        // ── Weapon skeletons ──────────────────────────────────────────────────
-        for (_, weapon_skel, attach_bone) in &self.weapon_skels {
-            let attach_world = skel
-                .bones
-                .iter()
-                .enumerate()
-                .find(|(_, b)| b.name.eq_ignore_ascii_case(attach_bone))
-                .map(|(i, _)| world[i])
-                .unwrap_or(glam::Mat4::IDENTITY);
-
-            for bone in &weapon_skel.bones {
-                let Ok(bind_world) = weapon_skel.calculate_world_transform(bone) else {
-                    continue;
-                };
-                let bind_mat = glam::Mat4::from_cols_array_2d(&bind_world);
-                let final_mat = attach_world * bind_mat;
-                // Only insert if this bone name isn't already in the body skeleton —
-                // body skeleton bones always take priority over weapon skeleton bones.
-                result.entry(bone.name.clone()).or_insert(final_mat);
-                result.entry(bone.name.to_lowercase()).or_insert(final_mat);
-            }
-        }
-
-        result
     }
 
+    struct BoneState {
+        translation: glam::Vec3,
+        rotation: glam::Quat,
+        scale: glam::Vec3,
+        compensate_scale: bool,
+    }
+
+    let mut states: Vec<BoneState> = skel
+        .bones
+        .iter()
+        .map(|b| {
+            let m = glam::Mat4::from_cols_array_2d(&b.transform);
+            let (scale, rotation, translation) = m.to_scale_rotation_translation();
+            BoneState {
+                translation,
+                rotation,
+                scale,
+                compensate_scale: false,
+            }
+        })
+        .collect();
+
+    if let Some(anim_data) = anim {
+        for group in &anim_data.groups {
+            use ssbh_data::anim_data::GroupType;
+            if group.group_type != GroupType::Transform {
+                continue;
+            }
+            for node in &group.nodes {
+                let Some(idx) = skel.bones.iter().position(|b| b.name == node.name) else {
+                    continue;
+                };
+                let Some(track) = node.tracks.first() else {
+                    continue;
+                };
+                use ssbh_data::anim_data::TrackValues;
+                if let TrackValues::Transform(values) = &track.values {
+                    if values.is_empty() {
+                        continue;
+                    }
+                    let cur = (frame.floor() as usize).clamp(0, values.len() - 1);
+                    let nxt = (frame.ceil() as usize).clamp(0, values.len() - 1);
+                    let f = frame.fract();
+                    let a = &values[cur];
+                    let b = &values[nxt];
+                    states[idx] = BoneState {
+                        translation: glam::Vec3::from(a.translation.to_array())
+                            .lerp(glam::Vec3::from(b.translation.to_array()), f),
+                        rotation: glam::Quat::from_array(a.rotation.to_array())
+                            .slerp(glam::Quat::from_array(b.rotation.to_array()), f),
+                        scale: glam::Vec3::from(a.scale.to_array())
+                            .lerp(glam::Vec3::from(b.scale.to_array()), f),
+                        compensate_scale: track.compensate_scale,
+                    };
+                }
+            }
+        }
+    }
+
+    let mut world: Vec<glam::Mat4> = vec![glam::Mat4::IDENTITY; bone_count];
+    for (i, bone) in skel.bones.iter().enumerate() {
+        let st = &states[i];
+        let comp = if st.compensate_scale {
+            bone.parent_index
+                .map(|p| glam::Vec3::ONE / states[p].scale)
+                .unwrap_or(glam::Vec3::ONE)
+        } else {
+            glam::Vec3::ONE
+        };
+        let local = glam::Mat4::from_translation(st.translation)
+            * glam::Mat4::from_scale(comp)
+            * glam::Mat4::from_quat(st.rotation)
+            * glam::Mat4::from_scale(st.scale);
+        let parent = bone
+            .parent_index
+            .map(|p| world[p])
+            .unwrap_or(glam::Mat4::IDENTITY);
+        world[i] = parent * local;
+        result.insert(bone.name.clone(), world[i]);
+        result.insert(bone.name.to_lowercase(), world[i]);
+    }
+
+    if crate::debug_enabled() {
+        for (name, mat) in &result {
+            let pos = mat.col(3).truncate();
+            eprintln!(
+                "[BONE_MAT] '{}' pos=({:.3},{:.3},{:.3})",
+                name, pos.x, pos.y, pos.z
+            );
+        }
+    }
+
+    // ACMD's synthetic `top` joint is the character origin. It is not present in nusktb;
+    // offline animations instead carry root motion on `Trans`. Using identity left
+    // top-bound hitboxes (most grabs) behind while the rendered fighter moved.
+    let top = synthetic_top_matrix(&result);
+    result.insert("top".to_string(), top);
+    result.insert("Top".to_string(), top);
+
+    // ── Weapon skeletons ──────────────────────────────────────────────────
+    for (_, weapon_skel, attach_bone) in weapon_skels {
+        let attach_world = skel
+            .bones
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.name.eq_ignore_ascii_case(attach_bone))
+            .map(|(i, _)| world[i])
+            .unwrap_or(glam::Mat4::IDENTITY);
+
+        for bone in &weapon_skel.bones {
+            let Ok(bind_world) = weapon_skel.calculate_world_transform(bone) else {
+                continue;
+            };
+            let bind_mat = glam::Mat4::from_cols_array_2d(&bind_world);
+            let final_mat = attach_world * bind_mat;
+            // Only insert if this bone name isn't already in the body skeleton —
+            // body skeleton bones always take priority over weapon skeleton bones.
+            result.entry(bone.name.clone()).or_insert(final_mat);
+            result.entry(bone.name.to_lowercase()).or_insert(final_mat);
+        }
+    }
+
+    result
+}
+
+impl HitboxRenderState {
     /// Returns a map of bone name -> world position (convenience wrapper).
     #[allow(dead_code)]
     pub fn bone_world_positions(&self) -> std::collections::HashMap<String, glam::Vec3> {
@@ -526,6 +552,113 @@ mod tests {
         let top = super::synthetic_top_matrix(&bones);
         assert_eq!(top.col(3).truncate(), expected);
         assert_eq!(top.x_axis.truncate(), glam::Vec3::X);
+    }
+
+    /// Benchmark for the editor's dominant per-frame CPU cost. Ignored by default because it
+    /// needs real game files; run it against an extracted data root with:
+    ///
+    /// ```text
+    /// VISIONARY_BENCH_FIGHTER=/path/to/export/fighter/mario \
+    ///   cargo test --release -- --ignored --nocapture bone_matrix_cost
+    /// ```
+    #[test]
+    #[ignore = "needs a real extracted data root; see VISIONARY_BENCH_FIGHTER"]
+    fn bone_matrix_cost() {
+        use std::time::Instant;
+        let Some(root) = std::env::var_os("VISIONARY_BENCH_FIGHTER").map(std::path::PathBuf::from)
+        else {
+            panic!("set VISIONARY_BENCH_FIGHTER to a fighter dir, e.g. .../export/fighter/mario");
+        };
+        let model_root = root.join("model");
+        let skel_path = model_root.join("body").join("c00").join("model.nusktb");
+        let skel = ssbh_data::skel_data::SkelData::from_file(&skel_path)
+            .unwrap_or_else(|e| panic!("read {skel_path:?}: {e}"));
+
+        // Any body motion will do — pick the first one on disk for a stable, real workload.
+        let anim_dir = root.join("motion").join("body").join("c00");
+        let anim_path = std::fs::read_dir(&anim_dir)
+            .ok()
+            .and_then(|d| {
+                let mut v: Vec<_> = d
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "nuanmb"))
+                    .collect();
+                v.sort();
+                v.into_iter().next()
+            })
+            .expect("no .nuanmb under motion/body/c00");
+        let anim = ssbh_data::anim_data::AnimData::from_file(&anim_path).ok();
+
+        // Load weapon skeletons the way `load_model` does.
+        let mut weapons: Vec<(String, ssbh_data::skel_data::SkelData, String)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&model_root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == "body" {
+                    continue;
+                }
+                let Some(p) = (0..8)
+                    .map(|s| entry.path().join(format!("c{s:02}")).join("model.nusktb"))
+                    .find(|p| p.exists())
+                else {
+                    continue;
+                };
+                if let Ok(s) = ssbh_data::skel_data::SkelData::from_file(&p) {
+                    let attach = super::weapon_attach_bone(&name);
+                    weapons.push((name, s, attach));
+                }
+            }
+        }
+
+        eprintln!(
+            "\n[bench] {} body bones, anim {:?}, {} weapon skeletons ({} bones)",
+            skel.bones.len(),
+            anim_path.file_name().unwrap(),
+            weapons.len(),
+            weapons.iter().map(|(_, s, _)| s.bones.len()).sum::<usize>(),
+        );
+
+        const N: usize = 200;
+        // Warm up so we time steady state rather than first-touch page faults.
+        for f in 0..10 {
+            std::hint::black_box(super::compute_bone_world_matrices(
+                &skel,
+                anim.as_ref(),
+                &weapons,
+                f as f32,
+            ));
+        }
+
+        // Case A: a different frame each call (animation playing) — always real work.
+        let t = Instant::now();
+        let mut entries = 0;
+        for i in 0..N {
+            let m =
+                super::compute_bone_world_matrices(&skel, anim.as_ref(), &weapons, (i % 60) as f32);
+            entries += m.len();
+        }
+        let moving = t.elapsed();
+
+        // Case B: the same frame every call — the common editor case (idle repaints, mouse
+        // moves, slider drags all recompute an identical result).
+        let t = Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(super::compute_bone_world_matrices(
+                &skel,
+                anim.as_ref(),
+                &weapons,
+                7.0,
+            ));
+        }
+        let still = t.elapsed();
+
+        eprintln!(
+            "[bench] moving frame: {:.3} ms/call\n[bench] same frame:   {:.3} ms/call\n[bench] {} map entries per call\n",
+            moving.as_secs_f64() * 1000.0 / N as f64,
+            still.as_secs_f64() * 1000.0 / N as f64,
+            entries / N,
+        );
     }
 }
 

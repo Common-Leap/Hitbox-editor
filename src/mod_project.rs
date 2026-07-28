@@ -1,6 +1,13 @@
 // Unified mod project: every edit the toolkit makes — hitboxes/ACMD scripts, effect-call
-// (spawn) edits, authored .eff value edits, one-slot ops — in one serializable file.
+// (spawn) edits, authored .eff value edits, effect transplants — in one serializable file.
 // This file travels WITH exported mods so a mod can be re-opened for further editing.
+//
+// Two distinct concepts live near each other here and must not be conflated:
+//   * TRANSPLANT — copying an emitter set out of a donor .eff into a fighter's .eff.
+//     That's the operation; see `TransplantOp`.
+//   * ONE-SLOT — scoping an edit so it only applies to specific costume/skin slots
+//     (c00, c07, c12, c50 …; NOT limited to 0–7). That's a modifier, expressed as
+//     `TransplantOp::one_slot_slots`, and it can ride on top of a transplant.
 
 use std::collections::HashMap;
 
@@ -70,13 +77,15 @@ pub struct EffMod {
     pub source_rel: String,
     #[serde(default)]
     pub authored: Vec<AuthoredEdit>,
-    #[serde(default)]
-    pub one_slot: Vec<OneSlotOp>,
+    /// Emitter sets copied in from a donor eff. Serialized as `one_slot` before the
+    /// transplant/one-slot split; the alias keeps pre-split projects loadable.
+    #[serde(default, alias = "one_slot")]
+    pub transplants: Vec<TransplantOp>,
 }
 
 impl EffMod {
     pub fn is_empty(&self) -> bool {
-        self.authored.is_empty() && self.one_slot.is_empty()
+        self.authored.is_empty() && self.transplants.is_empty()
     }
 }
 
@@ -84,7 +93,19 @@ impl EffMod {
 /// prefer the name match and fall back to the index with a warning (dump-revision drift).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthoredEdit {
+    /// The EMITTER SET name (e.g. `P_KirbyDash`) — what `apply_authored` matches against
+    /// `ptcl.emitter_list.emitter_sets[].name`.
     pub set_name: String,
+    /// The ENTRY / KIND name (e.g. `kirby_dash`) — a DIFFERENT namespace: this is what the
+    /// game spawns, what `TransplantOp::src_set_name` is resolved against (`entry_names`),
+    /// and what an effect alias hashes. The two are related by
+    /// `entries[i].emitter_set_id - 1 == set_idx`, not by position.
+    ///
+    /// Empty on projects saved before this field existed; callers that need a kind name must
+    /// skip such edits rather than fall back to `set_name`, which would name a kind that does
+    /// not exist and ship a carrier the game's loader can hang on.
+    #[serde(default)]
+    pub entry_name: String,
     pub set_idx: usize,
     pub emitter_name: String,
     pub emitter_idx: usize,
@@ -156,21 +177,65 @@ pub struct LiveTweak {
     pub speed: Option<f32>,
 }
 
-/// Copy an emitter set from a donor eff into this fighter's eff under a new entry name.
+/// Suffix used when the editor SUGGESTS a name for a transplanted entry.
+///
+/// This is a default for the name box only — the user may rename a transplant to anything,
+/// so nothing downstream may depend on it. The plugin is told each transplant's real kind
+/// mapping explicitly (`EffectAliasWire { from: hash(new_entry_name), to: donor }`), and
+/// that is what makes an arbitrary name resolve in game. The plugin's suffix matching is
+/// only an additive fallback, and it accepts the historical `_os` spelling too.
+pub const TRANSPLANT_SUFFIX: &str = "_tp";
+
+/// Prefix for the RUNTIME-ONLY clone of an edited fighter effect.
+///
+/// Authored edits cannot be applied to the fighter's own eff in a live match (its reparse
+/// rebuilds from the resident buffer and never re-reads the file), so the edited entry is
+/// cloned into the live carrier and the original kind is aliased onto the clone. That clone
+/// needs a name, and it must live in a namespace the user can never reach:
+///
+///  * NOT the transplant suffix — transplants take ANY user-chosen name, so a user could
+///    type the exact name the editor generated and the two would fight over one alias.
+///  * Reserved: [`is_reserved_entry_name`] rejects it in the transplant name box, so the
+///    collision is impossible by construction rather than merely unlikely.
+///
+/// This name never reaches an exported mod. On export the edits are applied to the fighter's
+/// OWN eff under its ORIGINAL entry name (`rebuild_eff_bytes` → `apply_authored`); the clone
+/// exists purely so the running game can be updated without a reload it does not support.
+pub const EDIT_CLONE_PREFIX: &str = "vsnedit_";
+
+/// True if `name` is in a namespace Visionary reserves for its own generated entries.
+///
+/// Used to keep user-chosen transplant names out of the editor's internal namespace.
+pub fn is_reserved_entry_name(name: &str) -> bool {
+    name.trim().to_lowercase().starts_with(EDIT_CLONE_PREFIX)
+}
+
+/// A TRANSPLANT: copy an emitter set from a donor eff into this fighter's eff, either
+/// under a new entry name or replacing an existing entry in place.
+///
+/// `one_slot_slots` is the (optional) ONE-SLOT scoping layered on top of the transplant —
+/// the transplant is the operation, the slot list narrows which costumes see it.
+///
+/// Was named `OneSlotOp` before the transplant/one-slot split. The struct name is invisible
+/// to serde, but the renamed `one_slot_slots` field carries a `serde(alias)` for its old
+/// on-disk name (`slots`) so projects saved before the split still load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OneSlotOp {
+pub struct TransplantOp {
     pub new_entry_name: String,
     /// Donor .eff relative to the export root ("" = same file as the target).
     pub src_file_rel: String,
     pub src_set_name: String,
     pub src_set_idx: usize,
-    /// Costume slots this op applies to (0 = c00 …). Empty = all costumes: the op lands
-    /// in the base ef_<fighter>.eff; otherwise it lands in ef_<fighter>_cXX.eff files.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub slots: Vec<u8>,
-    /// When set, the donor REPLACES this existing entry's emitter set(s) in place
-    /// (classic costume-scoped one-slot: every use switches, no ACMD redirect needed)
-    /// instead of being appended as a new entry.
+    /// ONE-SLOT scoping: costume slots this transplant applies to (0 = c00 …). Slot numbers
+    /// are real costume indices and are NOT limited to 0–7 — added-costume mods use much
+    /// larger ones. Empty = every costume: the transplant lands in the base
+    /// ef_<fighter>.eff; otherwise it lands in ef_<fighter>_cXX.eff files, one per slot.
+    /// Serialized as `slots` before the transplant/one-slot split.
+    #[serde(default, alias = "slots", skip_serializing_if = "Vec::is_empty")]
+    pub one_slot_slots: Vec<u8>,
+    /// When set, the donor REPLACES this existing entry's emitter set(s) in place — every
+    /// use switches, with no ACMD redirect needed — instead of being appended as a new
+    /// entry. This is how a one-slot-scoped transplant is normally authored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace_entry: Option<String>,
 }
@@ -187,4 +252,119 @@ pub fn fighter_from_source_rel(source_rel: &str) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().trim_start_matches("ef_").to_string())
         .unwrap_or_else(|| source_rel.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `modproject.json` exactly as builds before the transplant/one-slot rename wrote it:
+    /// `EffMod.one_slot` holding `OneSlotOp`s whose costume scoping lived in `slots`.
+    /// Both were renamed (`transplants` / `one_slot_slots`); the `serde(alias)`es are the
+    /// only thing keeping the user's existing saved projects loadable, so this pins them.
+    const LEGACY_PROJECT_JSON: &str = r#"{
+      "version": 1,
+      "name": "legacy_mod",
+      "fighters": {
+        "kirby": {
+          "display": "Kirby",
+          "acmd": {},
+          "effect_calls": {},
+          "effect_calls_full": {},
+          "eff": {
+            "source_rel": "effect/fighter/kirby/ef_kirby.eff",
+            "authored": [],
+            "one_slot": [
+              {
+                "new_entry_name": "alucard_backdash_os",
+                "src_file_rel": "effect/assist/alucard/ef_alucard.eff",
+                "src_set_name": "alucard_backdash",
+                "src_set_idx": 3
+              },
+              {
+                "new_entry_name": "kirby_swing_for_kirby_appeal",
+                "src_file_rel": "",
+                "src_set_name": "kirby_swing",
+                "src_set_idx": 7,
+                "slots": [0, 7, 12, 50],
+                "replace_entry": "kirby_appeal"
+              }
+            ]
+          },
+          "live_tweaks": []
+        }
+      }
+    }"#;
+
+    #[test]
+    fn legacy_project_file_still_deserializes() {
+        let project: ModProjectFile =
+            serde_json::from_str(LEGACY_PROJECT_JSON).expect("pre-rename project must still load");
+        let eff = project.fighters["kirby"]
+            .eff
+            .as_ref()
+            .expect("eff mod present");
+
+        // `one_slot` → `transplants`: both ops survive, in order.
+        assert_eq!(eff.transplants.len(), 2, "legacy `one_slot` array dropped");
+        assert!(!eff.is_empty());
+        assert_eq!(eff.transplants[0].new_entry_name, "alucard_backdash_os");
+        assert_eq!(
+            eff.transplants[0].src_file_rel,
+            "effect/assist/alucard/ef_alucard.eff"
+        );
+        assert_eq!(eff.transplants[0].src_set_idx, 3);
+        // Absent `slots` means "every costume" — no one-slot scoping.
+        assert!(eff.transplants[0].one_slot_slots.is_empty());
+        assert!(eff.transplants[0].replace_entry.is_none());
+
+        // `slots` → `one_slot_slots`: the one-slot scoping on the second (replace) op,
+        // including slots well past the vanilla c00–c07.
+        assert_eq!(eff.transplants[1].one_slot_slots, vec![0, 7, 12, 50]);
+        assert_eq!(
+            eff.transplants[1].replace_entry.as_deref(),
+            Some("kirby_appeal")
+        );
+    }
+
+    #[test]
+    fn legacy_project_round_trips_through_the_new_field_names() {
+        let loaded: ModProjectFile = serde_json::from_str(LEGACY_PROJECT_JSON).unwrap();
+        let written = serde_json::to_string(&loaded).unwrap();
+
+        // New saves use the new on-disk names…
+        assert!(written.contains("\"transplants\""), "{written}");
+        assert!(written.contains("\"one_slot_slots\""), "{written}");
+        assert!(!written.contains("\"one_slot\":"), "{written}");
+
+        // …and reloading them yields the same project.
+        let reloaded: ModProjectFile = serde_json::from_str(&written).unwrap();
+        let a = reloaded.fighters["kirby"].eff.as_ref().unwrap();
+        let b = loaded.fighters["kirby"].eff.as_ref().unwrap();
+        assert_eq!(a.transplants.len(), b.transplants.len());
+        for (x, y) in a.transplants.iter().zip(&b.transplants) {
+            assert_eq!(x.new_entry_name, y.new_entry_name);
+            assert_eq!(x.src_file_rel, y.src_file_rel);
+            assert_eq!(x.src_set_name, y.src_set_name);
+            assert_eq!(x.src_set_idx, y.src_set_idx);
+            assert_eq!(x.one_slot_slots, y.one_slot_slots);
+            assert_eq!(x.replace_entry, y.replace_entry);
+        }
+    }
+
+    /// The one-slot side must not assume the vanilla 8 costumes anywhere in the format.
+    #[test]
+    fn one_slot_scoping_survives_slot_numbers_past_the_vanilla_eight() {
+        let op = TransplantOp {
+            new_entry_name: "donor_os".into(),
+            src_file_rel: String::new(),
+            src_set_name: "donor".into(),
+            src_set_idx: 0,
+            one_slot_slots: vec![8, 15, 16, 99, 255],
+            replace_entry: Some("target".into()),
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let back: TransplantOp = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.one_slot_slots, vec![8, 15, 16, 99, 255]);
+    }
 }

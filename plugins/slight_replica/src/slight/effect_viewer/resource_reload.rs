@@ -349,11 +349,7 @@ pub fn resident_directory_state(dir_hash: u64) -> Option<ResidentDirectoryState>
 /// reports the state and lets the caller wait for the worker.
 pub fn release_resident_directory(
     dir_hash: u64,
-) -> Option<(
-    ResidentDirectoryState,
-    ResidentDirectoryState,
-    bool,
-)> {
+) -> Option<(ResidentDirectoryState, ResidentDirectoryState, bool)> {
     let fs = filesystem_info()?;
     let directory_index = dir_info_index_for_path_hash(dir_hash)?;
     if fs.loaded_directories.is_null()
@@ -371,9 +367,7 @@ pub fn release_resident_directory(
             ref_count: (*directory).ref_count.load(Ordering::Acquire),
             flags: (*directory).flags,
             state: (*directory).state as u8,
-            incoming_request_count: (*directory)
-                .incoming_request_count
-                .load(Ordering::Acquire),
+            incoming_request_count: (*directory).incoming_request_count.load(Ordering::Acquire),
         }
     };
     let released = before.ref_count != 0;
@@ -386,9 +380,7 @@ pub fn release_resident_directory(
             ref_count: (*directory).ref_count.load(Ordering::Acquire),
             flags: (*directory).flags,
             state: (*directory).state as u8,
-            incoming_request_count: (*directory)
-                .incoming_request_count
-                .load(Ordering::Acquire),
+            incoming_request_count: (*directory).incoming_request_count.load(Ordering::Acquire),
         }
     };
     unsafe { skyline::nn::os::UnlockMutex(fs._mutex.cast()) };
@@ -632,7 +624,7 @@ pub fn replace_loaded_file(path_hash: u64) -> bool {
 
 /// Diagnostic view of the RESIDENT (in-memory) copy of a loaded file: the arc table's
 /// decomp size, the first bytes, and whether `needle` occurs in the buffer. Tells us
-/// whether the game's loaded data is vanilla or our merged bytes (one-slot entry names
+/// whether the game's loaded data is vanilla or our merged bytes (transplant entry names
 /// end in `_os`, so `b"_os\0"` only exists in a merged eff's string table).
 pub fn resident_probe(path_hash: u64, needle: &[u8]) -> Option<(usize, [u8; 8], bool)> {
     let fs_info = filesystem_info()?;

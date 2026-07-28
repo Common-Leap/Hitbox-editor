@@ -299,7 +299,8 @@ fn hook_resolve_kind(mgr: *mut u64, kind_hash: u64) -> *const u8 {
     let first = !FIRST.swap(true, Ordering::Relaxed);
     let h40 = kind_hash & 0xff_ffff_ffff;
     let label = crate::slight::effect_viewer::effect_names::label(h40);
-    let interesting = first || label.ends_with("_os");
+    let interesting =
+        first || crate::slight::effect_viewer::effect_names::is_transplant_label(&label);
     if interesting {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1097,7 +1098,7 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
         }
     }
     // Piggy-back donor eff loads onto the target fighter's own effect load, so a
-    // cross-fighter one-slot has its donor content resident from match start. Enqueue
+    // cross-fighter transplant has its donor content resident from match start. Enqueue
     // only (the per-frame pump does the res-service load + retry) to avoid re-entrancy.
     if !IN_DONOR_LOAD.load(Ordering::Relaxed) {
         if let Some(path_hash) = path_hash_from_search_index(*search_index) {
@@ -1151,7 +1152,7 @@ fn hook_unload_effects(manager: *mut u64, handle: u32) {
 //
 // `load_effects` takes CALLER-CHOSEN handles: smashline loads extra eff files for a
 // fighter with `fighter_handle + k * 2000` (see HDR smashline effects.rs). We do the
-// same for one-slot donors — the donor fighter's VANILLA eff becomes resident, and the
+// same for transplant donors — the donor fighter's VANILLA eff becomes resident, and the
 // kind alias renders the copy through it. No file serving involved (which the game's
 // loader bypasses entirely on this Eden setup).
 
@@ -1913,16 +1914,12 @@ pub unsafe fn pump_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccesso
         let dir_hash = smash::hash40(eff_dir(&ef_file));
         let file = rr::resident_file_state(file_hash);
         let directory = rr::resident_directory_state(dir_hash);
-        let file_released = file
-            .as_ref()
-            .map_or(true, |state| {
-                !state.filepath_loaded && state.data == 0 && state.ref_count == 0
-            });
-        let directory_released = directory
-            .as_ref()
-            .map_or(true, |state| {
-                state.ref_count == 0 && state.incoming_request_count == 0
-            });
+        let file_released = file.as_ref().map_or(true, |state| {
+            !state.filepath_loaded && state.data == 0 && state.ref_count == 0
+        });
+        let directory_released = directory.as_ref().map_or(true, |state| {
+            state.ref_count == 0 && state.incoming_request_count == 0
+        });
         let waited = AUTO_CARRIER_POLL.fetch_add(1, Ordering::Relaxed);
         if waited % 120 == 0 || (file_released && directory_released) {
             dlog(&format!(
@@ -2039,8 +2036,7 @@ pub unsafe fn pump_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccesso
     let generation = DONOR_BYTES_GEN.load(Ordering::Acquire);
     let disk_generation = CARRIER_DISK_LOADED_GEN.load(Ordering::Acquire);
     let file_hash = smash::hash40(&ef_file.to_lowercase());
-    let file_state =
-        crate::slight::effect_viewer::resource_reload::resident_file_state(file_hash);
+    let file_state = crate::slight::effect_viewer::resource_reload::resident_file_state(file_hash);
     let dir_state = crate::slight::effect_viewer::resource_reload::resident_directory_state(
         smash::hash40(eff_dir(&ef_file)),
     );
@@ -2406,7 +2402,9 @@ fn build_remap_from_served(ef_file: &str) {
     for (name, _) in &names {
         let lo = name.to_lowercase();
         let real = smash::hash40(&lo);
-        remap.insert(smash::hash40(&format!("{lo}_os")), real);
+        for suffix in crate::slight::effect_viewer::effect_names::TRANSPLANT_SUFFIXES {
+            remap.insert(smash::hash40(&format!("{lo}{suffix}")), real);
+        }
         carrier_kinds.insert(real);
         n += 1;
     }
@@ -2715,7 +2713,7 @@ fn retry_pending_donors(manager: *mut u64) {
     let mut done: Vec<usize> = Vec::new();
     for (i, p) in pend.iter_mut().enumerate() {
         p.tries += 1;
-        // Give up a donor whose bytes are never served (stale/foreign one-slot the editor listed
+        // Give up a donor whose bytes are never served (stale/foreign transplant the editor listed
         // but has no buffer for, e.g. a leftover ridley/bomberman). Retrying it forever wasted the
         // combined heap cap every frame and starved the real donor — the alucard-invisible bug.
         if !p.filled && p.read_misses >= 5 {
@@ -2833,7 +2831,7 @@ fn retry_pending_donors(manager: *mut u64) {
                             p.filled = rp.is_some();
                             kept = p.filled;
                         } else if read.is_none() {
-                            // Bytes aren't served for this donor (stale/foreign one-slot the editor
+                            // Bytes aren't served for this donor (stale/foreign transplant the editor
                             // sent but has no buffer for) — give up so it stops re-reserving the
                             // cap every frame and starving real donors. Was the alucard-starve bug.
                             p.read_misses += 1;
@@ -2955,7 +2953,7 @@ fn retry_pending_donors(manager: *mut u64) {
                 .or_default()
                 .insert(p.folder_hash, p.derived);
             // The co-load registered the donor's REAL kinds (e.g. `alucard_backdash`) with
-            // valid GPU bindings. But the one-slot redirect points the move at the MERGED
+            // valid GPU bindings. But the transplant redirect points the move at the MERGED
             // `_os` name (`alucard_backdash_os`, which lives in kirby's eff → GPU-broken). So
             // build a remap `hash(X_os) → hash(X)` from the donor's entry names; the effect
             // hook applies it as a final rewrite so the spawn lands on the real co-loaded kind.
@@ -2964,9 +2962,11 @@ fn retry_pending_donors(manager: *mut u64) {
                 let names = unsafe { eff_entry_names(buf) };
                 let mut remap = CO_LOADED_REMAP.lock();
                 for (name, _) in &names {
-                    let real = smash::hash40(&name.to_lowercase());
-                    let os = smash::hash40(&format!("{}_os", name.to_lowercase()));
-                    remap.insert(os, real);
+                    let lo = name.to_lowercase();
+                    let real = smash::hash40(&lo);
+                    for suffix in crate::slight::effect_viewer::effect_names::TRANSPLANT_SUFFIXES {
+                        remap.insert(smash::hash40(&format!("{lo}{suffix}")), real);
+                    }
                 }
                 dlog(&format!(
                     "co_load_remap {} entries from {}",
@@ -3086,7 +3086,7 @@ pub fn pump_force_reread() {
 /// + returns 1 when the handle is present, and `unload_effects` never removes it — so a
 /// reparse is a no-op and NEW entry names are never registered (`req` NOT-FOUND). We make the
 /// early-out MISS by mangling the matched node's KEY so the lookup fails; `load_effects` then
-/// takes the full path, re-hashes every entry name (registering the new one-slot kinds) and
+/// takes the full path, re-hashes every entry name (registering the new transplant kinds) and
 /// rebuilds the sets. No unlink/free — the stale node is inert (its key never matches again),
 /// and the old slot (free byte already set by unload_effects) is reused/GC'd. Returns true if
 /// a node was found + mangled.
@@ -3292,7 +3292,7 @@ fn do_force_reread(ef_path: &str) {
         probe_names.extend(
             names
                 .iter()
-                .filter(|(n, _)| n.ends_with("_os"))
+                .filter(|(n, _)| crate::slight::effect_viewer::effect_names::is_transplant_label(n))
                 .map(|(n, _)| n.as_str()),
         );
         for name in probe_names {
@@ -3396,7 +3396,7 @@ pub fn install_hooks() {
 /// ef_kirby.eff FILE). Reparsing the file hash only ever matched a bogus handle-0 slot we
 /// created and did nothing. This targets the FOLDER slot the game actually loaded, so the
 /// unload/reload re-reads the folder's ef file — which ARCropolis redirects to our merged
-/// eff (donor baked in), making one-slot entries resident.
+/// eff (donor baked in), making transplant entries resident.
 pub fn reparse_game_path(game_path: &str) -> usize {
     let manager = effect_manager();
     if manager.is_null() {
@@ -3457,4 +3457,372 @@ pub fn debug_line() -> String {
         donor_debug_line(),
         crate::slight::effect_viewer::resource_reload::debug_line(),
     )
+}
+
+// ── Runtime emitter field probe ──────────────────────────────────────────────
+
+/// One-shot probe: dump every f32 in each RUNTIME emitter struct of a named effect kind.
+///
+/// Purpose: find the offset of the per-emitter COLOUR fields inside the live emitter struct.
+/// `EffectModule::set_rgb` is keyed by effect HANDLE, so it can only tint a whole effect —
+/// per-emitter colour needs a direct write, and the only unknown is where in the emitter the
+/// colour lives. The set/emitter chain itself is already mapped (`set_object_debug`):
+/// per-set array stride 0x38, `+0x18` = emitters pointer, emitter stride `0x3e0`.
+///
+/// This dumps `offset=value` for every plausible f32 in each emitter. Correlating that
+/// against the SAME entry's `color0_r/g/b` in the .eff (known host-side) identifies the
+/// offset unambiguously — no guessing, and no eff parser needed in the plugin.
+///
+/// Trigger: put one effect entry name (e.g. `kirby_attack_arc`) in
+/// `sd:/slight/probe_emitters.txt`. Runs once per boot, on the game thread, then never again.
+/// Output: `sd:/effect_viewer_emitter_floats.txt`.
+const EMITTER_STRIDE: usize = 0x3e0;
+static EMITTER_PROBE_DONE: AtomicBool = AtomicBool::new(false);
+
+pub fn probe_emitter_fields() {
+    if EMITTER_PROBE_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Ok(raw) = std::fs::read_to_string("sd:/slight/probe_emitters.txt") else {
+        return;
+    };
+    // Only mark done once the file exists — otherwise a missing file would latch the probe
+    // off for the whole boot before the user ever writes one.
+    EMITTER_PROBE_DONE.store(true, Ordering::Relaxed);
+
+    let manager = effect_manager();
+    if manager.is_null() {
+        let _ = std::fs::write(
+            "sd:/effect_viewer_emitter_floats.txt",
+            format!(
+                "build={}\neffect manager unavailable\n",
+                super::live_eff::BUILD_TAG
+            ),
+        );
+        return;
+    }
+
+    let mut out = format!(
+        "build={}\nemitter stride={EMITTER_STRIDE:#x}\n",
+        super::live_eff::BUILD_TAG
+    );
+    for name in raw.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let h40 = smash::hash40(&name.to_lowercase());
+        let (diag, entry_ptr) = unsafe { resolve_kind_replica(manager, h40) };
+        let Some(ptr) = entry_ptr else {
+            out.push_str(&format!("\n=== {name}: UNRESOLVED ({diag}) ===\n"));
+            continue;
+        };
+        let entry = unsafe { std::slice::from_raw_parts(ptr, 0x10) };
+        let set_id = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+        let slot = diag
+            .split("slot=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<u32>().ok());
+        let (Some(slot), true) = (slot, set_id > 0) else {
+            out.push_str(&format!(
+                "\n=== {name}: set_id={set_id} slot={slot:?} ===\n"
+            ));
+            continue;
+        };
+
+        unsafe {
+            // Walk mgr → set-object array → this slot's set object → per-set entry.
+            let p1 = *((manager as usize + 0x194d0) as *const usize);
+            let arr = if p1 != 0 {
+                *((p1 + 0x98) as *const usize)
+            } else {
+                0
+            };
+            let set_obj = if arr != 0 {
+                *((arr + slot as usize * 8) as *const usize)
+            } else {
+                0
+            };
+            if set_obj == 0 {
+                out.push_str(&format!("\n=== {name}: set object null ===\n"));
+                continue;
+            }
+            let sets = *((set_obj + 0x58) as *const usize);
+            if sets == 0 {
+                out.push_str(&format!("\n=== {name}: per-set array null ===\n"));
+                continue;
+            }
+            let e = sets + (set_id as usize - 1) * 0x38;
+            let emitter_count = *((e + 4) as *const i32);
+            let emitters = *((e + 0x18) as *const usize);
+            // Same heap-window guard the rest of this file uses: reading a bogus pointer
+            // faults or hangs the game, which is far worse than a missing probe.
+            let ok = emitters >= 0x10_0000_0000 && emitters < 0x14_0000_0000 && emitters & 7 == 0;
+            out.push_str(&format!(
+                "\n=== {name} set_id={set_id} slot={slot} emitters={emitter_count} ptr={emitters:#x} mapped={ok} ===\n"
+            ));
+            if !ok || emitter_count <= 0 {
+                continue;
+            }
+            for i in 0..(emitter_count as usize).min(16) {
+                let base = emitters + i * EMITTER_STRIDE;
+                out.push_str(&format!("--- emitter {i} @ {base:#x} ---\n"));
+                // RAW HEX, unfiltered. The first pass dumped only "plausible" non-zero
+                // floats and that hid two things that matter: a zero colour channel, and any
+                // POINTER to a colour key table (colours may not be inline at all — the eff
+                // stores them in EmitterStatic key tables). Hex costs ~2 KB per emitter and
+                // lets the host extract floats AND pointers without another game run.
+                for off in (0..EMITTER_STRIDE).step_by(16) {
+                    let mut line = format!("{off:#05x}:");
+                    for b in 0..16 {
+                        line.push_str(&format!(" {:02x}", *((base + off + b) as *const u8)));
+                    }
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+                // Follow one level of POINTERS. The eff's real colours (0.7086614,
+                // 0.4444444, ...) do NOT appear anywhere in the emitter struct itself, so
+                // they live in a separate allocation — the colour KEY TABLES. Dumping each
+                // pointer target's floats is what lets the host match them against the eff
+                // and identify which pointer is which colour source.
+                out.push_str("  -- pointer targets --\n");
+                for off in (0..EMITTER_STRIDE).step_by(8) {
+                    let v = *((base + off) as *const u64) as usize;
+                    if v < 0x10_0000_0000 || v >= 0x14_0000_0000 || v & 7 != 0 {
+                        continue;
+                    }
+                    let mut floats = String::new();
+                    for k in 0..24usize {
+                        let f = *((v + k * 4) as *const f32);
+                        if f.is_finite() && f.abs() <= 1e6 {
+                            floats.push_str(&format!(" {:+.6}", f));
+                        } else {
+                            floats.push_str(" .");
+                        }
+                    }
+                    out.push_str(&format!("  ptr@{off:#05x} -> {v:#x}:{floats}\n"));
+                }
+            }
+        }
+    }
+    let _ = std::fs::write("sd:/effect_viewer_emitter_floats.txt", out);
+    crate::slight::diag::note("emitter field probe written");
+}
+
+// ── Runtime emitter poke (per-emitter modifier experiment) ───────────────────
+
+/// Live per-emitter field writer, driven from `sd:/slight/poke_emitter.txt`.
+///
+/// The dump showed every emitter carrying two groups of three `1.0`s at a 0x14 stride
+/// (0x1c0/0x1d4/0x1e8 and 0x200/0x214/0x228), each followed by a scalar that is identical
+/// between the groups. That is the shape of two RGB MULTIPLIERS (color0 / color1) held as
+/// animated-parameter structs with the value at +0 — 1.0 because they multiply the parsed
+/// eff data rather than replacing it. If so, writing them gives true PER-EMITTER colour
+/// without any eff reload, which is what `EffectModule::set_rgb` cannot express (it is
+/// keyed by effect handle, so it can only tint a whole effect).
+///
+/// Format, one poke per line — `#` comments and blank lines ignored:
+/// ```text
+/// kirby_attack_arc 2 0x1c0 0.0     # set emitter 2's field at 0x1c0 to 0.0
+/// ```
+/// Values are re-applied EVERY frame (the game rewrites them from its own update), but the
+/// file is only re-read every few seconds and the resolved pointers are cached, so an empty
+/// or absent file costs one relaxed atomic load per tick.
+struct EmitterPoke {
+    emitter: usize,
+    offset: usize,
+    value: f32,
+}
+/// Resolved target: the emitter array base for one kind, plus that kind's pokes.
+struct PokeTarget {
+    emitters: usize,
+    count: usize,
+    pokes: Vec<EmitterPoke>,
+}
+static POKE_TARGETS: parking_lot::Mutex<Vec<PokeTarget>> = parking_lot::Mutex::new(Vec::new());
+static POKE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static POKE_TICK: AtomicU64 = AtomicU64::new(0);
+const POKE_RELOAD_FRAMES: u64 = 180;
+
+/// Re-read the poke file and re-resolve each kind's live emitter array.
+fn poke_reload() {
+    let mut targets: Vec<PokeTarget> = Vec::new();
+    if let Ok(raw) = std::fs::read_to_string("sd:/slight/poke_emitter.txt") {
+        let manager = effect_manager();
+        if !manager.is_null() {
+            // kind name → pokes, preserving file order.
+            let mut by_kind: Vec<(String, Vec<EmitterPoke>)> = Vec::new();
+            for line in raw.lines() {
+                let line = line.split('#').next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let mut it = line.split_whitespace();
+                let (Some(name), Some(em), Some(off), Some(val)) =
+                    (it.next(), it.next(), it.next(), it.next())
+                else {
+                    continue;
+                };
+                let em = match em.parse::<usize>() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let off = match off.strip_prefix("0x") {
+                    Some(h) => usize::from_str_radix(h, 16).ok(),
+                    None => off.parse::<usize>().ok(),
+                };
+                let (Some(off), Ok(value)) = (off, val.parse::<f32>()) else {
+                    continue;
+                };
+                // Offsets must stay inside the emitter struct — a stray write outside it
+                // would corrupt the neighbouring emitter (or worse) rather than fail loudly.
+                if off + 4 > EMITTER_STRIDE {
+                    continue;
+                }
+                let poke = EmitterPoke {
+                    emitter: em,
+                    offset: off,
+                    value,
+                };
+                match by_kind.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, v)) => v.push(poke),
+                    None => by_kind.push((name.to_string(), vec![poke])),
+                }
+            }
+            for (name, pokes) in by_kind {
+                if let Some((emitters, count)) = resolve_emitter_array(manager, &name) {
+                    targets.push(PokeTarget {
+                        emitters,
+                        count,
+                        pokes,
+                    });
+                }
+            }
+        }
+    }
+    POKE_ACTIVE.store(!targets.is_empty(), Ordering::Relaxed);
+    *POKE_TARGETS.lock() = targets;
+}
+
+/// kind name → (live emitter array base, emitter count), or None if not currently loaded.
+fn resolve_emitter_array(manager: *mut u64, name: &str) -> Option<(usize, usize)> {
+    let h40 = smash::hash40(&name.to_lowercase());
+    unsafe {
+        let (diag, entry_ptr) = resolve_kind_replica(manager, h40);
+        let ptr = entry_ptr?;
+        let entry = std::slice::from_raw_parts(ptr, 0x10);
+        let set_id = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+        if set_id == 0 {
+            return None;
+        }
+        let slot: u32 = diag
+            .split("slot=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())?;
+        let p1 = *((manager as usize + 0x194d0) as *const usize);
+        if p1 == 0 {
+            return None;
+        }
+        let arr = *((p1 + 0x98) as *const usize);
+        if arr == 0 {
+            return None;
+        }
+        let set_obj = *((arr + slot as usize * 8) as *const usize);
+        if set_obj == 0 {
+            return None;
+        }
+        let sets = *((set_obj + 0x58) as *const usize);
+        if sets == 0 {
+            return None;
+        }
+        let e = sets + (set_id as usize - 1) * 0x38;
+        let count = *((e + 4) as *const i32);
+        let emitters = *((e + 0x18) as *const usize);
+        // Same heap-window guard used everywhere else here: a bogus pointer faults or hangs
+        // the game, and this one gets WRITTEN through.
+        if count <= 0
+            || emitters < 0x10_0000_0000
+            || emitters >= 0x14_0000_0000
+            || emitters & 7 != 0
+        {
+            return None;
+        }
+        Some((emitters, count as usize))
+    }
+}
+
+/// Game thread, once per frame. Re-applies every poke (the game rewrites these fields from
+/// its own per-frame update, so a one-shot write would be visible for a single frame).
+pub fn pump_emitter_pokes() {
+    let n = POKE_TICK.fetch_add(1, Ordering::Relaxed);
+    if n % POKE_RELOAD_FRAMES == 0 {
+        poke_reload();
+    }
+    if !POKE_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(targets) = POKE_TARGETS.try_lock() else {
+        return;
+    };
+    for t in targets.iter() {
+        for p in &t.pokes {
+            if p.emitter >= t.count {
+                continue;
+            }
+            unsafe {
+                let addr = t.emitters + p.emitter * EMITTER_STRIDE + p.offset;
+                *(addr as *mut f32) = p.value;
+            }
+        }
+    }
+}
+
+/// Carrier readiness, for diagnostics: 0 = none staged, 1 = staged/building, 2 = live.
+pub fn carrier_state() -> u8 {
+    AUTO_CARRIER_STATE.load(Ordering::Relaxed) as u8
+}
+
+/// How many kinds the current carrier snapshot can serve — pairs with [`carrier_state`] to
+/// distinguish "carrier not up yet" from "carrier up but does not know this kind".
+pub fn carrier_kind_count() -> usize {
+    AUTO_CARRIER_KINDS.lock().len()
+}
+
+/// Per-frame: report carrier readiness to the editor, but only when it CHANGES.
+///
+/// Cheap by construction — two relaxed loads and a comparison when nothing moved, which is
+/// the overwhelmingly common case.
+static LAST_CARRIER_REPORT: AtomicU64 = AtomicU64::new(u64::MAX);
+pub fn pump_carrier_status() {
+    let state = AUTO_CARRIER_STATE.load(Ordering::Relaxed) as u64;
+    let kinds = match AUTO_CARRIER_KINDS.try_lock() {
+        Some(k) => k.len() as u64,
+        None => return,
+    };
+    // `state == 2` only means the carrier was STAGED — the battle object may not exist yet,
+    // and `spawn_via_carrier` needs the live object, not the state. Reporting state alone
+    // cleared the editor's spinner before anything could actually spawn. Report whether the
+    // object resolves, which is the same check the spawn path makes.
+    let spawned = unsafe { auto_carrier_boma().is_some() } as u64;
+    let packed = (state << 33) | (spawned << 32) | kinds;
+    // Emit on CHANGE, plus a slow heartbeat.
+    //
+    // Change-only was not enough: `emit` drops to an SD-file fallback when no client is
+    // connected, so the single report fired on the first fighter tick — before the editor
+    // connects — and nothing changed afterwards, so the editor never received one at all and
+    // permanently believed the plugin could not report readiness. The heartbeat guarantees a
+    // late-connecting client sees the current state within ~2 seconds.
+    static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+    let beat = HEARTBEAT.fetch_add(1, Ordering::Relaxed) % 120 == 0;
+    if LAST_CARRIER_REPORT.swap(packed, Ordering::Relaxed) == packed && !beat {
+        return;
+    }
+    crate::rust_extender::debugging::debuggable_server::notify_carrier_status(
+        state as u8,
+        kinds as usize,
+        spawned != 0,
+    );
+}
+
+/// Make the next [`pump_carrier_status`] re-send unconditionally (new client connected).
+pub fn reset_carrier_status_latch() {
+    LAST_CARRIER_REPORT.store(u64::MAX, Ordering::Relaxed);
 }

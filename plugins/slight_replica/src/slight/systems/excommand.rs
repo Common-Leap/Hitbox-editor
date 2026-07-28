@@ -302,6 +302,13 @@ fn collect_target_ids(kind: CommandName, boid_filter: Option<u32>) -> Vec<u64> {
         .collect()
 }
 
+/// Plugin STATE files that live in `USER_DIR` but are not excommand scripts.
+///
+/// `poll_sd` consumes every `.txt` it finds, so without this it ate the files the plugin
+/// itself writes there. `client_id.txt` is rewritten on every editor connect, which made
+/// this permanent: the poller retried it every tick forever (see the rename note below).
+const RESERVED_USER_FILES: &[&str] = &["client_id.txt", "gateway.txt"];
+
 fn poll_sd() {
     let Ok(entries) = std::fs::read_dir(USER_DIR) else {
         return;
@@ -312,6 +319,12 @@ fn poll_sd() {
             continue;
         };
         if name.starts_with('.') || name.ends_with(".done") {
+            continue;
+        }
+        if RESERVED_USER_FILES
+            .iter()
+            .any(|r| name.eq_ignore_ascii_case(r))
+        {
             continue;
         }
         if !path
@@ -327,7 +340,17 @@ fn poll_sd() {
         for line in csv::split_lines(&text) {
             parse_line(&line);
         }
-        let _ = std::fs::rename(&path, path.with_extension("done"));
+        // Clear the destination first. The Switch/emulator FS fails RenameFile when the
+        // target exists (POSIX would silently replace it), so a leftover `.done` from an
+        // earlier run made this rename fail EVERY tick — the script was re-read, re-parsed
+        // and re-renamed forever, several hundred times a second, on the game thread.
+        let done = path.with_extension("done");
+        let _ = std::fs::remove_file(&done);
+        if std::fs::rename(&path, &done).is_err() {
+            // Still stuck: delete outright rather than let it spin. Losing one consumed
+            // command file is strictly better than an unbounded per-frame retry.
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 

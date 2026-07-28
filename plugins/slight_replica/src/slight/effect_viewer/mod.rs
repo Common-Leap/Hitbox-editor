@@ -31,7 +31,7 @@ static PROXY_HANDLES: std::sync::LazyLock<
 /// Allows an intentional ACMD proxy request through the carrier-effect suppression hooks.
 static CARRIER_PROXY_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// Editor-facing one-slot hash for the current carrier request. The carrier instantiates the
+/// Editor-facing transplant hash for the current carrier request. The carrier instantiates the
 /// donor's real kind, but live tracking and pins must remain keyed to `<copy>_os`.
 static CARRIER_PROXY_LOGICAL_HASH: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -164,7 +164,7 @@ pub fn track_spawn(
     // so this fires regardless of which one ACMD actually used (req_follow/on_joint/
     // continual/time_follow guessing kept missing). On a refused `_os` request, re-fire
     // controlled variants from this same game-thread context to localize the ADD gate.
-    if effect_names::label(eff_hash).ends_with("_os")
+    if effect_names::is_transplant_label(&effect_names::label(eff_hash))
         || crate::slight::effect_viewer::effect_reload::is_coloaded_kind(eff_hash)
     {
         use std::io::Write;
@@ -401,7 +401,7 @@ fn remap_eff(eff_hash: phx::Hash40) -> phx::Hash40 {
     };
     // Log only when the input is a known merged `_os` kind, so we can see whether remap_eff
     // is even reached for the refused spawn and what it decided.
-    if effect_names::label(eff_hash.hash).ends_with("_os") {
+    if effect_names::is_transplant_label(&effect_names::label(eff_hash.hash)) {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)

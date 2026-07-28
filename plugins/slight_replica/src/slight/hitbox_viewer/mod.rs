@@ -14,6 +14,16 @@
 //!   24 absorbable, 25 flinchless, 26 disable_hitlag, 27 direct, 28 ground_air,
 //!   29 hitbits, 30 collision_part, 31 friendly_fire, 32 effect(h), 33 sfx_level,
 //!   34 collision_sound, 35 type.
+//!
+//! Those are `smash_script`'s parameter names, which are a stale Smash-4-era RE pass. The
+//! decompiled Ultimate scripts (and the editor) name the SAME positions differently — this
+//! is a naming difference only, the slots line up exactly:
+//!   17 ATTACK_SETOFF_KIND, 18 ATTACK_LR_CHECK, 19 is_clang, 20 is_add_attack,
+//!   21 hitbox_attr, 22 ground_or_air, 23 is_mtk, 24 is_shield_disable, 25 is_reflectable,
+//!   26 is_absorbable, 27 is_landing_attack, 28 COLLISION_SITUATION_MASK,
+//!   29 COLLISION_CATEGORY_MASK, 30 COLLISION_PART_MASK, 31 no_finish_camera,
+//!   32 collision_attr(h), 33 ATTACK_SOUND_LEVEL, 34 COLLISION_SOUND_ATTR, 35 ATTACK_REGION.
+//! Slots 17..35 are rewritable from `HbOverrides` (see `rewrite_attack_args`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -134,12 +144,48 @@ pub struct CaptureLine {
     pub args: Vec<LuaArg>,
 }
 
+/// One completed motion playback: "every capture line this motion is going to produce has
+/// been recorded". Streamed to the editor as `AcmdCaptureEnd` so it can adopt a COMPLETE
+/// script instead of whatever had arrived a few frames into the move.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct CaptureEnd {
+    pub kind: i32,
+    pub motion: u64,
+}
+
 /// Everything unique captured this session (re-sent whole on client resync).
 static CAPTURE_LOG: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 /// Dedupe keys for CAPTURE_LOG entries.
 static CAPTURE_SEEN: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Not-yet-sent indices into CAPTURE_LOG.
 static CAPTURE_PENDING: LazyLock<Mutex<Vec<usize>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Completed motions not yet sent (drained strictly AFTER the lines they terminate).
+static END_PENDING: LazyLock<Mutex<Vec<CaptureEnd>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// What one battle object is currently playing, for end-of-motion detection.
+#[derive(Clone, Copy)]
+struct MotionWatch {
+    motion: u64,
+    kind: i32,
+    /// Last MotionModule::frame seen — a decrease means the motion restarted.
+    frame: f32,
+    /// A non-duplicate capture line was recorded during THIS playback, so an end marker
+    /// is worth sending (otherwise every idle/walk motion would emit one every second).
+    captured: bool,
+    /// End already announced for this playback.
+    ended: bool,
+}
+
+/// boid → current motion playback. Bounded by the live battle-object count.
+static MOTION_WATCH: LazyLock<Mutex<HashMap<u32, MotionWatch>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Mirrors `!MOTION_WATCH.is_empty()` so the per-frame watch can bail on one relaxed load.
+///
+/// `capture_tick` runs for EVERY fighter and article on EVERY frame. Until something is
+/// actually captured the map is empty, so without this the whole roster paid a lock plus
+/// several `MotionModule` calls per frame to look up an entry that was never there.
+static MOTION_WATCH_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// Small on-SD counters for distinguishing capture failures from editor/network failures.
 static CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static EFFECT_CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -233,7 +279,10 @@ pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     let mut log = CAPTURE_LOG.lock();
     let idx = log.len();
     log.push(line);
+    drop(log);
     CAPTURE_PENDING.lock().push(idx);
+    // Arm the end-of-motion marker: this playback produced data the editor has not seen.
+    mark_capture_motion((*boma).battle_object_id, motion, kind, frame);
     CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if func.contains("EFFECT") {
         EFFECT_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -265,10 +314,143 @@ pub fn take_pending(max: usize) -> Vec<CaptureLine> {
     lines
 }
 
+/// Drain completed-motion markers — but ONLY once every capture line recorded before them
+/// has already been handed out, so the editor never sees "motion finished" ahead of the
+/// lines that motion produced (the facade drains at most 32 lines per notify tick).
+pub fn take_pending_ends(max: usize) -> Vec<CaptureEnd> {
+    if !CAPTURE_PENDING.lock().is_empty() {
+        return Vec::new();
+    }
+    let mut q = END_PENDING.lock();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let n = q.len().min(max);
+    q.drain(..n).collect()
+}
+
 /// Re-queue the whole capture log (new editor client connected).
 pub fn requeue_all() {
     let n = CAPTURE_LOG.lock().len();
     *CAPTURE_PENDING.lock() = (0..n).collect();
+}
+
+/// Note that `boid` produced a fresh capture line while playing `motion`. Starts (or
+/// re-arms) the watch that later emits the end-of-motion marker.
+///
+/// This can be the first thing to observe a motion change (an ACMD script can run before the
+/// line callback on the frame a move is cancelled into another), so it also closes out the
+/// motion it replaces — otherwise a cancelled move's end marker would be dropped.
+fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) {
+    let mut finished: Option<(i32, u64)> = None;
+    {
+        let mut watch = MOTION_WATCH.lock();
+        // Battle object ids are reused across matches; keep the map from growing unbounded.
+        if watch.len() > 128 {
+            watch.clear();
+        }
+        let same_motion = match watch.get(&boid) {
+            Some(w) => w.motion == motion,
+            None => false,
+        };
+        if same_motion {
+            if let Some(w) = watch.get_mut(&boid) {
+                w.captured = true;
+                w.kind = kind;
+            }
+        } else {
+            if let Some(w) = watch.get(&boid) {
+                if w.captured && !w.ended {
+                    finished = Some((w.kind, w.motion));
+                }
+            }
+            watch.insert(
+                boid,
+                MotionWatch {
+                    motion,
+                    kind,
+                    frame,
+                    captured: true,
+                    ended: false,
+                },
+            );
+        }
+        // Keep the per-frame fast path's flag in step with the map under the same lock.
+        MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some((kind, motion)) = finished {
+        push_end(kind, motion);
+    }
+}
+
+fn push_end(kind: i32, motion: u64) {
+    let mut q = END_PENDING.lock();
+    // The editor only needs to know THAT the motion finished; collapse duplicates that
+    // pile up while a long capture batch is still draining.
+    if q.iter().any(|e| e.kind == kind && e.motion == motion) {
+        return;
+    }
+    q.push(CaptureEnd { kind, motion });
+}
+
+/// Per-agent, per-frame end-of-motion watch (agent_extender line callback).
+///
+/// "The move finished" is taken from the game itself rather than a timer: a motion is over
+/// once `MotionModule::frame` reaches `MotionModule::end_frame` (the animation ran out, which
+/// is exactly when the ACMD script stops executing), or once the agent switches to a different
+/// motion / restarts the same one (cancel, interrupt, looping jab). Only motions that actually
+/// recorded a new capture line emit a marker.
+pub unsafe fn capture_tick(lua_state: u64) {
+    // Fast path FIRST: this runs for every fighter and article every frame, and until a
+    // capture has actually been recorded there is nothing to watch. One relaxed atomic
+    // load, no lock and no game calls, is the difference between free and a per-agent
+    // per-frame cost the whole roster pays.
+    if !MOTION_WATCH_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return;
+    }
+    let boid = (*boma).battle_object_id;
+
+    let mut finished: Option<(i32, u64)> = None;
+    {
+        let mut watch = MOTION_WATCH.lock();
+        // Resolve the entry BEFORE querying MotionModule: an object nobody captured from
+        // must not pay for motion_kind/frame/end_frame.
+        if !watch.contains_key(&boid) {
+            return;
+        }
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let end = smash::app::lua_bind::MotionModule::end_frame(boma);
+        let Some(w) = watch.get_mut(&boid) else {
+            return;
+        };
+        if w.motion != motion || frame < w.frame {
+            // Switched away (or looped back to frame 0): the previous playback is over.
+            if w.captured && !w.ended {
+                finished = Some((w.kind, w.motion));
+            }
+            w.motion = motion;
+            w.frame = frame;
+            w.captured = false;
+            w.ended = false;
+        } else {
+            w.frame = frame;
+            // `>=` (not `end - rate`) so the marker is never EARLY: a hitbox on the very
+            // last frame still gets recorded before the editor is told to adopt.
+            if w.captured && !w.ended && end > 0.0 && frame >= end {
+                w.ended = true;
+                finished = Some((w.kind, w.motion));
+            }
+        }
+    }
+    if let Some((kind, motion)) = finished {
+        push_end(kind, motion);
+    }
 }
 
 // ── Rules (live modify / suppress / inject) ──────────────────────────────────
@@ -291,6 +473,28 @@ pub struct HbOverrides {
     pub z2: Option<f32>,
     pub hitlag: Option<f32>,
     pub sdi: Option<f32>,
+    // ── Attribute slots 17..35 ───────────────────────────────────────────────
+    // Arrive as the raw lua numbers (the editor holds them as symbolic names and encodes
+    // them on the way out); `collision_attr` is a hash40. Absent = leave the script's value.
+    pub setoff: Option<i64>,
+    pub lr_check: Option<i64>,
+    pub clang: Option<bool>,
+    pub add_attack: Option<i64>,
+    pub hitbox_attr: Option<f32>,
+    pub ground_or_air: Option<i64>,
+    pub mtk: Option<bool>,
+    pub shield_disable: Option<bool>,
+    pub reflectable: Option<bool>,
+    pub absorbable: Option<bool>,
+    pub landing_attack: Option<bool>,
+    pub situation_mask: Option<i64>,
+    pub category_mask: Option<i64>,
+    pub part_mask: Option<i64>,
+    pub no_finish_camera: Option<bool>,
+    pub collision_attr: Option<u64>,
+    pub sound_level: Option<i64>,
+    pub sound_attr: Option<i64>,
+    pub attack_region: Option<i64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -414,6 +618,72 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
     set_num(14, ov.z2, &mut vals);
     set_num(15, ov.hitlag, &mut vals);
     set_num(16, ov.sdi, &mut vals);
+
+    // Attribute slots keep the SCRIPT's own lua type and only take a new value. Scripts vary
+    // between pushing a given slot as Int, Num or Bool, and the game reads a wrongly-typed
+    // slot as garbage. Hash/Nil slots are left alone entirely: they carry sentinels (slot 20
+    // is `Hash40("no")` when the script passes NaN) that a number would destroy.
+    let set_scalar = |idx: usize, v: Option<i64>, vals: &mut Vec<LuaArg>| {
+        let Some(v) = v else { return };
+        if idx >= vals.len() {
+            return;
+        }
+        let next = match vals[idx] {
+            LuaArg::Int(_) => LuaArg::Int(v),
+            LuaArg::Num(_) => LuaArg::Num(v as f32),
+            LuaArg::Bool(_) => LuaArg::Bool(v != 0),
+            _ => return,
+        };
+        vals[idx] = next;
+    };
+    let set_flag = |idx: usize, v: Option<bool>, vals: &mut Vec<LuaArg>| {
+        let Some(v) = v else { return };
+        if idx >= vals.len() {
+            return;
+        }
+        let next = match vals[idx] {
+            LuaArg::Bool(_) => LuaArg::Bool(v),
+            LuaArg::Int(_) => LuaArg::Int(v as i64),
+            LuaArg::Num(_) => LuaArg::Num(if v { 1.0 } else { 0.0 }),
+            _ => return,
+        };
+        vals[idx] = next;
+    };
+    let set_scalar_f = |idx: usize, v: Option<f32>, vals: &mut Vec<LuaArg>| {
+        let Some(v) = v else { return };
+        if idx >= vals.len() {
+            return;
+        }
+        let next = match vals[idx] {
+            LuaArg::Num(_) => LuaArg::Num(v),
+            LuaArg::Int(_) => LuaArg::Int(v as i64),
+            _ => return,
+        };
+        vals[idx] = next;
+    };
+    set_scalar(17, ov.setoff, &mut vals);
+    set_scalar(18, ov.lr_check, &mut vals);
+    set_flag(19, ov.clang, &mut vals);
+    set_scalar(20, ov.add_attack, &mut vals);
+    set_scalar_f(21, ov.hitbox_attr, &mut vals);
+    set_scalar(22, ov.ground_or_air, &mut vals);
+    set_flag(23, ov.mtk, &mut vals);
+    set_flag(24, ov.shield_disable, &mut vals);
+    set_flag(25, ov.reflectable, &mut vals);
+    set_flag(26, ov.absorbable, &mut vals);
+    set_flag(27, ov.landing_attack, &mut vals);
+    set_scalar(28, ov.situation_mask, &mut vals);
+    set_scalar(29, ov.category_mask, &mut vals);
+    set_scalar(30, ov.part_mask, &mut vals);
+    set_flag(31, ov.no_finish_camera, &mut vals);
+    if let Some(h) = ov.collision_attr {
+        if matches!(vals.get(32), Some(LuaArg::Hash(_))) {
+            vals[32] = LuaArg::Hash(h);
+        }
+    }
+    set_scalar(33, ov.sound_level, &mut vals);
+    set_scalar(34, ov.sound_attr, &mut vals);
+    set_scalar(35, ov.attack_region, &mut vals);
 
     let mut agent = smash::lib::L2CAgent::new(lua_state);
     agent.clear_lua_stack();

@@ -1,11 +1,22 @@
 // Eff editor: browse ef_*.eff game dumps, edit authored emitter values against a pristine
 // snapshot, and preview the edit live in game through the slight_replica plugin.
 //
-// The game exposes no absolute setters for authored PTCL data — runtime color/speed are
-// multipliers and pos/rot/size are ACMD spawn arguments. So the editor keeps the ORIGINAL
-// authored values (from the .eff dump), lets you edit copies, and translates the delta into
-// the runtime modifier the plugin can pin: per-channel `edited ÷ original` color multiplier
-// and a scale multiplier, applied to the live kind's pristine spawn baseline.
+// HOW AUTHORED EDITS REACH THE GAME
+// Authored PTCL values are PER EMITTER. The runtime modifier protocol is not: the plugin's
+// `rainbow.color` / `scale` are pinned on an `EffectData` for a whole effect KIND, so there
+// is no wire message that can say "tint only emitter 3". Deriving a multiplier from the
+// authored delta therefore cannot be made correct — the old code averaged every emitter's
+// colour ratio into one kind-level value, which recoloured the ENTIRE effect whenever you
+// edited a single emitter (and silently ignored color1 edits entirely).
+//
+// So authored edits do NOT go on the modifier wire at all. They are applied by rebuilding
+// the fighter's .eff with `eff_export::rebuild_eff_bytes` — which is per-emitter exact, the
+// same bytes the exporter ships — and hot-reloading it in the running game (app-side
+// `deploy_live_eff`). The editor only raises a request flag; the app owns the rebuild.
+//
+// The kind-level multipliers are still exposed, but only as their own honest feature: the
+// "Kind look — color × / speed ×" panel, which the user drives directly and which is
+// documented as applying to every spawn of the effect.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -13,8 +24,8 @@ use std::time::Instant;
 use egui::Ui;
 
 use crate::effects::{load_effect, ColorKey, EmitterDef, PtclFile};
-use crate::game_link::{Color, GameLink, LinkStatus, LiveOverrides};
-use crate::mod_project::{AuthoredEdit, EmitterFieldEdits, OneSlotOp};
+use crate::game_link::{GameLink, LinkStatus, LiveOverrides};
+use crate::mod_project::{AuthoredEdit, EmitterFieldEdits, TransplantOp};
 
 /// Pristine copy of the editable authored fields of one emitter.
 #[derive(Clone)]
@@ -64,7 +75,7 @@ struct EffEntry {
 }
 
 /// One edited fighter (from the app's project state) — the primary unit the editor's
-/// selector is organized around. `merged` is the one-slots-applied build to parse when
+/// selector is organized around. `merged` is the transplants-applied build to parse when
 /// present; `alt_base` covers the data-root path when it differs from the export root.
 #[derive(Clone, PartialEq)]
 pub struct EditSource {
@@ -72,7 +83,7 @@ pub struct EditSource {
     pub base: PathBuf,
     pub alt_base: Option<PathBuf>,
     pub merged: Option<PathBuf>,
-    pub one_slots: usize,
+    pub transplant_count: usize,
     pub authored: usize,
     pub transplants: Vec<EffTransplant>,
 }
@@ -85,7 +96,7 @@ pub struct EffTransplant {
     pub entry_name: String,
     pub donor_name: String,
     pub donor_file: String,
-    pub slots: Vec<u8>,
+    pub one_slot_slots: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -96,33 +107,12 @@ pub struct EffTransplantRemoval {
     pub donor_name: String,
 }
 
-/// Runtime modifiers derived from authored edits: what to send the game so the live effect
-/// approximates the edited .eff.
-#[derive(Clone, Copy, Debug)]
-pub struct EntryMods {
-    pub color: [f32; 3],
-    pub alpha: f32,
-    pub scale: f32,
-    pub changed: bool,
-}
-
-impl Default for EntryMods {
-    fn default() -> Self {
-        Self {
-            color: [1.0; 3],
-            alpha: 1.0,
-            scale: 1.0,
-            changed: false,
-        }
-    }
-}
-
 pub struct EffEditor {
     pub open: bool,
     /// Eff path queued by the main editor (fighter selection) — loaded when the window is
     /// (or becomes) open, so closed-window fighter browsing stays cheap.
     pending_load: Option<PathBuf>,
-    /// Entry name (lowercase) to select after the next load — one-slot hand-off.
+    /// Entry name (lowercase) to select after the next load — transplant hand-off.
     pending_select: Option<String>,
     /// Authored edits (from a loaded project) applied once the queued eff loads.
     pending_edits: Option<Vec<AuthoredEdit>>,
@@ -132,9 +122,9 @@ pub struct EffEditor {
     scan_error: Option<String>,
 
     loaded_path: Option<PathBuf>,
-    /// Base eff path → merged (one-slots applied) file to ACTUALLY parse when that base
+    /// Base eff path → merged (transplants applied) file to ACTUALLY parse when that base
     /// is opened. Makes the merged view character-centric: picking ef_kirby.eff shows
-    /// kirby WITH its one-slots, wherever it's opened from.
+    /// kirby WITH its transplants, wherever it's opened from.
     merged_overlays: std::collections::HashMap<PathBuf, PathBuf>,
     /// The currently loaded view came from a merged overlay (shown in the header).
     loaded_is_merged: bool,
@@ -151,18 +141,40 @@ pub struct EffEditor {
     selected_entry: Option<usize>,
     selected_emitter: usize,
 
-    // One-slot state
-    /// The main editor's selected fighter — target for one-slot ops (set by the app).
+    // Transplant state
+    /// The main editor's selected fighter — target for transplant ops (set by the app).
     target_fighter: Option<String>,
-    /// Recorded one-slot ops, drained by the app into the project store.
-    pending_one_slots: Vec<OneSlotOp>,
+    /// Recorded transplant ops, drained by the app into the project store.
+    pending_transplants: Vec<TransplantOp>,
     /// Entry-level removals requested from the EFF editor, drained by the app so it can
     /// rebuild project state, live aliases, and the runtime carrier atomically.
     pending_transplant_removals: Vec<EffTransplantRemoval>,
 
     // Live-preview state
-    pub auto_apply: bool,
     eff_dirty_at: Option<Instant>,
+    /// Raised when the authored edits need to reach the running game. The app drains it
+    /// (`take_live_deploy_request`) and services it by rebuilding this fighter's eff and
+    /// hot-reloading it — the only per-emitter-exact path there is.
+    live_deploy_request: bool,
+    /// When the app last serviced a deploy request — drives `REDEPLOY_MIN_GAP_MS`.
+    live_deploy_at: Option<Instant>,
+    /// True from clicking Send until the app has finished building + sending the carrier.
+    /// Drives the spinner beside the button.
+    pub sending: bool,
+    /// Set once the snapshot has left the app: we are now waiting for the GAME to take it
+    /// (bytes decompress, resource service settles, carrier object comes up). Cleared when
+    /// the plugin reports the carrier live, or on timeout.
+    pub awaiting_game: Option<Instant>,
+    /// Last carrier report from the plugin, shown while waiting: (state, kinds, spawned).
+    /// Surfaced rather than hidden because "the spinner cleared too early" has been
+    /// diagnosed by guesswork twice now, and the raw signal settles it.
+    pub carrier_report: (u8, usize, bool),
+    /// Final carrier reading from the last send, kept on screen after the spinner clears.
+    pub last_carrier_result: Option<String>,
+    /// The carrier rebuild is synchronous on the UI thread, so servicing the request in the
+    /// same frame as the click would block before the spinner ever painted. Hold the request
+    /// for one frame so the "sending" state is visible.
+    deploy_defer: bool,
     last_sent_note: Option<String>,
 }
 
@@ -189,10 +201,16 @@ impl Default for EffEditor {
             selected_entry: None,
             selected_emitter: 0,
             target_fighter: None,
-            pending_one_slots: Vec::new(),
+            pending_transplants: Vec::new(),
             pending_transplant_removals: Vec::new(),
-            auto_apply: true,
             eff_dirty_at: None,
+            live_deploy_request: false,
+            live_deploy_at: None,
+            sending: false,
+            awaiting_game: None,
+            carrier_report: (0, 0, false),
+            last_carrier_result: None,
+            deploy_defer: false,
             last_sent_note: None,
         }
     }
@@ -207,11 +225,11 @@ fn scan_eff_files(root: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             scan_eff_files(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("eff") {
-            // Transient one-slot preview files aren't real sources — hide them.
+            // Transient transplant preview files aren't real sources — hide them.
             let is_preview = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.contains("_oneslot_preview"))
+                .map(|n| crate::scratch_dirs::is_transplant_preview_name(n))
                 .unwrap_or(false);
             if !is_preview {
                 out.push(path);
@@ -220,42 +238,56 @@ fn scan_eff_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn ratio(edited: f32, pristine: f32) -> f32 {
-    if pristine.abs() < 1e-4 {
-        if edited.abs() < 1e-4 {
-            1.0
-        } else {
-            (edited / 1e-4).clamp(0.0, 8.0)
-        }
-    } else {
-        (edited / pristine).clamp(0.0, 8.0)
-    }
-}
-
-fn mean_rgb(keys: &[ColorKey]) -> Option<[f32; 3]> {
-    if keys.is_empty() {
-        return None;
-    }
-    let mut acc = [0.0f32; 3];
-    for k in keys {
-        acc[0] += k.r;
-        acc[1] += k.g;
-        acc[2] += k.b;
-    }
-    let n = keys.len() as f32;
-    Some([acc[0] / n, acc[1] / n, acc[2] / n])
-}
-
-/// Mean alpha of an alpha key table (value lives in the `.r` channel — see `sample_alpha`).
-fn mean_alpha(keys: &[ColorKey]) -> Option<f32> {
-    if keys.is_empty() {
-        return None;
-    }
-    Some(keys.iter().map(|k| k.r).sum::<f32>() / keys.len() as f32)
-}
-
 fn diff(a: f32, b: f32) -> bool {
     (a - b).abs() > 1e-3
+}
+
+/// Which authored fields of ONE emitter differ from its pristine snapshot, as the
+/// absolute-value edit record the exporter/rebuilder consumes. Single source of truth for
+/// "is this emitter edited?" (`is_empty`) and for what to write (`collect_authored_edits`),
+/// so the UI's edited-emitter list can never disagree with what actually ships.
+fn field_edits(em: &EmitterDef, pr: &EmitterSnapshot) -> EmitterFieldEdits {
+    let mut f = EmitterFieldEdits::default();
+    if diff(em.emission_rate, pr.emission_rate) {
+        f.emission_rate = Some(em.emission_rate);
+    }
+    if diff(em.lifetime, pr.lifetime) {
+        f.lifetime = Some(em.lifetime);
+    }
+    if diff(em.scale, pr.scale) {
+        f.scale = Some(em.scale);
+    }
+    if diff(em.color_scale, pr.color_scale) {
+        f.color_scale = Some(em.color_scale);
+    }
+    if diff(em.emitter_scale.x, pr.emitter_scale.x)
+        || diff(em.emitter_scale.y, pr.emitter_scale.y)
+        || diff(em.emitter_scale.z, pr.emitter_scale.z)
+    {
+        f.emitter_scale = Some([em.emitter_scale.x, em.emitter_scale.y, em.emitter_scale.z]);
+    }
+    let keys_differ = |a: &[ColorKey], b: &[ColorKey]| {
+        a.len() != b.len()
+            || a.iter()
+                .zip(b)
+                .any(|(x, y)| diff(x.r, y.r) || diff(x.g, y.g) || diff(x.b, y.b))
+    };
+    if keys_differ(&em.color0, &pr.color0) {
+        f.color0 = Some(em.color0.iter().map(|k| [k.r, k.g, k.b, k.frame]).collect());
+    }
+    if keys_differ(&em.color1, &pr.color1) {
+        f.color1 = Some(em.color1.iter().map(|k| [k.r, k.g, k.b, k.frame]).collect());
+    }
+    if em.alpha0_keys.len() != pr.alpha0_keys.len()
+        || em
+            .alpha0_keys
+            .iter()
+            .zip(&pr.alpha0_keys)
+            .any(|(x, y)| diff(x.r, y.r))
+    {
+        f.alpha0 = Some(em.alpha0_keys.iter().map(|k| [k.r, k.frame]).collect());
+    }
+    f
 }
 
 impl EffEditor {
@@ -287,7 +319,7 @@ impl EffEditor {
         self.eff_dirty_at = None;
 
         // Character-centric view: the fighter's base eff transparently resolves to its
-        // MERGED (one-slots applied) file when one exists — the new/replaced entries
+        // MERGED (transplants applied) file when one exists — the new/replaced entries
         // show up and are editable no matter how the file was opened.
         let overlay = self
             .merged_overlays
@@ -368,9 +400,9 @@ impl EffEditor {
         self.target_fighter = fighter;
     }
 
-    /// One-slot ops recorded since the last drain (the app owns the project store).
-    pub fn take_one_slots(&mut self) -> Vec<OneSlotOp> {
-        std::mem::take(&mut self.pending_one_slots)
+    /// Transplant ops recorded since the last drain (the app owns the project store).
+    pub fn take_transplants(&mut self) -> Vec<TransplantOp> {
+        std::mem::take(&mut self.pending_transplants)
     }
 
     pub fn take_transplant_removals(&mut self) -> Vec<EffTransplantRemoval> {
@@ -404,50 +436,20 @@ impl EffEditor {
         let mut out = Vec::new();
         for (set_idx, (set, pset)) in ptcl.emitter_sets.iter().zip(&self.pristine).enumerate() {
             for (em_idx, (em, pr)) in set.emitters.iter().zip(pset.iter()).enumerate() {
-                let mut f = EmitterFieldEdits::default();
-                if diff(em.emission_rate, pr.emission_rate) {
-                    f.emission_rate = Some(em.emission_rate);
-                }
-                if diff(em.lifetime, pr.lifetime) {
-                    f.lifetime = Some(em.lifetime);
-                }
-                if diff(em.scale, pr.scale) {
-                    f.scale = Some(em.scale);
-                }
-                if diff(em.color_scale, pr.color_scale) {
-                    f.color_scale = Some(em.color_scale);
-                }
-                if diff(em.emitter_scale.x, pr.emitter_scale.x)
-                    || diff(em.emitter_scale.y, pr.emitter_scale.y)
-                    || diff(em.emitter_scale.z, pr.emitter_scale.z)
-                {
-                    f.emitter_scale =
-                        Some([em.emitter_scale.x, em.emitter_scale.y, em.emitter_scale.z]);
-                }
-                let keys_differ = |a: &[ColorKey], b: &[ColorKey]| {
-                    a.len() != b.len()
-                        || a.iter()
-                            .zip(b)
-                            .any(|(x, y)| diff(x.r, y.r) || diff(x.g, y.g) || diff(x.b, y.b))
-                };
-                if keys_differ(&em.color0, &pr.color0) {
-                    f.color0 = Some(em.color0.iter().map(|k| [k.r, k.g, k.b, k.frame]).collect());
-                }
-                if keys_differ(&em.color1, &pr.color1) {
-                    f.color1 = Some(em.color1.iter().map(|k| [k.r, k.g, k.b, k.frame]).collect());
-                }
-                if em.alpha0_keys.len() != pr.alpha0_keys.len()
-                    || em
-                        .alpha0_keys
-                        .iter()
-                        .zip(&pr.alpha0_keys)
-                        .any(|(x, y)| diff(x.r, y.r))
-                {
-                    f.alpha0 = Some(em.alpha0_keys.iter().map(|k| [k.r, k.frame]).collect());
-                }
+                let f = field_edits(em, pr);
                 if !f.is_empty() {
+                    // The entry (kind) name is a separate namespace from the emitter-set
+                    // name and cannot be derived from it — resolve it via the entry list,
+                    // which is the only place the set_idx → kind mapping exists.
+                    let entry_name = self
+                        .entries
+                        .iter()
+                        .find(|e| e.set_idx == set_idx)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default();
                     out.push(AuthoredEdit {
                         set_name: set.name.clone(),
+                        entry_name,
                         set_idx,
                         emitter_name: em.name.clone(),
                         emitter_idx: em_idx,
@@ -526,130 +528,65 @@ impl EffEditor {
         }
     }
 
-    /// Send derived modifiers for every entry whose emitters were edited and whose kind is
-    /// live in game — used after loading a project so the game reflects it immediately.
-    pub fn send_all_derived(&mut self, link: &GameLink, overrides: &mut LiveOverrides) {
-        if link.status() != LinkStatus::Connected {
-            return;
-        }
-        let candidates: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| link.is_live(e.hash))
-            .map(|(i, _)| i)
-            .collect();
-        for i in candidates {
-            if self.entry_mods(self.entries[i].set_idx).changed {
-                self.send_derived(link, overrides, i);
-            }
-        }
+    /// Ask the app to push the current authored edits into the running game.
+    ///
+    /// DISABLED: this used to rebuild the FIGHTER's own eff and hot-reload it. That path is
+    /// a dead end and was ruled out — `reparse_game_path` rebuilds the parsed emitter
+    /// structs from the RESIDENT buffer and never re-requests the file, so the merged bytes
+    /// were never read mid-match (`cb_game=0`) and edits only appeared after a full reboot.
+    ///
+    /// The replacement is the CARRIER path: clone the effects that need editing into the
+    /// carrier's eff space and reload that instead of the fighter's. Until that lands (or
+    /// per-emitter runtime modifiers prove workable, which is the cheaper answer), authored
+    /// colour edits are export-only and nothing is pushed live.
+    pub fn request_live_apply(&mut self) {
+        self.live_deploy_request = true;
+        self.sending = true;
+        self.deploy_defer = true;
     }
 
-    // ── Modifier derivation ───────────────────────────────────────────────────
+    /// Drain the deploy request (app-side, once per frame). Returns true when the app
+    /// should rebuild + hot-reload the loaded fighter's eff.
+    pub fn take_live_deploy_request(&mut self) -> bool {
+        if !self.live_deploy_request {
+            return false;
+        }
+        // Let one frame paint with the spinner up before the blocking rebuild starts.
+        if self.deploy_defer {
+            self.deploy_defer = false;
+            return false;
+        }
+        self.live_deploy_request = false;
+        self.live_deploy_at = Some(Instant::now());
+        true
+    }
 
-    /// Aggregate authored-edit → runtime-modifier translation for one entry (emitter set).
-    fn entry_mods(&self, set_idx: usize) -> EntryMods {
+    /// Report the outcome of a serviced deploy back into the editor's status line, so the
+    /// user still sees exactly what was sent (this replaces the old "queued eff-derived
+    /// modifiers for …" note).
+    pub fn set_sent_note(&mut self, note: impl Into<String>) {
+        self.last_sent_note = Some(note.into());
+    }
+
+    // ── Edit scope ────────────────────────────────────────────────────────────
+
+    /// Indices of the emitters in this set that differ from pristine. Purely informational
+    /// (the panel shows WHAT is edited); the edits themselves travel as absolute values
+    /// through `collect_authored_edits`, per emitter, never as an aggregate.
+    fn edited_emitters(&self, set_idx: usize) -> Vec<usize> {
         let (Some(ptcl), Some(pristine)) = (self.ptcl.as_ref(), self.pristine.get(set_idx)) else {
-            return EntryMods::default();
+            return Vec::new();
         };
         let Some(set) = ptcl.emitter_sets.get(set_idx) else {
-            return EntryMods::default();
+            return Vec::new();
         };
-
-        let mut color_acc = [0.0f32; 3];
-        let mut color_n = 0u32;
-        let mut alpha_acc = 0.0f32;
-        let mut alpha_n = 0u32;
-        let mut scale_acc = 0.0f32;
-        let mut scale_n = 0u32;
-
-        for (e, p) in set.emitters.iter().zip(pristine.iter()) {
-            // Color: mean over color0 keys (fall back to color1), times color_scale.
-            let (ce, cp) = match (mean_rgb(&e.color0), mean_rgb(&p.color0)) {
-                (Some(a), Some(b)) => (Some(a), Some(b)),
-                _ => (mean_rgb(&e.color1), mean_rgb(&p.color1)),
-            };
-            if let (Some(ce), Some(cp)) = (ce, cp) {
-                let cs = ratio(e.color_scale, p.color_scale);
-                let r = [
-                    ratio(ce[0], cp[0]) * cs,
-                    ratio(ce[1], cp[1]) * cs,
-                    ratio(ce[2], cp[2]) * cs,
-                ];
-                if r.iter().any(|v| diff(*v, 1.0)) {
-                    for i in 0..3 {
-                        color_acc[i] += r[i];
-                    }
-                    color_n += 1;
-                }
-            }
-
-            if let (Some(ae), Some(ap)) = (mean_alpha(&e.alpha0_keys), mean_alpha(&p.alpha0_keys)) {
-                let r = ratio(ae, ap);
-                if diff(r, 1.0) {
-                    alpha_acc += r;
-                    alpha_n += 1;
-                }
-            }
-
-            let es = (e.emitter_scale.x + e.emitter_scale.y + e.emitter_scale.z) / 3.0;
-            let ps = (p.emitter_scale.x + p.emitter_scale.y + p.emitter_scale.z) / 3.0;
-            let r = ratio(e.scale, p.scale) * ratio(es, ps);
-            if diff(r, 1.0) {
-                scale_acc += r;
-                scale_n += 1;
-            }
-        }
-
-        let color = if color_n > 0 {
-            [
-                color_acc[0] / color_n as f32,
-                color_acc[1] / color_n as f32,
-                color_acc[2] / color_n as f32,
-            ]
-        } else {
-            [1.0; 3]
-        };
-        let alpha = if alpha_n > 0 {
-            alpha_acc / alpha_n as f32
-        } else {
-            1.0
-        };
-        let scale = if scale_n > 0 {
-            scale_acc / scale_n as f32
-        } else {
-            1.0
-        };
-        EntryMods {
-            color,
-            alpha,
-            scale,
-            changed: color_n + alpha_n + scale_n > 0,
-        }
-    }
-
-    /// Derive runtime modifiers from the authored edits and write them into the SHARED
-    /// override form (debounced send happens app-side), so both panels show one truth.
-    fn send_derived(&mut self, link: &GameLink, overrides: &mut LiveOverrides, entry_idx: usize) {
-        let Some(entry) = self.entries.get(entry_idx) else {
-            return;
-        };
-        let Some(kind) = link.kind(entry.hash) else {
-            return;
-        };
-        let mods = self.entry_mods(entry.set_idx);
-
-        let form = overrides.form_mut(entry.hash, || kind.data.clone());
-        form.scale = kind.first.scale * mods.scale;
-        form.rainbow.color = Color {
-            red: mods.color[0],
-            green: mods.color[1],
-            blue: mods.color[2],
-            alpha: mods.alpha,
-        };
-        overrides.mark_dirty(entry.hash);
-        self.last_sent_note = Some(format!("queued eff-derived modifiers for {}", entry.name));
+        set.emitters
+            .iter()
+            .zip(pristine.iter())
+            .enumerate()
+            .filter(|(_, (e, p))| !field_edits(e, p).is_empty())
+            .map(|(i, _)| i)
+            .collect()
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────
@@ -668,7 +605,7 @@ impl EffEditor {
     /// Replace the edit-source list (the app's per-fighter eff mods). This is the single
     /// source of truth for the "Editing:" selector AND the overlay map — every base path
     /// (export-root AND data-root variants) redirects to the fighter's merged build, so
-    /// one-slotted entries show no matter which path a load request used.
+    /// transplanted entries show no matter which path a load request used.
     pub fn set_edit_sources(&mut self, sources: Vec<EditSource>) {
         let mut overlays = std::collections::HashMap::new();
         for s in &sources {
@@ -692,7 +629,7 @@ impl EffEditor {
         self.edit_sources = sources;
     }
 
-    /// Point `base` (a fighter's real eff path) at `merged` (its one-slots-applied build).
+    /// Point `base` (a fighter's real eff path) at `merged` (its transplants-applied build).
     /// While set, ANY load of `base` — the file combo, fighter auto-follow, project load —
     /// parses the merged file instead. Pass None to drop the overlay. If `base` is the
     /// currently loaded file, it reloads so the view updates immediately.
@@ -712,11 +649,11 @@ impl EffEditor {
     }
 
     /// Select this entry (by name, case-insensitive) once the pending/current eff is
-    /// loaded — used to land on a freshly one-slotted or replaced entry.
+    /// loaded — used to land on a freshly transplanted or replaced entry.
     pub fn queue_select(&mut self, name: &str) {
         // Never leave the previous donor highlighted while a new merged preview is pending.
         // If the rebuild/load fails, an empty selection is truthful; showing the old entry
-        // made a Bomberman request appear to have one-slotted Alucard.
+        // made a Bomberman request appear to have transplanted Alucard.
         self.selected_entry = None;
         self.selected_emitter = 0;
         self.pending_select = Some(name.to_lowercase());
@@ -743,8 +680,13 @@ impl EffEditor {
             if path.exists() {
                 self.load_eff(&path);
                 if let Some(edits) = self.pending_edits.take() {
+                    let had_edits = !edits.is_empty();
                     self.apply_authored_edits(&edits);
-                    self.send_all_derived(link, overrides);
+                    // Project just loaded: get the game showing it. Rebuild-and-reload, so
+                    // every emitter lands where the project says — not an averaged tint.
+                    if had_edits && link.status() == LinkStatus::Connected {
+                        self.request_live_apply();
+                    }
                 }
                 self.apply_pending_select();
             }
@@ -753,14 +695,9 @@ impl EffEditor {
             self.apply_pending_select();
         }
 
-        // Debounced auto-apply of authored edits. (Direct-form sends are debounced by the
-        // shared override store, flushed app-side.)
-        if let (Some(t), Some(sel)) = (self.eff_dirty_at, self.selected_entry) {
-            if self.auto_apply && t.elapsed().as_millis() > 300 {
-                self.eff_dirty_at = None;
-                self.send_derived(link, overrides, sel);
-            }
-        }
+        // NOTE: no auto-apply. `eff_dirty_at` now only marks "there are unsent changes" for
+        // the Send button; nothing rebuilds or uploads until the user asks. Editing a colour
+        // used to queue a full carrier rebuild + in-game reload a moment after every change.
 
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("eff_editor"),
@@ -815,6 +752,82 @@ impl EffEditor {
             };
             ui.colored_label(dot, "●");
             ui.label(label);
+            ui.separator();
+            // Primary send, in the header so it is reachable from ANY panel — the one down in
+            // the game panel is easy to miss and only visible once you have scrolled there.
+            let connected = link.status() == LinkStatus::Connected;
+            let unsent = self.eff_dirty_at.is_some();
+            let btn = egui::Button::new(
+                egui::RichText::new(if unsent {
+                    "⬆ Send edits •"
+                } else {
+                    "⬆ Send edits"
+                })
+                .strong(),
+            );
+            let btn = if unsent {
+                btn.fill(egui::Color32::from_rgb(0x7A, 0x5A, 0x10))
+            } else {
+                btn
+            };
+            if ui
+                .add_enabled(connected && !self.sending, btn)
+                .on_hover_text(
+                    "Rebuild the live carrier with every authored edit baked in and hand it to \
+                     the running game. Re-trigger the move to see it on a fresh spawn.",
+                )
+                .on_disabled_hover_text(if self.sending {
+                    "Sending…"
+                } else {
+                    "Connect to the running game first."
+                })
+                .clicked()
+            {
+                self.eff_dirty_at = None;
+                self.request_live_apply();
+            }
+            if self.sending || self.awaiting_game.is_some() {
+                ui.add(egui::Spinner::new().size(14.0));
+                let (text, tint) = if self.sending {
+                    (
+                        "building…".to_string(),
+                        egui::Color32::from_rgb(0x90, 0xC0, 0xF0),
+                    )
+                } else {
+                    // The long half: the game is decompressing the carrier and bringing its
+                    // object up. This is what the minute-long wait actually was.
+                    let secs = self
+                        .awaiting_game
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    let (st, kinds, spawned) = self.carrier_report;
+                    (
+                        if secs >= 2 {
+                            format!(
+                                "waiting for game… {secs}s (state={st} kinds={kinds} \
+                                 object={})",
+                                if spawned { "up" } else { "down" }
+                            )
+                        } else {
+                            "waiting for game".to_string()
+                        },
+                        egui::Color32::from_rgb(0xE0, 0xC0, 0x60),
+                    )
+                };
+                ui.label(egui::RichText::new(text).small().color(tint));
+            } else if unsent {
+                ui.label(
+                    egui::RichText::new("unsent")
+                        .small()
+                        .color(egui::Color32::from_rgb(0xE0, 0xA0, 0x30)),
+                );
+            } else if let Some(r) = &self.last_carrier_result {
+                ui.label(
+                    egui::RichText::new(r)
+                        .small()
+                        .color(egui::Color32::from_rgb(0x9A, 0x9A, 0x9A)),
+                );
+            }
             if link.status() != LinkStatus::Connected {
                 if let Some(err) = link.last_error() {
                     ui.label(
@@ -859,11 +872,11 @@ impl EffEditor {
                     || (src.alt_base.is_some()
                         && self.loaded_path.as_deref() == src.alt_base.as_deref());
                 let mut badges: Vec<String> = Vec::new();
-                if src.one_slots > 0 {
+                if src.transplant_count > 0 {
                     badges.push(format!(
                         "{} transplant{}",
-                        src.one_slots,
-                        if src.one_slots == 1 { "" } else { "s" }
+                        src.transplant_count,
+                        if src.transplant_count == 1 { "" } else { "s" }
                     ));
                 }
                 if src.authored > 0 {
@@ -876,7 +889,7 @@ impl EffEditor {
                 };
                 // A slotted fighter whose merged build is missing signals a failed merge —
                 // surface it instead of silently showing the base file.
-                let broken = src.one_slots > 0 && src.merged.is_none();
+                let broken = src.transplant_count > 0 && src.merged.is_none();
                 let text = if broken {
                     egui::RichText::new(format!("⚠ {label}")).color(egui::Color32::from_rgb(230, 190, 80))
                 } else {
@@ -1302,16 +1315,16 @@ impl EffEditor {
             };
         });
         if let Some((fighter, item)) = transplant {
-            let scope = if item.slots.len() == 1 {
-                format!("one-slot c0{}", item.slots[0])
-            } else if item.slots.is_empty() {
+            let scope = if item.one_slot_slots.len() == 1 {
+                format!("one-slot c{:02}", item.one_slot_slots[0])
+            } else if item.one_slot_slots.is_empty() {
                 "all skins".to_string()
             } else {
                 format!(
                     "skins {}",
-                    item.slots
+                    item.one_slot_slots
                         .iter()
-                        .map(|slot| format!("c0{slot}"))
+                        .map(|slot| format!("c{slot:02}"))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -1342,32 +1355,110 @@ impl EffEditor {
             ui.separator();
         }
 
-        // Derived modifiers from authored edits
-        let mods = self.entry_mods(set_idx);
+        // Authored edits → live game. These are applied by REBUILDING this fighter's eff and
+        // hot-reloading it, so each emitter gets exactly its own edited values. They are
+        // deliberately NOT translated into the kind-level colour multiplier below: that
+        // multiplier is whole-effect by construction and would tint emitters you never
+        // touched (and could not carry a per-key or color1 edit at all).
+        let edited = self.edited_emitters(set_idx);
+        let total = self
+            .ptcl
+            .as_ref()
+            .and_then(|p| p.emitter_sets.get(set_idx))
+            .map(|s| s.emitters.len())
+            .unwrap_or(0);
+        let edited_names = self
+            .ptcl
+            .as_ref()
+            .and_then(|p| p.emitter_sets.get(set_idx))
+            .map(|s| {
+                edited
+                    .iter()
+                    .map(|i| match s.emitters.get(*i) {
+                        Some(e) if !e.name.is_empty() => format!("{i}:{}", e.name),
+                        _ => format!("{i}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Eff-derived modifiers").strong());
-        ui.label(
-            egui::RichText::new(format!(
-                "color ×[{:.2} {:.2} {:.2}]  alpha ×{:.2}  scale ×{:.2}",
-                mods.color[0], mods.color[1], mods.color[2], mods.alpha, mods.scale
-            ))
-            .monospace(),
-        );
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.auto_apply, "auto-apply");
-            let can_send = kind.is_some() && link.status() == LinkStatus::Connected;
-            if ui
-                .add_enabled(can_send, egui::Button::new("Apply to game"))
-                .clicked()
-            {
-                self.send_derived(link, overrides, entry_idx);
-            }
-        });
-        if !mods.changed {
+        ui.label(egui::RichText::new("Authored edits → live eff").strong());
+        if edited.is_empty() {
             ui.label(
-                egui::RichText::new("no authored edits yet — modifiers are identity")
+                egui::RichText::new("no authored edits yet — the game shows the original eff")
                     .small()
                     .color(egui::Color32::DARK_GRAY),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} of {total} emitter(s) edited: {edited_names}",
+                    edited.len()
+                ))
+                .monospace(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Applied by rebuilding the eff — only these emitters change. The game \
+                     re-reads the file, so re-trigger the move to see it on a fresh spawn.",
+                )
+                .small()
+                .color(egui::Color32::GRAY),
+            );
+        }
+        ui.horizontal(|ui| {
+            // EXPLICIT send only. Auto-apply used to rebuild and re-upload the carrier a
+            // moment after every edit, which meant a colour drag shipped a full carrier
+            // rebuild + in-game reload repeatedly. Editing is now free; you pay only when
+            // you ask to.
+            let connected = link.status() == LinkStatus::Connected;
+            let unsent = self.eff_dirty_at.is_some();
+            let label = if unsent {
+                "Send to game •"
+            } else {
+                "Send to game"
+            };
+            let btn = egui::Button::new(label);
+            let resp = ui
+                .add_enabled(connected && !self.sending, btn)
+                .on_hover_text(
+                    "Rebuild the live carrier with every authored edit baked in and hand it to \
+                 the running game. Re-trigger the move to see it on a fresh spawn.",
+                );
+            if resp.clicked() {
+                self.eff_dirty_at = None;
+                self.request_live_apply();
+            }
+            if self.sending {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(
+                    egui::RichText::new("sending…")
+                        .small()
+                        .color(egui::Color32::from_rgb(0x90, 0xC0, 0xF0)),
+                );
+            } else if !connected {
+                ui.label(
+                    egui::RichText::new("game not connected")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+            } else if unsent {
+                ui.label(
+                    egui::RichText::new("unsent changes")
+                        .small()
+                        .color(egui::Color32::from_rgb(0xE0, 0xA0, 0x30)),
+                );
+            }
+        });
+        // Feedback for BOTH senders (the rebuild above and the kind color×/speed "Send now"
+        // below) lives here, above the live-kind guard: a rebuild works whether or not the
+        // effect has been seen in game yet, so its result must stay visible either way.
+        if let Some(note) = &self.last_sent_note {
+            ui.label(
+                egui::RichText::new(note)
+                    .small()
+                    .color(egui::Color32::LIGHT_GRAY),
             );
         }
 
@@ -1381,7 +1472,7 @@ impl EffEditor {
                 .color(egui::Color32::DARK_GRAY),
             );
             ui.separator();
-            self.draw_one_slot_section(ui, &entry_name, set_idx);
+            self.draw_transplant_section(ui, &entry_name, set_idx);
             return;
         };
 
@@ -1492,25 +1583,18 @@ impl EffEditor {
                 self.last_sent_note = Some("sent kind color/speed".into());
             }
         });
-        if let Some(note) = &self.last_sent_note {
-            ui.label(
-                egui::RichText::new(note)
-                    .small()
-                    .color(egui::Color32::LIGHT_GRAY),
-            );
-        }
 
         ui.separator();
-        self.draw_one_slot_section(ui, &entry_name, set_idx);
+        self.draw_transplant_section(ui, &entry_name, set_idx);
     }
 
-    fn draw_one_slot_section(&mut self, ui: &mut Ui, entry_name: &str, _set_idx: usize) {
-        // Transplanting moved to the EFF Transplant Studio (Windows menu in the main editor):
-        // it can pick a donor from ANY eff (pool-wide search) and redirect existing uses.
+    fn draw_transplant_section(&mut self, ui: &mut Ui, entry_name: &str, _set_idx: usize) {
+        // Transplanting moved to the Transplant Effects window (Windows menu in the main
+        // editor): it can pick a donor from ANY eff (pool-wide search) and redirect existing uses.
         ui.label(
             egui::RichText::new(format!(
                 "To transplant '{entry_name}' (or any other effect), open Windows → \
-                 EFF Transplant Studio in the main window."
+                 Transplant Effects in the main window."
             ))
             .small()
             .color(egui::Color32::GRAY),

@@ -117,7 +117,7 @@ pub struct SpawnInjectWire {
     pub args: Vec<LuaArgWire>,
 }
 
-/// Wire form of plugin `spawn_rules::EffectAlias` — live one-slot kind substitution:
+/// Wire form of plugin `spawn_rules::EffectAlias` — live transplant kind substitution:
 /// a copy/replaced entry that doesn't exist in the running game spawns as its donor.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EffectAliasWire {
@@ -140,7 +140,7 @@ pub struct DonorEffWire {
 }
 
 /// A stripped donor eff (only the referenced effects + their resources), base64-encoded,
-/// that the plugin injects as resident data for a live cross-character one-slot.
+/// that the plugin injects as resident data for a live cross-character transplant.
 #[derive(Clone, PartialEq, serde::Serialize)]
 pub struct DonorBytesWire {
     /// Donor eff arc path (lowercase), e.g. "effect/assist/alucard/ef_alucard.eff".
@@ -237,6 +237,51 @@ pub struct HbOverridesWire {
     pub hitlag: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sdi: Option<f32>,
+    // ── Attribute slots 17..35 ───────────────────────────────────────────────
+    //
+    // Sent as the NUMBERS the lua stack wants (the editor holds them as symbolic names);
+    // `collision_attr` is a hash40. `None` means "leave the game's own value alone", so a
+    // hitbox whose attributes were never resolved to a known constant is not clobbered.
+    // Plugins predating these fields ignore them, so an old plugin build still applies the
+    // geometry/damage overrides exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setoff: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lr_check: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clang: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_attack: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hitbox_attr: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ground_or_air: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtk: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shield_disable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflectable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absorbable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landing_attack: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub situation_mask: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_mask: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_mask: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_finish_camera: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collision_attr: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound_level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound_attr: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attack_region: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -279,21 +324,20 @@ pub struct HitboxRuleWire {
 
 const OVERRIDE_DEBOUNCE_MS: u128 = 200;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DirtyEdit {
-    /// Authored EFF modifiers: size plus color/speed multipliers.
-    Modifiers,
-    /// User live tweaks: color/speed multipliers only.
-    Tweak,
-}
+// This store carries ONLY user-set kind-level tweaks (color× / speed×, which apply to every
+// spawn of the effect — that is what the user is asking for when they drag those fields).
+// It used to carry a second class of entry, "modifiers derived from authored .eff edits",
+// which also pushed `scale`. That derivation was removed: authored values are per emitter
+// and this wire message is per kind, so it recoloured whole effects when one emitter was
+// edited. Authored edits now go through the eff rebuild + hot-reload path (app::
+// apply_authored_eff_live), which is per-emitter exact.
 
 #[derive(Clone, Debug)]
 pub struct LiveOverride {
     pub form: RpmEffectData,
     dirty_at: Option<Instant>,
-    dirty_edit: Option<DirtyEdit>,
-    /// The USER set this entry's color×/speed (vs. values derived from authored edits) —
-    /// only these export as LAST_EFFECT_SET_* tweaks and persist in the project.
+    /// The USER set this entry's color×/speed — only these export as LAST_EFFECT_SET_*
+    /// tweaks and persist in the project.
     user_tweaked: bool,
 }
 
@@ -302,7 +346,6 @@ impl LiveOverride {
         Self {
             form,
             dirty_at: None,
-            dirty_edit: None,
             user_tweaked: false,
         }
     }
@@ -336,30 +379,19 @@ impl LiveOverrides {
             .or_insert_with(|| LiveOverride::new(form.clone()));
         e.form = form;
         e.dirty_at = None;
-        e.dirty_edit = None;
-    }
-
-    /// Schedule authored size/color/speed modifiers after an in-place `form_mut` edit.
-    /// Transform fields are intentionally omitted from the wire edit: ACMD position and
-    /// rotation are per-spawn values and must never be inferred from this kind-level form.
-    pub fn mark_dirty(&mut self, hash: u64) {
-        if let Some(e) = self.entries.get_mut(&hash) {
-            e.dirty_at = Some(Instant::now());
-            e.dirty_edit = Some(DirtyEdit::Modifiers);
-        }
     }
 
     /// Send every entry whose debounce has elapsed. Returns how many were sent.
+    /// `include_scale` is false: size is a per-spawn value pushed through the spawn rules,
+    /// never inferred from this kind-level form. Transform fields are omitted for the same
+    /// reason — ACMD position/rotation are per spawn.
     pub fn flush_due(&mut self, link: &GameLink) -> usize {
         let mut sent = 0;
         for (hash, e) in self.entries.iter_mut() {
             if let Some(t) = e.dirty_at {
                 if t.elapsed().as_millis() > OVERRIDE_DEBOUNCE_MS {
                     e.dirty_at = None;
-                    match e.dirty_edit.take().unwrap_or(DirtyEdit::Tweak) {
-                        DirtyEdit::Modifiers => link.send_modifier_edit(*hash, &e.form, true),
-                        DirtyEdit::Tweak => link.send_modifier_edit(*hash, &e.form, false),
-                    }
+                    link.send_modifier_edit(*hash, &e.form, false);
                     sent += 1;
                 }
             }
@@ -371,10 +403,7 @@ impl LiveOverrides {
     pub fn flush_one(&mut self, hash: u64, link: &GameLink) {
         if let Some(e) = self.entries.get_mut(&hash) {
             e.dirty_at = None;
-            match e.dirty_edit.take().unwrap_or(DirtyEdit::Tweak) {
-                DirtyEdit::Modifiers => link.send_modifier_edit(hash, &e.form, true),
-                DirtyEdit::Tweak => link.send_modifier_edit(hash, &e.form, false),
-            }
+            link.send_modifier_edit(hash, &e.form, false);
         }
     }
 
@@ -387,10 +416,6 @@ impl LiveOverrides {
     pub fn mark_tweak(&mut self, hash: u64) {
         if let Some(e) = self.entries.get_mut(&hash) {
             e.dirty_at = Some(Instant::now());
-            e.dirty_edit = Some(match e.dirty_edit {
-                Some(DirtyEdit::Modifiers) => DirtyEdit::Modifiers,
-                _ => DirtyEdit::Tweak,
-            });
             e.user_tweaked = true;
         }
     }
@@ -411,7 +436,6 @@ impl LiveOverrides {
             e.form.speed = 1.0;
             e.user_tweaked = false;
             e.dirty_at = Some(Instant::now());
-            e.dirty_edit = Some(DirtyEdit::Tweak);
         }
     }
 
@@ -429,7 +453,6 @@ impl LiveOverrides {
         }
         e.user_tweaked = true;
         e.dirty_at = Some(Instant::now());
-        e.dirty_edit = Some(DirtyEdit::Tweak);
     }
 }
 
@@ -492,6 +515,18 @@ struct Shared {
     captures: BTreeMap<u64, Vec<CaptureLine>>,
     /// Bumped on every new capture line — lets the app cheaply notice new data.
     captures_seq: u64,
+    /// Live-carrier readiness reported by the plugin: 0 = none, 1 = staged/building, 2 = live.
+    carrier_state: u8,
+    /// The carrier battle object exists and is active — the real "can spawn now" signal.
+    carrier_spawned: bool,
+    /// Kinds the current carrier can serve — distinguishes "not up yet" from "up but does
+    /// not know this kind".
+    carrier_kinds: usize,
+    /// Bumped on every CarrierStatus so callers can tell "no report yet" from "reported 0".
+    carrier_seq: u64,
+    /// (fighter kind, motion hash) → number of completed playbacks the plugin reported.
+    /// A bump means "every line that motion produces has now been streamed".
+    capture_ends: BTreeMap<(i32, u64), u64>,
     outbox: Vec<String>,
     last_error: Option<String>,
     frames_rx: u64,
@@ -506,6 +541,11 @@ impl Default for Shared {
             kinds: BTreeMap::new(),
             captures: BTreeMap::new(),
             captures_seq: 0,
+            carrier_state: 0,
+            carrier_spawned: false,
+            carrier_kinds: 0,
+            carrier_seq: 0,
+            capture_ends: BTreeMap::new(),
             outbox: Vec::new(),
             last_error: None,
             frames_rx: 0,
@@ -595,7 +635,7 @@ impl GameLink {
         }
     }
 
-    /// Replace the plugin's live one-slot alias list (copy/replaced kind → donor kind,
+    /// Replace the plugin's live transplant alias list (copy/replaced kind → donor kind,
     /// optionally costume-gated). Full-list replace; empty clears all aliases.
     pub fn send_effect_aliases(&self, aliases: &[EffectAliasWire]) {
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "effect_aliases": aliases }))
@@ -623,7 +663,7 @@ impl GameLink {
     }
 
     /// Stripped donor eff bytes for the plugin to inject as resident data (live
-    /// cross-character one-slot). Sent whenever the referenced donor set changes.
+    /// cross-character transplant). Sent whenever the referenced donor set changes.
     pub fn send_donor_bytes(&self, donors: &[DonorBytesWire]) {
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "donor_bytes": donors }))
         else {
@@ -636,7 +676,7 @@ impl GameLink {
         }
     }
 
-    /// Custom names (one-slot copies) so the plugin resolves their hashes for display
+    /// Custom names (transplant copies) so the plugin resolves their hashes for display
     /// instead of falling back to hex.
     pub fn send_effect_names(&self, names: &[String]) {
         if names.is_empty() {
@@ -693,7 +733,7 @@ impl GameLink {
     }
 
     /// Ask the plugin to synchronously LIVE RE-READ a fighter's resident eff: swap it for
-    /// the deployed merged bytes + reparse, so a cross-fighter one-slot (or authored eff
+    /// the deployed merged bytes + reparse, so a cross-fighter transplant (or authored eff
     /// edit) renders mid-match without a re-entry. `arc_path` = "effect/fighter/<f>/ef_<f>.eff".
     pub fn send_force_reread(&self, arc_path: &str) {
         let frame = format!(
@@ -747,8 +787,60 @@ impl GameLink {
     }
 
     /// Monotonic counter of received capture lines (cheap "anything new?" check).
+    /// Live-carrier readiness: `(state, kinds, reports_seen)`.
+    ///
+    /// `state` is 0 none / 1 staged / 2 live. `reports_seen` is 0 with plugin builds that
+    /// predate the `CarrierStatus` notify, so callers can degrade gracefully rather than
+    /// waiting forever for a signal that will never arrive.
+    pub fn carrier_status(&self) -> (u8, usize, u64, bool) {
+        self.shared
+            .lock()
+            .map(|s| {
+                (
+                    s.carrier_state,
+                    s.carrier_kinds,
+                    s.carrier_seq,
+                    s.carrier_spawned,
+                )
+            })
+            .unwrap_or((0, 0, 0, false))
+    }
+
     pub fn captures_seq(&self) -> u64 {
         self.shared.lock().map(|s| s.captures_seq).unwrap_or(0)
+    }
+
+    /// How many capture lines are held for one motion (optionally restricted to a fighter
+    /// kind). Cheap "did more arrive?" check that avoids cloning the whole bucket.
+    pub fn captures_count(&self, motion: u64, kind: Option<i32>) -> usize {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.captures.get(&motion).map(|lines| match kind {
+                    Some(k) => lines.iter().filter(|l| l.kind == k).count(),
+                    None => lines.len(),
+                })
+            })
+            .unwrap_or(0)
+    }
+
+    /// How many times the plugin has reported this motion finishing (i.e. "its script has
+    /// been streamed in full"). `kind = None` sums every fighter that played the motion.
+    /// Stays 0 with plugin builds predating the `AcmdCaptureEnd` notify.
+    pub fn capture_end_count(&self, motion: u64, kind: Option<i32>) -> u64 {
+        self.shared
+            .lock()
+            .map(|s| match kind {
+                Some(k) => s.capture_ends.get(&(k, motion)).copied().unwrap_or(0),
+                None => s
+                    .capture_ends
+                    .iter()
+                    .filter(|((_, m), _)| *m == motion)
+                    .map(|(_, n)| *n)
+                    .sum(),
+            })
+            .unwrap_or(0)
     }
 
     /// Replace the plugin's live hitbox-rule list (modify/suppress/inject ATTACKs).
@@ -959,6 +1051,35 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
                 s.captures_seq += 1;
             }
         }
+        "AcmdCaptureEnd" => {
+            // "That motion just finished playing" — every line it produces has already been
+            // delivered (the plugin holds these back until the line backlog drains).
+            let Some(e) = body.get("AcmdCaptureEnd") else {
+                return;
+            };
+            let (Some(kind), Some(motion)) = (
+                e.get("kind").and_then(|k| k.as_i64()),
+                e.get("motion").and_then(|m| m.as_u64()),
+            ) else {
+                return;
+            };
+            *s.capture_ends.entry((kind as i32, motion)).or_insert(0) += 1;
+        }
+        "CarrierStatus" => {
+            // How far along the game is in taking the carrier we pushed. 0 = none staged,
+            // 1 = staged/building, 2 = live and serving. The editor uses this to keep its
+            // "sending" state up until the game has ACTUALLY taken the edit, instead of
+            // clearing the moment the bytes left the socket.
+            let Some(c) = body.get("CarrierStatus") else {
+                return;
+            };
+            s.carrier_state = c.get("state").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            // The battle object actually existing is what `spawn_via_carrier` requires;
+            // `state` alone can be 2 while nothing can spawn yet.
+            s.carrier_spawned = c.get("spawned").and_then(|v| v.as_bool()).unwrap_or(false);
+            s.carrier_kinds = c.get("kinds").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            s.carrier_seq += 1;
+        }
         "Remove" => {
             if let Some(id) = body
                 .get("Remove")
@@ -1098,6 +1219,88 @@ mod tests {
         assert_eq!(s2.lock().unwrap().captures.get(&0x1234).unwrap().len(), 1);
     }
 
+    /// A capture line for a fighter kind, in the plugin's exact emit form.
+    fn capture_frame(kind: i32, motion: u64, frame: f32) -> String {
+        plugin_frame(
+            "AcmdCapture",
+            &serde_json::json!({
+                "AcmdCapture": {
+                    "kind": kind, "motion": motion, "frame": frame, "func": "ATTACK",
+                    "args": [
+                        {"t":"i","v":0}, {"t":"i","v":0}, {"t":"h","v":0x031ed91fcau64},
+                        {"t":"n","v":8.0}, {"t":"i","v":361}, {"t":"i","v":100},
+                        {"t":"i","v":0}, {"t":"i","v":40}, {"t":"n","v":4.0},
+                        {"t":"n","v":0.0}, {"t":"n","v":8.0}, {"t":"n","v":6.0},
+                        {"t":"x","v":null}
+                    ]
+                }
+            }),
+        )
+    }
+
+    fn feed(link: &GameLink, payloads: &[String]) {
+        for p in payloads {
+            let mut buf = p.clone();
+            for payload in extract_frames(&mut buf) {
+                handle_frame(&link.shared, &payload);
+            }
+        }
+    }
+
+    /// `AcmdCaptureEnd` is the "this move finished, its script is fully streamed" signal the
+    /// deferred auto-fetch keys off. It must be counted per (fighter kind, motion) and must
+    /// NOT land in the capture buckets.
+    #[test]
+    fn acmd_capture_end_counts_per_kind_and_motion() {
+        let link = GameLink::default();
+        let end = |kind: i32, motion: u64| {
+            plugin_frame(
+                "AcmdCaptureEnd",
+                &serde_json::json!({ "AcmdCaptureEnd": { "kind": kind, "motion": motion } }),
+            )
+        };
+
+        assert_eq!(link.capture_end_count(0x1234, Some(8)), 0);
+        feed(&link, &[capture_frame(8, 0x1234, 3.0), end(8, 0x1234)]);
+        assert_eq!(link.capture_end_count(0x1234, Some(8)), 1);
+        // The marker is not a capture line.
+        assert_eq!(link.captures_for(0x1234).len(), 1);
+
+        // A different fighter playing the same motion is tracked separately…
+        feed(&link, &[end(9, 0x1234)]);
+        assert_eq!(link.capture_end_count(0x1234, Some(8)), 1);
+        assert_eq!(link.capture_end_count(0x1234, Some(9)), 1);
+        // …but `None` sums every kind, for when the editor has no fighter selected.
+        assert_eq!(link.capture_end_count(0x1234, None), 2);
+
+        // Re-performing the move bumps the count again — that is what re-triggers adoption.
+        feed(&link, &[end(8, 0x1234)]);
+        assert_eq!(link.capture_end_count(0x1234, Some(8)), 2);
+        // Unrelated motions stay at zero.
+        assert_eq!(link.capture_end_count(0x5678, Some(8)), 0);
+    }
+
+    /// The settle window uses `captures_count` to tell "more lines arrived" from "some other
+    /// move produced a line", so it has to be kind-filtered and per-motion.
+    #[test]
+    fn captures_count_filters_by_kind_and_motion() {
+        let link = GameLink::default();
+        feed(
+            &link,
+            &[
+                capture_frame(8, 0x1234, 3.0),
+                capture_frame(8, 0x1234, 5.0),
+                capture_frame(9, 0x1234, 3.0),
+                capture_frame(8, 0x5678, 3.0),
+            ],
+        );
+        assert_eq!(link.captures_count(0x1234, Some(8)), 2);
+        assert_eq!(link.captures_count(0x1234, Some(9)), 1);
+        assert_eq!(link.captures_count(0x1234, None), 3);
+        assert_eq!(link.captures_count(0x5678, Some(8)), 1);
+        assert_eq!(link.captures_count(0xdead, Some(8)), 0);
+    }
+
     #[test]
     fn outbound_hitbox_rules_match_plugin_field_names() {
         let link = GameLink::default();
@@ -1150,6 +1353,72 @@ mod tests {
         assert_eq!(rules[1]["inject"]["args"][0]["t"].as_str(), Some("i"));
         assert_eq!(rules[1]["inject"]["args"][1]["t"].as_str(), Some("h"));
         assert_eq!(rules[1]["inject"]["args"][2]["t"].as_str(), Some("x"));
+    }
+
+    /// Attribute edits (Hit Properties / Collision Masks / Effect-Sound) used to be dropped
+    /// on the floor: the override payload had no slot for them, so picking a value in the UI
+    /// changed nothing in game. Guard both that they are SENT and that the JSON keys are the
+    /// ones the plugin's `HbOverrides` deserializes.
+    #[test]
+    fn outbound_attribute_overrides_match_plugin_field_names() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: 0,
+            hitbox_id: Some(0),
+            suppress: false,
+            frame_start: None,
+            frame_end: None,
+            overrides: Some(HbOverridesWire {
+                setoff: Some(1),
+                lr_check: Some(3),
+                clang: Some(true),
+                add_attack: Some(0),
+                hitbox_attr: Some(0.0),
+                ground_or_air: Some(2),
+                mtk: Some(false),
+                shield_disable: Some(true),
+                reflectable: Some(false),
+                absorbable: Some(true),
+                landing_attack: Some(false),
+                situation_mask: Some(3),
+                category_mask: Some(0x3F),
+                part_mask: Some(0x1F),
+                no_finish_camera: Some(true),
+                collision_attr: Some(0x15a2c502b3),
+                sound_level: Some(1),
+                sound_attr: Some(1),
+                attack_region: Some(4),
+                ..Default::default()
+            }),
+            inject: None,
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let ov = &v["hitbox_rules"][0]["overrides"];
+        assert_eq!(ov["setoff"].as_i64(), Some(1));
+        assert_eq!(ov["lr_check"].as_i64(), Some(3));
+        assert_eq!(ov["clang"].as_bool(), Some(true));
+        assert_eq!(ov["add_attack"].as_i64(), Some(0));
+        assert_eq!(ov["hitbox_attr"].as_f64(), Some(0.0));
+        assert_eq!(ov["ground_or_air"].as_i64(), Some(2));
+        assert_eq!(ov["mtk"].as_bool(), Some(false));
+        assert_eq!(ov["shield_disable"].as_bool(), Some(true));
+        assert_eq!(ov["reflectable"].as_bool(), Some(false));
+        assert_eq!(ov["absorbable"].as_bool(), Some(true));
+        assert_eq!(ov["landing_attack"].as_bool(), Some(false));
+        assert_eq!(ov["situation_mask"].as_i64(), Some(3));
+        assert_eq!(ov["category_mask"].as_i64(), Some(0x3F));
+        assert_eq!(ov["part_mask"].as_i64(), Some(0x1F));
+        assert_eq!(ov["no_finish_camera"].as_bool(), Some(true));
+        assert_eq!(ov["collision_attr"].as_u64(), Some(0x15a2c502b3));
+        assert_eq!(ov["sound_level"].as_i64(), Some(1));
+        assert_eq!(ov["sound_attr"].as_i64(), Some(1));
+        assert_eq!(ov["attack_region"].as_i64(), Some(4));
+        // Unresolved slots stay absent so the plugin keeps the script's own value.
+        let bare = serde_json::to_value(HbOverridesWire::default()).unwrap();
+        assert!(bare.as_object().unwrap().is_empty());
     }
 
     #[test]

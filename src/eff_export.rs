@@ -5,20 +5,28 @@
 //   emission_rate → Emission.rate            lifetime      → ParticleData.life (i32)
 //   scale         → ParticleScale.scale_x/y/z (ratio vs scale_x, preserves anisotropy)
 //   color_scale   → EmitterStatic.color_scale emitter_scale → EmitterInfo.scale_x/y/z
-//   color0/color1 → EmitterStatic key tables (key.x/y/z = r/g/b; times untouched)
-//   alpha0        → EmitterStatic.alpha0 (value in key.x)
+//   color0/color1 → whichever source `effects.rs` READ for this emitter, at the same
+//                   precedence: a Constant ParticleColor, else the EmitterStatic key table
+//                   (key.x/y/z = r/g/b; times untouched), else the EmitterInfo static color
+//   alpha0        → EmitterStatic.alpha0 keys (value in key.x), else a Constant
+//                   ParticleColor.alpha0, else EmitterInfo.color0_a — same rule
+//
+// Writes are strictly scoped: one AuthoredEdit names ONE emitter set and ONE emitter, and
+// touches only that emitter's LIVE key slots. Every other emitter, channel and inert key
+// slot stays byte-identical to the source — see the
+// `authored_color_edit_touches_only_the_targeted_emitter` regression test.
 //
 // Edited emitters get `cached_binary` cleared — the serializer prefers the cached EMTR
 // blob and would otherwise silently drop the edits.
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, OneSlotOp};
+use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, TransplantOp};
 
 /// Rebuild the source .eff bytes with all authored edits applied. `donor_root` resolves
-/// cross-file one-slot donors (the ArcExplorer export root the `src_file_rel`s are
+/// cross-file transplant donors (the ArcExplorer export root the `src_file_rel`s are
 /// relative to); pass None to restrict to same-file duplication.
-/// Applies EVERY one-slot op regardless of costume scoping (the preview view).
+/// Applies EVERY transplant op regardless of costume scoping (the preview view).
 pub fn rebuild_eff_bytes(
     src_bytes: &[u8],
     eff: &EffMod,
@@ -27,9 +35,13 @@ pub fn rebuild_eff_bytes(
     rebuild_eff_bytes_filtered(src_bytes, eff, donor_root, |_| true)
 }
 
-/// Slot-scoped rebuild for export: `slot` None = the base file (only costume-unscoped
-/// ops); Some(s) = the ef_*_c0s.eff file (unscoped ops + ops scoped to that slot —
-/// the slotted file replaces the base for that costume, so it must carry both).
+/// ONE-SLOT-scoped rebuild for export: `slot` None = the base file (only transplants with
+/// no one-slot scoping); Some(s) = the `ef_*_cNN.eff` file (unscoped transplants + those
+/// scoped to that slot — the slotted file replaces the base for that costume, so it must
+/// carry both).
+///
+/// `slot` is a real costume index, NOT limited to the vanilla 0–7: the caller writes
+/// `c{slot:02}`, so c08 and up (and three-digit slots) name their files correctly.
 pub fn rebuild_eff_bytes_for_slot(
     src_bytes: &[u8],
     eff: &EffMod,
@@ -37,8 +49,8 @@ pub fn rebuild_eff_bytes_for_slot(
     slot: Option<u8>,
 ) -> Result<Vec<u8>> {
     rebuild_eff_bytes_filtered(src_bytes, eff, donor_root, |op| match slot {
-        None => op.slots.is_empty(),
-        Some(s) => op.slots.is_empty() || op.slots.contains(&s),
+        None => op.one_slot_slots.is_empty(),
+        Some(s) => op.one_slot_slots.is_empty() || op.one_slot_slots.contains(&s),
     })
 }
 
@@ -56,13 +68,43 @@ pub fn rebuild_eff_bytes_for_slot(
 pub fn rebuild_runtime_carrier_eff_bytes(
     carrier_bytes: &[u8],
     carrier_rel: &str,
-    ops: &[OneSlotOp],
+    ops: &[TransplantOp],
     donor_root: &std::path::Path,
+) -> Result<Vec<u8>> {
+    rebuild_runtime_carrier_eff_bytes_with_edits(carrier_bytes, carrier_rel, ops, donor_root, &[])
+}
+
+/// Authored edits to bake into the carrier's cloned entries.
+///
+/// The carrier path exists because the FIGHTER's own eff cannot be reloaded mid-match:
+/// `reparse_game_path` rebuilds the parsed emitter structs from the RESIDENT buffer and never
+/// re-requests the file, so the merged bytes were never read (`cb_game=0` in
+/// `effect_viewer_cb.txt`) and edits only appeared after a full reboot. The carrier's eff IS
+/// reloadable — that is the path transplants already use — so an edited effect is cloned into
+/// the carrier with its edits baked in and the original kind is aliased onto the clone.
+///
+/// `set_name` names the entry AS IT EXISTS IN THE CARRIER (the transplant's `new_entry_name`),
+/// not the fighter's original entry name.
+pub struct CarrierAuthored {
+    pub set_name: String,
+    pub edits: Vec<AuthoredEdit>,
+}
+
+/// As [`rebuild_runtime_carrier_eff_bytes`], but bakes authored edits into the cloned entries.
+pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
+    carrier_bytes: &[u8],
+    carrier_rel: &str,
+    ops: &[TransplantOp],
+    donor_root: &std::path::Path,
+    authored: &[CarrierAuthored],
 ) -> Result<Vec<u8>> {
     // A carrier-native selection needs no transplant. The runtime remap already turns an `_os`
     // request into the carrier's existing real entry, so parsing, pruning, and repacking these
     // resource pools only introduces risk. Preserve the game's known-good payload byte-for-byte.
-    if !ops.is_empty()
+    // ...but only when there is nothing to bake in. With authored edits the bytes MUST be
+    // rebuilt, otherwise the edits silently do not ship.
+    if authored.is_empty()
+        && !ops.is_empty()
         && ops
             .iter()
             .all(|op| op.src_file_rel.eq_ignore_ascii_case(carrier_rel))
@@ -84,7 +126,7 @@ pub fn rebuild_runtime_carrier_eff_bytes(
 
     // Load every donor once, then decide which shader strategy the whole carrier uses.
     let mut donors: Vec<(String, effect_library::NamcoEffectFile)> = Vec::new();
-    let mut plan: Vec<(&OneSlotOp, usize)> = Vec::new();
+    let mut plan: Vec<(&TransplantOp, usize)> = Vec::new();
     for op in ops {
         // A selected native carrier effect is already present in the required scaffold.
         if op.src_file_rel.eq_ignore_ascii_case(carrier_rel) {
@@ -168,7 +210,7 @@ pub fn rebuild_runtime_carrier_eff_bytes(
     for (op, donor_index) in &plan {
         let donor = &donors[*donor_index].1;
         let (standard_base, compute_base) = bases[*donor_index];
-        apply_one_slot_cross_file(
+        apply_transplant_cross_file(
             &mut carrier,
             donor,
             op,
@@ -181,17 +223,25 @@ pub fn rebuild_runtime_carrier_eff_bytes(
     }
 
     // The Rust BFRES writer round-trips model topology and vertex/index data, but its rebuilt
-    // primitive container has not proven GPU-valid in game: effects made entirely of those
-    // primitives construct and return handles, then draw nothing. When one donor owns the
-    // snapshot's primitive-only effects, retain that donor's original PRMA/BFRES pool exactly.
-    // Descriptor IDs remain the emitter-facing lookup key, so unused donor models are harmless.
+    // primitive container has not proven GPU-valid in game: effects made from those primitives
+    // construct and return handles, then draw nothing. When one donor owns the snapshot's
+    // primitive-using effects, retain that donor's original PRMA/BFRES pool exactly. Descriptor
+    // IDs remain the emitter-facing lookup key, so unused donor models are harmless.
+    //
+    // This used to require the effect to be primitive-ONLY, which missed the common case: a
+    // MIXED effect (mostly particles plus one mesh emitter). Those fell through to the pruning
+    // path, which prunes against the CARRIER's pool — the donor's primitive IDs are not in it,
+    // so the mesh emitter's geometry was silently dropped and that part of the effect vanished
+    // while every particle emitter around it rendered normally (kirby_dash lost the cone at the
+    // front of the dash; its pool went 39 descriptors → 2). Replacing the carrier's pool is safe
+    // here because the carrier's own effects are silenced anyway.
     let preserve_raw_primitives = donors.len() == 1
         && ops
             .iter()
             .all(|op| !op.src_file_rel.eq_ignore_ascii_case(carrier_rel))
         && plan
             .iter()
-            .any(|(op, donor_index)| donor_effect_is_primitive_only(&donors[*donor_index].1, op));
+            .any(|(op, donor_index)| donor_effect_uses_primitives(&donors[*donor_index].1, op));
     if preserve_raw_primitives {
         let mut donor_primitives = donors[0]
             .1
@@ -273,6 +323,39 @@ pub fn rebuild_runtime_carrier_eff_bytes(
                      game's loader, so the carrier was not built.",
                     set.name
                 );
+            }
+        }
+    }
+
+    // Bake authored edits into the CLONED entries, last — after the transplant has created
+    // them and after the shader-safety check, so an edit can never mask a bad clone.
+    if !authored.is_empty() {
+        let ptcl = carrier
+            .ptcl_file
+            .as_mut()
+            .context("carrier has no ptcl section — cannot apply authored edits")?;
+        for entry in authored {
+            let idx = ptcl
+                .emitter_list
+                .emitter_sets
+                .iter()
+                .position(|s| s.name.eq_ignore_ascii_case(&entry.set_name));
+            let Some(idx) = idx else {
+                anyhow::bail!(
+                    "authored edits target '{}', which is not in the built carrier — the \
+                     transplant that should have created it did not run",
+                    entry.set_name
+                );
+            };
+            for edit in &entry.edits {
+                // Retarget the edit at the carrier's copy: the editor authored it against the
+                // FIGHTER's eff, where the set sits at a different index under its original
+                // name. `apply_authored` resolves strictly by (name, index), so both must be
+                // rewritten or the edit lands on the wrong set — or silently on none.
+                let mut edit = edit.clone();
+                edit.set_name = entry.set_name.clone();
+                edit.set_idx = idx;
+                apply_authored(ptcl, &edit)?;
             }
         }
     }
@@ -584,7 +667,10 @@ fn variation_count(bnsh: &[u8]) -> Result<usize> {
 
 /// How many compute-shader variations a donor entry needs (`highest index + 1`), or None when it
 /// uses no compute shader at all.
-fn donor_compute_demand(donor: &effect_library::NamcoEffectFile, op: &OneSlotOp) -> Option<usize> {
+fn donor_compute_demand(
+    donor: &effect_library::NamcoEffectFile,
+    op: &TransplantOp,
+) -> Option<usize> {
     let ptcl = donor.ptcl_file.as_ref()?;
     let entry_index = donor
         .entry_names
@@ -604,7 +690,10 @@ fn donor_compute_demand(donor: &effect_library::NamcoEffectFile, op: &OneSlotOp)
 /// True when every emitter in the selected donor set renders through a donor-owned primitive.
 /// These are the effects for which a GPU-invalid rewritten BFRES means complete invisibility,
 /// rather than one missing layer among otherwise visible quad particles.
-fn donor_effect_is_primitive_only(donor: &effect_library::NamcoEffectFile, op: &OneSlotOp) -> bool {
+fn donor_effect_uses_primitives(
+    donor: &effect_library::NamcoEffectFile,
+    op: &TransplantOp,
+) -> bool {
     let Some(ptcl) = donor.ptcl_file.as_ref() else {
         return false;
     };
@@ -626,7 +715,7 @@ fn donor_effect_is_primitive_only(donor: &effect_library::NamcoEffectFile, op: &
         return false;
     };
     let mut count = 0usize;
-    let mut all_primitive = true;
+    let mut any_primitive = false;
     visit_emitters_ref(&set.emitters, &mut |em| {
         count += 1;
         let ids = [
@@ -642,9 +731,9 @@ fn donor_effect_is_primitive_only(donor: &effect_library::NamcoEffectFile, op: &
                     .iter()
                     .any(|descriptor| descriptor.id == *id)
         });
-        all_primitive &= has_local_primitive;
+        any_primitive |= has_local_primitive;
     });
-    count != 0 && all_primitive
+    count != 0 && any_primitive
 }
 
 /// How a transplant's emitters relate to the destination's shader containers.
@@ -671,7 +760,7 @@ fn rebuild_eff_bytes_filtered(
     src_bytes: &[u8],
     eff: &EffMod,
     donor_root: Option<&std::path::Path>,
-    keep: impl Fn(&OneSlotOp) -> bool,
+    keep: impl Fn(&TransplantOp) -> bool,
 ) -> Result<Vec<u8>> {
     let mut namco = effect_library::NamcoEffectFile::load(src_bytes)
         .context("effect_library failed to parse the source .eff")?;
@@ -679,28 +768,31 @@ fn rebuild_eff_bytes_filtered(
         .source_rel
         .to_ascii_lowercase()
         .starts_with("effect/fighter/");
-    // One-slot ops FIRST (they only append sets, so pre-existing set indices are
+    // Transplant ops FIRST (they only append sets, so pre-existing set indices are
     // stable), then authored edits — which may target a freshly cloned set by name
     // (editing the copy in the eff editor). Cross-fighter donors bake in here too: the
     // merged file replaces the player's own (resident) eff at boot, so it renders.
-    for op in eff.one_slot.iter().filter(|op| keep(op)) {
+    for op in eff.transplants.iter().filter(|op| keep(op)) {
         let same_file = op.src_file_rel.is_empty() || op.src_file_rel == eff.source_rel;
         if same_file {
-            apply_one_slot_same_file(&mut namco, op)?;
+            apply_transplant_same_file(&mut namco, op)?;
         } else {
             let root = donor_root.ok_or_else(|| {
                 anyhow!(
-                    "one-slot '{}': cross-file donor '{}' needs the export root",
+                    "transplant '{}': cross-file donor '{}' needs the export root",
                     op.new_entry_name,
                     op.src_file_rel
                 )
             })?;
             let donor_bytes = std::fs::read(root.join(&op.src_file_rel)).with_context(|| {
-                format!("cross-file one-slot donor '{}' unreadable", op.src_file_rel)
+                format!(
+                    "cross-file transplant donor '{}' unreadable",
+                    op.src_file_rel
+                )
             })?;
             let donor = effect_library::NamcoEffectFile::load(&donor_bytes)
                 .context("effect_library failed to parse the donor .eff")?;
-            apply_one_slot_cross_file(
+            apply_transplant_cross_file(
                 &mut namco,
                 &donor,
                 op,
@@ -726,9 +818,9 @@ fn rebuild_eff_bytes_filtered(
 /// Duplicate a donor entry's emitter set(s) within the same eff under a new entry name —
 /// the ACMD side then retargets the fighter's call to `new_entry_name`, leaving the
 /// original entry vanilla for everyone else.
-fn apply_one_slot_same_file(
+fn apply_transplant_same_file(
     namco: &mut effect_library::NamcoEffectFile,
-    op: &OneSlotOp,
+    op: &TransplantOp,
 ) -> Result<()> {
     if op.replace_entry.is_none()
         && namco
@@ -737,7 +829,7 @@ fn apply_one_slot_same_file(
             .any(|n| n.eq_ignore_ascii_case(&op.new_entry_name))
     {
         anyhow::bail!(
-            "one-slot target name '{}' already exists",
+            "transplant target name '{}' already exists",
             op.new_entry_name
         );
     }
@@ -749,7 +841,7 @@ fn apply_one_slot_same_file(
         .position(|n| n.eq_ignore_ascii_case(&op.src_set_name))
         .ok_or_else(|| {
             anyhow!(
-                "one-slot donor entry '{}' not found in this eff",
+                "transplant donor entry '{}' not found in this eff",
                 op.src_set_name
             )
         })?;
@@ -805,16 +897,16 @@ fn apply_one_slot_same_file(
         }
         new_entry.variant_start_idx = new_start;
     }
-    finish_one_slot_entry(namco, op, new_entry)
+    finish_transplant_entry(namco, op, new_entry)
 }
 
 /// Append `new_entry` under the op's new name, or — replace mode — repoint an existing
 /// entry at the cloned set(s) (its name and slot in the table stay; the old set is
 /// orphaned but harmless). Replace is the costume-scoped semantic: every ACMD use of
 /// the entry switches on that costume with no redirect needed.
-fn finish_one_slot_entry(
+fn finish_transplant_entry(
     namco: &mut effect_library::NamcoEffectFile,
-    op: &OneSlotOp,
+    op: &TransplantOp,
     new_entry: effect_library::namco_file::EffectHeader,
 ) -> Result<()> {
     match &op.replace_entry {
@@ -828,7 +920,7 @@ fn finish_one_slot_entry(
                 .iter()
                 .position(|n| n.eq_ignore_ascii_case(target))
                 .ok_or_else(|| {
-                    anyhow!("one-slot replace target entry '{target}' not found in this eff")
+                    anyhow!("transplant replace target entry '{target}' not found in this eff")
                 })?;
             // Take the donor's header (kind/flags describe how its set plays) but keep
             // the entry's name so every existing ACMD call keeps resolving.
@@ -842,10 +934,10 @@ fn finish_one_slot_entry(
 /// the textures they reference (by GUID, merged into this file's BNTX), append the donor's
 /// shader variations (BNSH merge) and remap the cloned emitters' shader indices. Primitives
 /// (rare) are not transferable yet — referencing one bails with a clear error.
-fn apply_one_slot_cross_file(
+fn apply_transplant_cross_file(
     namco: &mut effect_library::NamcoEffectFile,
     donor: &effect_library::NamcoEffectFile,
-    op: &OneSlotOp,
+    op: &TransplantOp,
     destination_is_fighter: bool,
     shader_strategy: ShaderStrategy,
 ) -> Result<()> {
@@ -856,7 +948,7 @@ fn apply_one_slot_cross_file(
             .any(|n| n.eq_ignore_ascii_case(&op.new_entry_name))
     {
         anyhow::bail!(
-            "one-slot target name '{}' already exists",
+            "transplant target name '{}' already exists",
             op.new_entry_name
         );
     }
@@ -868,7 +960,7 @@ fn apply_one_slot_cross_file(
         .position(|n| n.eq_ignore_ascii_case(&op.src_set_name))
         .ok_or_else(|| {
             anyhow!(
-                "one-slot donor entry '{}' not found in '{}'",
+                "transplant donor entry '{}' not found in '{}'",
                 op.src_set_name,
                 op.src_file_rel
             )
@@ -1076,7 +1168,7 @@ fn apply_one_slot_cross_file(
                 .as_ref()
                 .ok_or_else(|| anyhow!("donor texture section has no binary"))?;
             // bntx extraction is file-path based — round-trip through the scratch dir.
-            let tmp = crate::scratch_dirs::app_scratch_dir("oneslot-tex")?;
+            let tmp = crate::scratch_dirs::app_scratch_dir("transplant-tex")?;
             let path = tmp.path().join(format!("{name}.bntx"));
             effect_library::bntx::export_single_texture(donor_bin, idx, &name, &path)
                 .with_context(|| format!("extracting donor texture '{name}'"))?;
@@ -1267,7 +1359,7 @@ fn apply_one_slot_cross_file(
         }
         new_entry.variant_start_idx = new_start;
     }
-    finish_one_slot_entry(namco, op, new_entry)
+    finish_transplant_entry(namco, op, new_entry)
 }
 
 fn destination_entry_kind(kind: u16, destination_is_fighter: bool) -> u16 {
@@ -1316,6 +1408,111 @@ mod tests {
     use super::{
         append_unique_resource_ids, destination_entry_kind, remap_shader_indices, shader_index_fits,
     };
+    use crate::mod_project::{AuthoredEdit, EmitterFieldEdits};
+
+    /// Every emitter in the file, as (set name, flat emitter index, serialized data).
+    /// Serializing `EmitterData` catches ANY field drift, not just the ones we edit.
+    fn emitter_snapshot(file: &effect_library::NamcoEffectFile) -> Vec<(String, usize, String)> {
+        let mut out = Vec::new();
+        let Some(ptcl) = file.ptcl_file.as_ref() else {
+            return out;
+        };
+        for set in &ptcl.emitter_list.emitter_sets {
+            let mut idx = 0usize;
+            super::visit_emitters_ref(&set.emitters, &mut |em| {
+                out.push((
+                    set.name.clone(),
+                    idx,
+                    serde_json::to_string(&em.data).unwrap_or_default(),
+                ));
+                idx += 1;
+            });
+        }
+        out
+    }
+
+    /// A color edit on ONE emitter must leave every other emitter byte-identical.
+    /// Point `VISIONARY_EFF_ROOT` at an extracted `effect/` tree to run this.
+    #[test]
+    fn authored_color_edit_touches_only_the_targeted_emitter() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/mario/ef_mario.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let source = effect_library::NamcoEffectFile::load(&bytes).expect("parse source");
+        let before = emitter_snapshot(&source);
+
+        // Target the first set that has at least two emitters, and edit its SECOND one.
+        let ptcl = source.ptcl_file.as_ref().expect("source PTCL");
+        let (set_idx, set_name) = ptcl
+            .emitter_list
+            .emitter_sets
+            .iter()
+            .enumerate()
+            .find_map(|(i, s)| {
+                let mut n = 0usize;
+                super::visit_emitters_ref(&s.emitters, &mut |_| n += 1);
+                (n >= 2).then(|| (i, s.name.clone()))
+            })
+            .expect("a set with >= 2 emitters");
+        let target_emitter = 1usize;
+        let target_name = before
+            .iter()
+            .filter(|(name, ..)| *name == set_name)
+            .nth(target_emitter)
+            .map(|_| {
+                let mut nth = None;
+                let mut idx = 0usize;
+                super::visit_emitters_ref(
+                    &ptcl.emitter_list.emitter_sets[set_idx].emitters,
+                    &mut |em| {
+                        if idx == target_emitter {
+                            nth = Some(em.data.display_name());
+                        }
+                        idx += 1;
+                    },
+                );
+                nth.unwrap_or_default()
+            })
+            .expect("target emitter");
+
+        let eff = crate::mod_project::EffMod {
+            source_rel: SRC.to_string(),
+            authored: vec![AuthoredEdit {
+                set_name: set_name.clone(),
+                // Not exercised by this test: it drives `rebuild_eff_bytes`, which resolves
+                // by emitter-set name. Only the carrier path needs the kind name.
+                entry_name: String::new(),
+                set_idx,
+                emitter_name: target_name,
+                emitter_idx: target_emitter,
+                fields: EmitterFieldEdits {
+                    color0: Some(vec![[1.0, 0.0, 0.0, 0.0]]),
+                    ..Default::default()
+                },
+            }],
+            transplants: Vec::new(),
+        };
+        let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, Some(&root)).expect("rebuild");
+        let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
+        let after = emitter_snapshot(&after);
+
+        assert_eq!(before.len(), after.len(), "emitter count changed");
+        let changed: Vec<(String, usize)> = before
+            .iter()
+            .zip(&after)
+            .filter(|((_, _, a), (_, _, b))| a != b)
+            .map(|((s, i, _), _)| (s.clone(), *i))
+            .collect();
+        assert_eq!(
+            changed,
+            vec![(set_name, target_emitter)],
+            "a single-emitter color edit leaked into other emitters"
+        );
+    }
 
     #[test]
     fn carrier_rejects_shader_variations_its_container_lacks() {
@@ -1373,17 +1570,17 @@ mod tests {
         };
         const CARRIER: &str = "effect/assist/bomberman/ef_bomberman.eff";
         let carrier_base = std::fs::read(root.join(CARRIER)).expect("carrier eff");
-        let op = |file: &str, set: &str| crate::mod_project::OneSlotOp {
+        let op = |file: &str, set: &str| crate::mod_project::TransplantOp {
             new_entry_name: set.to_string(),
             src_file_rel: file.to_string(),
             src_set_name: set.to_string(),
             src_set_idx: 0,
-            slots: Vec::new(),
+            one_slot_slots: Vec::new(),
             replace_entry: None,
         };
         const PICKEL: &str = "effect/fighter/pickel/ef_pickel.eff";
         const DAISY: &str = "effect/fighter/daisy/ef_daisy.eff";
-        let cases: [(&str, Vec<crate::mod_project::OneSlotOp>); 3] = [
+        let cases: [(&str, Vec<crate::mod_project::TransplantOp>); 3] = [
             ("one donor", vec![op(PICKEL, "pickel_tnt")]),
             (
                 // DAISY_KINOPIO_BULLET is the one known effect that samples a compute shader.
@@ -1540,12 +1737,12 @@ mod tests {
         };
         const CARRIER: &str = "effect/assist/bomberman/ef_bomberman.eff";
         let carrier_base = std::fs::read(root.join(CARRIER)).expect("carrier eff");
-        let op = crate::mod_project::OneSlotOp {
+        let op = crate::mod_project::TransplantOp {
             new_entry_name: "bomberman_bomb_os".into(),
             src_file_rel: CARRIER.into(),
             src_set_name: "bomberman_bomb".into(),
             src_set_idx: 0,
-            slots: Vec::new(),
+            one_slot_slots: Vec::new(),
             replace_entry: None,
         };
         let built = super::rebuild_runtime_carrier_eff_bytes(&carrier_base, CARRIER, &[op], &root)
@@ -1587,12 +1784,12 @@ mod tests {
         let carrier_base = std::fs::read(root.join(CARRIER)).expect("carrier eff");
         let donor_bytes = std::fs::read(root.join(DAISY)).expect("Daisy eff");
         let donor = effect_library::NamcoEffectFile::load(&donor_bytes).expect("Daisy parse");
-        let op = crate::mod_project::OneSlotOp {
+        let op = crate::mod_project::TransplantOp {
             new_entry_name: "daisy_flower_petals".into(),
             src_file_rel: DAISY.into(),
             src_set_name: "daisy_flower_petals".into(),
             src_set_idx: 0,
-            slots: Vec::new(),
+            one_slot_slots: Vec::new(),
             replace_entry: None,
         };
         let built = super::rebuild_runtime_carrier_eff_bytes(&carrier_base, CARRIER, &[op], &root)
@@ -1633,10 +1830,18 @@ fn visit_emitters_ref<F: FnMut(&effect_library::structs::Emitter)>(
 
 fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &AuthoredEdit) -> Result<()> {
     let sets = &mut ptcl.emitter_list.emitter_sets;
-    let set_idx = sets
-        .iter()
-        .position(|s| !edit.set_name.is_empty() && s.name == edit.set_name)
-        .unwrap_or(edit.set_idx);
+    // Scope resolution is deliberately strict: an edit names ONE set and ONE emitter, so
+    // when the stored index already holds the stored name that pair wins outright. Falling
+    // straight to `position()` retargeted the edit at the FIRST set of that name, which a
+    // transplant clone of a multi-variant entry can easily duplicate.
+    let set_named = |s: &effect_library::structs::EmitterSet| {
+        !edit.set_name.is_empty() && s.name == edit.set_name
+    };
+    let set_idx = if sets.get(edit.set_idx).map(set_named).unwrap_or(false) {
+        edit.set_idx
+    } else {
+        sets.iter().position(set_named).unwrap_or(edit.set_idx)
+    };
     let set = sets.get_mut(set_idx).ok_or_else(|| {
         anyhow!(
             "emitter set '{}' (idx {}) not found in source eff",
@@ -1651,43 +1856,49 @@ fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &AuthoredEdit) -> R
         );
     }
 
-    // Flat, parent-first traversal (matches the editor's per-set emitter enumeration).
-    let mut flat_idx = 0usize;
-    let mut applied = false;
-    visit_emitters(&mut set.emitters, &mut flat_idx, &mut |idx, em| {
-        if applied {
-            return;
+    // Resolve the target emitter FIRST over a read-only, flat parent-first traversal (the
+    // same order the editor enumerates), then write to exactly that one index. Same rule as
+    // the set above: stored-name-at-stored-index wins, so identically-named sibling emitters
+    // can never pull an edit off the emitter the user actually selected.
+    let mut names: Vec<String> = Vec::new();
+    visit_emitters_ref(&set.emitters, &mut |em| names.push(em.data.display_name()));
+    let named = |i: usize| {
+        !edit.emitter_name.is_empty() && names.get(i).map(|n| *n == edit.emitter_name) == Some(true)
+    };
+    let target = if named(edit.emitter_idx) {
+        Some(edit.emitter_idx)
+    } else if let Some(i) = (0..names.len()).find(|i| named(*i)) {
+        eprintln!(
+            "[EFF-EXPORT] warning: emitter '{}' of set '{}' moved from index {} to {}",
+            edit.emitter_name, set.name, edit.emitter_idx, i
+        );
+        Some(i)
+    } else if edit.emitter_idx < names.len() {
+        if !edit.emitter_name.is_empty() {
+            eprintln!(
+                "[EFF-EXPORT] warning: emitter '{}' not found by name in set '{}' — using index {}",
+                edit.emitter_name, set.name, edit.emitter_idx
+            );
         }
-        let name = em.data.display_name();
-        let by_name = !edit.emitter_name.is_empty() && name == edit.emitter_name;
-        let by_idx = edit.emitter_name.is_empty() && idx == edit.emitter_idx;
-        if by_name || by_idx {
-            apply_fields(em, &edit.fields);
-            applied = true;
-        }
-    });
-    if !applied {
-        // Name lookup failed (renamed dump?) — retry strictly by stored index.
-        let mut flat_idx = 0usize;
-        visit_emitters(&mut set.emitters, &mut flat_idx, &mut |idx, em| {
-            if !applied && idx == edit.emitter_idx {
-                eprintln!(
-                    "[EFF-EXPORT] warning: emitter '{}' not found by name in set '{}' — using index {}",
-                    edit.emitter_name, set.name, edit.emitter_idx
-                );
-                apply_fields(em, &edit.fields);
-                applied = true;
-            }
-        });
-    }
-    if !applied {
-        anyhow::bail!(
+        Some(edit.emitter_idx)
+    } else {
+        None
+    };
+    let target = target.ok_or_else(|| {
+        anyhow!(
             "emitter '{}' (idx {}) not found in set '{}'",
             edit.emitter_name,
             edit.emitter_idx,
             set.name
-        );
-    }
+        )
+    })?;
+
+    let mut flat_idx = 0usize;
+    visit_emitters(&mut set.emitters, &mut flat_idx, &mut |idx, em| {
+        if idx == target {
+            apply_fields(em, &edit.fields);
+        }
+    });
     Ok(())
 }
 
@@ -1749,7 +1960,11 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
                 d.particle_color.color0_b = row[2];
             }
         } else if d.emitter_static.num_color0_keys > 0 {
-            for (k, row) in d.emitter_static.color0.keys.iter_mut().zip(rows) {
+            // Only the first `num_color0_keys` slots are live; the rest of the fixed-size
+            // table is inert padding the editor never showed. A stale project file carrying
+            // more rows than this emitter has keys must not spill into those slots.
+            let live = d.emitter_static.num_color0_keys as usize;
+            for (k, row) in d.emitter_static.color0.keys.iter_mut().take(live).zip(rows) {
                 k.x = row[0];
                 k.y = row[1];
                 k.z = row[2];
@@ -1771,7 +1986,8 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
                 d.particle_color.color1_b = row[2];
             }
         } else if d.emitter_static.num_color1_keys > 0 {
-            for (k, row) in d.emitter_static.color1.keys.iter_mut().zip(rows) {
+            let live = d.emitter_static.num_color1_keys as usize;
+            for (k, row) in d.emitter_static.color1.keys.iter_mut().take(live).zip(rows) {
                 k.x = row[0];
                 k.y = row[1];
                 k.z = row[2];
@@ -1782,9 +1998,26 @@ fn apply_fields(em: &mut effect_library::structs::Emitter, f: &EmitterFieldEdits
             d.emitter_info.color1_b = row[2];
         }
     }
+    // Alpha follows the SAME source-precedence rule as the colors above — `alpha_keys` in
+    // `effects.rs` reads the key table first, then a Constant ParticleColor alpha, then the
+    // EmitterInfo static alpha. Writing unconditionally into the key table dropped every
+    // alpha edit on an emitter with no alpha keys (the game ignores the inert table) while
+    // scribbling over slots the editor never showed.
     if let Some(rows) = &f.alpha0 {
-        for (k, row) in d.emitter_static.alpha0.keys.iter_mut().zip(rows) {
-            k.x = row[0];
+        let live = d.emitter_static.num_alpha0_keys as usize;
+        if live > 0 {
+            for (k, row) in d.emitter_static.alpha0.keys.iter_mut().take(live).zip(rows) {
+                k.x = row[0];
+            }
+        } else if matches!(
+            d.particle_color.alpha0_type,
+            effect_library::ColorType::Constant
+        ) {
+            if let Some(row) = rows.first() {
+                d.particle_color.alpha0 = row[0];
+            }
+        } else if let Some(row) = rows.first() {
+            d.emitter_info.color0_a = row[0];
         }
     }
     // Serializer prefers the cached EMTR blob; clearing it forces a re-encode of `data`.

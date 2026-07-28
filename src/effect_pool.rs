@@ -1,6 +1,6 @@
 //! Persistent pool of effect entries across ALL eff files under the export root.
 //!
-//! Backs the One-Slot studio's donor picker: every ef_*.eff's entry names, scanned
+//! Backs the Transplant studio's donor picker: every ef_*.eff's entry names, scanned
 //! incrementally (a few files per frame) and cached by (mtime, size) in
 //! `{app_storage_root}/eff-entry-cache.json` so subsequent launches are instant.
 
@@ -175,7 +175,7 @@ impl EffectPool {
 
     /// Index an eff file explicitly (e.g. one imported from outside the export root) so
     /// its entries show up in donor search and the effect-name picker. Returns the key
-    /// (rel path if under the root, otherwise the absolute path) that `entries_of`/one-slot
+    /// (rel path if under the root, otherwise the absolute path) that `entries_of`/transplant
     /// resolution use. Persists the cache immediately.
     pub fn add_file(&mut self, path: &Path) -> String {
         let rel = self.rel_of(path);
@@ -230,11 +230,11 @@ fn walk_effs(root: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             walk_effs(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("eff") {
-            // Skip the transient one-slot preview eff the editor writes next to a fighter eff.
+            // Skip the transient transplant preview eff the editor writes next to a fighter eff.
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.contains("_oneslot_preview"))
+                .map(|n| crate::scratch_dirs::is_transplant_preview_name(n))
                 .unwrap_or(false)
             {
                 continue;

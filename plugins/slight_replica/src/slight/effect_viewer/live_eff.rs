@@ -1,7 +1,7 @@
 //! Live eff serving + IN-MATCH reparse (no re-entry).
 //!
 //! Ported from the original effect viewer's working `live_edit.rs` orchestration. The
-//! editor writes each fighter's MERGED eff (one-slots + authored edits baked in) plus a
+//! editor writes each fighter's MERGED eff (transplants + authored edits baked in) plus a
 //! manifest to `sd:/effect_viewer/live_eff/`. For each entry:
 //!
 //!  1. Register an Arcropolis GENERIC (disk) callback for the arc path with max_size =
@@ -10,17 +10,25 @@
 //!     the arc FILE-TABLE size (immediately, even registered mid-game). The `with_path`
 //!     stream callback never does (it is for `stream:/` files read via nn::fs), so a
 //!     merged eff BIGGER than vanilla was truncated to the vanilla size — the appended
-//!     one-slot entries never existed in game and their spawns were invisible. A grown
+//!     transplant entries never existed in game and their spawns were invisible. A grown
 //!     file on a later deploy is simply re-registered with the larger size.
-//!  2. `.eff` files are then REPARSED in place via the effect manager
-//!     ([`effect_reload::reparse_game_path`]) — the game unloads + reloads the slot, so
-//!     the new/edited emitter sets exist mid-match. Non-eff files use the raw-buffer patch.
+//!  2. `.eff` files then need BOTH halves, in this order:
+//!     a. [`resource_reload::replace_loaded_file`] pulls the merged bytes into the RESIDENT
+//!        buffer — this is the call that actually goes out through `arcrop_load_file` and
+//!        reaches our disk callback.
+//!     b. [`effect_reload::reparse_game_path`] unloads + reloads the slot to rebuild the
+//!        PARSED emitter structs from those bytes.
+//!     Non-eff files need only (a).
 //!  3. Kill + re-`req` the live tracked effects so anything already on screen respawns
 //!     from the new data.
 //!
-//! Why the previous approach failed: overwriting the resident eff bytes did nothing
-//! because the game renders from the PARSED emitter structs, not the raw buffer. The
-//! unload/load reparse is what actually rebuilds them.
+//! Both halves are load-bearing, and each alone was tried and failed:
+//!   * Raw-buffer patch alone did nothing — the game renders from the PARSED structs.
+//!   * Reparse alone ALSO did nothing, which is subtler: `unload_effects`/`load_effects`
+//!     rebuild from the resident buffer and never re-request the file, so the callback was
+//!     never hit (`cb_game=0` in `effect_viewer_cb.txt`) and the reparse faithfully
+//!     re-parsed the VANILLA bytes. Authored colour edits then only appeared after a full
+//!     reboot, where a genuine arc load goes through Arcropolis.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const MANIFEST: &str = "sd:/effect_viewer/live_eff/manifest.json";
 const DIR: &str = "sd:/effect_viewer/live_eff/";
 /// Written into every diag file so on-device logs are attributable to a specific build.
-const BUILD_TAG: &str = "2026-07-26cs-sparse-color-pins";
+pub const BUILD_TAG: &str = "2026-07-27l-status-heartbeat";
 
 /// Times [`disk_cb`] served bytes. Split by initiator so we can DECISIVELY answer the
 /// one open question of the whole cross-fighter-live effort: does the game's own resource
@@ -98,7 +106,7 @@ extern "C" fn disk_cb(hash: u64, out: *mut u8, capacity: usize, out_size: &mut u
     };
     // Proof-of-serve trace: this is the ONLY place that knows a load re-read the file.
     // `cb_game>0` is the decisive proof that the GAME'S loader (not just our probe) pulls
-    // merged bytes through Arcropolis — i.e. that cross-fighter one-slots load at match entry.
+    // merged bytes through Arcropolis — i.e. that cross-fighter transplants load at match entry.
     let _ = std::fs::write(
         "sd:/effect_viewer_cb.txt",
         format!(
@@ -216,7 +224,7 @@ fn reload_inner(apply_live: bool) {
 
     // SERVED must be current BEFORE any reparse: the reparse makes the game re-request
     // the file THROUGH our disk callback, which reads SERVED. (This ordering being
-    // wrong was one reason one-slots came back invisible — the first reparse after a
+    // wrong was one reason transplants came back invisible — the first reparse after a
     // deploy re-loaded the VANILLA bytes.)
     *SERVED.lock() = Some(served.clone());
 
@@ -225,6 +233,21 @@ fn reload_inner(apply_live: bool) {
     if apply_live {
         for (path, hash) in &present {
             if is_eff_path(path) {
+                // TWO steps, and BOTH are required — this is what `cb_game=0` was telling us.
+                //
+                // The reparse below does `unload_effects` + `load_effects`, which rebuilds the
+                // parsed emitter structs FROM THE RESIDENT BUFFER. It does NOT re-request the
+                // file, so it never reaches the disk callback and happily re-parses the same
+                // VANILLA bytes — authored colour edits only appeared after a full reboot,
+                // where a genuine arc load goes through arcrop.
+                //
+                // So pull the merged bytes into the resident buffer first (this is the call
+                // that actually goes out through `arcrop_load_file` and hits our callback),
+                // THEN reparse to rebuild the structs from them. `replace_loaded_file` alone
+                // is not enough for a `.eff` — the parsed containers would still be stale.
+                if crate::slight::effect_viewer::resource_reload::replace_loaded_file(*hash) {
+                    refreshed += 1;
+                }
                 reparsed += crate::slight::effect_viewer::effect_reload::reparse_game_path(path);
             } else if crate::slight::effect_viewer::resource_reload::replace_loaded_file(*hash) {
                 refreshed += 1;

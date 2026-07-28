@@ -36,7 +36,16 @@ pub fn start_session() {
     if let Some(mut buffer) = BUF.try_lock() {
         buffer.clear();
     }
-    let _ = std::fs::write(DIAG_FILE, "SLight diagnostic session\n");
+    // Stamp the build into the session header. Without this there is no way to tell from
+    // on-device logs WHICH .nro actually loaded, which turns "did my fix ship?" into
+    // guesswork about file timestamps.
+    let _ = std::fs::write(
+        DIAG_FILE,
+        format!(
+            "SLight diagnostic session\nbuild={}\n",
+            crate::slight::effect_viewer::live_eff::BUILD_TAG
+        ),
+    );
 }
 
 fn push(line: String) {

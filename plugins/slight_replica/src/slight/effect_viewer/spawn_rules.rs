@@ -124,9 +124,9 @@ pub fn transform_for(
         .map(|r| (r.pos, r.rot, r.scale))
 }
 
-// ── Effect kind aliases (live one-slot parity) ───────────────────────────────
+// ── Effect kind aliases (live transplant parity) ─────────────────────────────
 //
-// A one-slotted COPY (new eff entry) or a costume REPLACEMENT doesn't exist in the
+// A transplanted COPY (new eff entry) or a costume REPLACEMENT doesn't exist in the
 // running game's loaded eff resources until the mod is exported and the game restarts —
 // spawning its hash does nothing. But a fresh copy is content-identical to its donor,
 // so the live equivalent is: rewrite the requested kind to the donor's at the EFFECT
@@ -138,7 +138,9 @@ pub fn transform_for(
 pub struct EffectAlias {
     pub from: u64,
     pub to: u64,
-    /// Costume slots (c00…c07) the alias is active on; empty = all costumes.
+    /// Costume slots the alias is active on; empty = all costumes. NOT limited to the
+    /// vanilla c00–c07: slot-add mods use higher indices, and `u8` spans the whole colour
+    /// index range the runtime can report.
     #[serde(default)]
     pub slots: Vec<u8>,
 }
@@ -165,11 +167,14 @@ pub fn any_alias() -> bool {
 /// unknown — slot-gated aliases then do NOT match).
 pub fn alias_for(from: u64, costume: i32) -> Option<u64> {
     let aliases = ALIASES.try_lock()?;
+    // `try_from`, not `as`: a costume index outside u8 would WRAP and could then falsely
+    // match a low-numbered slot (colour 264 aliasing onto a c08-scoped entry). Out of range
+    // means "no slot-gated alias applies", same as the unknown-costume (-1) case.
+    let slot = u8::try_from(costume).ok();
     aliases
         .iter()
         .find(|a| {
-            a.from == from
-                && (a.slots.is_empty() || (costume >= 0 && a.slots.contains(&(costume as u8))))
+            a.from == from && (a.slots.is_empty() || slot.is_some_and(|s| a.slots.contains(&s)))
         })
         .map(|a| a.to)
 }

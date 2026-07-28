@@ -23,29 +23,65 @@ pub fn fetch_acmd_script(fighter: &str, move_name: &str) -> anyhow::Result<AcmdS
     Ok(parse_acmd_script(&body))
 }
 
+/// Worker threads used for fighter-wide script scans (and the connection-pool size).
+/// GitHub's raw host serves this happily; more stops helping once the pipe is saturated.
+pub const SCRIPT_FETCH_THREADS: usize = 8;
+
+/// Shared blocking HTTP client for every GitHub script/index fetch.
+///
+/// `reqwest::blocking::get` builds a THROWAWAY client per call, so a fighter-wide scan paid a
+/// fresh DNS + TCP + TLS handshake for all ~450 moves (measured ~236 ms per request, against
+/// ~32 ms on a kept-alive connection). One shared client pools connections across every
+/// request and is safe to use from several threads at once.
+static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .user_agent("visionary")
+        .pool_max_idle_per_host(SCRIPT_FETCH_THREADS)
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+});
+
+/// The shared pooled HTTP client (see [`HTTP`]).
+pub fn http_client() -> &'static reqwest::blocking::Client {
+    &HTTP
+}
+
+/// Disk path a fighter+move's cached script body lives at.
+fn script_cache_path(fighter: &str, move_name: &str) -> std::path::PathBuf {
+    crate::scratch_dirs::app_storage_root()
+        .join("script-cache")
+        .join(fighter)
+        .join(format!("{}.txt", move_name_to_pascal(move_name)))
+}
+
+/// Cached script body, if this move was fetched before. Never touches the network — lets a
+/// scan resolve every already-known move up front and spend threads only on the rest.
+pub fn cached_script_body(fighter: &str, move_name: &str) -> Option<String> {
+    std::fs::read_to_string(script_cache_path(fighter, move_name)).ok()
+}
+
 /// Fetch the raw script body text for a fighter+move from GitHub.
 pub fn fetch_script_body(fighter: &str, move_name: &str) -> anyhow::Result<String> {
     let pascal = move_name_to_pascal(move_name);
     let url = format!(
         "https://raw.githubusercontent.com/WuBoytH/SSBU-Dumped-Scripts/main/smashline/lua2cpp_{fighter}/{fighter}/{pascal}.txt"
     );
-    Ok(reqwest::blocking::get(&url)?.text()?)
+    Ok(HTTP.get(&url).send()?.text()?)
 }
 
 /// Disk-cached [`fetch_script_body`]: bodies (including "404: Not Found" misses) are
 /// stored under `{app_storage_root}/script-cache/{fighter}/`, so fighter-wide scans
-/// (one-slot full-use discovery) only hit the network once per move ever.
+/// (the transplant studio's full-use discovery) only hit the network once per move ever.
 pub fn fetch_script_body_cached(fighter: &str, move_name: &str) -> anyhow::Result<String> {
-    let pascal = move_name_to_pascal(move_name);
-    let dir = crate::scratch_dirs::app_storage_root()
-        .join("script-cache")
-        .join(fighter);
-    let path = dir.join(format!("{pascal}.txt"));
-    if let Ok(body) = std::fs::read_to_string(&path) {
+    if let Some(body) = cached_script_body(fighter, move_name) {
         return Ok(body);
     }
     let body = fetch_script_body(fighter, move_name)?;
-    let _ = std::fs::create_dir_all(&dir);
+    let path = script_cache_path(fighter, move_name);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let _ = std::fs::write(&path, &body);
     Ok(body)
 }
@@ -808,8 +844,11 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
 
     let hitlag_mult: f32 = get(16).parse().unwrap_or(1.0);
     let sdi_mult: f32 = get(17).parse().unwrap_or(1.0);
-    let setoff_kind = strip_deref(get(18));
-    let lr_check = strip_deref(get(19));
+    // Scripts normally spell these as `*NAME`, but dumps of live-captured moves can carry the
+    // bare number — decode both to the symbolic name so the property dropdowns match.
+    use crate::param_labels as pl;
+    let setoff_kind = pl::decode_const(pl::SETOFF_KIND, get(18));
+    let lr_check = pl::decode_const(pl::LR_CHECK, get(19));
     let is_clang = get(20) == "true";
     let is_add_attack: i32 = get(21).parse().unwrap_or(0);
     let hitbox_attr: f32 = get(22).parse().unwrap_or(0.0);
@@ -819,14 +858,14 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     let is_reflectable = get(26) == "true";
     let is_absorbable = get(27) == "true";
     let is_landing_attack = get(28) == "true";
-    let situation_mask = strip_deref(get(29));
-    let category_mask = strip_deref(get(30));
-    let part_mask = strip_deref(get(31));
+    let situation_mask = pl::decode_const(pl::SITUATION_MASK, get(29));
+    let category_mask = pl::decode_const(pl::CATEGORY_MASK, get(30));
+    let part_mask = pl::decode_const(pl::PART_MASK, get(31));
     let no_finish_camera = get(32) == "true";
     let collision_attr = extract_hash40_string(get(33)).unwrap_or_else(|| strip_deref(get(33)));
-    let sound_level = strip_deref(get(34));
-    let sound_attr = strip_deref(get(35));
-    let attack_region = strip_deref(get(36));
+    let sound_level = pl::decode_const(pl::SOUND_LEVEL, get(34));
+    let sound_attr = pl::decode_const(pl::SOUND_ATTR, get(35));
+    let attack_region = pl::decode_const(pl::ATTACK_REGION, get(36));
 
     Some(AttackCall {
         id,

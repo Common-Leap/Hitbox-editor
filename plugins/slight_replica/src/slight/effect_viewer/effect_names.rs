@@ -92,7 +92,7 @@ fn build_reverse_map() -> HashMap<u64, String> {
     map
 }
 
-/// Names registered at runtime (editor one-slot copies etc.). Checked after the static
+/// Names registered at runtime (editor transplant copies etc.). Checked after the static
 /// dictionary.
 static EXTRA: LazyLock<parking_lot::RwLock<HashMap<u64, String>>> =
     LazyLock::new(|| parking_lot::RwLock::new(HashMap::new()));
@@ -106,6 +106,19 @@ pub fn register(names: &[String]) {
             extra.entry(hash40(&n)).or_insert(n);
         }
     }
+}
+
+/// Suffixes the editor appends to a transplanted entry's name.
+///
+/// `_tp` is what Visionary writes today; `_os` is the historical spelling from when
+/// transplanting was still called "one-slotting". BOTH must keep resolving — projects
+/// authored before the rename have `_os` entries baked into their exported effs and
+/// ACMD scripts, and those files are not rewritten on load.
+pub const TRANSPLANT_SUFFIXES: [&str; 2] = ["_tp", "_os"];
+
+/// True if `label` looks like an editor-created transplant entry.
+pub fn is_transplant_label(label: &str) -> bool {
+    TRANSPLANT_SUFFIXES.iter().any(|s| label.ends_with(s))
 }
 
 /// Resolve a hash40 to its name, or `0x<hash>` if unknown.

@@ -32,6 +32,9 @@ pub fn init() {
 pub fn on_rpm_client_connected(client_id: u64) {
     smash_utils::ensure_slight_dirs();
     let _ = std::fs::write(smash_utils::CLIENT_ID_FILE, client_id.to_string());
+    // Force the next carrier-status pump to re-send: everything emitted before this client
+    // connected went to the SD fallback, so without this the editor starts blind.
+    crate::slight::effect_viewer::effect_reload::reset_carrier_status_latch();
 
     // Do NOT touch shared state (kinds/tracker) from this SERVER thread: a contended
     // parking_lot lock parks the waiter, and parked threads never wake in this environment
@@ -109,6 +112,15 @@ pub fn notify_acmd_capture(line: &crate::slight::hitbox_viewer::CaptureLine) {
     emit("AcmdCapture", &serde_json::json!({ "AcmdCapture": line }));
 }
 
+/// Tell the editor a captured motion has finished playing — every line it produces has now
+/// been streamed. Emitted strictly after those lines (see `take_pending_ends`).
+pub fn notify_acmd_capture_end(end: &crate::slight::hitbox_viewer::CaptureEnd) {
+    emit(
+        "AcmdCaptureEnd",
+        &serde_json::json!({ "AcmdCaptureEnd": end }),
+    );
+}
+
 pub fn remove_effect(id: u64) {
     emit("Remove", &serde_json::json!({ "Remove": { "id": id } }));
 }
@@ -180,7 +192,7 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
                 crate::slight::effect_viewer::live_eff::probe();
             }
             // Live re-read: synchronously swap the fighter's resident eff for the merged
-            // bytes + reparse, so a cross-fighter one-slot renders mid-match (no re-entry).
+            // bytes + reparse, so a cross-fighter transplant renders mid-match (no re-entry).
             // Payload: {"command":"force_reread","path":"effect/fighter/<f>/ef_<f>.eff"}.
             "force_reread" => {
                 if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
@@ -246,7 +258,7 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         return None;
     }
 
-    // Stripped donor eff bytes to inject as resident data (live cross-character one-slot).
+    // Stripped donor eff bytes to inject as resident data (live cross-character transplant).
     if let Some(bytes_v) = v.get("donor_bytes") {
         #[derive(serde::Deserialize)]
         struct DonorBytes {
@@ -269,7 +281,7 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         return None;
     }
 
-    // Custom effect names (one-slot copies) for hash→name display resolution.
+    // Custom effect names (transplant copies) for hash→name display resolution.
     if let Some(names_v) = v.get("effect_names") {
         if let Ok(names) = serde_json::from_value::<Vec<String>>(names_v.clone()) {
             crate::slight::effect_viewer::effect_names::register(&names);
@@ -277,7 +289,7 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         return None;
     }
 
-    // Live one-slot aliases: full-list replace (copy/replaced kind → donor kind).
+    // Live transplant aliases: full-list replace (copy/replaced kind → donor kind).
     if let Some(aliases_v) = v.get("effect_aliases") {
         match serde_json::from_value::<Vec<crate::slight::effect_viewer::spawn_rules::EffectAlias>>(
             aliases_v.clone(),
@@ -569,4 +581,19 @@ fn parse_new_value(id: u64, val: &serde_json::Value) -> ParsedEdit {
         }
     }
     edit
+}
+
+/// Tell the editor how the live carrier is doing.
+///
+/// The editor pushes a carrier and then has no idea when the game has actually taken it —
+/// the bytes decompress, the resource service settles and the carrier object is created
+/// asynchronously, which took visibly long enough that edits looked like they had failed.
+/// Emitting the state lets the editor show "waiting for game…" instead of guessing.
+pub fn notify_carrier_status(state: u8, kinds: usize, spawned: bool) {
+    emit(
+        "CarrierStatus",
+        &serde_json::json!({
+            "CarrierStatus": { "state": state, "kinds": kinds, "spawned": spawned }
+        }),
+    );
 }
