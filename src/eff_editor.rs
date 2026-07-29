@@ -671,6 +671,48 @@ impl EffEditor {
     /// Indices of the emitters in this set that differ from pristine. Purely informational
     /// (the panel shows WHAT is edited); the edits themselves travel as absolute values
     /// through `collect_authored_edits`, per emitter, never as an aggregate.
+    /// Keep the emitter selection inside the set being shown.
+    ///
+    /// Clamping used to happen into a LOCAL index, leaving `selected_emitter` out of range —
+    /// so moving from a ten-emitter entry to a three-emitter one drew emitter 2's fields with
+    /// no tab highlighted, and the texture panel's swap (which writes through
+    /// `selected_emitter`) silently landed on nothing at all.
+    fn clamp_selected_emitter(&mut self, set_idx: usize) {
+        let count = self
+            .ptcl
+            .as_ref()
+            .and_then(|p| p.emitter_sets.get(set_idx))
+            .map(|s| s.emitters.len())
+            .unwrap_or(0);
+        if self.selected_emitter >= count {
+            self.selected_emitter = 0;
+        }
+    }
+
+    /// Emitter-set indices holding at least one authored edit.
+    ///
+    /// One pass over the file rather than `edited_emitters` per entry: the entry list draws
+    /// every frame, and re-deriving the texture-name table for each of sixty entries is the
+    /// difference between free and noticeable.
+    fn edited_sets(&self) -> std::collections::HashSet<usize> {
+        let Some(ptcl) = self.ptcl.as_ref() else {
+            return std::collections::HashSet::new();
+        };
+        let tex_names = self.texture_names();
+        ptcl.emitter_sets
+            .iter()
+            .zip(&self.pristine)
+            .enumerate()
+            .filter(|(_, (set, pristine))| {
+                set.emitters
+                    .iter()
+                    .zip(pristine.iter())
+                    .any(|(e, p)| !field_edits(e, p, &tex_names).is_empty())
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     fn edited_emitters(&self, set_idx: usize) -> Vec<usize> {
         let (Some(ptcl), Some(pristine)) = (self.ptcl.as_ref(), self.pristine.get(set_idx)) else {
             return Vec::new();
@@ -878,8 +920,10 @@ impl EffEditor {
             ui.colored_label(dot, "●");
             ui.label(label);
             ui.separator();
-            // Primary send, in the header so it is reachable from ANY panel — the one down in
-            // the game panel is easy to miss and only visible once you have scrolled there.
+            // The ONLY send control, in the header so it is reachable from every panel. A
+            // second copy used to sit in the game panel reporting none of the phases below it,
+            // so whichever one you happened to be looking at decided how much you were told
+            // about a stalled send.
             let connected = link.status() == LinkStatus::Connected;
             let unsent = self.eff_dirty_at.is_some();
             let btn = egui::Button::new(
@@ -898,8 +942,9 @@ impl EffEditor {
             if ui
                 .add_enabled(connected && !self.sending, btn)
                 .on_hover_text(
-                    "Rebuild the live carrier with every authored edit baked in and hand it to \
-                     the running game. Re-trigger the move to see it on a fresh spawn.",
+                    "Rebuild the live carrier and hand it to the running game — emitter edits, \
+                     transplants, texture swaps and imported PNGs all ride this one send. \
+                     Re-trigger the move to see it on a fresh spawn.",
                 )
                 .on_disabled_hover_text(if self.sending {
                     "Sending…"
@@ -1114,8 +1159,22 @@ impl EffEditor {
     }
 
     fn draw_entry_list(&mut self, ui: &mut Ui, link: &GameLink) {
+        let edited_sets = self.edited_sets();
+        let edited_entries = self
+            .entries
+            .iter()
+            .filter(|e| edited_sets.contains(&e.set_idx))
+            .count();
         ui.horizontal(|ui| {
             ui.label(format!("Entries ({})", self.entries.len()));
+            if edited_entries > 0 {
+                ui.label(
+                    egui::RichText::new(format!("{edited_entries} edited"))
+                        .small()
+                        .color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60)),
+                )
+                .on_hover_text("Entries with unsent emitter edits, highlighted in the list");
+            }
         });
         ui.add(
             egui::TextEdit::singleline(&mut self.entry_filter)
@@ -1149,14 +1208,41 @@ impl EffEditor {
                         } else {
                             egui::Color32::DARK_GRAY
                         };
-                        ui.colored_label(dot, "●");
+                        ui.colored_label(dot, "●")
+                            .on_hover_text(if live {
+                                "Seen spawning in game"
+                            } else {
+                                "Not seen in game yet — trigger the move in training mode"
+                            });
                         let selected = self.selected_entry == Some(i);
-                        let response = ui
-                            .selectable_label(
-                                selected,
-                                egui::RichText::new(&entry.name).monospace(),
-                            )
-                            .on_hover_text(format!("hash40 0x{:010x}", entry.hash));
+                        // An edited entry is tinted rather than badged: the list is narrow, a
+                        // word of text per row would push the names out of view, and this is
+                        // the one thing you need to find again after scrolling away.
+                        let text = egui::RichText::new(&entry.name).monospace();
+                        let text = if edited_sets.contains(&entry.set_idx) {
+                            text.color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60))
+                        } else {
+                            text
+                        };
+                        let response = ui.selectable_label(selected, text).on_hover_text(
+                            if edited_sets.contains(&entry.set_idx) {
+                                format!(
+                                    "hash40 0x{:010x}\nhas unsent emitter edits\nright-click to copy the name",
+                                    entry.hash
+                                )
+                            } else {
+                                format!(
+                                    "hash40 0x{:010x}\nright-click to copy the name",
+                                    entry.hash
+                                )
+                            },
+                        );
+                        // The entry name is what goes into an ACMD `EFFECT` call, and the list
+                        // is the only place it appears in full — the label is truncated once
+                        // the panel is narrow, so retyping it from the screen is not an option.
+                        if response.secondary_clicked() {
+                            ui.ctx().copy_text(entry.name.clone());
+                        }
                         if transplant_entries.contains_key(&entry.name) {
                             ui.label(
                                 egui::RichText::new("TRANSPLANTED")
@@ -1192,6 +1278,14 @@ impl EffEditor {
         };
         let set_idx = self.entries[entry_idx].set_idx;
         let entry_name = self.entries[entry_idx].name.clone();
+
+        // Which emitters of this set are edited, for the tab markers. Computed BEFORE the
+        // mutable borrow below, which is what makes it usable while the fields are drawn.
+        let edited: std::collections::HashSet<usize> =
+            self.edited_emitters(set_idx).into_iter().collect();
+
+        self.clamp_selected_emitter(set_idx);
+
         let Some(ptcl) = self.ptcl.as_mut() else {
             return;
         };
@@ -1219,7 +1313,9 @@ impl EffEditor {
             }
         });
 
-        // Emitter tabs
+        // Emitter tabs. Edited ones carry a dot and are tinted: a set can have twenty
+        // emitters, and without a marker the only way to find the two you changed was to
+        // click through all of them.
         ui.horizontal_wrapped(|ui| {
             for (i, em) in set.emitters.iter().enumerate() {
                 let name = if em.name.is_empty() {
@@ -1227,8 +1323,14 @@ impl EffEditor {
                 } else {
                     em.name.clone()
                 };
+                let text = if edited.contains(&i) {
+                    egui::RichText::new(format!("{name} •"))
+                        .color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60))
+                } else {
+                    egui::RichText::new(name)
+                };
                 if ui
-                    .selectable_label(self.selected_emitter == i, name)
+                    .selectable_label(self.selected_emitter == i, text)
                     .clicked()
                 {
                     self.selected_emitter = i;
@@ -1237,9 +1339,7 @@ impl EffEditor {
         });
         ui.separator();
 
-        let ei = self
-            .selected_emitter
-            .min(set.emitters.len().saturating_sub(1));
+        let ei = self.selected_emitter;
         let (Some(em), Some(pr)) = (set.emitters.get_mut(ei), pristine_set.get(ei)) else {
             ui.colored_label(egui::Color32::GRAY, "No emitters in this set.");
             return;
@@ -1461,6 +1561,25 @@ impl EffEditor {
                 "Point this emitter at another of the eff's textures. Ships with the next \
                  Send, like any other emitter edit.",
             );
+        // Every other control in this window shows what it started as; a swap is an edit like
+        // any other and gets the same treatment, so a changed texture is visible without
+        // opening the picker to compare.
+        let original = self
+            .selected_entry
+            .map(|entry_idx| self.entries[entry_idx].set_idx)
+            .and_then(|set_idx| self.pristine.get(set_idx))
+            .and_then(|set| set.get(self.selected_emitter))
+            .and_then(|snapshot| snapshot.texture_index);
+        if original.map(|o| o as usize) != Some(index) {
+            let was = original
+                .and_then(|o| labels.get(o as usize).cloned())
+                .unwrap_or_else(|| "nothing".to_string());
+            ui.label(
+                egui::RichText::new(format!("swapped — was {was}"))
+                    .small()
+                    .color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60)),
+            );
+        }
         if let Some(i) = swap_to {
             if let (Some(entry_idx), Some(ptcl)) = (self.selected_entry, self.ptcl.as_mut()) {
                 let set_idx = self.entries[entry_idx].set_idx;
@@ -1767,10 +1886,10 @@ impl EffEditor {
         }
 
         // Authored edits → live game. These are baked into the CARRIER's copy of the effect,
-        // so each emitter gets exactly its own edited values. They are deliberately NOT
-        // translated into the kind-level colour multiplier below: that multiplier is
-        // whole-effect by construction and would tint emitters you never touched (and could
-        // not carry a per-key or color1 edit at all).
+        // so each emitter gets exactly its own edited values — which is why the kind-level
+        // colour multiplier that used to sit under this panel is gone: it was whole-effect by
+        // construction, tinting emitters you never touched, and could not carry a per-key or
+        // color1 edit at all.
         let edited = self.edited_emitters(set_idx);
         let total = self
             .ptcl
@@ -1984,6 +2103,74 @@ mod tests {
             .collect();
         ptcl.emitter_sets[0].emitters[0].texture_index = Some(0);
         editor.pristine = vec![vec![EmitterSnapshot::of(&ptcl.emitter_sets[0].emitters[0])]];
+    }
+
+    /// Moving to an entry with fewer emitters must not leave the selection past the end.
+    ///
+    /// It used to: the clamp went into a local index while `selected_emitter` stayed out of
+    /// range. The visible symptom was a tab strip with nothing highlighted, but the damaging
+    /// one was silent — the texture panel writes its swap through `selected_emitter`, so the
+    /// swap landed on no emitter and was simply lost.
+    #[test]
+    fn selecting_a_smaller_entry_pulls_the_emitter_selection_back_in_range() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        // A second set with three emitters, then back to the one-emitter set.
+        let ptcl = editor.ptcl.as_mut().unwrap();
+        let template = ptcl.emitter_sets[0].emitters[0].clone();
+        ptcl.emitter_sets.push(EmitterSet {
+            name: "P_Big".into(),
+            emitters: vec![template.clone(), template.clone(), template],
+        });
+        editor.pristine.push(
+            editor.ptcl.as_ref().unwrap().emitter_sets[1]
+                .emitters
+                .iter()
+                .map(EmitterSnapshot::of)
+                .collect(),
+        );
+
+        editor.selected_emitter = 2;
+        editor.clamp_selected_emitter(1);
+        assert_eq!(editor.selected_emitter, 2, "in range — leave it alone");
+
+        editor.clamp_selected_emitter(0);
+        assert_eq!(
+            editor.selected_emitter, 0,
+            "out of range for a one-emitter set"
+        );
+
+        // A set index that does not exist at all must not leave a stale selection either.
+        editor.selected_emitter = 5;
+        editor.clamp_selected_emitter(99);
+        assert_eq!(editor.selected_emitter, 0);
+    }
+
+    /// The entry list and the tab strip both highlight what is edited; they must agree with
+    /// what `collect_authored_edits` will actually ship.
+    #[test]
+    fn edited_sets_match_what_gets_sent() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        assert!(editor.edited_sets().is_empty());
+
+        tune(&mut editor, 2.5);
+        assert_eq!(
+            editor.edited_sets(),
+            std::collections::HashSet::from([0]),
+            "the tuned set must be marked"
+        );
+        assert_eq!(editor.collect_authored_edits().len(), 1);
+
+        // A texture swap is an edit too — the markers must not miss it just because no
+        // numeric field moved.
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        with_textures(&mut editor);
+        assert!(editor.edited_sets().is_empty());
+        editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
+        assert_eq!(
+            editor.edited_sets(),
+            std::collections::HashSet::from([0]),
+            "a swap with no field change must still mark the set"
+        );
     }
 
     /// The texture picker used to write `em.texture_index` and stop there: no snapshot field,
