@@ -1,6 +1,6 @@
 # Visionary
 
-Visionary is a desktop editor for viewing and editing most things about fighters in Super Smash Bros. Ultimate except for models and animations.Changes are previewed in the running game through the included Skyline plugin.
+Visionary is a desktop editor for viewing and editing most things about fighters in Super Smash Bros. Ultimate, except for models and animations. Changes are previewed in the running game through the included Skyline plugin.
 
 ## Components
 
@@ -8,8 +8,8 @@ Visionary is a desktop editor for viewing and editing most things about fighters
 - `plugins/slight_replica/` contains the in-game effect viewer and live-edit plugin.
 - The upstream `ssbh_wgpu` crate provides character model, animation, skeleton,
   and weapon rendering.
-- The public `effect_library` Rust crate provides `.eff` parsing, editing, and
-  export.
+- The [`effect_library`](https://crates.io/crates/effect_library) crate on
+  crates.io provides `.eff` parsing, editing, and export.
 
 ## Prerequisites
 
