@@ -1238,6 +1238,7 @@ static AUTO_CARRIER_TARGET: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| M
 /// state and leaks another parsed set, so it cannot be part of an indefinitely repeatable cycle.
 const CARRIER_SWAP_MAX_WAIT: u64 = 1800;
 
+
 /// Drop the effect manager's cached entry for the carrier folder so the next load of it fully
 /// re-parses. Returns how many handles were evicted.
 ///
@@ -1921,6 +1922,16 @@ pub unsafe fn pump_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccesso
         let retiring = AUTO_CARRIER_RETIRING_ID.load(Ordering::Relaxed);
         let retiring_kind = AUTO_CARRIER_RETIRING_KIND.load(Ordering::Relaxed) as i32;
         if carrier_boma_for_id(retiring, retiring_kind).is_some() {
+            // Which wait owns the swap's frames? Measured once: state 4 took 317 frames while
+            // state 5 finished at wait=0, so the teardown — not the resource release — is the
+            // cost. These two returns are the only candidates left, and they were
+            // indistinguishable in the log because neither logged at all.
+            if stalled % 30 == 0 {
+                dlog(&format!(
+                    "AUTO_CARRIER_AWAIT_RETIRING_OBJECT id={retiring:#x} kind={retiring_kind} \
+                     stalled={stalled}"
+                ));
+            }
             conceal_auto_carrier(retiring, retiring_kind);
             return;
         }
@@ -1928,6 +1939,12 @@ pub unsafe fn pump_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccesso
         AUTO_CARRIER_RETIRING_KIND.store(-1, Ordering::Relaxed);
         let active = smash::app::lua_bind::ItemManager::get_num_of_active_item(item_kind);
         if active != 0 {
+            if stalled % 30 == 0 {
+                dlog(&format!(
+                    "AUTO_CARRIER_AWAIT_ITEM_INACTIVE kind={item_kind:#x} active={active} \
+                     stalled={stalled}"
+                ));
+            }
             return;
         }
         // The object being gone is NOT the same event as its effect handle being released: the
@@ -2315,7 +2332,18 @@ unsafe fn remove_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccessor)
     AUTO_CARRIER_RETIRING_KIND.store(retiring_kind, Ordering::Relaxed);
     AUTO_CARRIER_RETIRING_ID.store(expected, Ordering::Relaxed);
     AUTO_CARRIER_WAIT.store(0, Ordering::Relaxed);
-    retire_auto_carrier_id(expected, retiring_kind as i32);
+    // Take the item OUT OF THE SLOT FIRST, then retire it.
+    //
+    // This used to retire first and remove second, and the removal therefore never ran: setting
+    // DEAD/lifetime 0 detaches the item from the holder, so the very next `get_have_item_id`
+    // read 0 and the code took the "detached" branch every single time (`AUTO_CARRIER_REMOVE`
+    // appeared zero times in a whole session, `detached_id=... current_held=0x0` every time).
+    // Nothing then destroyed the object, so it sat unheld and alive while the swap waited for
+    // it — measured at 600+ frames on one id, which is where the swap's whole cost went.
+    //
+    // Order matters for safety too, not just speed: `remove_item` on the held slot deletes the
+    // item outright, so it never exists unheld-and-alive. That state is the one that spawns
+    // bombs and crashes the game.
     let held_id = smash::app::lua_bind::ItemModule::get_have_item_id(boma, AUTO_CARRIER_SLOT);
     if held_id == expected {
         let result = smash::app::lua_bind::ItemModule::remove_item(boma, AUTO_CARRIER_SLOT);
@@ -2327,6 +2355,9 @@ unsafe fn remove_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccessor)
             "AUTO_CARRIER_RETIRE detached_id={expected:#x} current_held={held_id:#x}"
         ));
     }
+    // Still retire whatever survives: a carrier that was already lost before the swap is not in
+    // any slot, and DEAD plus an offstage position is all that is left to apply to it.
+    retire_auto_carrier_id(expected, retiring_kind as i32);
     true
 }
 

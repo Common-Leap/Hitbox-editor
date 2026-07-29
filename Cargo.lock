@@ -416,6 +416,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bcdec_rs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f09c37bc0e9f0924b7dae9988265ef3c76c88538f41a3b06caf4bed07cee5226"
+
+[[package]]
 name = "bimap"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -455,13 +461,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "binrw"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ad120d555272286c1017d25165ab8bd74806f13fc85b258484ec7e4ce75458f"
+dependencies = [
+ "array-init",
+ "binrw_derive 0.15.2",
+ "bytemuck",
+]
+
+[[package]]
 name = "binrw_derive"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfdce8fda72e8cc5038fb9e739e665d1f3072f7e3e24c573277b8fdce595ef72"
 dependencies = [
  "either",
- "owo-colors",
+ "owo-colors 3.5.0",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -474,7 +491,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08118044b6695ea0de85ecdaac53adeb0d5d024770a904f45b9453ad3c12898c"
 dependencies = [
  "either",
- "owo-colors",
+ "owo-colors 3.5.0",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -487,10 +504,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7196f6935a944081728167ce6e3a599bd38d6d80d21afe4ca17be2097a6682f"
 dependencies = [
  "either",
- "owo-colors",
+ "owo-colors 3.5.0",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "binrw_derive"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6df92e0e9baae4dc82c7bad7715ca40c0a5c71539057bf2ea04a5c29c980410b"
+dependencies = [
+ "either",
+ "owo-colors 4.3.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -576,6 +606,18 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
+]
+
+[[package]]
+name = "bntx"
+version = "0.1.0"
+source = "git+https://github.com/ScanMountGoat/bntx.git?rev=87fffc7d17238cb07ff93ec75e0a7b5db15f4683#87fffc7d17238cb07ff93ec75e0a7b5db15f4683"
+dependencies = [
+ "binrw 0.15.2",
+ "image_dds",
+ "tegra_swizzle 0.4.0",
+ "thiserror 2.0.18",
+ "xc3_write 0.20.0",
 ]
 
 [[package]]
@@ -917,6 +959,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "ddsfile"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479dfe1e6737aa9e96c6ac7b69689dc4c32da8383f2c12744739d76afa8b66c4"
+dependencies = [
+ "bitflags 2.11.1",
+ "byteorder",
+ "enum-primitive-derive",
+ "num-traits",
+]
+
+[[package]]
 name = "diff-struct"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1029,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "effect_library"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "base64 0.21.7",
  "byteorder",
@@ -1262,6 +1316,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "enum-primitive-derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c375b9c5eadb68d0a6efee2999fef292f45854c3444c86f09d8ab086ba942b0e"
+dependencies = [
+ "num-traits",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1878,6 +1943,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "num-traits",
@@ -2233,6 +2299,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "image_dds"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3388630ed66c07107145ac5b13c804261f18d5daf0dd2699481888aba16cd38"
+dependencies = [
+ "bcdec_rs",
+ "bytemuck",
+ "ddsfile",
+ "half",
+ "image",
+ "intel_tex_2",
+ "strum 0.26.3",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "imagesize"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2268,6 +2350,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "intel_tex_2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd699c0e6adcac28c06db24a220c834c8ec811e0d2d80f0261bb14e01737b4dc"
+dependencies = [
+ "ispc_rt",
+]
+
+[[package]]
 name = "interpolate_name"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2283,6 +2374,16 @@ name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+
+[[package]]
+name = "ispc_rt"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a396f76fd253fab9945bb4c6080f515d0c4036bc30219462d199b58886fd37b4"
+dependencies = [
+ "libc",
+ "num_cpus",
+]
 
 [[package]]
 name = "itertools"
@@ -2829,6 +2930,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
+]
+
+[[package]]
 name = "num_enum"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2857,7 +2968,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b1f32aa48bc74ec799cd2ecdd811984d3ee2caf5bbb07f2f0026771a3a0862"
 dependencies = [
  "binrw 0.13.4",
- "tegra_swizzle",
+ "tegra_swizzle 0.3.2",
 ]
 
 [[package]]
@@ -3272,6 +3383,12 @@ name = "owo-colors"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
+
+[[package]]
+name = "owo-colors"
+version = "4.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "parking"
@@ -4420,7 +4537,7 @@ dependencies = [
  "serde",
  "ssbh_lib",
  "ssbh_write",
- "strum",
+ "strum 0.24.1",
  "thiserror 1.0.69",
 ]
 
@@ -4435,7 +4552,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "ssbh_write",
- "strum",
+ "strum 0.24.1",
  "thiserror 1.0.69",
 ]
 
@@ -4456,7 +4573,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "ssbh_data",
- "strum",
+ "strum 0.24.1",
  "topological-sort",
  "walkdir",
  "wgpu",
@@ -4511,7 +4628,16 @@ version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "063e6045c0e62079840579a7e47a355ae92f60eb74daaf156fb1e84ba164e63f"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.24.3",
+]
+
+[[package]]
+name = "strum"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+dependencies = [
+ "strum_macros 0.26.4",
 ]
 
 [[package]]
@@ -4525,6 +4651,19 @@ dependencies = [
  "quote",
  "rustversion",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4637,6 +4776,12 @@ name = "tegra_swizzle"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12afa2e808fe8dba9c3257273cb42dfd067ff2089809e064b78cd91e3cfd8e78"
+
+[[package]]
+name = "tegra_swizzle"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a99e82f512a8f5baabe0d9e5ba86b4e827840635e7628a5216a34e03b06a6f01"
 
 [[package]]
 name = "tempfile"
@@ -5168,6 +5313,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "binrw 0.15.2",
+ "bntx",
  "dirs",
  "effect_library",
  "eframe",
@@ -5176,6 +5323,8 @@ dependencies = [
  "egui_extras",
  "glam",
  "hash40",
+ "image",
+ "image_dds",
  "motion_list_rs",
  "prc-rs",
  "reqwest",
@@ -6269,7 +6418,17 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5388d746d87bf33f14e7a16c42e155cb35e97208942acf723b5667d49328c561"
 dependencies = [
- "xc3_write_derive",
+ "xc3_write_derive 0.10.0",
+]
+
+[[package]]
+name = "xc3_write"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07a78acbd6ea13bf7abd822289cf09b2868f60dd5c7f95f056a7a7683105dea4"
+dependencies = [
+ "indexmap 2.14.0",
+ "xc3_write_derive 0.20.0",
 ]
 
 [[package]]
@@ -6277,6 +6436,17 @@ name = "xc3_write_derive"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8af9f793cd0b670ad6d0cf5c5a41a130d4e893cc08c9249a3e4efd6e6806aa5f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "xc3_write_derive"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba1f09642740be57f7162bfd4d60bb425f5b1bb9fc700e1b86381a8d5f9a1183"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6316,7 +6486,7 @@ dependencies = [
  "binrw 0.14.2",
  "indexmap 1.9.3",
  "thiserror 1.0.69",
- "xc3_write",
+ "xc3_write 0.10.0",
  "xmltree",
 ]
 

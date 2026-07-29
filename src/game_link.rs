@@ -145,8 +145,16 @@ pub struct DonorEffWire {
 pub struct DonorBytesWire {
     /// Donor eff arc path (lowercase), e.g. "effect/assist/alucard/ef_alucard.eff".
     pub path: String,
-    /// base64(stripped ef bytes).
+    /// base64(stripped ef bytes). Empty when [`Self::file`] carries the payload instead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub b64: String,
+    /// sd:-relative file holding the payload, which the plugin reads directly.
+    ///
+    /// The emulator's sdmc is a directory on this machine, so multi-MB payloads go to disk
+    /// rather than through base64 in a JSON frame over a socket read in 8 KB chunks. `b64`
+    /// remains the fallback for when that directory cannot be found.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
 }
 
 // ── Live ACMD capture + hitbox rules (wire forms match slight_replica hitbox_viewer) ──

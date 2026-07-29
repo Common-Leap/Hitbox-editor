@@ -21,7 +21,7 @@
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, TransplantOp};
+use crate::mod_project::{AuthoredEdit, EffMod, EmitterFieldEdits, TextureImport, TransplantOp};
 
 /// Rebuild the source .eff bytes with all authored edits applied. `donor_root` resolves
 /// cross-file transplant donors (the ArcExplorer export root the `src_file_rel`s are
@@ -93,14 +93,16 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
     ops: &[TransplantOp],
     donor_root: &std::path::Path,
     authored: &[CarrierAuthored],
+    textures: &[TextureImport],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<u8>> {
     // A carrier-native selection needs no transplant. The runtime remap already turns an `_os`
     // request into the carrier's existing real entry, so parsing, pruning, and repacking these
     // resource pools only introduces risk. Preserve the game's known-good payload byte-for-byte.
-    // ...but only when there is nothing to bake in. With authored edits the bytes MUST be
-    // rebuilt, otherwise the edits silently do not ship.
+    // ...but only when there is nothing to bake in. With authored edits or an imported
+    // texture the bytes MUST be rebuilt, otherwise those silently do not ship.
     if authored.is_empty()
+        && textures.is_empty()
         && !ops.is_empty()
         && ops
             .iter()
@@ -219,56 +221,23 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
         )?;
     }
 
-    // Does anything the carrier natively keeps render through its own models? Replacing the pool
-    // wholesale would take those with it, so the shortcut below is only available when nothing
-    // native needs geometry. Ask the real question rather than assuming a native selection
-    // implies a mesh.
-    let native_mesh: Vec<&str> = ops
-        .iter()
-        .filter(|op| op.src_file_rel.eq_ignore_ascii_case(carrier_rel))
-        .filter(|op| donor_effect_uses_primitives(&carrier, op))
-        .map(|op| op.src_set_name.as_str())
-        .collect();
-    // EVERY mesh-backed effect in the carrier keeps its geometry. The merge path above has
-    // already appended each donor's models to the carrier's pool, keyed by descriptor GUID.
+    // EVERY mesh-backed effect in the carrier keeps its geometry, and ONLY the models it
+    // actually references. The merge above has already appended each donor's models to the
+    // carrier's pool keyed by descriptor GUID; `prune_unreferenced_resources` then drops the
+    // rest.
     //
-    // This used to ship exactly one donor's pool verbatim and drop the rest, because a rebuilt
-    // pool did not draw in game. That was a real defect, but in the WRITER, not in merging: it
-    // relocated the wrong set of pointer slots. Measured against the 296 game containers under
-    // `effect/`, the writer marked four words of header padding as pointers and left five real
-    // pointers unrebased, so the game rewrote padding and followed unrebased addresses — a
-    // container that parses perfectly in software and draws nothing on hardware. With that
-    // fixed, splitting any game container into single-model exports and merging them back
-    // reproduces its GPU region byte for byte (295 of 296; the one exception is a stale preview
-    // this tool wrote earlier), and 292 reproduce the relocation set exactly. See
-    // `crate/examples/bfres_merge_fidelity.rs` and `bfres_rlt_semantics.rs` in EffectLibraryRust.
+    // A single mesh donor used to ship its pool VERBATIM, because a rebuilt pool did not draw
+    // in game. That was a real defect, but in the WRITER, not in merging: it relocated the
+    // wrong set of pointer slots — four words of header padding marked as pointers, five real
+    // pointers left unrebased — so the game rewrote padding and followed addresses it never
+    // fixed up. Perfect in software, invisible on hardware, which is why every structural test
+    // passed. Measured against the 296 game containers under `effect/`, splitting one into
+    // single-model exports and merging them back now reproduces its GPU region byte for byte,
+    // and its relocation set on 292. See `bfres_merge_fidelity.rs` / `bfres_rlt_semantics.rs`.
     //
-    // Verbatim preservation is kept ONLY where it is exactly equivalent to merging — a single
-    // mesh donor and nothing native — because there it is strictly less work, not because
-    // merging is suspect.
-    let mut mesh_donors: Vec<usize> = plan
-        .iter()
-        .filter(|(op, donor_index)| donor_effect_uses_primitives(&donors[*donor_index].1, op))
-        .map(|(_, donor_index)| *donor_index)
-        .collect();
-    mesh_donors.sort_unstable();
-    mesh_donors.dedup();
-    let sole_donor = (native_mesh.is_empty() && mesh_donors.len() == 1).then(|| mesh_donors[0]);
-    let preserve_raw_primitives = sole_donor.is_some();
-    if let Some(index) = sole_donor {
-        let mut donor_primitives = donors[index]
-            .1
-            .ptcl_file
-            .as_ref()
-            .and_then(|ptcl| ptcl.primitive_info.clone())
-            .ok_or_else(|| anyhow!("mesh donor has no primitive pool"))?;
-        donor_primitives.preserve_binary_data = true;
-        carrier
-            .ptcl_file
-            .as_mut()
-            .ok_or_else(|| anyhow!("carrier has no PTCL"))?
-            .primitive_info = Some(donor_primitives);
-    }
+    // The shortcut is gone rather than merely narrowed: shipping a donor's pool whole is what
+    // put all 39 of Kirby's models in a carrier that referenced 2 of them, and there is no way
+    // to strip a pool without rebuilding it.
 
     let transplanted: Vec<&str> = plan
         .iter()
@@ -284,7 +253,14 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
         )
         .collect();
     silence_carrier_native_effects(&mut carrier, &transplanted);
-    prune_unreferenced_resources(&mut carrier, preserve_raw_primitives)?;
+    // Textures an edit will SWAP TO are not sampled by anything yet — hold them back from the
+    // prune, which otherwise drops them a few lines before the swap looks for them.
+    let swap_targets: Vec<String> = authored
+        .iter()
+        .flat_map(|entry| entry.edits.iter())
+        .filter_map(|edit| edit.fields.texture_name.clone())
+        .collect();
+    prune_unreferenced_resources(&mut carrier, &swap_targets)?;
     // Compaction trims the shader container to the variations something addresses. Verified
     // safe on game data: `BnshFile` rewriting preserves every variation's byte code, control
     // code and object data, and the `_RLT` table it emits describes its own pointers correctly
@@ -379,9 +355,98 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
         }
     }
 
+    apply_texture_imports(&mut carrier, textures, warnings)?;
+
     carrier
         .save()
         .context("effect_library failed to encode the runtime carrier .eff")
+}
+
+/// Replace pool textures with the user's own images.
+///
+/// Runs LAST, on the final pool: pruning has already settled which textures survive and any
+/// swap edits have already repointed samplers, so an import lands on the texture that will
+/// actually be sampled. An import naming a texture this file does not hold is a WARNING, not
+/// a failure — same rule as a missing authored edit. Transplants and imports are independent
+/// features, and one stale import must not take a working carrier down with it.
+fn apply_texture_imports(
+    file: &mut effect_library::NamcoEffectFile,
+    imports: &[TextureImport],
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if imports.is_empty() {
+        return Ok(());
+    }
+    let Some(textures) = file
+        .ptcl_file
+        .as_mut()
+        .and_then(|ptcl| ptcl.texture_info.as_mut())
+    else {
+        for import in imports {
+            warnings.push(format!("texture:{}", import.texture_name));
+        }
+        return Ok(());
+    };
+
+    for import in imports {
+        let Some(index) = textures
+            .descriptors
+            .iter()
+            .position(|d| d.name == import.texture_name)
+        else {
+            warnings.push(format!("texture:{}", import.texture_name));
+            continue;
+        };
+        let Some(pool) = textures.binary_data.as_ref() else {
+            warnings.push(format!("texture:{}", import.texture_name));
+            continue;
+        };
+        let png = std::fs::read(&import.png_path).with_context(|| {
+            format!(
+                "texture import for '{}': cannot read {}",
+                import.texture_name, import.png_path
+            )
+        })?;
+        let names: Vec<String> = textures.descriptors.iter().map(|d| d.name.clone()).collect();
+        let (rebuilt, report) = crate::texture_import::replace_with_png(pool, &names, index, &png)
+            .with_context(|| format!("importing {} over '{}'", import.png_path, import.texture_name))?;
+        if let Some(original) = &report.format_substituted_from {
+            // The user asked for THIS image on THIS texture and got it, but not in the format
+            // the game shipped — worth saying, since a normal map re-encoded as colour will
+            // look wrong in a way that has nothing to do with the image they picked.
+            warnings.push(format!(
+                "texture-format:{} was {original}, imported as {}",
+                import.texture_name, report.format
+            ));
+        }
+        textures.binary_data = Some(rebuilt);
+    }
+    Ok(())
+}
+
+/// Reduce a donor eff to the named entries plus only the resources those entries reference.
+///
+/// The plugin co-loads the donor eff whole so a foreign kind is resident in a match the donor's
+/// character is not in. It used to be sent WHOLE: `ef_marx.eff` is 20 MB, and the transport
+/// base64s it into a single JSON frame, so one Marx effect cost ~27 MB on the wire. Two donors
+/// put ~43 MB through a socket the emulator reads in 8 KB chunks — the reported 30 s timeout.
+///
+/// Stripping was tried once and reverted, because a stripped mesh effect ("alucard_backdash")
+/// spawned and rendered nothing. That is the exact signature of the BFRES relocation defect
+/// since fixed and corpus-calibrated: the pool survived the trip structurally intact and was
+/// unusable on hardware. The passes used here are the same three the carrier has always used,
+/// and the carrier renders.
+///
+/// Entries and sets are kept and merely emptied, never deleted, so every id still resolves —
+/// deleting an entry leaves the item's own spawn requests resolving against nothing.
+pub fn strip_donor_eff_bytes(src: &[u8], keep_entries: &[&str]) -> Result<Vec<u8>> {
+    let mut file = effect_library::NamcoEffectFile::load(src)
+        .context("effect_library failed to parse the donor .eff")?;
+    silence_carrier_native_effects(&mut file, keep_entries);
+    prune_unreferenced_resources(&mut file, &[])?;
+    compact_shader_containers(&mut file)?;
+    file.save()
+        .context("effect_library failed to encode the stripped donor .eff")
 }
 
 /// Empty every emitter set the transplants did not create, leaving the carrier's own effects as
@@ -430,14 +495,29 @@ fn silence_carrier_native_effects(
 /// Both pools are GUID-keyed, so dropping an entry moves nothing: the emitters that remain keep
 /// referring to exactly the resources they already did. Shader variations are index-keyed and so
 /// need renumbering — [`compact_shader_containers`] handles those separately.
+///
+/// `keep_textures` names textures that must survive even though nothing samples them YET. The
+/// carrier applies authored edits AFTER this pass (so an edit can never mask a bad transplant
+/// clone), which means a texture-swap edit's TARGET is unreferenced at prune time and would be
+/// thrown away right before the swap tried to point at it.
 fn prune_unreferenced_resources(
     carrier: &mut effect_library::NamcoEffectFile,
-    preserve_raw_primitives: bool,
+    keep_textures: &[String],
 ) -> Result<()> {
     let Some(ptcl) = carrier.ptcl_file.as_mut() else {
         return Ok(());
     };
     let mut used_textures: Vec<u64> = Vec::new();
+    for name in keep_textures {
+        let id = ptcl
+            .texture_info
+            .as_ref()
+            .and_then(|info| info.descriptors.iter().find(|d| d.name == *name))
+            .map(|d| d.id);
+        if let Some(id) = id {
+            append_unique_resource_ids(&mut used_textures, [Some(id)]);
+        }
+    }
     let mut used_primitives: Vec<u64> = Vec::new();
     for set in &ptcl.emitter_list.emitter_sets {
         visit_emitters_ref(&set.emitters, &mut |em| {
@@ -501,7 +581,7 @@ fn prune_unreferenced_resources(
         }
     }
 
-    if !preserve_raw_primitives {
+    {
         let Some(primitives) = ptcl.primitive_info.as_mut() else {
             return Ok(());
         };
@@ -709,6 +789,7 @@ fn donor_compute_demand(
 /// True when every emitter in the selected donor set renders through a donor-owned primitive.
 /// These are the effects for which a GPU-invalid rewritten BFRES means complete invisibility,
 /// rather than one missing layer among otherwise visible quad particles.
+#[cfg(test)]
 fn donor_effect_uses_primitives(
     donor: &effect_library::NamcoEffectFile,
     op: &TransplantOp,
@@ -828,6 +909,14 @@ fn rebuild_eff_bytes_filtered(
         for edit in &eff.authored {
             apply_authored(ptcl, edit)?;
         }
+    }
+    // This path does not prune, so an import only has to find its texture by name. Warnings
+    // go to stderr rather than a channel: the export UI reports the file it wrote, and a
+    // missing import here has already been surfaced by the live carrier build.
+    let mut warnings = Vec::new();
+    apply_texture_imports(&mut namco, &eff.textures, &mut warnings)?;
+    for warning in &warnings {
+        eprintln!("[EFF-EXPORT] warning: {warning}");
     }
     namco
         .save()
@@ -1450,6 +1539,223 @@ mod tests {
         out
     }
 
+    /// A texture swap must repoint exactly one emitter's `sampler0` and touch nothing else.
+    ///
+    /// The swap is authored as a NAME; this is what proves the name resolves to the right
+    /// GUID, and that resolving it does not disturb the sibling emitters that keep sampling
+    /// the original texture.
+    #[test]
+    fn a_texture_swap_repoints_only_the_targeted_emitter() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/mario/ef_mario.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let source = effect_library::NamcoEffectFile::load(&bytes).expect("parse source");
+        let before = emitter_snapshot(&source);
+        let ptcl = source.ptcl_file.as_ref().expect("source PTCL");
+        let descriptors = &ptcl.texture_info.as_ref().expect("textures").descriptors;
+
+        // Find an emitter that actually samples something, and a DIFFERENT texture to send it
+        // to — swapping a texture for itself would pass without proving anything.
+        let mut found = None;
+        for (set_idx, set) in ptcl.emitter_list.emitter_sets.iter().enumerate() {
+            let mut idx = 0usize;
+            super::visit_emitters_ref(&set.emitters, &mut |em| {
+                if found.is_none() {
+                    if let Some(sampler) = em.data.sampler0.as_ref() {
+                        if descriptors.iter().any(|d| d.id == sampler.texture_id) {
+                            found = Some((
+                                set_idx,
+                                set.name.clone(),
+                                idx,
+                                em.data.display_name(),
+                                sampler.texture_id,
+                            ));
+                        }
+                    }
+                }
+                idx += 1;
+            });
+            if found.is_some() {
+                break;
+            }
+        }
+        let (set_idx, set_name, emitter_idx, emitter_name, original_id) =
+            found.expect("an emitter that samples a pool texture");
+        let target = descriptors
+            .iter()
+            .find(|d| d.id != original_id)
+            .expect("a second texture to swap to")
+            .clone();
+
+        let eff = crate::mod_project::EffMod {
+            source_rel: SRC.to_string(),
+            authored: vec![AuthoredEdit {
+                set_name: set_name.clone(),
+                entry_name: String::new(),
+                set_idx,
+                emitter_name: emitter_name.clone(),
+                emitter_idx,
+                fields: EmitterFieldEdits {
+                    texture_name: Some(target.name.clone()),
+                    ..Default::default()
+                },
+            }],
+            transplants: Vec::new(),
+            textures: Vec::new(),
+        };
+        let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, None).expect("rebuild");
+        let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
+
+        let mut swapped = None;
+        let ptcl = after.ptcl_file.as_ref().expect("rebuilt PTCL");
+        let mut idx = 0usize;
+        super::visit_emitters_ref(
+            &ptcl.emitter_list.emitter_sets[set_idx].emitters,
+            &mut |em| {
+                if idx == emitter_idx {
+                    swapped = em.data.sampler0.as_ref().map(|s| s.texture_id);
+                }
+                idx += 1;
+            },
+        );
+        assert_eq!(
+            swapped,
+            Some(target.id),
+            "the targeted emitter should now sample '{}'",
+            target.name
+        );
+
+        // Every OTHER emitter must be untouched.
+        let after_all = emitter_snapshot(&after);
+        assert_eq!(before.len(), after_all.len(), "emitter count changed");
+        for (i, (b, a)) in before.iter().zip(&after_all).enumerate() {
+            let is_target = b.0 == set_name && b.1 == emitter_idx;
+            if is_target {
+                assert_ne!(b.2, a.2, "the targeted emitter did not change");
+            } else {
+                assert_eq!(b.2, a.2, "emitter {i} ({}, {}) changed", b.0, b.1);
+            }
+        }
+    }
+
+    /// An imported PNG must reach the pool, and the eff must still parse around it with the
+    /// same textures under the same names.
+    #[test]
+    fn a_texture_import_replaces_the_pool_texture_in_place() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/mario/ef_mario.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let source = effect_library::NamcoEffectFile::load(&bytes).expect("parse source");
+        let textures = source
+            .ptcl_file
+            .as_ref()
+            .and_then(|p| p.texture_info.as_ref())
+            .expect("textures");
+        let names: Vec<String> = textures.descriptors.iter().map(|d| d.name.clone()).collect();
+        let original_pool = textures.binary_data.clone().expect("pool");
+
+        // Replace the first texture Visionary can convert.
+        let name = names
+            .iter()
+            .enumerate()
+            .find(|(i, n)| {
+                crate::texture_import::describe(&original_pool, *i, n)
+                    .map(|d| d.convertible)
+                    .unwrap_or(false)
+            })
+            .map(|(_, n)| n.clone())
+            .expect("a convertible texture");
+
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let png_path = scratch.path().join("import.png");
+        let mut image = image::RgbaImage::new(64, 64);
+        for (x, y, px) in image.enumerate_pixels_mut() {
+            *px = image::Rgba([(x * 4) as u8, (y * 4) as u8, 0xC0, 0xFF]);
+        }
+        image.save(&png_path).expect("write png");
+
+        let eff = crate::mod_project::EffMod {
+            source_rel: SRC.to_string(),
+            authored: Vec::new(),
+            transplants: Vec::new(),
+            textures: vec![crate::mod_project::TextureImport {
+                texture_name: name.clone(),
+                png_path: png_path.to_string_lossy().to_string(),
+            }],
+        };
+        let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, None).expect("rebuild");
+        let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
+        let after_textures = after
+            .ptcl_file
+            .as_ref()
+            .and_then(|p| p.texture_info.as_ref())
+            .expect("textures survived");
+
+        // The serializer sorts the descriptor table on save (and reorders the archive to
+        // match), so compare the SET of names — order here is the writer's business, and the
+        // only thing an import must not do is add or drop one.
+        let mut after_names: Vec<String> = after_textures
+            .descriptors
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        let mut expected = names.clone();
+        after_names.sort();
+        expected.sort();
+        assert_eq!(after_names, expected, "the import lost or added a texture");
+        let new_pool = after_textures.binary_data.as_ref().expect("pool survived");
+        assert_ne!(*new_pool, original_pool, "the pool was not changed");
+
+        let new_index = after_textures
+            .descriptors
+            .iter()
+            .position(|d| d.name == name)
+            .expect("the imported texture is still in the pool");
+        let described =
+            crate::texture_import::describe(new_pool, new_index, &name).expect("describe imported");
+        assert_eq!(
+            (described.width, described.height),
+            (64, 64),
+            "the imported image's dimensions did not reach the pool"
+        );
+    }
+
+    /// An import naming a texture the file does not hold must warn and leave everything else
+    /// working — the same rule authored edits follow. One stale import cannot be allowed to
+    /// take down a build carrying unrelated transplants.
+    #[test]
+    fn a_stale_texture_import_warns_instead_of_failing() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/mario/ef_mario.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let mut file = effect_library::NamcoEffectFile::load(&bytes).expect("parse source");
+        let mut warnings = Vec::new();
+        super::apply_texture_imports(
+            &mut file,
+            &[crate::mod_project::TextureImport {
+                texture_name: "ef_not_a_real_texture".into(),
+                // Deliberately a path that does not exist: a missing NAME must be caught
+                // before the file is ever read, so this must not surface as an IO error.
+                png_path: "/nonexistent/nope.png".into(),
+            }],
+            &mut warnings,
+        )
+        .expect("a stale import must not fail the build");
+        assert_eq!(warnings, vec!["texture:ef_not_a_real_texture".to_string()]);
+    }
+
     /// A color edit on ONE emitter must leave every other emitter byte-identical.
     /// Point `VISIONARY_EFF_ROOT` at an extracted `effect/` tree to run this.
     #[test]
@@ -1500,6 +1806,7 @@ mod tests {
 
         let eff = crate::mod_project::EffMod {
             source_rel: SRC.to_string(),
+            textures: Vec::new(),
             authored: vec![AuthoredEdit {
                 set_name: set_name.clone(),
                 // Not exercised by this test: it drives `rebuild_eff_bytes`, which resolves
@@ -1622,6 +1929,7 @@ mod tests {
                 CARRIER,
                 &ops,
                 &root,
+                &[],
                 &[],
                 &mut Vec::new(),
             )
@@ -1786,6 +2094,7 @@ mod tests {
             &[op],
             &root,
             &[],
+            &[],
             &mut Vec::new(),
         )
         .expect("native carrier build");
@@ -1814,8 +2123,199 @@ mod tests {
         );
     }
 
+    /// Every primitive GUID the file's emitters reference (excluding the "none" sentinels).
+    pub(super) fn referenced_primitive_ids(file: &effect_library::NamcoEffectFile) -> Vec<u64> {
+        let mut out = Vec::new();
+        let Some(ptcl) = file.ptcl_file.as_ref() else {
+            return out;
+        };
+        for set in &ptcl.emitter_list.emitter_sets {
+            super::visit_emitters_ref(&set.emitters, &mut |em| {
+                for id in [
+                    em.data.particle_data.primitive_id,
+                    em.data.particle_data.primitive_ex_id,
+                    em.data.shape_info.primitive_index,
+                ] {
+                    if id != 0 && id != u64::MAX && !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            });
+        }
+        out
+    }
+
+    /// The vertex and index bytes of the model a GUID addresses, or None if absent.
+    ///
+    /// Compares GEOMETRY, not container bytes: a single-model export inherits its source
+    /// container's string-pool order, so two pools describing identical meshes serialise
+    /// differently while drawing the same thing.
+    #[allow(clippy::type_complexity)]
+    fn geometry_for_id(
+        file: &effect_library::NamcoEffectFile,
+        id: u64,
+    ) -> Option<(Vec<Vec<Vec<u8>>>, Vec<Vec<u8>>)> {
+        let prim = file.ptcl_file.as_ref()?.primitive_info.as_ref()?;
+        let index = effect_library::bfres::descriptor_index_for_id(&prim.descriptors, id)?;
+        let blob =
+            effect_library::bfres::export_single_model(prim.binary_data.as_ref()?, index).ok()?;
+        let (_, model) = effect_library::bfres::ResFile::parse_model_export(blob).ok()?;
+        Some((
+            model
+                .vertex_buffers
+                .iter()
+                .map(|vb| vb.buffers.clone())
+                .collect(),
+            model
+                .shapes
+                .values()
+                .flat_map(|s| s.meshes.iter().map(|m| m.index_data.clone()))
+                .collect(),
+        ))
+    }
+
+    /// The carrier's mesh pool holds EXACTLY the models its emitters use — no dead models, none
+    /// missing — and each one is the same geometry the source shipped.
+    ///
+    /// A source may legitimately not own an id: vanilla emitters keep nonzero values in inactive
+    /// primitive fields and reference globally-owned models the file never carries
+    /// (ef_bomberman names 0x35ca927c, which neither it nor Kirby owns). Those are not required.
+    pub(super) fn assert_pool_is_exactly_what_is_used(
+        output: &effect_library::NamcoEffectFile,
+        sources: &[&effect_library::NamcoEffectFile],
+    ) {
+        let referenced = referenced_primitive_ids(output);
+        let shipped: Vec<u64> = output
+            .ptcl_file
+            .as_ref()
+            .and_then(|p| p.primitive_info.as_ref())
+            .map(|p| p.descriptors.iter().map(|d| d.id).collect())
+            .unwrap_or_default();
+
+        let dead: Vec<String> = shipped
+            .iter()
+            .filter(|id| !referenced.contains(id))
+            .map(|id| format!("{id:#x}"))
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "the carrier ships {} model(s) nothing references: {}",
+            dead.len(),
+            dead.join(", ")
+        );
+
+        let mut checked = 0usize;
+        for id in &referenced {
+            let Some(source) = sources.iter().find(|s| geometry_for_id(s, *id).is_some()) else {
+                continue; // globally-owned; no local model to ship
+            };
+            assert!(
+                shipped.contains(id),
+                "primitive {id:#x} is referenced and owned by a source, but was stripped"
+            );
+            assert_eq!(
+                geometry_for_id(output, *id),
+                geometry_for_id(source, *id),
+                "primitive {id:#x} lost or changed its geometry in the carrier"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no mesh-backed primitive was checked — the fixture is not exercising meshes"
+        );
+    }
+
+    /// A stripped donor keeps the effect asked for — emitters, meshes and textures — and
+    /// drops everything else.
+    ///
+    /// The donor eff is co-loaded by the plugin and used to be sent whole: 20 MB for one Marx
+    /// effect, base64'd into a single JSON frame. Stripping was reverted once when a stripped
+    /// mesh effect rendered nothing, which was the BFRES relocation defect, not the strip.
     #[test]
-    fn primitive_only_carrier_preserves_the_game_bfres() {
+    fn a_stripped_donor_keeps_the_effect_it_was_asked_for() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        // Kirby is the demanding case: kirby_dash is MIXED — particles plus a mesh cone — so it
+        // exercises the pool that used to arrive intact-but-undrawable.
+        const KIRBY: &str = "effect/fighter/kirby/ef_kirby.eff";
+        let bytes = std::fs::read(root.join(KIRBY)).expect("Kirby eff");
+        let full = effect_library::NamcoEffectFile::load(&bytes).expect("Kirby parse");
+        let stripped_bytes =
+            super::strip_donor_eff_bytes(&bytes, &["kirby_dash"]).expect("strip Kirby");
+        let stripped =
+            effect_library::NamcoEffectFile::load(&stripped_bytes).expect("stripped parse");
+
+        assert!(
+            stripped_bytes.len() < bytes.len() / 2,
+            "stripping one effect out of Kirby should be a large saving, got {} of {} B",
+            stripped_bytes.len(),
+            bytes.len()
+        );
+
+        // The kept effect still resolves and still emits.
+        let index = stripped
+            .entry_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case("kirby_dash"))
+            .expect("kirby_dash entry survives");
+        let set_idx = stripped.entries[index].emitter_set_id as usize - 1;
+        let set = &stripped
+            .ptcl_file
+            .as_ref()
+            .expect("stripped PTCL")
+            .emitter_list
+            .emitter_sets[set_idx];
+        assert!(
+            !set.emitters.is_empty(),
+            "the kept effect lost its emitters"
+        );
+
+        // Its geometry is intact and nothing dead came along.
+        assert_pool_is_exactly_what_is_used(&stripped, &[&full]);
+
+        // Every texture it references is still in the archive.
+        let tex_ids: Vec<u64> = stripped
+            .ptcl_file
+            .as_ref()
+            .and_then(|p| p.texture_info.as_ref())
+            .map(|t| t.descriptors.iter().map(|d| d.id).collect())
+            .unwrap_or_default();
+        let mut wanted: Vec<u64> = Vec::new();
+        super::visit_emitters_ref(&set.emitters, &mut |em| {
+            let d = &em.data;
+            super::append_unique_resource_ids(
+                &mut wanted,
+                [
+                    d.sampler0.as_ref().map(|s| s.texture_id),
+                    d.sampler1.as_ref().map(|s| s.texture_id),
+                    d.sampler2.as_ref().map(|s| s.texture_id),
+                    d.sampler3.as_ref().map(|s| s.texture_id),
+                    d.sampler4.as_ref().map(|s| s.texture_id),
+                    d.sampler5.as_ref().map(|s| s.texture_id),
+                ],
+            );
+        });
+        assert!(!wanted.is_empty(), "kirby_dash references no textures?");
+        let missing: Vec<String> = wanted
+            .iter()
+            .filter(|id| !tex_ids.contains(id))
+            .map(|id| format!("{id:#x}"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "stripped donor lost {} texture(s) the kept effect uses: {}",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+
+    /// A primitive-only transplant keeps the models it uses and drops the rest.
+    #[test]
+    fn a_primitive_only_transplant_ships_only_the_models_it_uses() {
         let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
         else {
             eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
@@ -1840,28 +2340,31 @@ mod tests {
             &[op],
             &root,
             &[],
+            &[],
             &mut Vec::new(),
         )
         .expect("Daisy carrier build");
         let output = effect_library::NamcoEffectFile::load(&built).expect("Daisy carrier re-read");
-        let source_primitives = donor
+        let carrier_src =
+            effect_library::NamcoEffectFile::load(&carrier_base).expect("carrier parse");
+        assert_pool_is_exactly_what_is_used(&output, &[&donor, &carrier_src]);
+        let source_count = donor
             .ptcl_file
             .as_ref()
             .and_then(|ptcl| ptcl.primitive_info.as_ref())
-            .expect("Daisy primitive pool");
-        let output_primitives = output
+            .expect("Daisy primitive pool")
+            .descriptors
+            .len();
+        let output_count = output
             .ptcl_file
             .as_ref()
             .and_then(|ptcl| ptcl.primitive_info.as_ref())
-            .expect("carrier primitive pool");
-        assert_eq!(
-            output_primitives.binary_data, source_primitives.binary_data,
-            "primitive-only effects must retain the donor's game-authored BFRES"
-        );
-        assert_eq!(
-            output_primitives.descriptors.len(),
-            source_primitives.descriptors.len(),
-            "the raw BFRES must retain its matching descriptor table"
+            .expect("carrier primitive pool")
+            .descriptors
+            .len();
+        assert!(
+            output_count < source_count,
+            "one effect should not need all {source_count} of the donor's models"
         );
     }
 
@@ -1934,6 +2437,7 @@ mod tests {
             &[op],
             &root,
             std::slice::from_ref(&authored),
+            &[],
             &mut Vec::new(),
         )
         .expect("authored kirby carrier build");
@@ -1993,22 +2497,8 @@ mod tests {
             "kirby_dash is mesh-backed; the rebuilt carrier reference no primitives at all"
         );
 
-        // And the pool itself must be the donor's untouched BFRES — the Rust writer's rebuilt
-        // container is not GPU-valid (see `preserve_raw_primitives`).
-        let source_primitives = donor
-            .ptcl_file
-            .as_ref()
-            .and_then(|p| p.primitive_info.as_ref())
-            .expect("Kirby primitive pool");
-        assert_eq!(
-            out_ptcl
-                .primitive_info
-                .as_ref()
-                .expect("carrier primitive pool")
-                .binary_data,
-            source_primitives.binary_data,
-            "an authored edit must still ship the donor's game-authored BFRES"
-        );
+        // And the shipped models must be the donor's geometry, with nothing dead alongside.
+        assert_pool_is_exactly_what_is_used(&output, &[&donor, &carrier_src]);
     }
 
     /// The EMTR writer must round-trip a MESH-backed emitter losslessly.
@@ -2139,6 +2629,7 @@ mod tests {
             &[op],
             &root,
             std::slice::from_ref(&authored),
+            &[],
             &mut Vec::new(),
         )
         .expect("carrier build");
@@ -2266,6 +2757,7 @@ mod tests {
                 std::slice::from_ref(&op),
                 &root,
                 std::slice::from_ref(&authored),
+                &[],
                 &mut skipped,
             )
             .expect("carrier build");
@@ -2544,6 +3036,7 @@ mod tests {
             &ops,
             &root,
             std::slice::from_ref(&authored),
+            &[],
             &mut warnings,
         )
         .expect("mixed carrier build");
@@ -2687,6 +3180,7 @@ mod tests {
             CARRIER,
             &ops,
             &root,
+            &[],
             &[],
             &mut Vec::new(),
         )
@@ -2906,6 +3400,7 @@ mod tests {
             &ops,
             &root,
             &[],
+            &[],
             &mut warnings,
         )
         .expect("mixed carrier build");
@@ -2981,9 +3476,10 @@ mod tests {
         );
     }
 
-    /// The single-mesh case must still ship the donor's untouched BFRES.
+    /// The single-mesh case strips too. It used to ship the donor's pool whole, which is how
+    /// all 39 of Kirby's models reached a carrier that referenced two of them.
     #[test]
-    fn a_single_mesh_source_keeps_the_raw_bfres() {
+    fn a_single_mesh_source_keeps_only_the_models_it_uses() {
         let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
         else {
             eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
@@ -3015,6 +3511,7 @@ mod tests {
             &[op],
             &root,
             &[],
+            &[],
             &mut warnings,
         )
         .expect("carrier build");
@@ -3023,17 +3520,21 @@ mod tests {
             "a single mesh source is not a conflict: {warnings:?}"
         );
         let out = effect_library::NamcoEffectFile::load(&built).expect("carrier re-read");
-        let size = |f: &effect_library::NamcoEffectFile| {
+        let carrier_src =
+            effect_library::NamcoEffectFile::load(&carrier_base).expect("carrier parse");
+        assert_pool_is_exactly_what_is_used(&out, &[&donor, &carrier_src]);
+        let count = |f: &effect_library::NamcoEffectFile| {
             f.ptcl_file
                 .as_ref()
                 .and_then(|p| p.primitive_info.as_ref())
-                .and_then(|p| p.binary_data.as_ref())
-                .map(|b| b.len())
+                .map(|p| p.descriptors.len())
+                .unwrap_or(0)
         };
-        assert_eq!(
-            size(&out),
-            size(&donor),
-            "the donor's game-authored BFRES must ship whole, not re-encoded"
+        assert!(
+            count(&out) < count(&donor),
+            "kirby_dash uses a fraction of Kirby's {} models; the carrier shipped {}",
+            count(&donor),
+            count(&out)
         );
     }
 
@@ -3084,6 +3585,7 @@ mod tests {
             &[op],
             &root,
             std::slice::from_ref(&orphan),
+            &[],
             &mut skipped,
         )
         .expect("an unplaceable edit must not fail the build");
@@ -3165,6 +3667,34 @@ fn visit_emitters_ref<F: FnMut(&effect_library::structs::Emitter)>(
 }
 
 fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &AuthoredEdit) -> Result<()> {
+    // A texture swap names the pool texture; the emitter addresses textures by GUID. Resolve
+    // it here, while the descriptor table is still reachable — `sets` borrows `ptcl` mutably
+    // below.
+    let swap_to = match edit.fields.texture_name.as_deref() {
+        Some(wanted) => {
+            let descriptors = ptcl
+                .texture_info
+                .as_ref()
+                .map(|info| info.descriptors.as_slice())
+                .unwrap_or_default();
+            let id = descriptors
+                .iter()
+                .find(|d| d.name == wanted)
+                .map(|d| d.id);
+            if id.is_none() {
+                // Dropping the swap leaves the original texture — wrong, but it still renders.
+                // Writing a GUID no descriptor holds would make the emitter sample nothing.
+                eprintln!(
+                    "[EFF-EXPORT] warning: texture swap on '{}' wants '{wanted}', which this \
+                     pool does not hold — swap skipped",
+                    edit.emitter_name
+                );
+            }
+            id
+        }
+        None => None,
+    };
+
     let sets = &mut ptcl.emitter_list.emitter_sets;
     // Scope resolution is deliberately strict: an edit names ONE set and ONE emitter, so
     // when the stored index already holds the stored name that pair wins outright. Falling
@@ -3233,6 +3763,11 @@ fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &AuthoredEdit) -> R
     visit_emitters(&mut set.emitters, &mut flat_idx, &mut |idx, em| {
         if idx == target {
             apply_fields(em, &edit.fields);
+            if let Some(id) = swap_to {
+                if let Some(sampler) = em.data.sampler0.as_mut() {
+                    sampler.texture_id = id;
+                }
+            }
         }
     });
     Ok(())
@@ -3417,6 +3952,7 @@ mod bench {
         let eff = EffMod {
             source_rel: src_rel,
             authored: Vec::new(),
+            textures: Vec::new(),
             transplants: vec![TransplantOp {
                 new_entry_name: format!("{DONOR_SET}_tp"),
                 src_file_rel: DONOR_REL.into(),
@@ -3458,6 +3994,7 @@ mod bench {
                 &eff.transplants,
                 &root,
                 &[],
+                &[],
                 &mut warnings,
             )
             .expect("carrier build");
@@ -3468,5 +4005,183 @@ mod bench {
             );
         }
         let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Time and size the work one transplant triggers, on the reported case: a 20 MB donor
+    /// (`marx_icebomb`) plus an edited `kirby_dash`, into the Bomberman carrier.
+    ///
+    /// A measurement, printed with `--nocapture`, plus the one assertion worth keeping: the
+    /// carrier must not ship models nothing references. It exists so cost is attributed to a
+    /// phase rather than guessed at — the app-side build turned out to be ~90 ms, which ruled
+    /// out the rebuild as the cause of a 30 s send timeout.
+    #[test]
+    fn measure_transplant_build_cost() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT");
+            return;
+        };
+        const CARRIER: &str = "effect/assist/bomberman/ef_bomberman.eff";
+        const KIRBY: &str = "effect/fighter/kirby/ef_kirby.eff";
+        const MARX: &str = "effect/boss/marx/ef_marx.eff";
+
+        let kirby_bytes = std::fs::read(root.join(KIRBY)).expect("kirby");
+        let marx_bytes = std::fs::read(root.join(MARX)).expect("marx");
+        let carrier_bytes = std::fs::read(root.join(CARRIER)).expect("carrier");
+        let kirby = effect_library::NamcoEffectFile::load(&kirby_bytes).expect("kirby parse");
+        let marx = effect_library::NamcoEffectFile::load(&marx_bytes).expect("marx parse");
+
+        let set_of = |f: &effect_library::NamcoEffectFile, name: &str| -> usize {
+            let i = f
+                .entry_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(name))
+                .unwrap_or_else(|| panic!("entry {name} not found"));
+            f.entries[i].emitter_set_id as usize - 1
+        };
+        let kirby_set = set_of(&kirby, "kirby_dash");
+        let marx_set = set_of(&marx, "marx_icebomb");
+        let clone_name = format!("{}kirby_dash", crate::mod_project::EDIT_CLONE_PREFIX);
+        let marx_op = TransplantOp {
+            new_entry_name: "marx_icebomb".into(),
+            src_file_rel: MARX.into(),
+            src_set_name: "marx_icebomb".into(),
+            src_set_idx: marx_set,
+            one_slot_slots: Vec::new(),
+            replace_entry: None,
+        };
+        let ops = vec![
+            TransplantOp {
+                new_entry_name: clone_name.clone(),
+                src_file_rel: KIRBY.into(),
+                src_set_name: "kirby_dash".into(),
+                src_set_idx: kirby_set,
+                one_slot_slots: Vec::new(),
+                replace_entry: None,
+            },
+            marx_op.clone(),
+        ];
+        let authored = super::CarrierAuthored {
+            set_name: clone_name.clone(),
+            edits: vec![crate::mod_project::AuthoredEdit {
+                set_name: clone_name,
+                entry_name: "kirby_dash".into(),
+                set_idx: 0,
+                emitter_name: String::new(),
+                emitter_idx: 0,
+                fields: crate::mod_project::EmitterFieldEdits {
+                    scale: Some(1.5),
+                    ..Default::default()
+                },
+            }],
+        };
+
+        let t = Instant::now();
+        let built = super::rebuild_runtime_carrier_eff_bytes_with_edits(
+            &carrier_bytes,
+            CARRIER,
+            &ops,
+            &root,
+            std::slice::from_ref(&authored),
+            &[],
+            &mut Vec::new(),
+        )
+        .expect("carrier build");
+        eprintln!("CARRIER BUILD : {:?} -> {} B", t.elapsed(), built.len());
+
+        let eff = crate::mod_project::EffMod {
+            source_rel: KIRBY.into(),
+            transplants: vec![marx_op],
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let merged = super::rebuild_eff_bytes(&kirby_bytes, &eff, Some(&root)).expect("preview");
+        eprintln!("MERGED PREVIEW: {:?} -> {} B", t.elapsed(), merged.len());
+
+        // The preview is written to disk and re-parsed by the editor on every transplant.
+        let scratch = crate::scratch_dirs::app_scratch_dir("perf").expect("scratch");
+        let path = scratch.path().join("_perf_preview.eff");
+        let t = Instant::now();
+        std::fs::write(&path, &merged).expect("write preview");
+        eprintln!("PREVIEW WRITE : {:?}", t.elapsed());
+        let t = Instant::now();
+        let _ = effect_library::NamcoEffectFile::load(&merged).expect("reparse");
+        eprintln!("PREVIEW PARSE : {:?}", t.elapsed());
+
+        let out = effect_library::NamcoEffectFile::load(&built).expect("built parse");
+        let report = |label: &str, f: &effect_library::NamcoEffectFile| {
+            let Some(p) = f.ptcl_file.as_ref() else {
+                return;
+            };
+            let tex = p.texture_info.as_ref();
+            let prim = p.primitive_info.as_ref();
+            let sh = p.shader_info.as_ref();
+            eprintln!(
+                "  {label}: BNTX {} tex / {} B | BFRES {} models / {} B | SHDR {} B",
+                tex.map(|t| t.descriptors.len()).unwrap_or(0),
+                tex.and_then(|t| t.binary_data.as_ref())
+                    .map(|b| b.len())
+                    .unwrap_or(0),
+                prim.map(|t| t.descriptors.len()).unwrap_or(0),
+                prim.and_then(|t| t.binary_data.as_ref())
+                    .map(|b| b.len())
+                    .unwrap_or(0),
+                sh.and_then(|t| t.binary_data.as_ref())
+                    .map(|b| b.len())
+                    .unwrap_or(0),
+            );
+        };
+        let carrier_src =
+            effect_library::NamcoEffectFile::load(&carrier_bytes).expect("carrier parse");
+        report("bomberman", &carrier_src);
+        report("BUILT    ", &out);
+        report("kirby    ", &kirby);
+        report("marx     ", &marx);
+
+        super::tests::assert_pool_is_exactly_what_is_used(&out, &[&kirby, &marx, &carrier_src]);
+
+        // The donor eff the plugin co-loads. This is the dominant payload: it was sent WHOLE,
+        // and the transport base64s it into one JSON frame.
+        for (label, bytes, keep) in [
+            ("marx ", &marx_bytes, "marx_icebomb"),
+            ("kirby", &kirby_bytes, "kirby_dash"),
+        ] {
+            let t = Instant::now();
+            let stripped = super::strip_donor_eff_bytes(bytes, &[keep]).expect("strip donor");
+            let b64 = |n: usize| n.div_ceil(3) * 4;
+            eprintln!(
+                "DONOR {label}: {} B -> {} B ({:.1}% ) in {:?} | on the wire {} B -> {} B",
+                bytes.len(),
+                stripped.len(),
+                100.0 * stripped.len() as f64 / bytes.len() as f64,
+                t.elapsed(),
+                b64(bytes.len()),
+                b64(stripped.len()),
+            );
+            let back = effect_library::NamcoEffectFile::load(&stripped).expect("reparse stripped");
+            let kept = back
+                .entry_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(keep))
+                .expect("kept entry survives");
+            let set_idx = back.entries[kept].emitter_set_id as usize - 1;
+            assert!(
+                !back
+                    .ptcl_file
+                    .as_ref()
+                    .expect("ptcl")
+                    .emitter_list
+                    .emitter_sets[set_idx]
+                    .emitters
+                    .is_empty(),
+                "{label}: the kept effect must still have its emitters"
+            );
+        }
     }
 }

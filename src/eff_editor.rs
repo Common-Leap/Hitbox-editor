@@ -9,10 +9,15 @@
 // colour ratio into one kind-level value, which recoloured the ENTIRE effect whenever you
 // edited a single emitter (and silently ignored color1 edits entirely).
 //
-// So authored edits do NOT go on the modifier wire at all. They are applied by rebuilding
-// the fighter's .eff with `eff_export::rebuild_eff_bytes` — which is per-emitter exact, the
-// same bytes the exporter ships — and hot-reloading it in the running game (app-side
-// `deploy_live_eff`). The editor only raises a request flag; the app owns the rebuild.
+// So authored edits do NOT go on the modifier wire at all. They are baked into the LIVE
+// CARRIER: the edited effect is cloned into a borrowed assist eff, the edits are written into
+// that clone (per-emitter exact, the same writer the exporter uses), and the original kind is
+// aliased onto it. The fighter's own eff is not a candidate — `reparse_game_path` rebuilds the
+// parsed structs from the resident buffer and never re-requests the file, so edited bytes went
+// unread mid-match. The editor only raises a request flag; the app owns the rebuild.
+//
+// Transplants, per-emitter texture swaps and whole-texture PNG imports all ride that same
+// rebuild, so one Send ships everything the project says.
 //
 // The kind-level multipliers are still exposed, but only as their own honest feature: the
 // "Kind look — color × / speed ×" panel, which the user drives directly and which is
@@ -23,7 +28,7 @@ use std::time::Instant;
 
 use egui::Ui;
 
-use crate::effects::{load_effect, ColorKey, EmitterDef, PtclFile};
+use crate::effects::{load_effect, ColorKey, EmitterDef, PtclFile, TextureInfo};
 use crate::game_link::{GameLink, LinkStatus, LiveOverrides};
 use crate::mod_project::{AuthoredEdit, EmitterFieldEdits, TransplantOp};
 
@@ -38,6 +43,7 @@ struct EmitterSnapshot {
     color0: Vec<ColorKey>,
     color1: Vec<ColorKey>,
     alpha0_keys: Vec<ColorKey>,
+    texture_index: Option<u32>,
 }
 
 impl EmitterSnapshot {
@@ -51,6 +57,7 @@ impl EmitterSnapshot {
             color0: e.color0.clone(),
             color1: e.color1.clone(),
             alpha0_keys: e.alpha0_keys.clone(),
+            texture_index: e.texture_index,
         }
     }
 
@@ -63,6 +70,7 @@ impl EmitterSnapshot {
         e.color0 = self.color0.clone();
         e.color1 = self.color1.clone();
         e.alpha0_keys = self.alpha0_keys.clone();
+        e.texture_index = self.texture_index;
     }
 }
 
@@ -85,6 +93,8 @@ pub struct EditSource {
     pub merged: Option<PathBuf>,
     pub transplant_count: usize,
     pub authored: usize,
+    /// How many of this eff's pool textures the user has replaced with their own image.
+    pub textures: usize,
     pub transplants: Vec<EffTransplant>,
 }
 
@@ -140,6 +150,17 @@ pub struct EffEditor {
     edit_sources: Vec<EditSource>,
     load_error: Option<String>,
     ptcl: Option<PtclFile>,
+    /// The loaded eff's BNTX pool, verbatim — what "Export PNG" decodes from. `ptcl` carries
+    /// only what each texture IS (name, size, format), never its pixels.
+    texture_pool: Option<Vec<u8>>,
+    /// Texture replacements the user picked, drained by the app into the project store.
+    pending_texture_imports: Vec<crate::mod_project::TextureImport>,
+    /// The project's texture replacements for the loaded eff, fed by the app each frame so
+    /// the texture panel can show what is already replaced.
+    texture_imports: Vec<crate::mod_project::TextureImport>,
+    /// Result of the last export/import, shown beside the buttons. Errors here are the whole
+    /// point: an unconvertible format or an unreadable PNG has to say so, not do nothing.
+    texture_note: Option<(String, bool)>,
     /// Pristine snapshots per emitter set, parallel to `ptcl.emitter_sets`.
     pristine: Vec<Vec<EmitterSnapshot>>,
     entries: Vec<EffEntry>,
@@ -211,6 +232,10 @@ impl Default for EffEditor {
             edit_sources: Vec::new(),
             load_error: None,
             ptcl: None,
+            texture_pool: None,
+            pending_texture_imports: Vec::new(),
+            texture_imports: Vec::new(),
+            texture_note: None,
             pristine: Vec::new(),
             entries: Vec::new(),
             entry_filter: String::new(),
@@ -265,8 +290,16 @@ fn diff(a: f32, b: f32) -> bool {
 /// absolute-value edit record the exporter/rebuilder consumes. Single source of truth for
 /// "is this emitter edited?" (`is_empty`) and for what to write (`collect_authored_edits`),
 /// so the UI's edited-emitter list can never disagree with what actually ships.
-fn field_edits(em: &EmitterDef, pr: &EmitterSnapshot) -> EmitterFieldEdits {
+fn field_edits(em: &EmitterDef, pr: &EmitterSnapshot, tex_names: &[String]) -> EmitterFieldEdits {
     let mut f = EmitterFieldEdits::default();
+    // Swaps are recorded by texture NAME. The picker works in pool indices, but the index is
+    // only meaningful against the file loaded right now — see `EmitterFieldEdits::texture_name`.
+    if em.texture_index != pr.texture_index {
+        f.texture_name = em
+            .texture_index
+            .and_then(|i| tex_names.get(i as usize))
+            .cloned();
+    }
     if diff(em.emission_rate, pr.emission_rate) {
         f.emission_rate = Some(em.emission_rate);
     }
@@ -387,6 +420,8 @@ impl EffEditor {
 
         self.entries = entries;
         self.ptcl = Some(ptcl);
+        self.texture_pool = loaded.texture_pool;
+        self.texture_note = None;
         self.loaded_path = Some(path.to_path_buf());
     }
 
@@ -429,6 +464,16 @@ impl EffEditor {
         std::mem::take(&mut self.pending_transplant_removals)
     }
 
+    /// Texture replacements picked since the last drain (the app owns the project store).
+    pub fn take_texture_imports(&mut self) -> Vec<crate::mod_project::TextureImport> {
+        std::mem::take(&mut self.pending_texture_imports)
+    }
+
+    /// The project's texture replacements for the loaded eff, so the panel can show them.
+    pub fn set_texture_imports(&mut self, imports: Vec<crate::mod_project::TextureImport>) {
+        self.texture_imports = imports;
+    }
+
     fn current_edit_source(&self) -> Option<&EditSource> {
         let loaded = self.loaded_path.as_ref()?;
         self.edit_sources.iter().find(|source| {
@@ -448,15 +493,24 @@ impl EffEditor {
             .map(|item| (source.fighter.clone(), item))
     }
 
+    /// Names of the loaded eff's pool textures, in pool order.
+    fn texture_names(&self) -> Vec<String> {
+        self.ptcl
+            .as_ref()
+            .map(|p| p.bntx_textures.iter().map(|t| t.tex_name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Diff the working PTCL against the pristine snapshots → absolute-value edit records.
     pub fn collect_authored_edits(&self) -> Vec<AuthoredEdit> {
         let Some(ptcl) = self.ptcl.as_ref() else {
             return Vec::new();
         };
+        let tex_names = self.texture_names();
         let mut out = Vec::new();
         for (set_idx, (set, pset)) in ptcl.emitter_sets.iter().zip(&self.pristine).enumerate() {
             for (em_idx, (em, pr)) in set.emitters.iter().zip(pset.iter()).enumerate() {
-                let f = field_edits(em, pr);
+                let f = field_edits(em, pr, &tex_names);
                 if !f.is_empty() {
                     // The entry (kind) name is a separate namespace from the emitter-set
                     // name and cannot be derived from it — resolve it via the entry list,
@@ -484,6 +538,7 @@ impl EffEditor {
     /// Apply saved authored edits onto the loaded eff. Prefers name matches; falls back to
     /// stored indices with a warning (source dump may have changed between sessions).
     pub fn apply_authored_edits(&mut self, edits: &[AuthoredEdit]) {
+        let tex_names = self.texture_names();
         let Some(ptcl) = self.ptcl.as_mut() else {
             return;
         };
@@ -545,20 +600,17 @@ impl EffEditor {
                     k.r = row[0];
                 }
             }
+            if let Some(wanted) = &f.texture_name {
+                // A swap to a texture this file does not hold leaves the emitter showing what
+                // it actually samples, which is the truth. The edit itself is untouched — it
+                // may still resolve in the carrier, whose pool is assembled differently.
+                if let Some(i) = tex_names.iter().position(|n| n == wanted) {
+                    em.texture_index = Some(i as u32);
+                }
+            }
         }
     }
 
-    /// Ask the app to push the current authored edits into the running game.
-    ///
-    /// DISABLED: this used to rebuild the FIGHTER's own eff and hot-reload it. That path is
-    /// a dead end and was ruled out — `reparse_game_path` rebuilds the parsed emitter
-    /// structs from the RESIDENT buffer and never re-requests the file, so the merged bytes
-    /// were never read mid-match (`cb_game=0`) and edits only appeared after a full reboot.
-    ///
-    /// The replacement is the CARRIER path: clone the effects that need editing into the
-    /// carrier's eff space and reload that instead of the fighter's. Until that lands (or
-    /// per-emitter runtime modifiers prove workable, which is the cheaper answer), authored
-    /// colour edits are export-only and nothing is pushed live.
     /// Note that the project now differs from what the running game was last given.
     ///
     /// Lights the Send button's unsent indicator. Used by changes that deliberately do NOT
@@ -568,6 +620,14 @@ impl EffEditor {
         self.eff_dirty_at = Some(Instant::now());
     }
 
+    /// Ask the app to rebuild the live carrier and hand it to the running game.
+    ///
+    /// The fighter's OWN eff is not the target and never can be: `reparse_game_path` rebuilds
+    /// the parsed emitter structs from the resident buffer and never re-requests the file, so
+    /// edited bytes went unread mid-match (`cb_game=0`) and only appeared after a reboot. The
+    /// carrier's eff IS reloadable, so an edited effect is cloned into it with its edits baked
+    /// in and the original kind is aliased onto the clone. Transplants, texture imports and
+    /// texture swaps all ride that same rebuild.
     pub fn request_live_apply(&mut self) {
         self.live_deploy_request = true;
         self.sending = true;
@@ -609,11 +669,12 @@ impl EffEditor {
         let Some(set) = ptcl.emitter_sets.get(set_idx) else {
             return Vec::new();
         };
+        let tex_names = self.texture_names();
         set.emitters
             .iter()
             .zip(pristine.iter())
             .enumerate()
-            .filter(|(_, (e, p))| !field_edits(e, p).is_empty())
+            .filter(|(_, (e, p))| !field_edits(e, p, &tex_names).is_empty())
             .map(|(i, _)| i)
             .collect()
     }
@@ -843,10 +904,12 @@ impl EffEditor {
                         egui::Color32::from_rgb(0x90, 0xC0, 0xF0),
                     )
                 } else {
-                    // The long half: the game is decompressing the carrier and bringing its
-                    // object up. This is what the minute-long wait actually was. Name the
-                    // PHASE rather than dumping raw numbers — "object=down" told the user
-                    // nothing about which of three very different stalls they were in.
+                    // The long half: the game is taking the carrier and bringing its object
+                    // up. Name the PHASE rather than dumping raw numbers — "object=down" told
+                    // the user nothing about which of several very different stalls they were
+                    // in. The payload itself now moves by disk, so the old "waiting for the
+                    // game to take the bytes" phase is a file read and passes in a frame; what
+                    // remains is the swap: retiring the previous carrier and spawning ours.
                     let secs = self
                         .awaiting_game
                         .map(|t| t.elapsed().as_secs())
@@ -859,7 +922,7 @@ impl EffEditor {
                         _ if secs < 2 => "waiting for game",
                         (2, true) if took_ours => "carrier up",
                         (2, true) => "game still serving the previous carrier",
-                        (0, _) => "waiting for the game to take the bytes",
+                        (0, _) => "handing the carrier over",
                         (2, false) => "carrier staged — waiting for its object",
                         (3, _) | (4, _) => "retiring the previous carrier",
                         (5, _) => "waiting for the old resources to release",
@@ -941,6 +1004,13 @@ impl EffEditor {
                 }
                 if src.authored > 0 {
                     badges.push(format!("{} emitter edits", src.authored));
+                }
+                if src.textures > 0 {
+                    badges.push(format!(
+                        "{} texture{}",
+                        src.textures,
+                        if src.textures == 1 { "" } else { "s" }
+                    ));
                 }
                 let label = if badges.is_empty() {
                     src.fighter.clone()
@@ -1107,9 +1177,9 @@ impl EffEditor {
             return;
         };
         // Texture pool of the loaded eff (for the per-emitter "swap texture" picker). Captured
-        // as owned labels up front so the `set`/`em` mutable borrows below don't conflict.
-        let tex_labels: Vec<String> = ptcl
-            .bntx_textures
+        // as owned values up front so the `set`/`em` mutable borrows below don't conflict.
+        let textures = ptcl.bntx_textures.clone();
+        let tex_labels: Vec<String> = textures
             .iter()
             .enumerate()
             .map(|(i, t)| {
@@ -1173,6 +1243,9 @@ impl EffEditor {
         };
 
         let mut changed = false;
+        // The texture the selected emitter samples, handed to the import/export row that runs
+        // after the emitter borrow ends.
+        let mut texture_actions: Option<(usize, TextureInfo)> = None;
         egui::ScrollArea::vertical()
             .id_salt("emitter_fields")
             .show(ui, |ui| {
@@ -1293,39 +1366,52 @@ impl EffEditor {
                 }
 
                 // ── Textures ──────────────────────────────────────────────────────
-                // View the texture this emitter samples and swap it to any other texture
-                // present in the eff (applies live in the preview). Importing external images
-                // needs a BNTX encoder (see status) — swap-to-existing works today.
+                // Two separate operations live here and are deliberately labelled apart:
+                //   SWAP  — point this emitter at a different texture the eff already has.
+                //           A per-emitter edit; nothing else that samples the old one moves.
+                //   IMPORT— replace the pixels of a pool texture with your own image.
+                //           A per-FILE edit: every emitter sampling that texture changes.
                 if !tex_labels.is_empty() {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("texture").strong());
-                    let cur = em.texture_index as usize;
-                    let cur_label = tex_labels
-                        .get(cur)
-                        .cloned()
-                        .unwrap_or_else(|| "(none / index out of range)".to_string());
-                    egui::ComboBox::from_id_salt("emitter_texture_swap")
-                        .selected_text(cur_label)
-                        .width(260.0)
-                        .show_ui(ui, |ui| {
-                            for (i, label) in tex_labels.iter().enumerate() {
-                                if ui
-                                    .selectable_label(em.texture_index as usize == i, label)
-                                    .clicked()
-                                {
-                                    em.texture_index = i as u32;
-                                    changed = true;
-                                }
-                            }
-                        });
-                    ui.label(
-                        egui::RichText::new(
-                            "Swap re-skins this emitter in the preview. Importing your own PNG \
-                         needs a BNTX encoder (coming — see notes).",
-                        )
-                        .small()
-                        .color(egui::Color32::GRAY),
-                    );
+                    match em.texture_index {
+                        None => {
+                            ui.label(
+                                egui::RichText::new(
+                                    "this emitter samples no texture — nothing to swap",
+                                )
+                                .small()
+                                .color(egui::Color32::GRAY),
+                            );
+                        }
+                        Some(cur) => {
+                            let cur = cur as usize;
+                            let cur_label = tex_labels
+                                .get(cur)
+                                .cloned()
+                                .unwrap_or_else(|| "(not in this pool)".to_string());
+                            egui::ComboBox::from_id_salt("emitter_texture_swap")
+                                .selected_text(cur_label)
+                                .width(260.0)
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in tex_labels.iter().enumerate() {
+                                        if ui
+                                            .selectable_label(cur == i, label)
+                                            .clicked()
+                                        {
+                                            em.texture_index = Some(i as u32);
+                                            changed = true;
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Point this emitter at another of the eff's textures. Ships \
+                                     with the next Send, like any other emitter edit.",
+                                );
+                            texture_actions = textures.get(cur).map(|t| (cur, t.clone()));
+                        }
+                    }
                 }
 
                 ui.add_space(6.0);
@@ -1335,8 +1421,153 @@ impl EffEditor {
                 }
             });
 
+        // Import/export live OUTSIDE the emitter borrow: they mutate editor-level state
+        // (`pending_texture_imports`, `texture_note`), not the emitter.
+        if let Some((index, texture)) = texture_actions {
+            self.draw_texture_import(ui, index, &texture);
+        }
+
         if changed {
             self.eff_dirty_at = Some(Instant::now());
+        }
+    }
+
+    /// Export the sampled texture as a PNG, or replace it with one.
+    ///
+    /// Scoped to the texture the SELECTED emitter samples rather than offering the whole pool:
+    /// the pool is 60-odd textures with names like `ef_cmn_line02`, and picking out of that
+    /// list is guesswork. Reaching a texture through the emitter that uses it means you are
+    /// always replacing the one you are looking at.
+    fn draw_texture_import(&mut self, ui: &mut Ui, index: usize, texture: &TextureInfo) {
+        let name = texture.tex_name.clone();
+        let replaced = self
+            .texture_imports
+            .iter()
+            .find(|t| t.texture_name == name)
+            .cloned();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(if texture.format.is_empty() {
+                    format!("{}×{}", texture.width, texture.height)
+                } else {
+                    format!("{}×{} · {}", texture.width, texture.height, texture.format)
+                })
+                .small()
+                .color(egui::Color32::GRAY),
+            );
+            let pool = self.texture_pool.clone();
+            let can_convert = texture.convertible && pool.is_some();
+
+            if ui
+                .add_enabled(can_convert, egui::Button::new("Export PNG…").small())
+                .on_hover_text("Save this texture as a PNG to paint over")
+                .on_disabled_hover_text(if pool.is_none() {
+                    "This eff has no texture archive".to_string()
+                } else {
+                    format!("Visionary cannot convert {}", texture.format)
+                })
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Export texture as PNG")
+                    .set_file_name(format!("{name}.png"))
+                    .add_filter("PNG", &["png"])
+                    .save_file()
+                {
+                    let pool = pool.clone().unwrap_or_default();
+                    self.texture_note = Some(
+                        match crate::texture_import::export_png(&pool, index, &name)
+                            .and_then(|png| Ok(std::fs::write(&path, png)?))
+                        {
+                            Ok(()) => (format!("exported {name}.png"), true),
+                            Err(e) => (format!("export failed: {e}"), false),
+                        },
+                    );
+                }
+            }
+
+            if ui
+                .add_enabled(can_convert, egui::Button::new("Replace with PNG…").small())
+                .on_hover_text(
+                    "Use your own image for this texture. EVERY emitter that samples it \
+                     changes — this replaces the texture, not just this emitter's use of it.",
+                )
+                .on_disabled_hover_text(if pool.is_none() {
+                    "This eff has no texture archive".to_string()
+                } else {
+                    format!("Visionary cannot convert {}", texture.format)
+                })
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Choose a PNG for this texture")
+                    .add_filter("PNG", &["png"])
+                    .pick_file()
+                {
+                    // Encode once NOW so a bad image is rejected here, where the user is
+                    // looking at it — not silently, mid carrier build, minutes later.
+                    let pool = pool.clone().unwrap_or_default();
+                    let names: Vec<String> = self.texture_names();
+                    match std::fs::read(&path).map_err(anyhow::Error::from).and_then(
+                        |png| crate::texture_import::replace_with_png(&pool, &names, index, &png),
+                    ) {
+                        Ok((_, report)) => {
+                            self.pending_texture_imports
+                                .push(crate::mod_project::TextureImport {
+                                    texture_name: name.clone(),
+                                    png_path: path.to_string_lossy().to_string(),
+                                });
+                            let note = match &report.format_substituted_from {
+                                Some(original) => format!(
+                                    "{name}: {}×{} — {original} cannot be written, saved as {}",
+                                    report.width, report.height, report.format
+                                ),
+                                None => format!(
+                                    "{name}: {}×{} {}",
+                                    report.width, report.height, report.format
+                                ),
+                            };
+                            self.texture_note = Some((note, true));
+                            self.eff_dirty_at = Some(Instant::now());
+                        }
+                        Err(e) => self.texture_note = Some((format!("import failed: {e}"), false)),
+                    }
+                }
+            }
+
+            if let Some(existing) = &replaced {
+                if ui
+                    .small_button("Restore original")
+                    .on_hover_text(format!("Stop using {}", existing.png_path))
+                    .clicked()
+                {
+                    // Recorded as an import with no image: the app reads this as "drop the
+                    // entry for this texture". Removing it from `texture_imports` here would
+                    // only change the display — the project store is the app's.
+                    self.pending_texture_imports
+                        .push(crate::mod_project::TextureImport {
+                            texture_name: name.clone(),
+                            png_path: String::new(),
+                        });
+                    self.eff_dirty_at = Some(Instant::now());
+                }
+            }
+        });
+
+        if let Some(existing) = &replaced {
+            ui.label(
+                egui::RichText::new(format!("replaced by {}", existing.png_path))
+                    .small()
+                    .color(egui::Color32::from_rgb(140, 200, 255)),
+            );
+        }
+        if let Some((note, ok)) = &self.texture_note {
+            ui.label(egui::RichText::new(note).small().color(if *ok {
+                egui::Color32::from_rgb(0x70, 0xB0, 0x70)
+            } else {
+                egui::Color32::from_rgb(0xD0, 0x80, 0x60)
+            }));
         }
     }
 
@@ -1415,11 +1646,11 @@ impl EffEditor {
             ui.separator();
         }
 
-        // Authored edits → live game. These are applied by REBUILDING this fighter's eff and
-        // hot-reloading it, so each emitter gets exactly its own edited values. They are
-        // deliberately NOT translated into the kind-level colour multiplier below: that
-        // multiplier is whole-effect by construction and would tint emitters you never
-        // touched (and could not carry a per-key or color1 edit at all).
+        // Authored edits → live game. These are baked into the CARRIER's copy of the effect,
+        // so each emitter gets exactly its own edited values. They are deliberately NOT
+        // translated into the kind-level colour multiplier below: that multiplier is
+        // whole-effect by construction and would tint emitters you never touched (and could
+        // not carry a per-key or color1 edit at all).
         let edited = self.edited_emitters(set_idx);
         let total = self
             .ptcl
@@ -1460,65 +1691,41 @@ impl EffEditor {
             );
             ui.label(
                 egui::RichText::new(
-                    "Applied by rebuilding the eff — only these emitters change. The game \
-                     re-reads the file, so re-trigger the move to see it on a fresh spawn.",
+                    "Baked into the live carrier — only these emitters change. Send from the \
+                     header, then re-trigger the move to see it on a fresh spawn.",
                 )
                 .small()
                 .color(egui::Color32::GRAY),
             );
         }
-        ui.horizontal(|ui| {
-            // EXPLICIT send only. Auto-apply used to rebuild and re-upload the carrier a
-            // moment after every edit, which meant a colour drag shipped a full carrier
-            // rebuild + in-game reload repeatedly. Editing is now free; you pay only when
-            // you ask to.
-            let connected = link.status() == LinkStatus::Connected;
-            let unsent = self.eff_dirty_at.is_some();
-            let label = if unsent {
-                "Send to game •"
-            } else {
-                "Send to game"
-            };
-            let btn = egui::Button::new(label);
-            let resp = ui
-                .add_enabled(connected && !self.sending, btn)
-                .on_hover_text(
-                    "Rebuild the live carrier with every authored edit baked in and hand it to \
-                 the running game. Re-trigger the move to see it on a fresh spawn.",
-                );
-            if resp.clicked() {
-                self.eff_dirty_at = None;
-                self.request_live_apply();
-            }
-            // The wait continues after the bytes leave the app, so this spinner has to track
-            // `awaiting_game` too — otherwise it clears while the carrier is still coming up,
-            // which is exactly the "loading finishes before the item spawns" complaint.
-            if self.sending || self.awaiting_game.is_some() {
-                ui.add(egui::Spinner::new().size(14.0));
-                let (text, tint) = if self.sending {
-                    ("sending…", egui::Color32::from_rgb(0x90, 0xC0, 0xF0))
-                } else {
-                    (
-                        "waiting for game…",
-                        egui::Color32::from_rgb(0xE0, 0xC0, 0x60),
-                    )
-                };
-                ui.label(egui::RichText::new(text).small().color(tint));
-            } else if !connected {
+        // Texture replacements are file-wide, not per-entry, so they are listed here in full
+        // rather than filtered to the selected effect — a replaced texture changes every
+        // emitter that samples it, including ones in entries you are not looking at.
+        if !self.texture_imports.is_empty() {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} replaced texture(s) — applies to the whole eff",
+                    self.texture_imports.len()
+                ))
+                .small()
+                .color(egui::Color32::from_rgb(140, 200, 255)),
+            );
+            for import in &self.texture_imports {
                 ui.label(
-                    egui::RichText::new("game not connected")
+                    egui::RichText::new(format!("  {}", import.texture_name))
                         .small()
+                        .monospace()
                         .color(egui::Color32::GRAY),
                 );
-            } else if unsent {
-                ui.label(
-                    egui::RichText::new("unsent changes")
-                        .small()
-                        .color(egui::Color32::from_rgb(0xE0, 0xA0, 0x30)),
-                );
             }
-        });
-        // Feedback for BOTH senders (the rebuild above and the kind color×/speed "Send now"
+        }
+        // There is exactly ONE send control, and it lives in the header where it is reachable
+        // from every panel. A second copy used to sit here with a plain "waiting for game…"
+        // spinner, which reported none of the phases the header's does — so whichever one you
+        // happened to be looking at decided how much you were told about a stalled send.
+        //
+        // Feedback for BOTH senders (the header's rebuild and the kind color×/speed "Send now"
         // below) lives here, above the live-kind guard: a rebuild works whether or not the
         // effect has been seen in game yet, so its result must stay visible either way.
         if let Some(note) = &self.last_sent_note {
@@ -1539,7 +1746,7 @@ impl EffEditor {
                 .color(egui::Color32::DARK_GRAY),
             );
             ui.separator();
-            self.draw_transplant_section(ui, &entry_name, set_idx);
+            self.draw_transplant_section(ui, &entry_name);
             return;
         };
 
@@ -1652,10 +1859,10 @@ impl EffEditor {
         });
 
         ui.separator();
-        self.draw_transplant_section(ui, &entry_name, set_idx);
+        self.draw_transplant_section(ui, &entry_name);
     }
 
-    fn draw_transplant_section(&mut self, ui: &mut Ui, entry_name: &str, _set_idx: usize) {
+    fn draw_transplant_section(&mut self, ui: &mut Ui, entry_name: &str) {
         // Transplanting moved to the Transplant Effects window (Windows menu in the main
         // editor): it can pick a donor from ANY eff (pool-wide search) and redirect existing uses.
         ui.label(
@@ -1686,7 +1893,7 @@ mod tests {
             color0: Vec::new(),
             color1: Vec::new(),
             alpha0_keys: Vec::new(),
-            texture_index: 0,
+            texture_index: None,
         };
         let mut editor = EffEditor::default();
         editor.pristine = vec![vec![EmitterSnapshot::of(&emitter)]];
@@ -1709,6 +1916,80 @@ mod tests {
     /// Tune the one emitter so the working copy differs from its pristine snapshot.
     fn tune(editor: &mut EffEditor, scale: f32) {
         editor.ptcl.as_mut().expect("ptcl").emitter_sets[0].emitters[0].scale = scale;
+    }
+
+    /// Give the fixture a two-texture pool and point its emitter at the first one.
+    fn with_textures(editor: &mut EffEditor) {
+        let ptcl = editor.ptcl.as_mut().expect("ptcl");
+        ptcl.bntx_textures = ["ef_a", "ef_b"]
+            .iter()
+            .map(|n| TextureInfo {
+                tex_name: (*n).into(),
+                width: 64,
+                height: 64,
+                format: "BC7Srgb".into(),
+                convertible: true,
+            })
+            .collect();
+        ptcl.emitter_sets[0].emitters[0].texture_index = Some(0);
+        editor.pristine = vec![vec![EmitterSnapshot::of(&ptcl.emitter_sets[0].emitters[0])]];
+    }
+
+    /// The texture picker used to write `em.texture_index` and stop there: no snapshot field,
+    /// no edit record, no export path. It changed the editor's own view and nothing shipped.
+    #[test]
+    fn a_texture_swap_becomes_an_edit_record_naming_the_texture() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        with_textures(&mut editor);
+        assert!(
+            editor.collect_authored_edits().is_empty(),
+            "an untouched fixture must have no edits"
+        );
+
+        editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
+
+        let edits = editor.collect_authored_edits();
+        assert_eq!(edits.len(), 1, "the swap must produce an edit record");
+        assert_eq!(
+            edits[0].fields.texture_name.as_deref(),
+            Some("ef_b"),
+            "the record must name the texture, not its pool index"
+        );
+    }
+
+    /// Reset must undo a swap like any other field — it restores from the same snapshot.
+    #[test]
+    fn resetting_an_emitter_undoes_a_texture_swap() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        with_textures(&mut editor);
+        editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
+
+        let pristine = editor.pristine[0][0].clone();
+        pristine.restore(&mut editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0]);
+
+        assert!(
+            editor.collect_authored_edits().is_empty(),
+            "reset must clear the swap"
+        );
+    }
+
+    /// A swap round-trips through the project: saved as a name, reapplied as an index against
+    /// whatever pool the reloaded file has.
+    #[test]
+    fn a_saved_texture_swap_reapplies_onto_the_reloaded_eff() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        with_textures(&mut editor);
+        editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
+        let saved = editor.collect_authored_edits();
+
+        let mut reloaded = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        with_textures(&mut reloaded);
+        reloaded.apply_authored_edits(&saved);
+
+        assert_eq!(
+            reloaded.ptcl.as_ref().unwrap().emitter_sets[0].emitters[0].texture_index,
+            Some(1)
+        );
     }
 
     /// A transplant reloads the eff from a baseline that deliberately excludes authored edits,

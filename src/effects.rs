@@ -41,7 +41,11 @@ pub struct EmitterDef {
     pub color1: Vec<ColorKey>,
     /// Alpha values use `r`, matching `AuthoredEdit`'s compact `[value, frame]` form.
     pub alpha0_keys: Vec<ColorKey>,
-    pub texture_index: u32,
+    /// Which pool texture this emitter's `sampler0` reads, or None when it samples nothing
+    /// (or samples a GUID the pool has no descriptor for). None is NOT the same as 0: this
+    /// used to fall back to 0, which showed every textureless emitter as sampling the pool's
+    /// first texture and offered a swap that had nothing to swap.
+    pub texture_index: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,8 +58,13 @@ pub struct EmitterSet {
 #[derive(Debug, Clone)]
 pub struct TextureInfo {
     pub tex_name: String,
+    /// Zero when the pool's BNTX could not be read for this entry.
     pub width: u32,
     pub height: u32,
+    /// Surface format as `bntx` names it, e.g. `BC7Srgb`; empty when unreadable.
+    pub format: String,
+    /// Whether this texture can be exported to a PNG and replaced by one.
+    pub convertible: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +76,9 @@ pub struct PtclFile {
 pub struct LoadedEffect {
     pub index: EffIndex,
     pub ptcl: PtclFile,
+    /// The file's BNTX pool, verbatim. Kept so the editor can decode a texture to PNG for
+    /// editing — `PtclFile` only carries what a texture IS, not its pixels.
+    pub texture_pool: Option<Vec<u8>>,
 }
 
 pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
@@ -91,9 +103,15 @@ pub fn load_effect(path: &Path) -> Result<LoadedEffect> {
         .as_ref()
         .map(convert_ptcl)
         .unwrap_or_default();
+    let texture_pool = file
+        .ptcl_file
+        .as_ref()
+        .and_then(|p| p.texture_info.as_ref())
+        .and_then(|info| info.binary_data.clone());
     Ok(LoadedEffect {
         index: EffIndex { handles },
         ptcl,
+        texture_pool,
     })
 }
 
@@ -103,14 +121,31 @@ fn convert_ptcl(source: &effect_library::PtclFile) -> PtclFile {
         .as_ref()
         .map(|info| info.descriptors.as_slice())
         .unwrap_or_default();
+    // Dimensions and format come from the pool's own BRTI headers. `effect_library` keeps the
+    // payload opaque, so this reads the container directly — cheap (fixed-offset reads, no
+    // decode) and it is what lets the editor label a texture and say whether it can be
+    // replaced by a PNG before the user picks one.
+    let pool = source
+        .texture_info
+        .as_ref()
+        .and_then(|info| info.binary_data.as_deref());
     let bntx_textures = descriptors
         .iter()
-        .map(|texture| TextureInfo {
-            tex_name: texture.name.clone(),
-            // EffectLibrary intentionally keeps texture payloads opaque here; dimensions are
-            // irrelevant to authored edits and are no longer decoded by the desktop app.
-            width: 0,
-            height: 0,
+        .enumerate()
+        .map(|(index, texture)| {
+            let described = pool.and_then(|pool| {
+                crate::texture_import::describe(pool, index, &texture.name).ok()
+            });
+            TextureInfo {
+                tex_name: texture.name.clone(),
+                width: described.as_ref().map(|d| d.width).unwrap_or(0),
+                height: described.as_ref().map(|d| d.height).unwrap_or(0),
+                format: described
+                    .as_ref()
+                    .map(|d| d.format.clone())
+                    .unwrap_or_default(),
+                convertible: described.map(|d| d.convertible).unwrap_or(false),
+            }
         })
         .collect();
 
@@ -157,7 +192,7 @@ fn convert_emitter(
                 .iter()
                 .position(|texture| texture.id == sampler.texture_id)
         })
-        .unwrap_or(0) as u32;
+        .map(|index| index as u32);
 
     EmitterDef {
         name: data.display_name(),

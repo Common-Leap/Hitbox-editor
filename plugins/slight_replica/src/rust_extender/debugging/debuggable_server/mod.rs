@@ -255,15 +255,39 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         #[derive(serde::Deserialize)]
         struct DonorBytes {
             path: String,
+            /// base64 payload — the transport of last resort.
+            #[serde(default)]
             b64: String,
+            /// sd:-relative file the editor already wrote the payload to. Preferred: this runs
+            /// under an emulator whose sdmc is a directory on the same machine as the editor,
+            /// so the editor can drop the bytes straight there. base64 inside a JSON frame cost
+            /// ~1.33x in size on a socket read in 8 KB chunks, for payloads of several MB.
+            #[serde(default)]
+            file: String,
         }
         match serde_json::from_value::<Vec<DonorBytes>>(bytes_v.clone()) {
             Ok(list) => {
                 let decoded: Vec<(String, Vec<u8>)> = list
                     .into_iter()
                     .filter_map(|d| {
-                        crate::slight::effect_viewer::effect_reload::b64_decode(&d.b64)
-                            .map(|bytes| (d.path, bytes))
+                        let bytes = if !d.file.is_empty() {
+                            let at = format!("sd:/{}", d.file);
+                            match std::fs::read(&at) {
+                                Ok(b) => Some(b),
+                                Err(e) => {
+                                    // Never silently fall back to a stale in-memory buffer: a
+                                    // missing payload must be visible, not mistaken for "no
+                                    // change".
+                                    crate::slight::diag::note(format!(
+                                        "donor_bytes: cannot read {at}: {e}"
+                                    ));
+                                    None
+                                }
+                            }
+                        } else {
+                            crate::slight::effect_viewer::effect_reload::b64_decode(&d.b64)
+                        };
+                        bytes.map(|bytes| (d.path, bytes))
                     })
                     .collect();
                 crate::slight::effect_viewer::effect_reload::set_donor_bytes(decoded);

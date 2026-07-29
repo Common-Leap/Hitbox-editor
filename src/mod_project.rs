@@ -81,12 +81,30 @@ pub struct EffMod {
     /// transplant/one-slot split; the alias keeps pre-split projects loadable.
     #[serde(default, alias = "one_slot")]
     pub transplants: Vec<TransplantOp>,
+    /// Pool textures the user replaced with their own image.
+    #[serde(default)]
+    pub textures: Vec<TextureImport>,
 }
 
 impl EffMod {
     pub fn is_empty(&self) -> bool {
-        self.authored.is_empty() && self.transplants.is_empty()
+        self.authored.is_empty() && self.transplants.is_empty() && self.textures.is_empty()
     }
+}
+
+/// One pool texture replaced by an image of the user's.
+///
+/// Keyed by texture NAME, not pool index: the carrier and the exported eff both rebuild their
+/// pools (pruning drops everything unreferenced), so an index recorded against the editor's
+/// view names a different texture by the time it is applied. Names survive that.
+///
+/// The PNG is referenced by path rather than embedded, so the project file stays small and a
+/// rebuild picks up whatever the image file says now — edit it in your paint program, send
+/// again, and the new pixels ship without re-importing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextureImport {
+    pub texture_name: String,
+    pub png_path: String,
 }
 
 /// One emitter's edited authored fields. Names are stored alongside indices; appliers
@@ -133,6 +151,13 @@ pub struct EmitterFieldEdits {
     /// Alpha key rows: [value, time]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha0: Option<Vec<[f32; 2]>>,
+    /// Pool texture NAME this emitter's `sampler0` should read instead of its original one.
+    ///
+    /// A name rather than the picker's index: the index is against the editor's view of the
+    /// merged eff, and every path that ships these bytes rebuilds its own pool — the carrier
+    /// prunes everything unreferenced, so indices there mean something else entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_name: Option<String>,
 }
 
 impl EmitterFieldEdits {
@@ -145,6 +170,7 @@ impl EmitterFieldEdits {
             && self.color0.is_none()
             && self.color1.is_none()
             && self.alpha0.is_none()
+            && self.texture_name.is_none()
     }
 
     /// Number of edited fields (for the edit-tree badges).
@@ -158,6 +184,7 @@ impl EmitterFieldEdits {
             self.color0.is_some(),
             self.color1.is_some(),
             self.alpha0.is_some(),
+            self.texture_name.is_some(),
         ]
         .iter()
         .filter(|b| **b)

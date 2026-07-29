@@ -11,6 +11,7 @@ mod mod_project;
 mod param_labels;
 mod renderer;
 mod scratch_dirs;
+mod texture_import;
 
 use ssbh_wgpu;
 

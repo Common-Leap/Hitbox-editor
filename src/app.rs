@@ -5733,6 +5733,55 @@ impl VisionaryApp {
         }
     }
 
+    /// Hand a payload to the plugin by DISK where possible, base64 otherwise.
+    ///
+    /// The emulator's sdmc is a directory on this machine, so the plugin can read the bytes
+    /// straight out of it. Sending them instead meant base64 (+33%) inside a JSON frame over a
+    /// socket the emulator reads in 8 KB chunks — several MB per donor, and the carrier on top.
+    /// base64 stays as the fallback for when that directory cannot be found.
+    fn donor_payload_wire(
+        &self,
+        arc_path: String,
+        bytes: &[u8],
+        dbg: &mut String,
+    ) -> crate::game_link::DonorBytesWire {
+        // One file per arc path, overwritten each send: the plugin reads it immediately, and a
+        // stable name keeps the directory from growing without bound.
+        let name = format!("{}.eff", arc_path.replace(['/', '\\', ':'], "_"));
+        let rel = format!("effect_viewer/payload/{name}");
+        if let Some(sd) = dirs::home_dir().map(|h| h.join(".local/share/eden/sdmc")) {
+            let dir = sd.join("effect_viewer/payload");
+            // Write-then-rename: the plugin must never read a half-written payload.
+            let final_path = dir.join(&name);
+            let staging = dir.join(format!("{name}.next"));
+            let wrote = std::fs::create_dir_all(&dir)
+                .and_then(|_| std::fs::write(&staging, bytes))
+                .and_then(|_| std::fs::rename(&staging, &final_path));
+            match wrote {
+                Ok(()) => {
+                    dbg.push_str(&format!("  via disk: {rel} ({} B)\n", bytes.len()));
+                    return crate::game_link::DonorBytesWire {
+                        path: arc_path,
+                        b64: String::new(),
+                        file: rel,
+                    };
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&staging);
+                    dbg.push_str(&format!(
+                        "  disk write failed ({e}); falling back to base64\n"
+                    ));
+                }
+            }
+        }
+        use base64::Engine;
+        crate::game_link::DonorBytesWire {
+            path: arc_path,
+            b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            file: String::new(),
+        }
+    }
+
     fn flush_effect_aliases(&mut self) {
         if self.carrier_push_callers.is_empty() {
             return;
@@ -5844,6 +5893,15 @@ impl VisionaryApp {
         // transplanted?" is asked against a snapshot taken first. Asking the live vector would
         // let one edit's clone answer for the next edit's lookup.
         let transplant_ops = carrier_ops.clone();
+        // Texture imports ride the carrier whole: they name a pool texture, not an entry, so
+        // there is nothing to clone or alias — the carrier's pool already holds the texture
+        // under the donor's name once the transplant has copied it.
+        let carrier_textures: Vec<crate::mod_project::TextureImport> = self
+            .eff_mods
+            .iter()
+            .filter(|(fighter, _)| Some(fighter.to_lowercase()) == carrier_fighter)
+            .flat_map(|(_, eff)| eff.textures.iter().cloned())
+            .collect();
         let mut carrier_authored: Vec<crate::eff_export::CarrierAuthored> = Vec::new();
         let mut authored_aliases: Vec<(String, String)> = Vec::new();
         let mut carrier_name_conflicts: Vec<String> = Vec::new();
@@ -6085,8 +6143,6 @@ impl VisionaryApp {
         // Two mesh-backed sources competing for the carrier's single model container.
         let mut carrier_mesh_conflict: Option<String> = None;
         if !carrier_ops.is_empty() {
-            use base64::Engine;
-
             // Sources may legitimately live under DIFFERENT roots: the carrier is an assist
             // eff from the vanilla dump, while a modded fighter's own eff is under a mod
             // root. Requiring one root that holds everything silently skipped the carrier in
@@ -6165,6 +6221,7 @@ impl VisionaryApp {
                                 &carrier_transplants,
                                 root,
                                 &carrier_authored,
+                                &carrier_textures,
                                 &mut warnings,
                             );
                         for w in &warnings {
@@ -6209,10 +6266,11 @@ impl VisionaryApp {
                                     carrier_ops.len(),
                                     bytes.len()
                                 ));
-                                donor_bytes.push(crate::game_link::DonorBytesWire {
-                                    path: live_carrier_rel.into(),
-                                    b64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                                });
+                                donor_bytes.push(self.donor_payload_wire(
+                                    live_carrier_rel.into(),
+                                    &bytes,
+                                    &mut dbg,
+                                ));
                                 carrier_added = true;
                             }
                             Err(e) => {
@@ -6272,20 +6330,36 @@ impl VisionaryApp {
                 dbg.push_str(&format!("MISS file {rel} (names {names:?})\n"));
                 continue;
             };
-            // Send the FULL donor eff (not a stripped subset): stripping a mesh effect like
-            // alucard_backdash dropped resources so it spawned but rendered nothing. The plugin
-            // co-loads this via the game's own loader (GPU upload) under a separate handle, so
-            // the extra entries cost only memory, and the transplanted kind renders correctly.
-            {
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                dbg.push_str(&format!(
-                    "OK {rel}: FULL eff {} B ({} names)\n",
-                    bytes.len(),
-                    names.len()
-                ));
-                donor_bytes.push(crate::game_link::DonorBytesWire { path: rel, b64 });
-            }
+            // Strip the donor to the entries actually wanted before sending it.
+            //
+            // This used to send the FULL eff, because stripping once made alucard_backdash spawn
+            // and render nothing. That was the BFRES relocation defect, since fixed and
+            // calibrated against the game's own containers — a stripped pool arrived
+            // structurally intact and unusable on hardware, which looks exactly like "dropped
+            // resources". The transport base64s each donor into a single JSON frame, so the full
+            // file was extremely expensive: ef_marx.eff is 20 MB, ~27 MB on the wire, and it
+            // strips to 542 KB (2.7%) in ~5 ms.
+            //
+            // A strip failure is NOT fatal: fall back to the whole file, which is slow but
+            // always correct, rather than dropping the donor and rendering nothing.
+            let (payload, how) = match crate::eff_export::strip_donor_eff_bytes(
+                &bytes,
+                &names.iter().map(String::as_str).collect::<Vec<_>>(),
+            ) {
+                Ok(stripped) if stripped.len() < bytes.len() => (stripped, "stripped"),
+                Ok(_) => (bytes.clone(), "whole (strip saved nothing)"),
+                Err(e) => {
+                    dbg.push_str(&format!("STRIP FAILED {rel}: {e}\n"));
+                    (bytes.clone(), "whole (strip failed)")
+                }
+            };
+            dbg.push_str(&format!(
+                "OK {rel}: {how} {} B from {} B ({} names)\n",
+                payload.len(),
+                bytes.len(),
+                names.len()
+            ));
+            donor_bytes.push(self.donor_payload_wire(rel, &payload, &mut dbg));
         }
         let _ = std::fs::write(
             crate::scratch_dirs::app_storage_root().join("donor_send_debug.txt"),
@@ -7956,6 +8030,7 @@ impl eframe::App for VisionaryApp {
                         merged,
                         transplant_count: e.transplants.len(),
                         authored: e.authored.len(),
+                        textures: e.textures.len(),
                         transplants: e
                             .transplants
                             .iter()
@@ -7979,6 +8054,17 @@ impl eframe::App for VisionaryApp {
                 })
                 .collect();
             self.eff_editor.set_edit_sources(sources);
+            // Which textures are already replaced, so the panel can say so and offer to
+            // restore them. Scoped to the loaded eff by its `source_rel`, not to the selected
+            // fighter — the editor can be showing a file the main window is not.
+            let loaded_rel = self.eff_editor.loaded_rel().unwrap_or_default();
+            let imports = self
+                .eff_mods
+                .values()
+                .find(|e| e.source_rel.eq_ignore_ascii_case(&loaded_rel))
+                .map(|e| e.textures.clone())
+                .unwrap_or_default();
+            self.eff_editor.set_texture_imports(imports);
         }
         let t = self.perf.start();
         self.eff_editor
@@ -8021,29 +8107,25 @@ impl eframe::App for VisionaryApp {
             let generation = self.game_link.carrier_gen();
             let took_our_bytes = generation > self.eff_editor.gen_at_send;
             let live = state == 2 && spawned && took_our_bytes;
-            // Give up after 30s. The "no reports at all" bail is 8s, not 3: the plugin's
-            // heartbeat is frame-driven, so it only ticks while a match is running, and at
-            // 30 fps under load the first beat can be seconds out.
-            let stale = since.elapsed().as_secs() >= 30;
-            let silent = reports == 0 && since.elapsed().as_secs() >= 8;
-            if live || stale || silent {
+            // No deadline on a swap that is making progress. The game stays playable for the
+            // whole teardown, so giving up bought nothing — it only abandoned a swap that was
+            // still going to land, and the give-up path itself is the disruptive one.
+            //
+            // The silence bail stays: if the plugin has reported NOTHING, no swap is in flight
+            // and waiting forever would hang the indicator on a match that is not running (or
+            // an .nro too old to report). Reports are frame-driven, so at 30 fps under load the
+            // first beat can be several seconds out — hence 12s, not 3.
+            let silent = reports == 0 && since.elapsed().as_secs() >= 12;
+            if live || silent {
                 self.eff_editor.awaiting_game = None;
                 // Keep the final reading visible. The indicator vanished too fast to read,
                 // which made the one signal that could settle this undiagnosable.
                 let why = if live {
                     ""
-                } else if silent {
+                } else {
                     // Reports are frame-driven, so silence means the per-frame driver never
                     // ran — no match in progress, or an .nro too old to report at all.
                     " (no reports — is a match running?)"
-                } else if state == 0 {
-                    " (TIMED OUT — carrier never staged)"
-                } else if !spawned {
-                    " (TIMED OUT — staged, but no carrier object on stage)"
-                } else if !took_our_bytes {
-                    " (TIMED OUT — game still serving the previous carrier)"
-                } else {
-                    " (TIMED OUT)"
                 };
                 self.eff_editor.last_carrier_result = Some(format!(
                     "carrier: state={state} kinds={kinds} object={} gen={generation} after \
@@ -8220,6 +8302,39 @@ impl eframe::App for VisionaryApp {
                 _ => ctx.request_repaint_after(std::time::Duration::from_millis(500)),
             }
         }
+        // Drain texture replacements picked in the eff editor into the project store. An
+        // empty `png_path` is the editor's "restore the original" signal — the entry is
+        // dropped rather than recorded, so a restored texture leaves no trace in the project.
+        let texture_imports = self.eff_editor.take_texture_imports();
+        if !texture_imports.is_empty() {
+            if let Some(fighter) = current_fighter.clone() {
+                let entry = self.eff_mods.entry(fighter.clone()).or_default();
+                if entry.source_rel.is_empty() {
+                    entry.source_rel = format!("effect/fighter/{fighter}/ef_{fighter}.eff");
+                }
+                for import in texture_imports {
+                    entry
+                        .textures
+                        .retain(|t| t.texture_name != import.texture_name);
+                    self.state.status = if import.png_path.is_empty() {
+                        format!("Texture '{}' restored for {fighter}", import.texture_name)
+                    } else {
+                        let msg =
+                            format!("Texture '{}' replaced for {fighter}", import.texture_name);
+                        entry.textures.push(import);
+                        msg
+                    };
+                }
+                // Like a transplant, this previews in-app and sends nothing until asked.
+                self.eff_editor.mark_unsent();
+            } else {
+                self.state.status =
+                    "Select a fighter before replacing a texture — the replacement has to be \
+                     recorded against one."
+                        .to_string();
+            }
+        }
+
         // Drain transplant ops recorded in the eff editor into the project store.
         let ops = self.eff_editor.take_transplants();
         let mut editor_transplant_fighter = None;

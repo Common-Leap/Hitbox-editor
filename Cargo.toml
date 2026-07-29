@@ -25,7 +25,14 @@ prc = { package = "prc-rs", version = "1.6", features = ["xml-feat"] }
 motion_lib = { package = "motion_list_rs", version = "1.5" }
 hash40 = "1.3"
 # `.eff` parsing, editing, and export.
-effect_library = "1.1.0"
+effect_library = "1.1.1"
+# BNTX encode/decode, for importing your own PNG over an effect texture. Not published on
+# crates.io, so pin the upstream commit. `image_dds` does the BCn compression and must stay
+# on the same 0.7 line bntx builds against or the `Surface` types will not unify.
+bntx = { git = "https://github.com/ScanMountGoat/bntx.git", rev = "87fffc7d17238cb07ff93ec75e0a7b5db15f4683" }
+binrw = "0.15"
+image_dds = "0.7"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Async + HTTP (for ACMD fetch)
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
@@ -47,9 +54,9 @@ opt-level = 3
 [profile.dev]
 opt-level = 1
 
-# effect_library 1.1.0 writes a BNSH relocation table that lists slots holding no offset; the
-# runtime turns each into a pointer to the image base and the game hangs walking the container.
-# Build against the local fix until it is published. Remove this once a fixed version is on
-# crates.io and the version requirement above is bumped.
+# 1.1.1 is the version carrying the BFRES and BNSH relocation-table fixes without which the
+# game's loader follows unrebased pointers and hangs. It is not on crates.io yet, so the
+# requirement above cannot be satisfied from the registry — build against the local checkout
+# until it is published, then delete this patch.
 [patch.crates-io]
 effect_library = { path = "../EffectLibraryRust/crate" }
