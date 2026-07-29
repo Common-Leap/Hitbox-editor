@@ -53,6 +53,11 @@ machine-specific path from another installation.
 5. Copy the newly built `lib_effect_viewer.nro` into the directory.
 6. Fully restart the game or emulator so Skyline loads the new plugin.
 
+Skyline loads every file in the plugins directory, not only the names listed
+above. A backup kept beside the plugin — `lib_effect_viewer.nro.bak`, a renamed
+copy, an older build — is loaded as a second plugin, so the hooks run twice and
+the frame rate halves. Keep spare builds somewhere else entirely.
+
 The deployment scripts under `scripts/` are convenience helpers for standard
 Eden and Ryujinx installations. Review them before use because emulator data
 directories are configurable and differ across operating systems. Manual
@@ -143,8 +148,9 @@ that port.
   dependencies, then fully restart the game.
 - If live effects never appear, verify that the installed Smashline plugin is
   Smashline 2 and exports the required callback symbols.
-- If hooks run twice or the game becomes unstable, remove the legacy
-  `libeffect_viewer.nro` name and leave only `lib_effect_viewer.nro`.
+- If hooks run twice, the frame rate halves, or the game becomes unstable, leave
+  exactly one copy of the plugin in the directory: no legacy
+  `libeffect_viewer.nro`, and no backups or renamed builds beside it.
 - Runtime diagnostics and saved edits are stored in the `slight` directory on
   the emulated or physical SD card.
 
