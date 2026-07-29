@@ -212,6 +212,14 @@ pub struct CaptureLine {
     /// sv_animcmd function name ("ATTACK", "EFFECT_FOLLOW", …).
     pub func: String,
     pub args: Vec<LuaArgWire>,
+    /// Which PLAYBACK of the motion produced this line — a global, strictly increasing id, so
+    /// a larger value always means "more recent" regardless of which agent produced it.
+    ///
+    /// The whole point is that a move performed twice yields two runs and the editor loads
+    /// exactly one. Defaults to 0 so a plugin build predating run ids still parses: every
+    /// line then shares run 0 and behaves as it always did (one merged bucket).
+    #[serde(default)]
+    pub run: u32,
 }
 
 /// Sparse ATTACK-arg overrides (plugin `HbOverrides`).
@@ -359,25 +367,69 @@ impl LiveOverride {
     }
 }
 
+/// Are these two capture lines the same script line, at the resolution the editor works in?
+///
+/// Only ever true within one run: two performances of a move are two runs and must both be
+/// stored, so the editor can pick the newer. This guards against the plugin re-sending its
+/// whole log on reconnect.
+///
+/// Frames are compared as the ROUNDED integer the editor displays rather than as raw floats.
+/// The float is `MotionModule::frame` at call time and differs in the low bits between
+/// performances; that only matters for a resend within a run, but comparing what is actually
+/// displayed is the honest test either way.
+/// How many playbacks of one (kind, motion) the editor keeps.
+///
+/// Only the newest is ever loaded. The one before it is held so a performance still streaming
+/// in cannot evict the last complete one while the settle window is deciding — that would
+/// leave a half-arrived script as the only thing to adopt.
+const RUNS_KEPT_PER_MOTION: usize = 2;
+
+/// Drop the oldest runs of one fighter kind from a motion's bucket.
+///
+/// The plugin re-records every performance now (that is what makes runs work), so without a
+/// cap the bucket grows for as long as the session lasts.
+fn retire_old_runs(bucket: &mut Vec<CaptureLine>, kind: i32) {
+    let mut runs: Vec<u32> = bucket
+        .iter()
+        .filter(|l| l.kind == kind)
+        .map(|l| l.run)
+        .collect();
+    runs.sort_unstable();
+    runs.dedup();
+    if runs.len() <= RUNS_KEPT_PER_MOTION {
+        return;
+    }
+    let cutoff = runs[runs.len() - RUNS_KEPT_PER_MOTION];
+    bucket.retain(|l| l.kind != kind || l.run >= cutoff);
+}
+
+fn same_capture(a: &CaptureLine, b: &CaptureLine) -> bool {
+    a.run == b.run
+        && a.kind == b.kind
+        && a.motion == b.motion
+        && a.func == b.func
+        && a.frame.max(0.0).round() == b.frame.max(0.0).round()
+        && a.args == b.args
+}
+
 #[derive(Default)]
 pub struct LiveOverrides {
     entries: BTreeMap<u64, LiveOverride>,
 }
 
+/// Kind-level color×/speed× multipliers.
+///
+/// These predate the live carrier. They were once the only way to change how an effect looked
+/// at runtime, and they are whole-effect by construction — one multiplier tints every emitter
+/// of every spawn, and cannot express a per-key or color1 edit at all. Authored eff edits now
+/// do that exactly, so the eff editor no longer offers a second, cruder way to recolour the
+/// same effect.
+///
+/// The store stays because the multipliers still ARRIVE from two places the user did not type
+/// them into: a project's saved `live_tweaks` (restored and re-sent on load) and pins already
+/// set in the running game (importable, or clearable, from the pin-sync prompt). Both paths
+/// go through `set_form`/`restore_tweak`, and `flush_due` sends them.
 impl LiveOverrides {
-    /// The editable form for a kind, created from `init()` on first access.
-    pub fn form_mut(
-        &mut self,
-        hash: u64,
-        init: impl FnOnce() -> RpmEffectData,
-    ) -> &mut RpmEffectData {
-        &mut self
-            .entries
-            .entry(hash)
-            .or_insert_with(|| LiveOverride::new(init()))
-            .form
-    }
-
     /// Adopt a form already reported by the game. Importing the game's current pins does not
     /// need to echo the complete form back; doing so could race a new spawn observation.
     pub fn set_form(&mut self, hash: u64, form: RpmEffectData) {
@@ -405,14 +457,6 @@ impl LiveOverrides {
             }
         }
         sent
-    }
-
-    /// Send one entry immediately (the "Send now" button).
-    pub fn flush_one(&mut self, hash: u64, link: &GameLink) {
-        if let Some(e) = self.entries.get_mut(&hash) {
-            e.dirty_at = None;
-            link.send_modifier_edit(hash, &e.form, false);
-        }
     }
 
     /// True while a debounced send is pending (keep repainting so it fires).
@@ -754,20 +798,49 @@ impl GameLink {
         }
     }
 
-    /// Captured ACMD lines for one motion (hash40 of the move/motion name), sorted by frame.
-    pub fn captures_for(&self, motion: u64) -> Vec<CaptureLine> {
-        let mut v = self
-            .shared
-            .lock()
-            .ok()
-            .and_then(|s| s.captures.get(&motion).cloned())
-            .unwrap_or_default();
+    /// Lines from the MOST RECENT playback of `motion` by `kind` — one performance, never a
+    /// merge of several.
+    ///
+    /// The store keeps more than one run so that a performance still streaming in cannot
+    /// replace the last complete one mid-arrival; this is what picks between them. Sorted into
+    /// script time, which within a single run is also the order the game executed.
+    pub fn latest_run_for(&self, motion: u64, kind: Option<i32>) -> Vec<CaptureLine> {
+        let Ok(s) = self.shared.lock() else {
+            return Vec::new();
+        };
+        let Some(lines) = s.captures.get(&motion) else {
+            return Vec::new();
+        };
+        let matching = |l: &&CaptureLine| kind.map(|k| l.kind == k).unwrap_or(true);
+        let Some(latest) = lines.iter().filter(matching).map(|l| l.run).max() else {
+            return Vec::new();
+        };
+        let mut v: Vec<CaptureLine> = lines
+            .iter()
+            .filter(|l| matching(l) && l.run == latest)
+            .cloned()
+            .collect();
         v.sort_by(|a, b| {
             a.frame
                 .partial_cmp(&b.frame)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         v
+    }
+
+    /// Forget every captured line.
+    ///
+    /// The capture store is append-only across the whole session, so performing a move under
+    /// different conditions (grounded then aerial, a different branch, a cancel) leaves the
+    /// UNION of those runs in the bucket, and a load then shows spawns that never occur
+    /// together. There is no run marker on the wire to separate them, so this is the honest
+    /// control: clear it, perform the move once, load that.
+    pub fn clear_captures(&self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.captures.clear();
+            s.capture_ends.clear();
+            s.captures_seq += 1;
+        }
     }
 
     /// Every captured line across ALL motions, tagged with its motion hash. Used to discover
@@ -814,17 +887,26 @@ impl GameLink {
         self.shared.lock().map(|s| s.captures_seq).unwrap_or(0)
     }
 
-    /// How many capture lines are held for one motion (optionally restricted to a fighter
-    /// kind). Cheap "did more arrive?" check that avoids cloning the whole bucket.
+    /// How many lines the CURRENT playback of one motion has produced so far. Cheap "did more
+    /// arrive?" check that avoids cloning the bucket.
+    ///
+    /// Counts the newest run only, because that is what the settle window is watching: the
+    /// count has to keep rising while a move plays and then go quiet. Counting every retained
+    /// run instead made it jump when a new performance started and never settle at all.
     pub fn captures_count(&self, motion: u64, kind: Option<i32>) -> usize {
         self.shared
             .lock()
             .ok()
             .and_then(|s| {
-                s.captures.get(&motion).map(|lines| match kind {
-                    Some(k) => lines.iter().filter(|l| l.kind == k).count(),
-                    None => lines.len(),
-                })
+                let lines = s.captures.get(&motion)?;
+                let matching = |l: &&CaptureLine| kind.map(|k| l.kind == k).unwrap_or(true);
+                let latest = lines.iter().filter(matching).map(|l| l.run).max()?;
+                Some(
+                    lines
+                        .iter()
+                        .filter(|l| matching(l) && l.run == latest)
+                        .count(),
+                )
             })
             .unwrap_or(0)
     }
@@ -1049,9 +1131,16 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
                 return;
             };
             let bucket = s.captures.entry(line.motion).or_default();
-            // Plugin dedupes per session, but a reconnect re-sends the whole log.
-            if !bucket.contains(&line) {
+            // The plugin dedupes per session and a reconnect re-sends the whole log, so exact
+            // duplicates have to be dropped here. Exact equality is not enough on its own:
+            // `frame` is the raw `MotionModule::frame` float, and two performances of the same
+            // move rarely produce bit-identical floats, so the SAME spawn arrived twice at
+            // 5.0 and 5.0000019 and the editor showed the effect twice. Dedupe on what the
+            // editor can actually distinguish — the whole line at frame resolution.
+            if !bucket.iter().any(|existing| same_capture(existing, &line)) {
+                let kind = line.kind;
                 bucket.push(line);
+                retire_old_runs(bucket, kind);
                 s.captures_seq += 1;
             }
         }
@@ -1067,6 +1156,10 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             ) else {
                 return;
             };
+            // A counter, not a flag: the settle window compares against a baseline taken when
+            // it armed, so each performance's end has to move it. The plugin now scopes its
+            // duplicate-collapse to the run, which is what keeps a second performance's end
+            // from being swallowed as a repeat of the first.
             *s.capture_ends.entry((kind as i32, motion)).or_insert(0) += 1;
         }
         "CarrierStatus" => {
@@ -1224,7 +1317,70 @@ mod tests {
         assert_eq!(s2.lock().unwrap().captures.get(&0x1234).unwrap().len(), 1);
     }
 
-    /// A capture line for a fighter kind, in the plugin's exact emit form.
+    /// The same spawn seen on a second performance arrives with a slightly different
+    /// `MotionModule::frame` float. Exact equality treated those as two spawns, and the editor
+    /// then showed the effect twice for a move performed twice.
+    #[test]
+    fn a_replayed_capture_line_is_not_a_second_spawn() {
+        let shared: Arc<Mutex<Shared>> = Arc::default();
+        let line = |frame: f64| {
+            plugin_frame(
+                "AcmdCapture",
+                &serde_json::json!({
+                    "AcmdCapture": {
+                        "kind": 8, "motion": 0x1234u64, "frame": frame,
+                        "func": "EFFECT_FOLLOW",
+                        "args": [{"t":"h","v":0x1u64}, {"t":"h","v":0x2u64}]
+                    }
+                }),
+            )
+        };
+        for frame in [5.0, 5.000_002, 4.999_998] {
+            let mut buf = line(frame);
+            for payload in extract_frames(&mut buf) {
+                handle_frame(&shared, &payload);
+            }
+        }
+        assert_eq!(
+            shared.lock().unwrap().captures.get(&0x1234).unwrap().len(),
+            1,
+            "one spawn observed three times is still one spawn"
+        );
+
+        // A genuinely different frame is still its own spawn — multi-hit moves depend on it.
+        let mut buf = line(9.0);
+        for payload in extract_frames(&mut buf) {
+            handle_frame(&shared, &payload);
+        }
+        assert_eq!(
+            shared.lock().unwrap().captures.get(&0x1234).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn clearing_captures_empties_every_motion() {
+        let link = GameLink::default();
+        {
+            let mut s = link.shared.lock().unwrap();
+            s.captures.entry(0x1234).or_default().push(CaptureLine {
+                kind: 8,
+                motion: 0x1234,
+                frame: 1.0,
+                func: "ATTACK".into(),
+                args: Vec::new(),
+                run: 1,
+            });
+            s.capture_ends.insert((8, 0x1234), 1);
+        }
+        assert_eq!(link.latest_run_for(0x1234, None).len(), 1);
+        link.clear_captures();
+        assert!(link.latest_run_for(0x1234, None).is_empty());
+        assert_eq!(link.capture_end_count(0x1234, Some(8)), 0);
+    }
+
+    /// A capture line for a fighter kind, in the plugin's exact emit form, with no `run`
+    /// field — the shape a plugin build predating run ids sends.
     fn capture_frame(kind: i32, motion: u64, frame: f32) -> String {
         plugin_frame(
             "AcmdCapture",
@@ -1243,6 +1399,20 @@ mod tests {
         )
     }
 
+    /// The same helper with an explicit run id — one performance of the move.
+    fn capture_run(kind: i32, motion: u64, frame: f32, run: u32, effect: u64) -> String {
+        plugin_frame(
+            "AcmdCapture",
+            &serde_json::json!({
+                "AcmdCapture": {
+                    "kind": kind, "motion": motion, "frame": frame,
+                    "func": "EFFECT_FOLLOW", "run": run,
+                    "args": [{"t":"h","v":effect}, {"t":"h","v":0x2u64}]
+                }
+            }),
+        )
+    }
+
     fn feed(link: &GameLink, payloads: &[String]) {
         for p in payloads {
             let mut buf = p.clone();
@@ -1250,6 +1420,93 @@ mod tests {
                 handle_frame(&link.shared, &payload);
             }
         }
+    }
+
+    /// Two performances of one move must not merge. This is the bug that made the editor show
+    /// spawns from a grounded run and an aerial run at once: the store is keyed by motion and
+    /// appends, so without run ids the bucket held the union of every branch ever taken.
+    #[test]
+    fn only_the_newest_performance_of_a_move_is_loaded() {
+        let link = GameLink::default();
+        // Run 7: two spawns. Run 9: a different second spawn (the other branch).
+        feed(
+            &link,
+            &[
+                capture_run(8, 0x1234, 3.0, 7, 0xAA),
+                capture_run(8, 0x1234, 9.0, 7, 0xBB),
+                capture_run(8, 0x1234, 3.0, 9, 0xAA),
+                capture_run(8, 0x1234, 9.0, 9, 0xCC),
+            ],
+        );
+
+        let loaded = link.latest_run_for(0x1234, Some(8));
+        assert_eq!(loaded.len(), 2, "one performance, not the union of two");
+        assert!(loaded.iter().all(|l| l.run == 9));
+        let effects: Vec<u64> = loaded
+            .iter()
+            .filter_map(|l| l.args.first().and_then(|a| a.as_hash()))
+            .collect();
+        assert_eq!(effects, vec![0xAA, 0xCC], "the older branch must not leak in");
+
+        // The settle window watches the CURRENT run, so its count must not include the old one.
+        assert_eq!(link.captures_count(0x1234, Some(8)), 2);
+    }
+
+    /// Another fighter playing the same motion allocates its own runs. Picking "the newest run
+    /// overall" would then hand the editor someone else's script — so the kind filter has to
+    /// come first.
+    #[test]
+    fn a_newer_run_from_another_fighter_does_not_win() {
+        let link = GameLink::default();
+        feed(
+            &link,
+            &[
+                capture_run(8, 0x1234, 3.0, 4, 0xAA),
+                // Higher run id, different fighter kind.
+                capture_run(9, 0x1234, 3.0, 12, 0xFF),
+            ],
+        );
+        let loaded = link.latest_run_for(0x1234, Some(8));
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].args[0].as_hash(), Some(0xAA));
+    }
+
+    /// The store keeps a bounded number of runs — every performance now re-records, so an
+    /// unbounded bucket would grow for as long as the game is open.
+    #[test]
+    fn old_runs_are_retired_once_enough_have_arrived() {
+        let link = GameLink::default();
+        for run in 1..=6u32 {
+            feed(&link, &[capture_run(8, 0x1234, 3.0, run, 0xAA)]);
+        }
+        let s = link.shared.lock().unwrap();
+        let runs: std::collections::BTreeSet<u32> = s
+            .captures
+            .get(&0x1234)
+            .unwrap()
+            .iter()
+            .map(|l| l.run)
+            .collect();
+        assert_eq!(
+            runs.into_iter().collect::<Vec<_>>(),
+            vec![5, 6],
+            "only the newest runs are kept"
+        );
+    }
+
+    /// A plugin build without run ids sends no `run` field at all. Everything then shares run
+    /// 0 and behaves exactly as it did before — one bucket, no crash, no empty load.
+    #[test]
+    fn captures_without_run_ids_still_load() {
+        let link = GameLink::default();
+        feed(
+            &link,
+            &[
+                capture_frame(8, 0x1234, 3.0),
+                capture_frame(8, 0x1234, 9.0),
+            ],
+        );
+        assert_eq!(link.latest_run_for(0x1234, Some(8)).len(), 2);
     }
 
     /// `AcmdCaptureEnd` is the "this move finished, its script is fully streamed" signal the
@@ -1269,7 +1526,7 @@ mod tests {
         feed(&link, &[capture_frame(8, 0x1234, 3.0), end(8, 0x1234)]);
         assert_eq!(link.capture_end_count(0x1234, Some(8)), 1);
         // The marker is not a capture line.
-        assert_eq!(link.captures_for(0x1234).len(), 1);
+        assert_eq!(link.latest_run_for(0x1234, None).len(), 1);
 
         // A different fighter playing the same motion is tracked separately…
         feed(&link, &[end(9, 0x1234)]);

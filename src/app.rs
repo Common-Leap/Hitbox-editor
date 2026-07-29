@@ -2317,6 +2317,26 @@ impl VisionaryApp {
                 {
                     self.load_from_capture();
                 }
+                // Captures accumulate for the whole session, and there is no marker on the
+                // wire separating one performance from the next. So performing a move under
+                // different conditions — grounded then aerial, a cancel, a different branch —
+                // leaves the union in the bucket, and a load shows spawns that never happen
+                // together. Clearing and performing the move once is the reliable answer.
+                if ui
+                    .add_enabled(has_capture, egui::Button::new("⌫"))
+                    .on_hover_text(
+                        "Forget everything captured so far.\n\nCaptures pile up across the \
+                         whole session, so if you have performed this move more than once (or \
+                         in different situations) the load can show spawns from several runs \
+                         at once. Clear, perform the move once, then hit ⟳ Live.",
+                    )
+                    .clicked()
+                {
+                    self.game_link.clear_captures();
+                    self.state.status = "Cleared the live capture — perform the move again \
+                                         to record a clean run."
+                        .into();
+                }
                 if !self.state.acmd_source.is_empty() {
                     let (txt, color) = if self.state.acmd_source == "Live capture" {
                         ("● Live", egui::Color32::from_rgb(90, 220, 90))
@@ -3984,7 +4004,46 @@ impl VisionaryApp {
 
     // ── Live ACMD capture + live hitbox rules ─────────────────────────────────
 
+    // FRAME SPACES
+    //
+    // The editor works in ACMD SCRIPT frames throughout — that is what the timeline shows and
+    // what an exported script's `frame(N)` calls mean. The plugin reports MOTION frames
+    // (`MotionModule::frame`), and the two are offset by one:
+    //
+    //   * every dumped script opens at `frame(1.0)`, never `frame(0.0)`;
+    //   * a motion's first frame reads 0.0;
+    //   * measured against the GitHub scripts, captured spawns come in exactly one frame
+    //     early, uniformly across a move (see `capture_vs_script_offset`, which reports it).
+    //
+    // Neither source is wrong; they count from different places. The editor adopts the
+    // script's convention because that is what it round-trips, so captures convert on the way
+    // IN and rules convert back on the way OUT. Before this existed the two spaces were
+    // conflated, and the live-rule frame windows carried an asymmetric `+1.5` fudge to cover
+    // whichever source the frame had come from.
+
+    /// A plugin-reported motion frame → the script frame the editor shows.
+    fn motion_to_script_frame(frame: f32) -> u32 {
+        frame.max(0.0).round() as u32 + 1
+    }
+
+    /// A script frame the editor holds → the motion frame the plugin will observe.
+    fn script_to_motion_frame(frame: u32) -> f32 {
+        frame.saturating_sub(1) as f32
+    }
+
+    /// Frame window for a live rule scoped to one script frame.
+    ///
+    /// Half-open either side of the motion frame, which is exactly the rounding bucket that
+    /// produced the script frame: any observation that would round to this frame falls inside,
+    /// and the neighbouring frames' spawns do not.
+    fn rule_frame_window(script_frame: u32) -> (Option<f32>, Option<f32>) {
+        let motion = Self::script_to_motion_frame(script_frame);
+        (Some(motion - 0.5), Some(motion + 0.5))
+    }
+
     /// hash40 of the current move's motion name (what MotionModule::motion_kind reports).
+    ///
+    /// (Frame-space helpers live just below — see [`Self::motion_to_script_frame`].)
     fn current_motion_hash(&self) -> Option<u64> {
         self.state
             .selected_move
@@ -3999,17 +4058,17 @@ impl VisionaryApp {
             .and_then(|fighter| fighter_kind_id(&fighter.name))
     }
 
-    /// Captures for the selected fighter only. Motion hashes are shared across the roster, so
-    /// using the global motion bucket directly can merge unrelated ATTACK/EFFECT scripts.
+    /// Captures for the selected fighter, from ONE performance of the move.
+    ///
+    /// Two filters, for two different ways the bucket used to merge unrelated things:
+    ///   * fighter kind — motion hashes are shared across the roster, so the raw bucket can
+    ///     hold another character's ATTACK/EFFECT script under the same motion;
+    ///   * run — the plugin tags each playback, and only the newest is loaded. Without it,
+    ///     performing a move grounded and then aerial left the union of both branches and the
+    ///     editor showed spawns that never occur together.
     fn captures_for_selected_fighter(&self, motion: u64) -> Vec<crate::game_link::CaptureLine> {
-        let captures = self.game_link.captures_for(motion);
-        let Some(kind) = self.current_fighter_kind() else {
-            return captures;
-        };
-        captures
-            .into_iter()
-            .filter(|capture| capture.kind == kind)
-            .collect()
+        self.game_link
+            .latest_run_for(motion, self.current_fighter_kind())
     }
 
     /// Reverse-lookup maps: hash40(lowercase bone) → canonical bone name; effect hashes
@@ -4080,8 +4139,13 @@ impl VisionaryApp {
         let now = std::time::Instant::now();
         match &mut self.pending_capture {
             // Same move, more lines: the script is still running — keep waiting.
+            //
+            // The count can also DROP, because it counts the current run only: performing the
+            // move again within the settle window starts a fresh run at one line. That is a
+            // new script arriving, not a finished one, so re-baseline and keep waiting rather
+            // than letting the window expire on a run that has barely started.
             Some(p) if p.motion == motion => {
-                if lines > p.lines {
+                if lines != p.lines {
                     p.lines = lines;
                     p.last_line = now;
                 }
@@ -4171,46 +4235,8 @@ impl VisionaryApp {
             .map(|(h, l)| (*h, l.clone()))
             .collect();
 
-        let mut hitboxes: Vec<crate::data::Hitbox> = Vec::new();
         let mut effects = Self::effect_calls_from_captures(&captures, &bone_rev, &eff_rev);
-        // Capture entries arrive as each runtime branch is observed. Sort them into script
-        // time while retaining capture order at equal frames, so a same-frame OFF/SPAWN pair
-        // keeps the ordering the game actually executed.
-        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
-        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
-        for (_, line) in ordered {
-            if line.func.starts_with("ATTACK") {
-                if let Some(hb) =
-                    Self::hitbox_from_capture(&line.args, line.frame, &bone_rev, &attr_labels)
-                {
-                    // Same id re-captured (multi-part moves): keep the earliest frame.
-                    if !hitboxes
-                        .iter()
-                        .any(|h| h.id == hb.id && h.active_start == hb.active_start)
-                    {
-                        hitboxes.push(hb);
-                    }
-                }
-            } else if line.func == "CATCH" {
-                if let Some(hb) = Self::hitbox_from_capture_grab(&line.args, line.frame, &bone_rev)
-                {
-                    if !hitboxes.iter().any(|h| {
-                        h.category == 1 && h.id == hb.id && h.active_start == hb.active_start
-                    }) {
-                        hitboxes.push(hb);
-                    }
-                }
-            } else if line.func.starts_with("AREA_WIND") {
-                if let Some(hb) = Self::hitbox_from_capture_wind(&line.args, line.frame) {
-                    if !hitboxes
-                        .iter()
-                        .any(|h| h.category == 2 && h.active_start == hb.active_start)
-                    {
-                        hitboxes.push(hb);
-                    }
-                }
-            }
-        }
+        let hitboxes = Self::hitboxes_from_captures(&captures, &bone_rev, &attr_labels);
         // Scrub our own ghosts: live retime/rename/add rules re-fire spawns through the
         // game's EFFECT functions, and captures taken before the plugin's inject guard
         // recorded those replays as if the script contained them. Any captured spawn
@@ -4256,8 +4282,74 @@ impl VisionaryApp {
         }
         self.state.acmd_source = "Live capture".into();
         self.acmd_error = None;
-        self.state.status =
+        let mut status =
             format!("Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) from live game capture");
+        if let Some(note) = self.capture_vs_script_offset() {
+            status.push_str(" — ");
+            status.push_str(&note);
+        }
+        self.state.status = status;
+    }
+
+    /// Compare the just-loaded live capture against the GitHub script for the same move and
+    /// describe how their frames differ.
+    ///
+    /// This REPORTS; it does not correct. The two sources measure different things — the
+    /// script's `frame(N)` is a target the ACMD coroutine resumes at, the capture is
+    /// `MotionModule::frame` at the instant the call ran — and which one the editor's timeline
+    /// should be denominated in is not something to decide silently. Dumped scripts start at
+    /// `frame(1.0)` while a motion's first frame reads 0.0, so a uniform one-frame difference
+    /// is expected rather than a fault in either source; a VARYING difference is the
+    /// interesting case and this is what will show it.
+    ///
+    /// Cache-only: never fetches, so loading a capture stays instant and offline.
+    fn capture_vs_script_offset(&self) -> Option<String> {
+        let fighter = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))?;
+        let move_name = self.state.selected_move.as_ref()?;
+        let body = crate::acmd::cached_script_body(&fighter.name, &move_name.name)?;
+        let script = crate::acmd::parse_effect_script(&body).to_effect_calls();
+        if script.is_empty() {
+            return None;
+        }
+        // Match on what both sources agree about — which effect, spawned how — and take the
+        // first unused script call for each, so a repeated effect pairs up in order.
+        let mut used = vec![false; script.len()];
+        let mut deltas: Vec<i64> = Vec::new();
+        for live in &self.state.effects {
+            if let Some(i) = script.iter().enumerate().position(|(i, s)| {
+                !used[i] && s.effect_name == live.effect_name && s.spawn_func == live.spawn_func
+            }) {
+                used[i] = true;
+                deltas.push(live.active_start as i64 - script[i].active_start as i64);
+            }
+        }
+        if deltas.is_empty() {
+            return None;
+        }
+        let matched = deltas.len();
+        let first = deltas[0];
+        if deltas.iter().all(|d| *d == first) {
+            if first == 0 {
+                return Some(format!("frames agree with the GitHub script ({matched} matched)"));
+            }
+            let (n, dir) = if first > 0 {
+                (first, "later than")
+            } else {
+                (-first, "earlier than")
+            };
+            return Some(format!(
+                "every captured spawn is {n} frame(s) {dir} the GitHub script ({matched} matched)"
+            ));
+        }
+        let lo = deltas.iter().min().copied().unwrap_or(0);
+        let hi = deltas.iter().max().copied().unwrap_or(0);
+        Some(format!(
+            "frames differ from the GitHub script by {lo}..{hi} frames across {matched} spawn(s) \
+             — not a constant offset, so one of the two is wrong for this move"
+        ))
     }
 
     /// ATTACK capture args (positional, editor conventions) → display Hitbox.
@@ -4297,7 +4389,7 @@ impl VisionaryApp {
             (Some(x), Some(y), Some(z)) => Some([x, y, z]),
             _ => None,
         };
-        let start = frame.max(0.0).round() as u32;
+        let start = Self::motion_to_script_frame(frame);
         Some(crate::data::Hitbox {
             id: i64_at(0)? as u32,
             part: i64_at(1).unwrap_or(0) as u32,
@@ -4338,7 +4430,8 @@ impl VisionaryApp {
             sound_attr: const_at(34, crate::param_labels::SOUND_ATTR),
             attack_region: const_at(35, crate::param_labels::ATTACK_REGION),
             active_start: start,
-            active_end: start + 2,
+            // Open until a clear (or another hitbox with this id) ends it.
+            active_end: u32::MAX,
             hitbox_type: 0,
             category: 0,
         })
@@ -4365,7 +4458,7 @@ impl VisionaryApp {
             (Some(x), Some(y), Some(z)) => Some([x, y, z]),
             _ => None,
         };
-        let start = frame.max(0.0).round() as u32;
+        let start = Self::motion_to_script_frame(frame);
         Some(crate::data::Hitbox {
             id: i64_at(0).unwrap_or(0) as u32,
             bone_name,
@@ -4381,7 +4474,8 @@ impl VisionaryApp {
             fkb: 0,
             kb_base: 0,
             active_start: start,
-            active_end: start + 2,
+            // Open until a clear (or another hitbox with this id) ends it.
+            active_end: u32::MAX,
             category: 1,
             ..Default::default()
         })
@@ -4406,7 +4500,7 @@ impl VisionaryApp {
             .map(f32::abs)
             .fold(0.0_f32, f32::max)
             .clamp(1.0, 25.0);
-        let start = frame.max(0.0).round() as u32;
+        let start = Self::motion_to_script_frame(frame);
         Some(crate::data::Hitbox {
             id: 0,
             bone_name: "top".to_string(),
@@ -4421,7 +4515,8 @@ impl VisionaryApp {
             fkb: 0,
             kb_base: 0,
             active_start: start,
-            active_end: start + 2,
+            // Open until a clear (or another hitbox with this id) ends it.
+            active_end: u32::MAX,
             category: 2,
             ..Default::default()
         })
@@ -4451,7 +4546,7 @@ impl VisionaryApp {
         });
         let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32()).unwrap_or(0.0);
         let bone_hash = args.get(1 + off).and_then(|a| a.as_hash()).unwrap_or(0);
-        let start = frame.max(0.0).round() as u32;
+        let start = Self::motion_to_script_frame(frame);
         Some(crate::data::EffectCall {
             effect_name: eff_rev
                 .get(&eff_hash)
@@ -4471,6 +4566,81 @@ impl VisionaryApp {
             active_end: if follows { 9999 } else { start },
             disabled: false,
         })
+    }
+
+    /// Build the move's collisions from a live capture, with lifetimes.
+    ///
+    /// Modelled the same way the GitHub script path models it (`data::eval_stmts`): a
+    /// collision stays open until something ends it, and ends on the frame BEFORE that.
+    /// Captures used to give every hitbox a hardcoded two-frame lifetime, because nothing told
+    /// the editor when hitboxes stop — so a live-fetched hitbox ended far earlier than the
+    /// script said. The plugin now captures `AttackModule::clear_all`, which is what scripts
+    /// actually use to end them.
+    fn hitboxes_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+        bone_rev: &HashMap<u64, String>,
+        attr_labels: &HashMap<u64, String>,
+    ) -> Vec<crate::data::Hitbox> {
+        let mut hitboxes: Vec<crate::data::Hitbox> = Vec::new();
+        // Capture entries arrive as each runtime branch is observed. Sort them into script
+        // time while retaining capture order at equal frames, so a same-frame CLEAR/ATTACK
+        // pair keeps the ordering the game actually executed.
+        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
+        for (_, line) in ordered {
+            if line.func == "ATTACK_CLEAR_ALL" {
+                let end = Self::motion_to_script_frame(line.frame).saturating_sub(1);
+                for hb in hitboxes.iter_mut().filter(|h| h.active_end == u32::MAX) {
+                    hb.active_end = end.max(hb.active_start);
+                }
+            } else if line.func.starts_with("ATTACK") {
+                if let Some(hb) =
+                    Self::hitbox_from_capture(&line.args, line.frame, &bone_rev, &attr_labels)
+                {
+                    // Same id re-captured (multi-part moves): keep the earliest frame.
+                    if !hitboxes
+                        .iter()
+                        .any(|h| h.id == hb.id && h.active_start == hb.active_start)
+                    {
+                        // Re-using an id replaces the previous hitbox with that id.
+                        let end = hb.active_start.saturating_sub(1);
+                        if let Some(open) = hitboxes
+                            .iter_mut()
+                            .find(|h| h.id == hb.id && h.active_end == u32::MAX)
+                        {
+                            open.active_end = end.max(open.active_start);
+                        }
+                        hitboxes.push(hb);
+                    }
+                }
+            } else if line.func == "CATCH" {
+                if let Some(hb) = Self::hitbox_from_capture_grab(&line.args, line.frame, &bone_rev)
+                {
+                    if !hitboxes.iter().any(|h| {
+                        h.category == 1 && h.id == hb.id && h.active_start == hb.active_start
+                    }) {
+                        hitboxes.push(hb);
+                    }
+                }
+            } else if line.func.starts_with("AREA_WIND") {
+                if let Some(hb) = Self::hitbox_from_capture_wind(&line.args, line.frame) {
+                    if !hitboxes
+                        .iter()
+                        .any(|h| h.category == 2 && h.active_start == hb.active_start)
+                    {
+                        hitboxes.push(hb);
+                    }
+                }
+            }
+        }
+        // Anything still open was never cleared during the capture — same meaning, and the
+        // same 9999 sentinel, the script path uses for a hitbox the script never clears. With
+        // a plugin build predating the clear-all hook this is EVERY hitbox, which reads as a
+        // bar running to the end of the timeline rather than a plausible-looking wrong answer.
+        for hb in hitboxes.iter_mut().filter(|h| h.active_end == u32::MAX) {
+            hb.active_end = 9999;
+        }
+        hitboxes
     }
 
     /// Reconstruct effect timeline spans from live spawn and stop events. Runtime capture can
@@ -4511,7 +4681,7 @@ impl VisionaryApp {
             let Some(stop_hash) = line.args.first().and_then(|arg| arg.as_hash()) else {
                 continue;
             };
-            let stop_frame = line.frame.max(0.0).round() as u32;
+            let stop_frame = Self::motion_to_script_frame(line.frame);
             // EffectModule::kill_kind terminates every live instance of the kind.
             for effect in effects.iter_mut().filter(|effect| {
                 effect.active_end == 9999 && effect_name_hash(&effect.effect_name) == stop_hash
@@ -4552,8 +4722,11 @@ impl VisionaryApp {
                 })
                 .or_else(|| captures.iter().find(|c| c.func.starts_with(pre)))
         };
-        // Frame window around a hit's spawn frame.
-        let win = |frame: u32| (Some(frame as f32 - 0.5), Some(frame as f32 + 1.5));
+        // Frame window around a hit's spawn frame, converted into the MOTION frames the
+        // plugin matches against. The `+1.5` this used to carry was covering the one-frame
+        // script/motion offset by widening the window instead of converting; that made every
+        // rule match two frames and could not tell adjacent hits apart.
+        let win = Self::rule_frame_window;
 
         let pristine = self.state.hitboxes_pristine.clone();
         let current = self.state.hitboxes.clone();
@@ -4626,7 +4799,7 @@ impl VisionaryApp {
                     frame_end: None,
                     overrides: None,
                     inject: Some(crate::game_link::InjectRuleWire {
-                        frame: h.active_start as f32,
+                        frame: Self::script_to_motion_frame(h.active_start),
                         args,
                     }),
                 }),
@@ -7056,8 +7229,8 @@ impl VisionaryApp {
                         if let Some(inject) =
                             self.build_effect_inject(&call, Some(motion), donor_hash)
                         {
-                            let fs = call.active_start as f32 - 0.5;
-                            let fe = call.active_start as f32 + 1.5;
+                            let (fs, fe) = Self::rule_frame_window(call.active_start);
+                            let (fs, fe) = (fs.unwrap_or_default(), fe.unwrap_or_default());
                             let store = self
                                 .effect_rules_store
                                 .entry(u.move_key.clone())
@@ -7206,13 +7379,13 @@ impl VisionaryApp {
         let mut missing_capture = false;
         for (i, ec) in effects.iter().enumerate() {
             let pristine = pristines.get(i);
-            let spawn_frame = pristine.map(|p| p.active_start).unwrap_or(ec.active_start) as f32;
+            let spawn_frame = pristine.map(|p| p.active_start).unwrap_or(ec.active_start);
             let hash = effect_name_hash(&ec.effect_name);
             // The effect the SCRIPT actually spawns (before edits) — what to suppress.
             let orig_hash = pristine
                 .map(|p| effect_name_hash(&p.effect_name))
                 .unwrap_or(hash);
-            let window = (Some(spawn_frame - 0.5), Some(spawn_frame + 1.5));
+            let window = Self::rule_frame_window(spawn_frame);
             if ec.disabled {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: orig_hash,
@@ -7373,7 +7546,7 @@ impl VisionaryApp {
         args[7 + off] = A::Num(ec.rotation[0]); // xr
         args[8 + off] = A::Num(ec.scale);
         Some(crate::game_link::SpawnInjectWire {
-            frame: ec.active_start as f32,
+            frame: Self::script_to_motion_frame(ec.active_start),
             // Existing captures carry the exact trailing args for this command. Preserve that
             // command unless an authored call explicitly supplies another compatible type.
             func: if ec.spawn_func.is_empty() {
@@ -7388,7 +7561,7 @@ impl VisionaryApp {
     fn build_effect_stop_inject(ec: &crate::data::EffectCall) -> crate::game_link::SpawnInjectWire {
         use crate::game_link::LuaArgWire as A;
         crate::game_link::SpawnInjectWire {
-            frame: ec.active_end.max(ec.active_start) as f32,
+            frame: Self::script_to_motion_frame(ec.active_end.max(ec.active_start)),
             func: "EFFECT_OFF_KIND".into(),
             args: vec![
                 A::Hash(effect_name_hash(&ec.effect_name)),
@@ -8068,7 +8241,7 @@ impl eframe::App for VisionaryApp {
         }
         let t = self.perf.start();
         self.eff_editor
-            .show(&ctx, &self.game_link, &mut self.live_overrides);
+            .show(&ctx, &self.game_link);
         self.perf.end("eff_editor", t);
         for removal in self.eff_editor.take_transplant_removals() {
             self.remove_transplant_from_editor(removal);
@@ -9484,6 +9657,7 @@ mod live_effect_capture_tests {
             frame,
             func: func.into(),
             args,
+            run: 1,
         }
     }
 
@@ -9555,6 +9729,7 @@ mod live_effect_capture_tests {
             frame: 20.0,
             func: "EFFECT_OFF_KIND".into(),
             args: vec![A::Hash(effect), A::Bool(false), A::Bool(true)],
+            run: 1,
         });
 
         let mut bones = HashMap::new();
@@ -9570,12 +9745,103 @@ mod live_effect_capture_tests {
             .filter(|call| call.effect_name == "moon_explosion")
             .collect();
         assert_eq!(moon.len(), 2);
-        assert!(moon.iter().all(|call| call.active_end == 20));
+        // Motion frame 20 is SCRIPT frame 21 — captures arrive in the plugin's 0-based motion
+        // frames and the editor works in the script's 1-based ones. See
+        // `VisionaryApp::motion_to_script_frame`.
+        assert!(moon.iter().all(|call| call.active_end == 21));
         let landing = calls
             .iter()
             .find(|call| call.effect_name == "sys_down_smoke")
             .unwrap();
-        assert_eq!(landing.active_start, 7);
-        assert_eq!(landing.active_end, 7);
+        assert_eq!(landing.active_start, 8);
+        assert_eq!(landing.active_end, 8);
+    }
+
+    /// Captured frames are converted into the script's frame space, and rules pushed back to
+    /// the plugin are converted out of it again. A round trip must land where it started, or a
+    /// suppress/retime rule targets the wrong frame.
+    #[test]
+    fn capture_frames_round_trip_through_the_script_frame_space() {
+        for motion in [0.0f32, 1.0, 4.999_998, 9.0, 9.6, 25.0] {
+            let script = VisionaryApp::motion_to_script_frame(motion);
+            let back = VisionaryApp::script_to_motion_frame(script);
+            assert!(
+                (back - motion.round()).abs() < f32::EPSILON,
+                "motion {motion} → script {script} → {back}"
+            );
+            let (lo, hi) = VisionaryApp::rule_frame_window(script);
+            let (lo, hi) = (lo.unwrap(), hi.unwrap());
+            assert!(
+                motion >= lo && motion <= hi,
+                "rule window [{lo}, {hi}] must contain the motion frame {motion} that produced it"
+            );
+        }
+        // The first script frame is 1, and it maps back to motion frame 0 — the whole reason
+        // the two spaces differ. Nothing may go negative.
+        assert_eq!(VisionaryApp::motion_to_script_frame(0.0), 1);
+        assert_eq!(VisionaryApp::script_to_motion_frame(0), 0.0);
+    }
+
+    /// A hitbox lasts until it is cleared. This used to be a hardcoded two frames, which is
+    /// what made live-fetched hitboxes end far earlier than the script says.
+    #[test]
+    fn captured_hitboxes_last_until_they_are_cleared() {
+        let bone = hash40::hash40("top").0;
+        let bones = HashMap::from([(bone, "top".to_string())]);
+        let attrs = HashMap::new();
+        let attack = |id: i64, frame: f32| {
+            let mut args = vec![A::Int(id), A::Int(0), A::Hash(bone)];
+            // damage, angle, kbg, fkb, bkb, size, x, y, z, then nil capsule slots.
+            args.extend([
+                A::Num(8.0),
+                A::Int(361),
+                A::Int(100),
+                A::Int(0),
+                A::Int(40),
+                A::Num(4.0),
+                A::Num(0.0),
+                A::Num(8.0),
+                A::Num(6.0),
+            ]);
+            args.extend(std::iter::repeat(A::Nil).take(24));
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("attack_air_n").0,
+                frame,
+                func: "ATTACK".into(),
+                args,
+                run: 1,
+            }
+        };
+        let clear = |frame: f32| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: "ATTACK_CLEAR_ALL".into(),
+            args: Vec::new(),
+            run: 1,
+        };
+
+        // Out at motion 9 (script 10), cleared at motion 15 (script 16) → ends the frame
+        // before, 15. The old code would have said 12.
+        let boxes =
+            VisionaryApp::hitboxes_from_captures(&[attack(0, 9.0), clear(15.0)], &bones, &attrs);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].active_start, 10);
+        assert_eq!(boxes[0].active_end, 15);
+
+        // Re-using an id ends the previous hitbox, like the script path does.
+        let boxes = VisionaryApp::hitboxes_from_captures(
+            &[attack(0, 9.0), attack(0, 14.0), clear(20.0)],
+            &bones,
+            &attrs,
+        );
+        assert_eq!(boxes.len(), 2);
+        assert_eq!((boxes[0].active_start, boxes[0].active_end), (10, 14));
+        assert_eq!((boxes[1].active_start, boxes[1].active_end), (15, 20));
+
+        // Never cleared — the same 9999 sentinel the script path uses, not a made-up length.
+        let boxes = VisionaryApp::hitboxes_from_captures(&[attack(0, 9.0)], &bones, &attrs);
+        assert_eq!(boxes[0].active_end, 9999);
     }
 }

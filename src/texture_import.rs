@@ -105,11 +105,23 @@ pub fn describe(pool: &[u8], index: usize, _name: &str) -> Result<TextureDesc> {
     })
 }
 
-/// Decode texture `index` of the pool to PNG bytes — the starting point for editing it.
-pub fn export_png(pool: &[u8], index: usize, name: &str) -> Result<Vec<u8>> {
+/// Decode texture `index` of the pool to straight RGBA8 pixels.
+///
+/// `max_edge` caps the longest side — pass `None` for the real thing, or a small number for a
+/// preview. Downscaling here rather than at the call site means a 1024² BC7 sheet is decoded
+/// once and the caller only ever holds the pixels it will actually draw.
+pub fn decode_rgba(
+    pool: &[u8],
+    index: usize,
+    name: &str,
+    max_edge: Option<u32>,
+) -> Result<image::RgbaImage> {
     let desc = describe(pool, index, name)?;
     if !desc.convertible {
-        bail!("'{name}' is {} — Visionary cannot convert that format", desc.format);
+        bail!(
+            "'{name}' is {} — Visionary cannot convert that format",
+            desc.format
+        );
     }
     let single = slice_one(pool, index, name)?;
     let bntx = parse_single(&single, name)?;
@@ -122,6 +134,22 @@ pub fn export_png(pool: &[u8], index: usize, name: &str) -> Result<Vec<u8>> {
     let image = rgba
         .to_image(0)
         .map_err(|e| anyhow!("cannot build an image from '{name}': {e}"))?;
+    Ok(match max_edge {
+        Some(edge) if image.width() > edge || image.height() > edge => {
+            let scale = edge as f32 / image.width().max(image.height()) as f32;
+            let (w, h) = (
+                ((image.width() as f32 * scale).round() as u32).max(1),
+                ((image.height() as f32 * scale).round() as u32).max(1),
+            );
+            image::imageops::thumbnail(&image, w, h)
+        }
+        _ => image,
+    })
+}
+
+/// Decode texture `index` of the pool to PNG bytes — the starting point for editing it.
+pub fn export_png(pool: &[u8], index: usize, name: &str) -> Result<Vec<u8>> {
+    let image = decode_rgba(pool, index, name, None)?;
     let mut out = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image)
         .write_to(&mut out, image::ImageFormat::Png)
@@ -366,6 +394,69 @@ mod tests {
              that format, drop this assertion"
         );
         eprintln!("round-tripped {converted} texture(s); skipped {skipped:?}");
+    }
+
+    /// The editor's thumbnail comes from `decode_rgba(.., Some(edge))`. It must come back at
+    /// preview size — decoding a 1024² sheet and handing the full thing to the GPU every time
+    /// the selection changes is the difference between a thumbnail and a stall.
+    ///
+    /// Writes the decoded previews to `VISIONARY_PREVIEW_DUMP` when set, so the images can be
+    /// eyeballed rather than only measured.
+    #[test]
+    fn previews_come_back_downscaled_and_opaque_where_the_texture_is() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/mario/ef_mario.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let file = effect_library::NamcoEffectFile::load(&bytes).expect("parse source");
+        let textures = file
+            .ptcl_file
+            .as_ref()
+            .and_then(|p| p.texture_info.as_ref())
+            .expect("textures");
+        let pool = textures.binary_data.clone().expect("pool");
+        let dump = std::env::var_os("VISIONARY_PREVIEW_DUMP").map(std::path::PathBuf::from);
+        if let Some(dir) = &dump {
+            std::fs::create_dir_all(dir).expect("dump dir");
+        }
+
+        let mut checked = 0usize;
+        for (index, descriptor) in textures.descriptors.iter().enumerate() {
+            let name = &descriptor.name;
+            let full = match describe(&pool, index, name) {
+                Ok(d) if d.convertible => d,
+                _ => continue,
+            };
+            let preview = decode_rgba(&pool, index, name, Some(168)).expect("preview");
+            assert!(
+                preview.width() <= 168 && preview.height() <= 168,
+                "{name}: preview is {}×{}, larger than the cap",
+                preview.width(),
+                preview.height()
+            );
+            // Aspect ratio preserved, within a pixel of rounding.
+            let expected = full.width as f32 / full.height as f32;
+            let got = preview.width() as f32 / preview.height() as f32;
+            assert!(
+                (expected - got).abs() < 0.05,
+                "{name}: preview aspect {got} != source aspect {expected}"
+            );
+            // A decode that silently produced an empty buffer would still be the right SIZE,
+            // so check there are actually pixels carrying something.
+            assert!(
+                preview.pixels().any(|p| p.0 != [0, 0, 0, 0]),
+                "{name}: preview decoded to nothing at all"
+            );
+            if let Some(dir) = &dump {
+                preview.save(dir.join(format!("{name}.png"))).expect("save");
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no convertible texture to preview");
+        eprintln!("previewed {checked} texture(s)");
     }
 
     #[test]

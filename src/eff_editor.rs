@@ -29,7 +29,7 @@ use std::time::Instant;
 use egui::Ui;
 
 use crate::effects::{load_effect, ColorKey, EmitterDef, PtclFile, TextureInfo};
-use crate::game_link::{GameLink, LinkStatus, LiveOverrides};
+use crate::game_link::{GameLink, LinkStatus};
 use crate::mod_project::{AuthoredEdit, EmitterFieldEdits, TransplantOp};
 
 /// Pristine copy of the editable authored fields of one emitter.
@@ -161,6 +161,13 @@ pub struct EffEditor {
     /// Result of the last export/import, shown beside the buttons. Errors here are the whole
     /// point: an unconvertible format or an unreadable PNG has to say so, not do nothing.
     texture_note: Option<(String, bool)>,
+    /// Pool index + info of the texture the selected emitter samples, published by the emitter
+    /// column for the texture panel on the right.
+    selected_texture: Option<(usize, TextureInfo)>,
+    /// Decoded preview for one pool texture, keyed by (loaded eff, pool index). `None` in the
+    /// second slot means "tried and could not" — kept so a failing texture is not re-decoded
+    /// every frame.
+    texture_preview: Option<((PathBuf, usize), Option<egui::TextureHandle>)>,
     /// Pristine snapshots per emitter set, parallel to `ptcl.emitter_sets`.
     pristine: Vec<Vec<EmitterSnapshot>>,
     entries: Vec<EffEntry>,
@@ -236,6 +243,8 @@ impl Default for EffEditor {
             pending_texture_imports: Vec::new(),
             texture_imports: Vec::new(),
             texture_note: None,
+            selected_texture: None,
+            texture_preview: None,
             pristine: Vec::new(),
             entries: Vec::new(),
             entry_filter: String::new(),
@@ -776,7 +785,7 @@ impl EffEditor {
         self.selected_emitter = 0;
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, link: &GameLink, overrides: &mut LiveOverrides) {
+    pub fn show(&mut self, ctx: &egui::Context, link: &GameLink) {
         if !self.open {
             return;
         }
@@ -819,7 +828,7 @@ impl EffEditor {
                 // Draw inside a CentralPanel so the window gets the normal panel background
                 // (drawing straight into the viewport root left it near-black).
                 egui::CentralPanel::default().show_inside(ui, |ui| {
-                    self.ui_contents(ui, link, overrides);
+                    self.ui_contents(ui, link);
                 });
                 if class != egui::ViewportClass::EmbeddedWindow
                     && ui.ctx().input(|i| i.viewport().close_requested())
@@ -833,7 +842,7 @@ impl EffEditor {
         );
     }
 
-    fn ui_contents(&mut self, ui: &mut Ui, link: &GameLink, overrides: &mut LiveOverrides) {
+    fn ui_contents(&mut self, ui: &mut Ui, link: &GameLink) {
         self.draw_header(ui, link);
         ui.separator();
         ui.horizontal_top(|ui| {
@@ -848,7 +857,13 @@ impl EffEditor {
             });
             ui.separator();
             ui.vertical(|ui| {
-                self.draw_game_panel(ui, link, overrides);
+                // The right column now carries a texture preview on top of the game readout,
+                // which can outgrow a short window — scroll it rather than clipping it.
+                egui::ScrollArea::vertical()
+                    .id_salt("eff_game_panel")
+                    .show(ui, |ui| {
+                        self.draw_game_panel(ui, link);
+                    });
             });
         });
     }
@@ -1167,6 +1182,10 @@ impl EffEditor {
     }
 
     fn draw_emitter_editor(&mut self, ui: &mut Ui) {
+        // The texture panel on the right renders from this and runs AFTER this column, so
+        // clear it on every path that does not reach a live emitter — otherwise deselecting
+        // leaves the previous emitter's texture on screen, with working Replace buttons.
+        self.selected_texture = None;
         let Some(entry_idx) = self.selected_entry else {
             ui.colored_label(egui::Color32::GRAY, "Select an entry to edit its emitters.");
             return;
@@ -1176,25 +1195,9 @@ impl EffEditor {
         let Some(ptcl) = self.ptcl.as_mut() else {
             return;
         };
-        // Texture pool of the loaded eff (for the per-emitter "swap texture" picker). Captured
-        // as owned values up front so the `set`/`em` mutable borrows below don't conflict.
+        // Texture pool of the loaded eff, cloned up front so the `set`/`em` mutable borrows
+        // below don't conflict with reading it.
         let textures = ptcl.bntx_textures.clone();
-        let tex_labels: Vec<String> = textures
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let name = if t.tex_name.is_empty() {
-                    format!("texture {i}")
-                } else {
-                    t.tex_name.clone()
-                };
-                if t.width > 0 && t.height > 0 {
-                    format!("{name}  ({}×{})", t.width, t.height)
-                } else {
-                    name
-                }
-            })
-            .collect();
         let Some(set) = ptcl.emitter_sets.get_mut(set_idx) else {
             return;
         };
@@ -1365,54 +1368,14 @@ impl EffEditor {
                     }
                 }
 
-                // ── Textures ──────────────────────────────────────────────────────
-                // Two separate operations live here and are deliberately labelled apart:
-                //   SWAP  — point this emitter at a different texture the eff already has.
-                //           A per-emitter edit; nothing else that samples the old one moves.
-                //   IMPORT— replace the pixels of a pool texture with your own image.
-                //           A per-FILE edit: every emitter sampling that texture changes.
-                if !tex_labels.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("texture").strong());
-                    match em.texture_index {
-                        None => {
-                            ui.label(
-                                egui::RichText::new(
-                                    "this emitter samples no texture — nothing to swap",
-                                )
-                                .small()
-                                .color(egui::Color32::GRAY),
-                            );
-                        }
-                        Some(cur) => {
-                            let cur = cur as usize;
-                            let cur_label = tex_labels
-                                .get(cur)
-                                .cloned()
-                                .unwrap_or_else(|| "(not in this pool)".to_string());
-                            egui::ComboBox::from_id_salt("emitter_texture_swap")
-                                .selected_text(cur_label)
-                                .width(260.0)
-                                .show_ui(ui, |ui| {
-                                    for (i, label) in tex_labels.iter().enumerate() {
-                                        if ui
-                                            .selectable_label(cur == i, label)
-                                            .clicked()
-                                        {
-                                            em.texture_index = Some(i as u32);
-                                            changed = true;
-                                        }
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Point this emitter at another of the eff's textures. Ships \
-                                     with the next Send, like any other emitter edit.",
-                                );
-                            texture_actions = textures.get(cur).map(|t| (cur, t.clone()));
-                        }
-                    }
-                }
+                // The texture this emitter samples is shown, previewed and edited in the
+                // Texture panel on the right — it needs the width for a preview, and the
+                // import half is a whole-file operation that does not belong in a column of
+                // per-emitter fields. Only the pointer is recorded here.
+                texture_actions = em
+                    .texture_index
+                    .map(|i| i as usize)
+                    .and_then(|i| textures.get(i).map(|t| (i, t.clone())));
 
                 ui.add_space(6.0);
                 if ui.small_button("Reset emitter").clicked() {
@@ -1421,23 +1384,177 @@ impl EffEditor {
                 }
             });
 
-        // Import/export live OUTSIDE the emitter borrow: they mutate editor-level state
-        // (`pending_texture_imports`, `texture_note`), not the emitter.
-        if let Some((index, texture)) = texture_actions {
-            self.draw_texture_import(ui, index, &texture);
-        }
+        self.selected_texture = texture_actions;
 
         if changed {
             self.eff_dirty_at = Some(Instant::now());
         }
     }
 
-    /// Export the sampled texture as a PNG, or replace it with one.
+    /// The texture panel: what the selected emitter samples, what it looks like, and the two
+    /// things you can do to it.
     ///
-    /// Scoped to the texture the SELECTED emitter samples rather than offering the whole pool:
-    /// the pool is 60-odd textures with names like `ef_cmn_line02`, and picking out of that
-    /// list is guesswork. Reaching a texture through the emitter that uses it means you are
-    /// always replacing the one you are looking at.
+    /// Reached through the emitter that uses it rather than from a flat list of the pool: 60-odd
+    /// entries named `ef_cmn_line02` is guesswork, and going via the emitter means you are always
+    /// looking at the one you are about to change.
+    ///
+    /// The two operations are deliberately labelled apart, because their blast radius differs:
+    ///   SWAP   — point THIS emitter at another texture the eff already has. A per-emitter edit.
+    ///   IMPORT — replace a pool texture's pixels. Every emitter sampling it changes.
+    fn draw_texture_panel(&mut self, ui: &mut Ui) {
+        ui.label(egui::RichText::new("Texture").strong());
+        let Some((index, texture)) = self.selected_texture.clone() else {
+            ui.label(
+                egui::RichText::new(if self.ptcl.is_none() {
+                    "no eff loaded"
+                } else {
+                    "this emitter samples no texture"
+                })
+                .small()
+                .color(egui::Color32::GRAY),
+            );
+            return;
+        };
+
+        // Swap picker. Labels are rebuilt here rather than shared with the emitter column so
+        // this panel does not depend on that column having drawn first.
+        let labels: Vec<String> = self
+            .ptcl
+            .as_ref()
+            .map(|p| {
+                p.bntx_textures
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let name = if t.tex_name.is_empty() {
+                            format!("texture {i}")
+                        } else {
+                            t.tex_name.clone()
+                        };
+                        if t.width > 0 && t.height > 0 {
+                            format!("{name}  ({}×{})", t.width, t.height)
+                        } else {
+                            name
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut swap_to = None;
+        egui::ComboBox::from_id_salt("emitter_texture_swap")
+            .selected_text(
+                labels
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| "(not in this pool)".to_string()),
+            )
+            .width(280.0)
+            .show_ui(ui, |ui| {
+                for (i, label) in labels.iter().enumerate() {
+                    if ui.selectable_label(index == i, label).clicked() {
+                        swap_to = Some(i as u32);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "Point this emitter at another of the eff's textures. Ships with the next \
+                 Send, like any other emitter edit.",
+            );
+        if let Some(i) = swap_to {
+            if let (Some(entry_idx), Some(ptcl)) = (self.selected_entry, self.ptcl.as_mut()) {
+                let set_idx = self.entries[entry_idx].set_idx;
+                if let Some(em) = ptcl
+                    .emitter_sets
+                    .get_mut(set_idx)
+                    .and_then(|s| s.emitters.get_mut(self.selected_emitter))
+                {
+                    em.texture_index = Some(i);
+                    self.eff_dirty_at = Some(Instant::now());
+                }
+            }
+        }
+
+        self.draw_texture_preview(ui, index, &texture);
+        self.draw_texture_import(ui, index, &texture);
+    }
+
+    /// Draw the texture itself.
+    ///
+    /// Decoding is BCn → RGBA over up to a megapixel, so it is done ONCE per texture and the
+    /// result kept as a GPU handle. Doing it per frame at 60fps would spend more time
+    /// decompressing this thumbnail than rendering the rest of the app.
+    fn draw_texture_preview(&mut self, ui: &mut Ui, index: usize, texture: &TextureInfo) {
+        const PREVIEW: u32 = 168;
+        let key = (self.loaded_path.clone().unwrap_or_default(), index);
+        if self.texture_preview.as_ref().map(|(k, _)| k) != Some(&key) {
+            let handle = self.texture_pool.as_ref().and_then(|pool| {
+                crate::texture_import::decode_rgba(
+                    pool,
+                    index,
+                    &texture.tex_name,
+                    Some(PREVIEW),
+                )
+                .ok()
+                .map(|image| {
+                    let size = [image.width() as usize, image.height() as usize];
+                    ui.ctx().load_texture(
+                        format!("eff_tex_{index}"),
+                        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+            });
+            self.texture_preview = Some((key, handle));
+        }
+
+        match self.texture_preview.as_ref().and_then(|(_, h)| h.as_ref()) {
+            Some(handle) => {
+                let size = handle.size_vec2();
+                let scale = PREVIEW as f32 / size.x.max(size.y).max(1.0);
+                // Checkerboard behind it: effect textures are mostly alpha, and on a flat
+                // background a soft-edged puff reads as "nothing decoded".
+                let (rect, _) = ui.allocate_exact_size(size * scale, egui::Sense::hover());
+                let painter = ui.painter();
+                let cell = 8.0;
+                let cols = (rect.width() / cell).ceil() as i32;
+                let rows = (rect.height() / cell).ceil() as i32;
+                for row in 0..rows {
+                    for col in 0..cols {
+                        let shade = if (row + col) % 2 == 0 { 60 } else { 78 };
+                        let cell_rect = egui::Rect::from_min_size(
+                            rect.min + egui::vec2(col as f32 * cell, row as f32 * cell),
+                            egui::vec2(cell, cell),
+                        )
+                        .intersect(rect);
+                        painter.rect_filled(
+                            cell_rect,
+                            0.0,
+                            egui::Color32::from_gray(shade),
+                        );
+                    }
+                }
+                painter.image(
+                    handle.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(if texture.convertible {
+                        "preview unavailable"
+                    } else {
+                        "no preview — Visionary cannot read this format"
+                    })
+                    .small()
+                    .color(egui::Color32::DARK_GRAY),
+                );
+            }
+        }
+    }
+
     fn draw_texture_import(&mut self, ui: &mut Ui, index: usize, texture: &TextureInfo) {
         let name = texture.tex_name.clone();
         let replaced = self
@@ -1571,7 +1688,10 @@ impl EffEditor {
         }
     }
 
-    fn draw_game_panel(&mut self, ui: &mut Ui, link: &GameLink, overrides: &mut LiveOverrides) {
+    fn draw_game_panel(&mut self, ui: &mut Ui, link: &GameLink) {
+        self.draw_texture_panel(ui);
+        ui.separator();
+
         ui.heading("Game preview");
         let (frames_rx, edits_tx) = link.stats();
         ui.label(
@@ -1778,85 +1898,16 @@ impl EffEditor {
             .color(egui::Color32::GRAY),
         );
 
-        // Direct runtime overrides — the SHARED store the Effects panel also edits; changes
-        // here back-sync into the move's EffectCalls (markers, edit records) app-side.
-        ui.separator();
-        ui.label(egui::RichText::new("Kind look — color × / speed × (all spawns)").strong());
-        ui.label(
-            egui::RichText::new(
-                "Per-spawn position/rotation/size live in the Effects panel (each spawn \
-                 independent). These multipliers apply to every spawn of the effect.",
-            )
-            .small()
-            .color(egui::Color32::GRAY),
-        );
-        let mut tweak_changed = false; // color×/speed rows (export as LAST_EFFECT_SET_*)
-        {
-            let form = overrides.form_mut(hash, || kind.data.clone());
-            egui::Grid::new("live_overrides")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("speed ×");
-                    tweak_changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut form.speed)
-                                .speed(0.02)
-                                .range(0.0..=8.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("color ×");
-                    ui.horizontal(|ui| {
-                        let c = &mut form.rainbow.color;
-                        tweak_changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut c.red)
-                                    .speed(0.02)
-                                    .range(0.0..=8.0),
-                            )
-                            .changed();
-                        tweak_changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut c.green)
-                                    .speed(0.02)
-                                    .range(0.0..=8.0),
-                            )
-                            .changed();
-                        tweak_changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut c.blue)
-                                    .speed(0.02)
-                                    .range(0.0..=8.0),
-                            )
-                            .changed();
-                        tweak_changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut c.alpha)
-                                    .speed(0.02)
-                                    .range(0.0..=8.0),
-                            )
-                            .changed();
-                    });
-                    ui.end_row();
-                });
-        }
-        if tweak_changed {
-            overrides.mark_tweak(hash);
-        }
-        ui.horizontal(|ui| {
-            if ui.small_button("Re-seed from game").clicked() {
-                let seed = kind.data.clone();
-                let form = overrides.form_mut(hash, || seed.clone());
-                form.speed = seed.speed;
-                form.rainbow = seed.rainbow;
-                overrides.mark_tweak(hash);
-            }
-            if ui.small_button("Send now").clicked() {
-                overrides.flush_one(hash, link);
-                self.last_sent_note = Some("sent kind color/speed".into());
-            }
-        });
+        // The kind-level "color × / speed ×" multipliers used to sit here. They predate the
+        // carrier: they were once the only way to change how an effect looked at runtime, and
+        // they are whole-effect by construction — one multiplier tints every emitter of every
+        // spawn and cannot express a per-key or color1 edit at all. Authored edits now do that
+        // exactly, so offering a second, cruder way to recolour the same effect only invited
+        // editing it two ways and wondering which won.
+        //
+        // The multipliers are not gone from the toolkit: `LiveOverrides` still restores them
+        // from a project's saved tweaks and can still import or clear the ones already pinned
+        // in the running game. What has gone is the form that let you type a new one HERE.
 
         ui.separator();
         self.draw_transplant_section(ui, &entry_name);

@@ -293,12 +293,12 @@ fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) 
                                 .iter_mut()
                                 .find(|h| h.id == call.id && h.active_end == u32::MAX)
                             {
-                                existing.active_end = (frame as u32).saturating_sub(1);
+                                existing.active_end = (script_frame(frame)).saturating_sub(1);
                             }
-                            hitboxes.push(call.to_hitbox(frame as u32));
+                            hitboxes.push(call.to_hitbox(script_frame(frame)));
                         }
                         ExcuteStmt::ClearAll => {
-                            let end = frame as u32;
+                            let end = script_frame(frame);
                             for hb in hitboxes.iter_mut() {
                                 if hb.active_end == u32::MAX {
                                     hb.active_end = end.saturating_sub(1);
@@ -1027,6 +1027,16 @@ impl EffectScript {
     }
 }
 
+/// Script frame → the integer frame the editor shows.
+///
+/// ROUNDS. This used to truncate (`frame as u32`), while the live-capture path rounded, so the
+/// two sources disagreed by a frame on any non-integral value — a `wait(1.5)` landed on 6 from
+/// the game and 5 from the script for the same spawn. Whichever is "right", they have to agree
+/// with each other before a difference between them means anything.
+fn script_frame(frame: f32) -> u32 {
+    frame.max(0.0).round() as u32
+}
+
 fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<EffectCall>) -> f32 {
     let mut frame = start_frame;
     for stmt in stmts {
@@ -1047,7 +1057,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             scale,
                             follows_bone,
                         } => {
-                            let active_end = if *follows_bone { 9999 } else { frame as u32 };
+                            let active_end = if *follows_bone { 9999 } else { script_frame(frame) };
                             calls.push(EffectCall {
                                 effect_name: effect_name.clone(),
                                 effect_name_alt: effect_name_alt.clone(),
@@ -1057,7 +1067,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 rotation: *rotation,
                                 scale: *scale,
                                 follows_bone: *follows_bone,
-                                active_start: frame as u32,
+                                active_start: script_frame(frame),
                                 active_end,
                                 disabled: false,
                             });
@@ -1067,7 +1077,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             for call in calls.iter_mut().filter(|call| {
                                 &call.effect_name == effect_name && call.active_end == 9999
                             }) {
-                                call.active_end = frame as u32;
+                                call.active_end = script_frame(frame);
                             }
                         }
                         EffectMacro::AfterImage {
@@ -1084,7 +1094,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 rotation: [0.0; 3],
                                 scale: 1.0,
                                 follows_bone: true,
-                                active_start: frame as u32,
+                                active_start: script_frame(frame),
                                 active_end: 9999,
                                 disabled: false,
                             });
@@ -1094,7 +1104,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             if let Some(call) =
                                 calls.iter_mut().rev().find(|c| c.active_end == 9999)
                             {
-                                call.active_end = frame as u32;
+                                call.active_end = script_frame(frame);
                             }
                         }
                         EffectMacro::LastEffectSetRate { .. } | EffectMacro::Raw(_) => {}
@@ -1325,5 +1335,74 @@ mod tests {
         assert!(VANILLA_FIGHTERS.contains(&"mario"));
         assert!(VANILLA_FIGHTERS.contains(&"ice_climber"));
         assert!(!VANILLA_FIGHTERS.contains(&"waluigi"));
+    }
+
+    /// The GitHub-script path used to TRUNCATE while the live-capture path rounded, so the
+    /// same underlying frame displayed as two different integers depending on where the move
+    /// was loaded from. Whichever source is authoritative, they have to agree with each other
+    /// first — a one-frame difference between them is only meaningful if it is real.
+    #[test]
+    fn script_frames_round_like_the_live_capture_does() {
+        // How `load_from_capture` turns a MotionModule frame into a displayed frame.
+        let capture = |f: f32| f.max(0.0).round() as u32;
+        for f in [0.0, 0.4, 0.5, 1.0, 4.999_998, 5.0, 5.000_002, 5.5, 9.75] {
+            assert_eq!(
+                script_frame(f),
+                capture(f),
+                "script and capture disagree on frame {f}"
+            );
+        }
+        // Negative frames cannot exist on the timeline; both clamp rather than wrapping.
+        assert_eq!(script_frame(-3.0), 0);
+    }
+
+    /// `frame()` is absolute and `wait()` is relative — mixing them up silently shifts every
+    /// spawn after the first `wait`, which is exactly the shape of a "timings are wrong"
+    /// report. Kirby's aerial neutral is the real case: frame 10, then three waits.
+    #[test]
+    fn wait_is_relative_and_frame_is_absolute() {
+        let script = EffectScript {
+            stmts: vec![
+                EffectStmt::Frame(10.0),
+                EffectStmt::Excute(vec![EffectMacro::Raw("x".into())]),
+                EffectStmt::Wait(3.0),
+                EffectStmt::Excute(vec![EffectMacro::Effect {
+                    effect_name: "a".into(),
+                    effect_name_alt: None,
+                    spawn_func: "EFFECT".into(),
+                    bone_name: "top".into(),
+                    offset: [0.0; 3],
+                    rotation: [0.0; 3],
+                    scale: 1.0,
+                    follows_bone: false,
+                }]),
+                EffectStmt::Wait(5.0),
+                EffectStmt::Excute(vec![EffectMacro::Effect {
+                    effect_name: "b".into(),
+                    effect_name_alt: None,
+                    spawn_func: "EFFECT".into(),
+                    bone_name: "top".into(),
+                    offset: [0.0; 3],
+                    rotation: [0.0; 3],
+                    scale: 1.0,
+                    follows_bone: false,
+                }]),
+                // An absolute frame AFTER waits must not be treated as another wait.
+                EffectStmt::Frame(20.0),
+                EffectStmt::Excute(vec![EffectMacro::Effect {
+                    effect_name: "c".into(),
+                    effect_name_alt: None,
+                    spawn_func: "EFFECT".into(),
+                    bone_name: "top".into(),
+                    offset: [0.0; 3],
+                    rotation: [0.0; 3],
+                    scale: 1.0,
+                    follows_bone: false,
+                }]),
+            ],
+        };
+        let calls = script.to_effect_calls();
+        let frames: Vec<u32> = calls.iter().map(|c| c.active_start).collect();
+        assert_eq!(frames, vec![13, 18, 20]);
     }
 }

@@ -43,7 +43,9 @@ impl Facade for DebuggableServerFacade {
             {
                 crate::slight::effect_viewer::show::queue_show(eff_hash);
             }
-            // Live-ACMD capture stream (deduped plugin-side, so this drains fast).
+            // Live-ACMD capture stream. Deduped plugin-side WITHIN a playback, so a move
+            // performed twice sends its lines twice — that is deliberate: each performance
+            // carries its own run id, which is how the editor keeps them apart.
             for line in crate::slight::hitbox_viewer::take_pending(MAX_NOTIFY_PER_TICK) {
                 crate::rust_extender::debuggable_server::notify_acmd_capture(&line);
             }

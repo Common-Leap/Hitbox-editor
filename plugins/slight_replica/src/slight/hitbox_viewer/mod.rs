@@ -142,6 +142,8 @@ pub struct CaptureLine {
     /// The sv_animcmd function, e.g. "ATTACK", "EFFECT_FOLLOW".
     pub func: &'static str,
     pub args: Vec<LuaArg>,
+    /// Which PLAYBACK of the motion produced this line. See [`next_run`].
+    pub run: u32,
 }
 
 /// One completed motion playback: "every capture line this motion is going to produce has
@@ -151,16 +153,49 @@ pub struct CaptureLine {
 pub struct CaptureEnd {
     pub kind: i32,
     pub motion: u64,
+    /// The playback that finished — pairs with [`CaptureLine::run`].
+    pub run: u32,
 }
 
-/// Everything unique captured this session (re-sent whole on client resync).
+/// Run ids identify ONE playback of a motion by one battle object.
+///
+/// Without them the editor could not tell two performances apart. Its capture store is keyed
+/// by motion and appends, so performing a move under different conditions — grounded then
+/// aerial, a cancel, a branch that only fires sometimes — left the UNION of those runs in the
+/// bucket and the editor showed spawns that never occur together.
+///
+/// Ids are global and strictly increasing rather than per-object, so a larger id always means
+/// "more recent" no matter which fighter or article produced it. That is the whole property
+/// the editor needs: pick the highest run present and you have exactly one performance.
+static NEXT_RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn next_run() -> u32 {
+    NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many playbacks of the same (kind, motion) to retain.
+///
+/// Only the newest is ever loaded, but a run still in progress must not evict the last
+/// complete one — the editor may still be settling on it. Two is enough for that and keeps
+/// the log bounded now that every performance re-records instead of deduplicating away.
+const RUNS_KEPT_PER_MOTION: usize = 2;
+
+/// Everything captured this session, newest `RUNS_KEPT_PER_MOTION` runs per (kind, motion).
 static CAPTURE_LOG: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-/// Dedupe keys for CAPTURE_LOG entries.
-static CAPTURE_SEEN: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-/// Not-yet-sent indices into CAPTURE_LOG.
-static CAPTURE_PENDING: LazyLock<Mutex<Vec<usize>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Dedupe keys, per run. Scoped to the run so a REPLAY re-records its lines (that is the
+/// point of runs) while a line repeated inside one playback is still collapsed. Retired runs
+/// drop their set with their lines, so this cannot grow without bound either.
+static CAPTURE_SEEN: LazyLock<Mutex<HashMap<u32, HashSet<u64>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Not-yet-sent lines. Holds CLONES rather than indices into `CAPTURE_LOG`: the log is pruned
+/// as old runs retire, and indices into a pruned vector name the wrong line.
+static CAPTURE_PENDING: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 /// Completed motions not yet sent (drained strictly AFTER the lines they terminate).
 static END_PENDING: LazyLock<Mutex<Vec<CaptureEnd>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// (kind, motion) → the run its last recorded line belonged to, so retirement runs once per
+/// playback instead of once per line. Bounded by the number of distinct moves performed.
+static LAST_RUN_SEEN: LazyLock<Mutex<HashMap<(i32, u64), u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// What one battle object is currently playing, for end-of-motion detection.
 #[derive(Clone, Copy)]
@@ -174,6 +209,15 @@ struct MotionWatch {
     captured: bool,
     /// End already announced for this playback.
     ended: bool,
+    /// Run id of this playback.
+    run: u32,
+    /// A collision (ATTACK / CATCH / AREA_WIND) has come out since the last clear.
+    ///
+    /// Gates clear-all capture. `AttackModule::clear_all` is called by the engine constantly —
+    /// on state changes, every frame in some situations — and recording all of that would
+    /// bury the script's own clears. Only a clear that actually ENDS something is a script
+    /// event worth streaming.
+    open_collisions: bool,
 }
 
 /// boid → current motion playback. Bounded by the live battle-object count.
@@ -242,20 +286,43 @@ fn fnv(mut h: u64, v: u64) -> u64 {
     h
 }
 
-/// Record one ACMD call (pristine, pre-rewrite args). Dedupes on
-/// (kind, motion, func, frame, args) so repeated move playback costs nothing.
+/// Record one ACMD call (pristine, pre-rewrite args).
+///
+/// Dedupe is WITHIN a playback: (func, frame, args) repeated inside one run collapses, but the
+/// next performance of the move gets a fresh run id and records everything again. It used to
+/// dedupe across the whole session ("repeated move playback costs nothing"), which is what let
+/// the editor merge several performances into one script.
 pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    record_for_boma(boma, func, args);
+}
+
+/// As [`record`], for hooks that receive a module accessor rather than a lua state —
+/// `AttackModule::clear_all` is a lua_bind call, not an sv_animcmd script primitive.
+pub unsafe fn record_for_boma(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    func: &'static str,
+    args: &[LuaArg],
+) {
     if INJECTING.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
-        as *mut smash::app::BattleObjectModuleAccessor;
     if boma.is_null() {
         return;
     }
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
     let kind = smash::app::utility::get_kind(&mut *boma);
+
+    // Resolve the run BEFORE the dedupe key — the key is scoped to it, and a new playback
+    // must not be silently folded into the previous one's key set.
+    let run = mark_capture_motion((*boma).battle_object_id, motion, kind, frame);
+
+    // Arm the clear-all gate: a clear is only worth capturing once something is out to clear.
+    if is_collision_func(func) {
+        note_collision((*boma).battle_object_id, true);
+    }
 
     let mut key = fnv(0xcbf29ce484222325, motion);
     key = fnv(key, kind as u64);
@@ -266,7 +333,7 @@ pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     for a in args {
         key = fnv(key, a.dedupe_bits());
     }
-    if !CAPTURE_SEEN.lock().insert(key) {
+    if !CAPTURE_SEEN.lock().entry(run).or_default().insert(key) {
         return;
     }
     let line = CaptureLine {
@@ -275,14 +342,16 @@ pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
         frame,
         func,
         args: args.to_vec(),
+        run,
     };
-    let mut log = CAPTURE_LOG.lock();
-    let idx = log.len();
-    log.push(line);
-    drop(log);
-    CAPTURE_PENDING.lock().push(idx);
-    // Arm the end-of-motion marker: this playback produced data the editor has not seen.
-    mark_capture_motion((*boma).battle_object_id, motion, kind, frame);
+    CAPTURE_PENDING.lock().push(line.clone());
+    CAPTURE_LOG.lock().push(line);
+    // Only on the FIRST line of a new run. Retiring scans the whole log, and this is the game
+    // thread — doing it per line would make every capture pay for the size of the session.
+    let first_of_run = LAST_RUN_SEEN.lock().insert((kind, motion), run) != Some(run);
+    if first_of_run {
+        retire_old_runs(kind, motion);
+    }
     CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if func.contains("EFFECT") {
         EFFECT_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -292,6 +361,31 @@ pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     CAPTURE_LAST_FRAME.store(frame.to_bits() as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Forget the oldest runs of one (kind, motion), keeping [`RUNS_KEPT_PER_MOTION`].
+///
+/// Every performance now re-records instead of deduplicating away, so without this the log
+/// grows for as long as the game runs. Retiring a run drops its dedupe set too.
+fn retire_old_runs(kind: i32, motion: u64) {
+    let mut log = CAPTURE_LOG.lock();
+    let mut runs: Vec<u32> = log
+        .iter()
+        .filter(|l| l.kind == kind && l.motion == motion)
+        .map(|l| l.run)
+        .collect();
+    runs.sort_unstable();
+    runs.dedup();
+    if runs.len() <= RUNS_KEPT_PER_MOTION {
+        return;
+    }
+    let retired: Vec<u32> = runs[..runs.len() - RUNS_KEPT_PER_MOTION].to_vec();
+    log.retain(|l| !(l.kind == kind && l.motion == motion && retired.contains(&l.run)));
+    drop(log);
+    let mut seen = CAPTURE_SEEN.lock();
+    for run in retired {
+        seen.remove(&run);
+    }
+}
+
 /// Drain up to `max` unsent capture lines (game thread, per-frame flush).
 pub fn take_pending(max: usize) -> Vec<CaptureLine> {
     let mut pending = CAPTURE_PENDING.lock();
@@ -299,14 +393,8 @@ pub fn take_pending(max: usize) -> Vec<CaptureLine> {
         return Vec::new();
     }
     let n = pending.len().min(max);
-    let idxs: Vec<usize> = pending.drain(..n).collect();
+    let lines: Vec<CaptureLine> = pending.drain(..n).collect();
     drop(pending);
-    let log = CAPTURE_LOG.lock();
-    let lines: Vec<_> = idxs
-        .into_iter()
-        .filter_map(|i| log.get(i).cloned())
-        .collect();
-    drop(log);
     if !lines.is_empty() {
         CAPTURE_DRAINED.fetch_add(lines.len() as u64, std::sync::atomic::Ordering::Relaxed);
         write_capture_diag("drained");
@@ -331,18 +419,21 @@ pub fn take_pending_ends(max: usize) -> Vec<CaptureEnd> {
 
 /// Re-queue the whole capture log (new editor client connected).
 pub fn requeue_all() {
-    let n = CAPTURE_LOG.lock().len();
-    *CAPTURE_PENDING.lock() = (0..n).collect();
+    let log = CAPTURE_LOG.lock().clone();
+    *CAPTURE_PENDING.lock() = log;
 }
 
-/// Note that `boid` produced a fresh capture line while playing `motion`. Starts (or
-/// re-arms) the watch that later emits the end-of-motion marker.
+/// Note that `boid` produced a fresh capture line while playing `motion`, and return the run
+/// id of that playback. Starts (or re-arms) the watch that later emits the end-of-motion
+/// marker.
 ///
 /// This can be the first thing to observe a motion change (an ACMD script can run before the
 /// line callback on the frame a move is cancelled into another), so it also closes out the
-/// motion it replaces — otherwise a cancelled move's end marker would be dropped.
-fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) {
-    let mut finished: Option<(i32, u64)> = None;
+/// motion it replaces — otherwise a cancelled move's end marker would be dropped, and its
+/// lines would be filed under the incoming motion's run.
+fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> u32 {
+    let mut finished: Option<(i32, u64, u32)> = None;
+    let run;
     {
         let mut watch = MOTION_WATCH.lock();
         // Battle object ids are reused across matches; keep the map from growing unbounded.
@@ -354,16 +445,19 @@ fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) {
             None => false,
         };
         if same_motion {
-            if let Some(w) = watch.get_mut(&boid) {
-                w.captured = true;
-                w.kind = kind;
-            }
+            // `capture_tick` may already have detected a restart and allocated a fresh run for
+            // this same motion; reuse whatever the watch holds rather than allocating again.
+            let w = watch.get_mut(&boid).expect("same_motion implies present");
+            w.captured = true;
+            w.kind = kind;
+            run = w.run;
         } else {
             if let Some(w) = watch.get(&boid) {
                 if w.captured && !w.ended {
-                    finished = Some((w.kind, w.motion));
+                    finished = Some((w.kind, w.motion, w.run));
                 }
             }
+            run = next_run();
             watch.insert(
                 boid,
                 MotionWatch {
@@ -372,25 +466,49 @@ fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) {
                     frame,
                     captured: true,
                     ended: false,
+                    run,
+                    open_collisions: false,
                 },
             );
         }
         // Keep the per-frame fast path's flag in step with the map under the same lock.
         MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
     }
-    if let Some((kind, motion)) = finished {
-        push_end(kind, motion);
+    if let Some((kind, motion, run)) = finished {
+        push_end(kind, motion, run);
     }
+    run
 }
 
-fn push_end(kind: i32, motion: u64) {
+/// Does this captured function put a collision out? Kept in step with the editor, which
+/// buckets captures the same way (`ATTACK*` / `CATCH` / `AREA_WIND*`).
+fn is_collision_func(func: &str) -> bool {
+    func.starts_with("ATTACK") && func != "ATTACK_CLEAR_ALL"
+        || func == "CATCH"
+        || func.starts_with("AREA_WIND")
+}
+
+/// Note that a collision came out (or was cleared) on `boid`, and report whether a clear is
+/// worth recording — i.e. whether anything was actually open to clear.
+fn note_collision(boid: u32, open: bool) -> bool {
+    let mut watch = MOTION_WATCH.lock();
+    let Some(w) = watch.get_mut(&boid) else {
+        return false;
+    };
+    let was_open = w.open_collisions;
+    w.open_collisions = open;
+    was_open
+}
+
+fn push_end(kind: i32, motion: u64, run: u32) {
     let mut q = END_PENDING.lock();
-    // The editor only needs to know THAT the motion finished; collapse duplicates that
-    // pile up while a long capture batch is still draining.
-    if q.iter().any(|e| e.kind == kind && e.motion == motion) {
+    // Collapse duplicates that pile up while a long capture batch is still draining. Scoped
+    // to the RUN: two performances of the same move are two ends, and folding the second into
+    // the first would leave the editor waiting for a marker that never comes.
+    if q.iter().any(|e| e.run == run) {
         return;
     }
-    q.push(CaptureEnd { kind, motion });
+    q.push(CaptureEnd { kind, motion, run });
 }
 
 /// Per-agent, per-frame end-of-motion watch (agent_extender line callback).
@@ -415,7 +533,7 @@ pub unsafe fn capture_tick(lua_state: u64) {
     }
     let boid = (*boma).battle_object_id;
 
-    let mut finished: Option<(i32, u64)> = None;
+    let mut finished: Option<(i32, u64, u32)> = None;
     {
         let mut watch = MOTION_WATCH.lock();
         // Resolve the entry BEFORE querying MotionModule: an object nobody captured from
@@ -432,24 +550,28 @@ pub unsafe fn capture_tick(lua_state: u64) {
         if w.motion != motion || frame < w.frame {
             // Switched away (or looped back to frame 0): the previous playback is over.
             if w.captured && !w.ended {
-                finished = Some((w.kind, w.motion));
+                finished = Some((w.kind, w.motion, w.run));
             }
             w.motion = motion;
             w.frame = frame;
             w.captured = false;
             w.ended = false;
+            // A NEW playback starts here — most importantly the "perform the same move
+            // again" case, which is a frame decrease with no motion change. Allocating the
+            // run now means the first line of that performance is already filed under it.
+            w.run = next_run();
         } else {
             w.frame = frame;
             // `>=` (not `end - rate`) so the marker is never EARLY: a hitbox on the very
             // last frame still gets recorded before the editor is told to adopt.
             if w.captured && !w.ended && end > 0.0 && frame >= end {
                 w.ended = true;
-                finished = Some((w.kind, w.motion));
+                finished = Some((w.kind, w.motion, w.run));
             }
         }
     }
-    if let Some((kind, motion)) = finished {
-        push_end(kind, motion);
+    if let Some((kind, motion, run)) = finished {
+        push_end(kind, motion, run);
     }
 }
 
@@ -739,6 +861,24 @@ attack_hook!(
     "ATTACK_IGNORE_THROW"
 );
 
+/// `AttackModule::clear_all` — when hitboxes STOP.
+///
+/// The editor had no source for this at all: a captured hitbox was given a hardcoded two-frame
+/// lifetime, so every live-fetched hitbox ended far earlier than the script says. Scripts end
+/// their hitboxes with `AttackModule::clear_all`, which is a lua_bind call rather than an
+/// sv_animcmd primitive — so it needs its own hook rather than riding `attack_hook!`.
+///
+/// The engine calls this constantly (state changes, and every frame in some situations), so
+/// only a clear that actually ends something is recorded. Without that gate the capture stream
+/// would be mostly clears.
+#[skyline::hook(replace = smash::app::lua_bind::AttackModule::clear_all)]
+unsafe fn hook_attack_clear_all(boma: *mut smash::app::BattleObjectModuleAccessor) {
+    if !boma.is_null() && note_collision((*boma).battle_object_id, false) {
+        record_for_boma(boma, "ATTACK_CLEAR_ALL", &[]);
+    }
+    original!()(boma)
+}
+
 // ── CATCH (grabbox) hook ─────────────────────────────────────────────────────
 // Arg layout (0-based): 0 id, 1 bone(h), 2 size, 3 x, 4 y, 5 z, 6 x2, 7 y2, 8 z2
 // (nil = sphere), 9 status, 10 situation. Only geometry (size + offsets) is rewritten.
@@ -938,7 +1078,8 @@ pub fn install() {
         hook_wind_2nd,
         hook_wind_2nd_rad,
         hook_wind_2nd_rad_arg9,
-        hook_wind_2nd_arg10
+        hook_wind_2nd_arg10,
+        hook_attack_clear_all
     );
-    skyline::println!("[SLight] ACMD ATTACK/CATCH/WIND hooks installed (capture + rules)");
+    skyline::println!("[SLight] ACMD ATTACK/CATCH/WIND/CLEAR hooks installed (capture + rules)");
 }
