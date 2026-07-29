@@ -824,6 +824,9 @@ impl VisionaryApp {
 
         let saved_data_root = load_config_path("data_root");
         let saved_export_dir = load_config_path("export_dir");
+        // Read before `set_data_root` runs below — that call re-points (and re-saves) the eff
+        // editor's root, so a folder the user picked in that window has to be captured first.
+        let saved_eff_root = load_config_path(EFF_ROOT_CONFIG_KEY);
         let saved_mod_roots = load_mod_roots();
 
         let mut app = Self {
@@ -898,16 +901,25 @@ impl VisionaryApp {
             perf: FrameProfiler::new(),
         };
 
-        if let Some(root) = app.export_dir.clone() {
-            app.eff_editor.set_export_root(root);
-        }
-
         match saved_data_root {
             Some(root) if root.is_dir() => app.set_data_root(root),
             // No data root but saved mod roots: index those alone, so a session that only
             // ever works on modded characters still comes up with a populated fighter list.
             _ if !app.extra_roots.is_empty() => app.reindex_fighters(),
             _ => {}
+        }
+
+        // The eff editor's dump root, in order of authority: a folder explicitly picked in that
+        // window, else the data root the main window is already showing (`set_data_root` above
+        // has pointed it there), else the mod export folder. Its own default is the process cwd,
+        // which meant the window came up listing whatever folder the app was launched from.
+        let eff_root = saved_eff_root.or_else(|| match app.state.data_root {
+            // Already pointed there by `set_data_root` — don't pull it back to the export folder.
+            Some(_) => None,
+            None => app.export_dir.clone(),
+        });
+        if let Some(root) = eff_root {
+            app.eff_editor.set_export_root(root);
         }
 
         // Profiling helper: preselect a fighter by internal name so a `VISIONARY_PROFILE` run
@@ -1045,6 +1057,13 @@ impl VisionaryApp {
             self.state.status = "No fighter/ directory found.".to_string();
             return;
         }
+
+        // One path source: the eff editor reads base .eff files out of the same dump the rest of
+        // the app indexes, so opening a data root re-points (and remembers) its root too. Left
+        // alone, that window kept listing the previous dump's files — or the launch folder's.
+        // A later pick inside the editor overwrites this; last choice wins either way.
+        self.eff_editor.set_export_root(path.clone());
+        save_config_path(EFF_ROOT_CONFIG_KEY, &path);
 
         self.state.data_root = Some(path);
         self.reindex_fighters();
@@ -4333,7 +4352,9 @@ impl VisionaryApp {
         let first = deltas[0];
         if deltas.iter().all(|d| *d == first) {
             if first == 0 {
-                return Some(format!("frames agree with the GitHub script ({matched} matched)"));
+                return Some(format!(
+                    "frames agree with the GitHub script ({matched} matched)"
+                ));
             }
             let (n, dir) = if first > 0 {
                 (first, "later than")
@@ -6075,6 +6096,40 @@ impl VisionaryApp {
             .filter(|(fighter, _)| Some(fighter.to_lowercase()) == carrier_fighter)
             .flat_map(|(_, eff)| eff.textures.iter().cloned())
             .collect();
+        // Added and removed pool textures ride along the same way. An addition also has to reach
+        // the carrier for a swap onto it to resolve, so these travel as one set.
+        let carrier_new_textures: Vec<crate::mod_project::TextureAddition> = self
+            .eff_mods
+            .iter()
+            .filter(|(fighter, _)| Some(fighter.to_lowercase()) == carrier_fighter)
+            .flat_map(|(_, eff)| eff.textures_added.iter().cloned())
+            .collect();
+        let carrier_gone_textures: Vec<String> = self
+            .eff_mods
+            .iter()
+            .filter(|(fighter, _)| Some(fighter.to_lowercase()) == carrier_fighter)
+            .flat_map(|(_, eff)| eff.textures_removed.iter().cloned())
+            .collect();
+        // Where donor and fighter effs may live: the effect pool's root, the eff editor's export
+        // root, the data root, plus mod roots (a modded character's own eff lives there, not in
+        // the vanilla dump). An assist eff under a different root than the fighter data was the
+        // silent-skip bug, so every lookup tries all of them.
+        //
+        // Built HERE rather than at the donor-stripping loop below because the texture-import
+        // pass needs to read the fighter's own eff, and that has to happen before the aliases
+        // are sent a few lines down.
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(p) = self.effect_pool.as_ref() {
+            roots.push(p.root().to_path_buf());
+        }
+        roots.push(self.eff_editor.export_root().to_path_buf());
+        if let Some(d) = &self.export_dir {
+            roots.push(d.clone());
+        }
+        if let Some(d) = &self.state.data_root {
+            roots.push(d.clone());
+        }
+        roots.extend(self.extra_roots.iter().cloned());
         let mut carrier_authored: Vec<crate::eff_export::CarrierAuthored> = Vec::new();
         let mut authored_aliases: Vec<(String, String)> = Vec::new();
         let mut carrier_name_conflicts: Vec<String> = Vec::new();
@@ -6162,6 +6217,74 @@ impl VisionaryApp {
                 authored_aliases.push((entry_lc, clone_name));
             }
         }
+
+        // A TEXTURE IMPORT HAS TO BRING ITS EFFECTS WITH IT.
+        //
+        // `apply_texture_imports` resolves the texture name against the CARRIER's pool, and the
+        // carrier only holds textures its own entries reference. So replacing a texture in the
+        // fighter's eff did nothing unless an entry sampling it happened to already be
+        // transplanted: the import was dropped with a warning and the user watched the original
+        // render in game. Clone the entries that actually sample the texture, exactly as an
+        // authored edit clones the entry it edits — the clone carries the texture into the
+        // carrier's pool, the pruner keeps it (something now samples it), and the import lands.
+        //
+        // Entries already riding the carrier are skipped: a transplant or an authored edit has
+        // brought the texture in already, and a second clone would only add a duplicate entry
+        // and a competing alias for the same kind.
+        if !carrier_textures.is_empty() {
+            if let Some(fighter) = carrier_fighter.as_ref() {
+                let src_rel = self
+                    .eff_mods
+                    .get(fighter)
+                    .filter(|eff| !eff.source_rel.is_empty())
+                    .map(|eff| eff.source_rel.to_lowercase())
+                    .unwrap_or_else(|| format!("effect/fighter/{fighter}/ef_{fighter}.eff"));
+                let bytes = roots
+                    .iter()
+                    .map(|r| r.join(&src_rel))
+                    .find(|p| p.is_file())
+                    .and_then(|p| std::fs::read(p).ok());
+                let parsed = bytes.and_then(|b| effect_library::NamcoEffectFile::load(&b).ok());
+                if let Some(file) = parsed {
+                    for import in &carrier_textures {
+                        for (entry_name, set_idx) in
+                            crate::eff_export::entries_sampling_texture(&file, &import.texture_name)
+                        {
+                            let entry_lc = entry_name.to_lowercase();
+                            // Already on the carrier, by transplant or by authored edit? Match
+                            // the SOURCE FILE too: an entry of the same name in a different eff
+                            // is a different effect sampling a different pool, and treating it
+                            // as "already carried" would skip the clone that actually brings
+                            // this texture in — the silent no-op again, just better hidden.
+                            let riding = transplant_ops.iter().any(|t| {
+                                t.src_file_rel.eq_ignore_ascii_case(&src_rel)
+                                    && t.src_set_name.eq_ignore_ascii_case(&entry_lc)
+                            }) || authored_aliases
+                                .iter()
+                                .any(|(from, _)| from.eq_ignore_ascii_case(&entry_lc));
+                            if riding {
+                                continue;
+                            }
+                            let clone_name =
+                                format!("{}{entry_lc}", crate::mod_project::EDIT_CLONE_PREFIX);
+                            if carrier_ops.iter().any(|op| op.new_entry_name == clone_name) {
+                                continue; // two imports sharing one effect
+                            }
+                            carrier_ops.push(crate::mod_project::TransplantOp {
+                                new_entry_name: clone_name.clone(),
+                                src_file_rel: src_rel.clone(),
+                                src_set_name: entry_lc.clone(),
+                                src_set_idx: set_idx,
+                                one_slot_slots: Vec::new(),
+                                replace_entry: None,
+                            });
+                            authored_aliases.push((entry_lc, clone_name));
+                        }
+                    }
+                }
+            }
+        }
+
         // Redirect spawns of the original kind onto the edited clone.
         for (from_name, to_name) in &authored_aliases {
             let wire = crate::game_link::EffectAliasWire {
@@ -6203,6 +6326,18 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_effect_names(&names);
         let live_carrier_rel = LIVE_CARRIER_REL;
+        // Does anything need the carrier at all? An imported texture counts on its own.
+        //
+        // This used to ask `!carrier_ops.is_empty()`, which is only true for transplants and
+        // authored edits. A texture import is neither: it names a pool texture, not an entry, so
+        // it adds no op. A texture-only send therefore built no carrier and published no carrier
+        // spec — and the plugin reads a snapshot with no carrier, plus withdrawn bytes, as
+        // "retire the live carrier". Nothing replaces it, so the editor sits on "retiring the
+        // previous carrier" until the user gives up. The import has to arm the carrier itself.
+        let carrier_needed = !carrier_ops.is_empty()
+            || !carrier_textures.is_empty()
+            || !carrier_new_textures.is_empty()
+            || !carrier_gone_textures.is_empty();
         // Cross-fighter donors: have the plugin co-load each donor's VANILLA eff with the
         // target fighter (system effs are always resident — no need to co-load those).
         let mut per_target: HashMap<String, Vec<String>> = HashMap::new();
@@ -6262,7 +6397,7 @@ impl VisionaryApp {
         let carrier_target: Option<String> = carrier_fighter
             .as_ref()
             .map(|f| format!("effect/fighter/{f}/ef_{f}.eff"));
-        if !carrier_ops.is_empty() {
+        if carrier_needed {
             if let Some(target) = &carrier_target {
                 // The old detached co-loader is deliberately disabled: send only the selected
                 // fresh carrier path to the plugin; its bytes are built below.
@@ -6282,28 +6417,6 @@ impl VisionaryApp {
         }
         donor_specs.sort_by(|a, b| a.target.cmp(&b.target));
 
-        // Build the stripped donor buffers the plugin injects as resident data (arcrop_load_file
-        // can't read vanilla donor files, so we must supply the bytes). Each carries only the
-        // referenced effects (original names) + their textures/primitives — the "strip unused
-        // effects to save memory" path. Skip sys/own-fighter donors (already resident).
-        //
-        // Donor files may live under any of several roots (the effect pool's root, the eff
-        // editor's export root, the data root), so try each — an assist eff under a different
-        // root than the fighter data was the silent-skip bug. A debug log records the outcome.
-        let mut roots: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(p) = self.effect_pool.as_ref() {
-            roots.push(p.root().to_path_buf());
-        }
-        roots.push(self.eff_editor.export_root().to_path_buf());
-        if let Some(d) = &self.export_dir {
-            roots.push(d.clone());
-        }
-        if let Some(d) = &self.state.data_root {
-            roots.push(d.clone());
-        }
-        // Mod roots too: a modded character's own eff (and its donors) live there, not in
-        // the vanilla dump.
-        roots.extend(self.extra_roots.iter().cloned());
         let mut donor_bytes: Vec<crate::game_link::DonorBytesWire> = Vec::new();
         let mut dbg = String::new();
         let mut carrier_added = false;
@@ -6315,7 +6428,11 @@ impl VisionaryApp {
         let mut carrier_dropped_edits: Vec<String> = Vec::new();
         // Two mesh-backed sources competing for the carrier's single model container.
         let mut carrier_mesh_conflict: Option<String> = None;
-        if !carrier_ops.is_empty() {
+        // Texture imports the carrier's pool had no texture for.
+        let mut carrier_dropped_textures: Vec<String> = Vec::new();
+        // Textures the build would not delete because something still samples them.
+        let mut carrier_textures_in_use: Vec<String> = Vec::new();
+        if carrier_needed {
             // Sources may legitimately live under DIFFERENT roots: the carrier is an assist
             // eff from the vanilla dump, while a modded fighter's own eff is under a mod
             // root. Requiring one root that holds everything silently skipped the carrier in
@@ -6395,6 +6512,8 @@ impl VisionaryApp {
                                 root,
                                 &carrier_authored,
                                 &carrier_textures,
+                                &carrier_new_textures,
+                                &carrier_gone_textures,
                                 &mut warnings,
                             );
                         for w in &warnings {
@@ -6412,6 +6531,23 @@ impl VisionaryApp {
                         if !skipped_authored.is_empty() {
                             carrier_dropped_edits = skipped_authored;
                         }
+                        // An import whose texture is not in the CARRIER's pool. The carrier only
+                        // holds the textures its transplanted entries brought with them, so a
+                        // texture the user replaced in the fighter's own eff is absent unless
+                        // some entry sampling it also rides the carrier. Silently shipping a
+                        // carrier without it looks identical to the import not working.
+                        carrier_dropped_textures = warnings
+                            .iter()
+                            .filter_map(|w| w.strip_prefix("texture:").map(str::to_string))
+                            .collect();
+                        // A delete the build refused. The editor's own guard only sees sampler0
+                        // (its emitter model discards the other five), so a texture used as a
+                        // distortion or mask input can pass that check and still be in use here.
+                        // Without this the delete would look like it worked and quietly not have.
+                        carrier_textures_in_use = warnings
+                            .iter()
+                            .filter_map(|w| w.strip_prefix("texture-in-use:").map(str::to_string))
+                            .collect();
                         // A model-data conflict ships a carrier whose geometry is known-wrong.
                         // That has to reach the user directly: it is not something they can
                         // diagnose from what they see in game.
@@ -6546,6 +6682,21 @@ impl VisionaryApp {
         // a way nothing else will explain, so it outranks the ordinary success line.
         if let Some(conflict) = &carrier_mesh_conflict {
             self.state.status = format!("Model data — {conflict}");
+        } else if carrier_added && !carrier_textures_in_use.is_empty() {
+            self.state.status = format!(
+                "Texture(s) {} were NOT deleted — emitters still sample them, through a sampler \
+                 slot the editor cannot see. Point those emitters elsewhere first.",
+                carrier_textures_in_use.join(", ")
+            );
+        } else if carrier_added && !carrier_dropped_textures.is_empty() {
+            // Ranked above the ordinary success line: the carrier shipped, but the replacement
+            // the user is waiting to see is not in it, and nothing in game will explain why.
+            self.state.status = format!(
+                "Carrier sent, but the replaced texture(s) {} are not in it — the carrier only \
+                 carries textures belonging to effects that ride it. Transplant or edit an \
+                 effect that uses the texture and send again.",
+                carrier_dropped_textures.join(", ")
+            );
         } else if carrier_added && !carrier_authored.is_empty() {
             let names: Vec<&str> = carrier_authored
                 .iter()
@@ -6564,14 +6715,27 @@ impl VisionaryApp {
                 "Carrier sent, but edits to {} could not be placed and were NOT applied",
                 carrier_dropped_edits.join(", ")
             );
-        } else if !carrier_authored.is_empty() && !carrier_added {
+        } else if carrier_added && !carrier_textures.is_empty() {
+            // Texture-only send: no authored edit and no transplant to report, so without this
+            // branch a successful send said nothing at all.
+            self.state.status = format!(
+                "Live carrier sent: {} replaced texture(s)",
+                carrier_textures.len()
+            );
+        } else if (!carrier_authored.is_empty() || !carrier_textures.is_empty()) && !carrier_added {
+            let what = if carrier_authored.is_empty() {
+                "Texture replacements"
+            } else {
+                "Edited effects"
+            };
             self.state.status = match &carrier_error {
-                Some(e) => format!("Edited effects NOT sent — carrier build failed: {e}"),
-                None => "Edited effects NOT sent — carrier was not built (see donor debug log)"
-                    .to_string(),
+                Some(e) => format!("{what} NOT sent — carrier build failed: {e}"),
+                None => {
+                    format!("{what} NOT sent — carrier was not built (see donor debug log)")
+                }
             };
         }
-        if !carrier_ops.is_empty() && !carrier_added {
+        if carrier_needed && !carrier_added {
             // Never arm the stable carrier path with bytes left over from an older selection.
             if let Some(target) = &carrier_target {
                 donor_specs.retain(|spec| &spec.target != target);
@@ -8240,8 +8404,7 @@ impl eframe::App for VisionaryApp {
             self.eff_editor.set_texture_imports(imports);
         }
         let t = self.perf.start();
-        self.eff_editor
-            .show(&ctx, &self.game_link);
+        self.eff_editor.show(&ctx, &self.game_link);
         self.perf.end("eff_editor", t);
         for removal in self.eff_editor.take_transplant_removals() {
             self.remove_transplant_from_editor(removal);
@@ -8503,6 +8666,47 @@ impl eframe::App for VisionaryApp {
             } else {
                 self.state.status =
                     "Select a fighter before replacing a texture — the replacement has to be \
+                     recorded against one."
+                        .to_string();
+            }
+        }
+
+        // Drain pool-shape changes the same way. These are ordered additions-then-removals to
+        // match how the build applies them, and both are recorded against the loaded eff's
+        // fighter, not the texture — a pool texture belongs to the file, not to one effect.
+        let texture_additions = self.eff_editor.take_texture_additions();
+        let texture_removals = self.eff_editor.take_texture_removals();
+        if !texture_additions.is_empty() || !texture_removals.is_empty() {
+            if let Some(fighter) = current_fighter.clone() {
+                let entry = self.eff_mods.entry(fighter.clone()).or_default();
+                if entry.source_rel.is_empty() {
+                    entry.source_rel = format!("effect/fighter/{fighter}/ef_{fighter}.eff");
+                }
+                for add in texture_additions {
+                    self.state.status =
+                        format!("Texture '{}' added for {fighter}", add.texture_name);
+                    entry
+                        .textures_added
+                        .retain(|t| t.texture_name != add.texture_name);
+                    entry.textures_added.push(add);
+                }
+                for name in texture_removals {
+                    // A texture the user ADDED and then deleted leaves nothing behind: dropping
+                    // the addition is the whole undo. Recording a removal for it as well would
+                    // ask the build to delete a texture the eff never had.
+                    let was_ours = entry.textures_added.iter().any(|t| t.texture_name == name);
+                    entry.textures_added.retain(|t| t.texture_name != name);
+                    entry.textures.retain(|t| t.texture_name != name);
+                    if !was_ours && !entry.textures_removed.contains(&name) {
+                        entry.textures_removed.push(name.clone());
+                    }
+                    self.state.status = format!("Texture '{name}' removed for {fighter}");
+                }
+                // Like a transplant, this previews in-app and sends nothing until asked.
+                self.eff_editor.mark_unsent();
+            } else {
+                self.state.status =
+                    "Select a fighter before changing the texture pool — the change has to be \
                      recorded against one."
                         .to_string();
             }
@@ -9297,7 +9501,13 @@ fn legacy_config_path(key: &str) -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|base| base.join("ssbu_hitbox_editor").join(key))
 }
 
-fn save_config_path(key: &str, path: &std::path::Path) {
+/// Config key for the eff editor's dump root. Separate from `data_root` because that window
+/// may point at a different folder than the main one (a mod dump, an older extract), and the
+/// pick has to survive a restart — it used to fall back to the process cwd, i.e. whatever
+/// folder the app happened to be launched from.
+pub(crate) const EFF_ROOT_CONFIG_KEY: &str = "eff_root";
+
+pub(crate) fn save_config_path(key: &str, path: &std::path::Path) {
     if let Some(dest) = config_path(key) {
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);

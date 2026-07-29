@@ -32,6 +32,15 @@ use crate::effects::{load_effect, ColorKey, EmitterDef, PtclFile, TextureInfo};
 use crate::game_link::{GameLink, LinkStatus};
 use crate::mod_project::{AuthoredEdit, EmitterFieldEdits, TransplantOp};
 
+/// Everything that decides what the texture thumbnail should show: the eff, the pool index, the
+/// replacement PNG's path and modification time, and whether raw form is selected.
+///
+/// Two parts of this are easy to miss. The mtime: exporting to `star.png`, painting it, and
+/// importing `star.png` again leaves the path identical, so without it the panel would keep
+/// showing the previous import. And the pool generation, because adding or removing a texture
+/// changes what an INDEX means without changing the eff or the file on disk.
+type TexturePreviewKey = (PathBuf, usize, String, bool, u128, u64);
+
 /// Pristine copy of the editable authored fields of one emitter.
 #[derive(Clone)]
 struct EmitterSnapshot {
@@ -155,6 +164,13 @@ pub struct EffEditor {
     texture_pool: Option<Vec<u8>>,
     /// Texture replacements the user picked, drained by the app into the project store.
     pending_texture_imports: Vec<crate::mod_project::TextureImport>,
+    /// Pool textures the user added, drained by the app into the project store.
+    pending_texture_additions: Vec<crate::mod_project::TextureAddition>,
+    /// Names of pool textures the user removed, drained by the app.
+    pending_texture_removals: Vec<String>,
+    /// Bumped whenever `texture_pool` is rebuilt in place. Part of the preview cache key: adding
+    /// or removing a texture changes what an index means without changing the path or the file.
+    texture_pool_gen: u64,
     /// The project's texture replacements for the loaded eff, fed by the app each frame so
     /// the texture panel can show what is already replaced.
     texture_imports: Vec<crate::mod_project::TextureImport>,
@@ -164,10 +180,14 @@ pub struct EffEditor {
     /// Pool index + info of the texture the selected emitter samples, published by the emitter
     /// column for the texture panel on the right.
     selected_texture: Option<(usize, TextureInfo)>,
-    /// Decoded preview for one pool texture, keyed by (loaded eff, pool index). `None` in the
-    /// second slot means "tried and could not" — kept so a failing texture is not re-decoded
-    /// every frame.
-    texture_preview: Option<((PathBuf, usize), Option<egui::TextureHandle>)>,
+    /// Decoded thumbnail for the selected texture. `None` in the second slot means "tried and
+    /// could not" — kept so a failing texture is not re-decoded every frame.
+    texture_preview: Option<(TexturePreviewKey, Option<egui::TextureHandle>)>,
+    /// Show textures as the stored channels rather than in editable form.
+    show_raw_textures: bool,
+    /// Plain-English note about the selected texture's layout, refreshed with the thumbnail.
+    /// Cached because working it out means decoding the texture, which must not happen per frame.
+    texture_form_note: String,
     /// Pristine snapshots per emitter set, parallel to `ptcl.emitter_sets`.
     pristine: Vec<Vec<EmitterSnapshot>>,
     entries: Vec<EffEntry>,
@@ -241,10 +261,15 @@ impl Default for EffEditor {
             ptcl: None,
             texture_pool: None,
             pending_texture_imports: Vec::new(),
+            pending_texture_additions: Vec::new(),
+            pending_texture_removals: Vec::new(),
+            texture_pool_gen: 0,
             texture_imports: Vec::new(),
             texture_note: None,
             selected_texture: None,
             texture_preview: None,
+            show_raw_textures: false,
+            texture_form_note: String::new(),
             pristine: Vec::new(),
             entries: Vec::new(),
             entry_filter: String::new(),
@@ -377,7 +402,11 @@ impl EffEditor {
         self.entries.clear();
         self.selected_entry = None;
         self.selected_emitter = 0;
-        self.eff_dirty_at = None;
+        // `eff_dirty_at` deliberately SURVIVES a load: it tracks project-vs-game divergence,
+        // not the working copy. Clearing it here silently undid the `mark_unsent` a transplant
+        // had just done, because recording one reloads the eff from the merged preview — so the
+        // Send button went back to grey the frame after a transplant lit it. It is cleared where
+        // the divergence actually ends, in `request_live_apply`.
 
         // Character-centric view: the fighter's base eff transparently resolves to its
         // MERGED (transplants applied) file when one exists — the new/replaced entries
@@ -483,6 +512,66 @@ impl EffEditor {
         self.texture_imports = imports;
     }
 
+    /// Pool textures added since the last drain (the app owns the project store).
+    pub fn take_texture_additions(&mut self) -> Vec<crate::mod_project::TextureAddition> {
+        std::mem::take(&mut self.pending_texture_additions)
+    }
+
+    /// Pool textures removed since the last drain.
+    pub fn take_texture_removals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_texture_removals)
+    }
+
+    /// How many of the loaded eff's emitters sample pool texture `index`.
+    ///
+    /// Counts sampler0 ONLY, because that is all the editor's model carries — `convert_emitter`
+    /// resolves `sampler0` and discards the other five. So this is a lower bound: a texture used
+    /// only as a distortion or mask input reads as unused here. The export-side removal pass
+    /// checks all six and refuses with a `texture-in-use` warning, which is the backstop.
+    fn texture_users(&self, index: usize) -> usize {
+        self.ptcl
+            .as_ref()
+            .map(|p| {
+                p.emitter_sets
+                    .iter()
+                    .flat_map(|set| set.emitters.iter())
+                    .filter(|em| em.texture_index == Some(index as u32))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Point the selected emitter at pool texture `index`.
+    fn point_selected_emitter_at(&mut self, index: usize) {
+        if let (Some(entry_idx), Some(ptcl)) = (self.selected_entry, self.ptcl.as_mut()) {
+            let set_idx = self.entries[entry_idx].set_idx;
+            if let Some(em) = ptcl
+                .emitter_sets
+                .get_mut(set_idx)
+                .and_then(|s| s.emitters.get_mut(self.selected_emitter))
+            {
+                em.texture_index = Some(index as u32);
+                self.eff_dirty_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Adopt a rebuilt pool that has one texture appended, and point the emitter at it.
+    ///
+    /// The editor's own view has to move with the pool or the panel lies: the label list, the
+    /// preview and the index a swap edit records all read from `bntx_textures`.
+    fn adopt_appended_texture(&mut self, pool: Vec<u8>, info: TextureInfo) {
+        self.texture_pool = Some(pool);
+        self.texture_pool_gen += 1;
+        let Some(ptcl) = self.ptcl.as_mut() else {
+            return;
+        };
+        ptcl.bntx_textures.push(info.clone());
+        let new_index = ptcl.bntx_textures.len() - 1;
+        self.selected_texture = Some((new_index, info));
+        self.point_selected_emitter_at(new_index);
+    }
+
     fn current_edit_source(&self) -> Option<&EditSource> {
         let loaded = self.loaded_path.as_ref()?;
         self.edit_sources.iter().find(|source| {
@@ -500,6 +589,15 @@ impl EffEditor {
             .find(|item| item.entry_name.eq_ignore_ascii_case(entry_name))
             .cloned()
             .map(|item| (source.fighter.clone(), item))
+    }
+
+    /// Which form the texture panel is showing and importing in.
+    fn texture_form(&self) -> crate::texture_import::Form {
+        if self.show_raw_textures {
+            crate::texture_import::Form::Raw
+        } else {
+            crate::texture_import::Form::Editable
+        }
     }
 
     /// Names of the loaded eff's pool textures, in pool order.
@@ -638,6 +736,9 @@ impl EffEditor {
     /// in and the original kind is aliased onto the clone. Transplants, texture imports and
     /// texture swaps all ride that same rebuild.
     pub fn request_live_apply(&mut self) {
+        // The game is about to be given everything we hold, so the unsent marker goes out here —
+        // the one place that is true of, whichever button or project load asked for the send.
+        self.eff_dirty_at = None;
         self.live_deploy_request = true;
         self.sending = true;
         self.deploy_defer = true;
@@ -953,7 +1054,6 @@ impl EffEditor {
                 })
                 .clicked()
             {
-                self.eff_dirty_at = None;
                 self.request_live_apply();
             }
             if self.sending || self.awaiting_game.is_some() {
@@ -1022,14 +1122,22 @@ impl EffEditor {
             }
             ui.separator();
 
-            ui.label(egui::RichText::new(self.export_root.display().to_string()).small());
+            ui.label(egui::RichText::new(self.export_root.display().to_string()).small())
+                .on_hover_text(
+                    "Where this window reads base .eff files from. Follows the data root you \
+                     opened in the main window until you pick one here.",
+                );
             if ui.small_button("Change…").clicked() {
-                if let Some(dir) = rfd::FileDialog::new()
-                    .set_title("Select ArcExplorer export root")
-                    .pick_folder()
-                {
-                    self.export_root = dir;
-                    self.rescan();
+                let mut dialog = rfd::FileDialog::new().set_title("Select ArcExplorer export root");
+                // Start where we already are, not in the launch folder.
+                if self.export_root.is_dir() {
+                    dialog = dialog.set_directory(&self.export_root);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    self.set_export_root(dir.clone());
+                    // Remembered across restarts, and it outranks the data root next launch —
+                    // picking a folder here used to last only as long as the session.
+                    crate::app::save_config_path(crate::app::EFF_ROOT_CONFIG_KEY, &dir);
                 }
             }
             if ui.small_button("Rescan").clicked() {
@@ -1540,6 +1648,22 @@ impl EffEditor {
                     .collect()
             })
             .unwrap_or_default();
+        // Only same-size textures are offered. An emitter carries UV rects, scroll rates and
+        // frame counts authored against its texture's dimensions, so pointing it at a different
+        // size does not scale the effect — it resamples it, and the result reads as a bug rather
+        // than an edit. Rather than let the picker offer a choice that is always wrong, the
+        // mismatched ones are shown greyed with the reason.
+        let same_size: Vec<bool> = self
+            .ptcl
+            .as_ref()
+            .map(|p| {
+                p.bntx_textures
+                    .iter()
+                    .map(|t| (t.width, t.height) == (texture.width, texture.height))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let offered = same_size.iter().filter(|ok| **ok).count();
         let mut swap_to = None;
         egui::ComboBox::from_id_salt("emitter_texture_swap")
             .selected_text(
@@ -1551,16 +1675,26 @@ impl EffEditor {
             .width(280.0)
             .show_ui(ui, |ui| {
                 for (i, label) in labels.iter().enumerate() {
-                    if ui.selectable_label(index == i, label).clicked() {
-                        swap_to = Some(i as u32);
+                    if same_size.get(i).copied().unwrap_or(true) {
+                        if ui.selectable_label(index == i, label).clicked() {
+                            swap_to = Some(i as u32);
+                        }
+                    } else {
+                        ui.add_enabled(false, egui::Button::selectable(false, label))
+                            .on_disabled_hover_text(format!(
+                                "Not {}×{} — an emitter's UV rects are authored for its texture's \
+                             size, so a different one resamples the effect.",
+                                texture.width, texture.height
+                            ));
                     }
                 }
             })
             .response
-            .on_hover_text(
-                "Point this emitter at another of the eff's textures. Ships with the next \
-                 Send, like any other emitter edit.",
-            );
+            .on_hover_text(format!(
+                "Point this emitter at another of the eff's textures. Only the {offered} at \
+                 {}×{} are offered. Ships with the next Send, like any other emitter edit.",
+                texture.width, texture.height
+            ));
         // Every other control in this window shows what it started as; a swap is an edit like
         // any other and gets the same treatment, so a changed texture is visible without
         // opening the picker to compare.
@@ -1605,25 +1739,74 @@ impl EffEditor {
     /// decompressing this thumbnail than rendering the rest of the app.
     fn draw_texture_preview(&mut self, ui: &mut Ui, index: usize, texture: &TextureInfo) {
         const PREVIEW: u32 = 168;
-        let key = (self.loaded_path.clone().unwrap_or_default(), index);
+        // A replaced texture previews from the PNG the user picked. The pool still holds the
+        // game's original — it is only rebuilt when the carrier is built — so decoding the pool
+        // here would show the texture that was just replaced and read as "the import did nothing".
+        let replacement = self
+            .texture_imports
+            .iter()
+            .find(|t| t.texture_name == texture.tex_name && !t.png_path.is_empty())
+            .map(|t| t.png_path.clone())
+            .unwrap_or_default();
+        let form = self.texture_form();
+        // The form is part of the key: flipping the checkbox has to re-decode, and so does
+        // re-importing the SAME path after painting it again — hence the file's mtime.
+        let stamp = std::fs::metadata(&replacement)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let key = (
+            self.loaded_path.clone().unwrap_or_default(),
+            index,
+            replacement.clone(),
+            form == crate::texture_import::Form::Raw,
+            stamp,
+            self.texture_pool_gen,
+        );
         if self.texture_preview.as_ref().map(|(k, _)| k) != Some(&key) {
-            let handle = self.texture_pool.as_ref().and_then(|pool| {
-                crate::texture_import::decode_rgba(
-                    pool,
-                    index,
-                    &texture.tex_name,
-                    Some(PREVIEW),
-                )
-                .ok()
-                .map(|image| {
-                    let size = [image.width() as usize, image.height() as usize];
-                    ui.ctx().load_texture(
-                        format!("eff_tex_{index}"),
-                        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
-                        egui::TextureOptions::LINEAR,
+            let decoded = if replacement.is_empty() {
+                self.texture_pool.as_ref().and_then(|pool| {
+                    crate::texture_import::decode_preview(
+                        pool,
+                        index,
+                        &texture.tex_name,
+                        form,
+                        Some(PREVIEW),
                     )
+                    .ok()
                 })
+            } else {
+                // Previewed through the same conversion the import runs, so an edited mask shows
+                // as the shape the game will draw rather than as a black-and-white square.
+                std::fs::read(&replacement)
+                    .ok()
+                    .and_then(|png| match self.texture_pool.as_ref() {
+                        Some(pool) => crate::texture_import::decode_import_preview(
+                            pool,
+                            index,
+                            &texture.tex_name,
+                            &png,
+                            form,
+                            Some(PREVIEW),
+                        )
+                        .ok(),
+                        None => crate::texture_import::decode_png_rgba(&png, Some(PREVIEW)).ok(),
+                    })
+            };
+            let handle = decoded.map(|image| {
+                let size = [image.width() as usize, image.height() as usize];
+                ui.ctx().load_texture(
+                    format!("eff_tex_{index}"),
+                    egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                    egui::TextureOptions::LINEAR,
+                )
             });
+            self.texture_form_note = match self.texture_pool.as_ref() {
+                Some(pool) => describe_form(pool, index, &texture.tex_name, form),
+                None => String::new(),
+            };
             self.texture_preview = Some((key, handle));
         }
 
@@ -1631,8 +1814,9 @@ impl EffEditor {
             Some(handle) => {
                 let size = handle.size_vec2();
                 let scale = PREVIEW as f32 / size.x.max(size.y).max(1.0);
-                // Checkerboard behind it: effect textures are mostly alpha, and on a flat
-                // background a soft-edged puff reads as "nothing decoded".
+                // Checkerboard behind it, for the textures that still carry alpha in editable
+                // form: on a flat background a soft-edged puff reads as "nothing decoded". Masks
+                // come through opaque, so it simply never shows for those.
                 let (rect, _) = ui.allocate_exact_size(size * scale, egui::Sense::hover());
                 let painter = ui.painter();
                 let cell = 8.0;
@@ -1646,11 +1830,7 @@ impl EffEditor {
                             egui::vec2(cell, cell),
                         )
                         .intersect(rect);
-                        painter.rect_filled(
-                            cell_rect,
-                            0.0,
-                            egui::Color32::from_gray(shade),
-                        );
+                        painter.rect_filled(cell_rect, 0.0, egui::Color32::from_gray(shade));
                     }
                 }
                 painter.image(
@@ -1672,6 +1852,235 @@ impl EffEditor {
                 );
             }
         }
+
+        // One switch for the whole panel: preview, export, and import all follow it. Keeping
+        // them together is deliberate — they are the same question, and letting them disagree is
+        // how an image gets interpreted in the form it is not in.
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(
+                &mut self.show_raw_textures,
+                egui::RichText::new("Raw channels").small(),
+            )
+            .on_hover_text(
+                "Switches all three at once: what the preview shows, what 'Export PNG' writes, \
+                 and how an imported PNG is read.\n\nOff: as the game samples it — the channel \
+                 swizzle resolved, transparency against the checkerboard, and exports you can \
+                 paint on.\n\nOn: the stored channels as the file holds them. Leave it ticked \
+                 to import a raw PNG back.",
+            );
+            if !self.texture_form_note.is_empty() {
+                ui.label(
+                    egui::RichText::new(&self.texture_form_note)
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+            }
+        });
+    }
+
+    /// Pool-shape operations: give this emitter a texture of its own, or drop one.
+    ///
+    /// These exist because a pool texture is SHARED. Every emitter that samples it changes when
+    /// it changes, and the `ef_cmn_*` names are shared by dozens of effects inside a single eff,
+    /// so "edit the texture" and "edit this effect's texture" are different jobs. Duplicating and
+    /// repointing is the only way to do the second one.
+    fn draw_texture_pool_ops(&mut self, ui: &mut Ui, index: usize, texture: &TextureInfo) {
+        let pool = self.texture_pool.clone();
+        let names = self.texture_names();
+        let can_convert = texture.convertible && pool.is_some();
+        let has_emitter = self.selected_entry.is_some();
+        let users = self.texture_users(index);
+
+        ui.horizontal_wrapped(|ui| {
+            // A duplicate is a rename, not a re-encode, so it works for ANY format Visionary can
+            // slice — including the ones it cannot decode to a PNG.
+            if ui
+                .add_enabled(
+                    pool.is_some() && has_emitter,
+                    egui::Button::new("Duplicate for this emitter").small(),
+                )
+                .on_hover_text(
+                    "Add a private copy of this texture and point THIS emitter at it. Edit the \
+                     copy freely — every other effect sampling the original is left alone. The \
+                     copy is byte-identical, not re-encoded.",
+                )
+                .on_disabled_hover_text(if pool.is_none() {
+                    "This eff has no texture archive"
+                } else {
+                    "Select an emitter first — the copy is pointed at it"
+                })
+                .clicked()
+            {
+                let pool_bytes = pool.clone().unwrap_or_default();
+                let new_name =
+                    crate::texture_import::unique_texture_name(&names, &texture.tex_name);
+                match crate::texture_import::duplicate_texture(
+                    &pool_bytes,
+                    &names,
+                    index,
+                    &new_name,
+                ) {
+                    Ok(rebuilt) => {
+                        let mut info = texture.clone();
+                        info.tex_name = new_name.clone();
+                        self.adopt_appended_texture(rebuilt, info);
+                        self.pending_texture_additions
+                            .push(crate::mod_project::TextureAddition {
+                                texture_name: new_name.clone(),
+                                template_name: texture.tex_name.clone(),
+                                png_path: String::new(),
+                                raw: false,
+                            });
+                        self.texture_note =
+                            Some((format!("added {new_name} — this emitter now uses it"), true));
+                    }
+                    Err(e) => self.texture_note = Some((format!("duplicate failed: {e}"), false)),
+                }
+            }
+
+            if ui
+                .add_enabled(
+                    can_convert && has_emitter,
+                    egui::Button::new("Import as new texture").small(),
+                )
+                .on_hover_text(
+                    "Add your image as a NEW pool texture and point this emitter at it, leaving \
+                     the original in place for everything else. Must be the same size as the \
+                     texture it takes over from.",
+                )
+                .on_disabled_hover_text(if pool.is_none() {
+                    "This eff has no texture archive".to_string()
+                } else if !has_emitter {
+                    "Select an emitter first — the new texture is pointed at it".to_string()
+                } else {
+                    format!("Visionary cannot convert {}", texture.format)
+                })
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Choose a PNG for the new texture")
+                    .add_filter("PNG", &["png"])
+                    .pick_file()
+                {
+                    let pool_bytes = pool.clone().unwrap_or_default();
+                    let new_name =
+                        crate::texture_import::unique_texture_name(&names, &texture.tex_name);
+                    let form = self.texture_form();
+                    // Encoded NOW so a wrong size or a bad image is rejected here, where the user
+                    // is looking at it — not silently, mid carrier build, minutes later.
+                    match std::fs::read(&path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|png| {
+                            crate::texture_import::add_texture_from_png(
+                                &pool_bytes,
+                                &names,
+                                index,
+                                &new_name,
+                                &png,
+                                form,
+                            )
+                        }) {
+                        Ok((rebuilt, report)) => {
+                            let mut info = texture.clone();
+                            info.tex_name = new_name.clone();
+                            self.adopt_appended_texture(rebuilt, info);
+                            self.pending_texture_additions.push(
+                                crate::mod_project::TextureAddition {
+                                    texture_name: new_name.clone(),
+                                    template_name: texture.tex_name.clone(),
+                                    png_path: path.to_string_lossy().to_string(),
+                                    raw: form == crate::texture_import::Form::Raw,
+                                },
+                            );
+                            self.texture_note = Some((
+                                format!(
+                                    "added {new_name}: {}×{} {} — this emitter now uses it",
+                                    report.width, report.height, report.format
+                                ),
+                                true,
+                            ));
+                        }
+                        Err(e) => self.texture_note = Some((format!("import failed: {e}"), false)),
+                    }
+                }
+            }
+
+            // Deleting is gated on nothing sampling it, because a pool without a texture some
+            // emitter still addresses leaves that emitter pointing at a GUID no descriptor holds
+            // — which draws nothing at all. Repoint the users first (the swap picker only offers
+            // same-size textures, so the replacement always fits).
+            let deletable = pool.is_some() && users == 0 && names.len() > 1;
+            if ui
+                .add_enabled(deletable, egui::Button::new("Delete texture").small())
+                .on_hover_text(
+                    "Remove this texture from the eff. Only possible once nothing samples it.",
+                )
+                .on_disabled_hover_text(if pool.is_none() {
+                    "This eff has no texture archive".to_string()
+                } else if names.len() <= 1 {
+                    "This is the eff's only texture".to_string()
+                } else {
+                    format!(
+                        "{users} emitter(s) still sample this texture. Point them at another one \
+                         first — use the texture picker on each."
+                    )
+                })
+                .clicked()
+            {
+                let pool_bytes = pool.clone().unwrap_or_default();
+                match crate::texture_import::remove_texture(&pool_bytes, &names, index) {
+                    Ok(rebuilt) => {
+                        let gone = texture.tex_name.clone();
+                        self.drop_texture_at(index, rebuilt);
+                        self.pending_texture_removals.push(gone.clone());
+                        self.texture_note = Some((format!("removed {gone}"), true));
+                    }
+                    Err(e) => self.texture_note = Some((format!("delete failed: {e}"), false)),
+                }
+            }
+        });
+
+        if users > 1 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{users} emitters share this texture — editing it changes all of them"
+                ))
+                .small()
+                .color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60)),
+            );
+        }
+    }
+
+    /// Drop pool texture `index` from the editor's view, keeping emitter indices valid.
+    ///
+    /// Removing a texture shifts every LATER index down by one, and the pristine snapshots have
+    /// to shift with the working copy — otherwise the next diff reports a swap on every emitter
+    /// above the hole, and those phantom edits would ship.
+    fn drop_texture_at(&mut self, index: usize, pool: Vec<u8>) {
+        self.texture_pool = Some(pool);
+        self.texture_pool_gen += 1;
+        let shift = |slot: &mut Option<u32>| {
+            if let Some(i) = slot {
+                if *i as usize > index {
+                    *i -= 1;
+                }
+            }
+        };
+        if let Some(ptcl) = self.ptcl.as_mut() {
+            ptcl.bntx_textures.remove(index);
+            for set in ptcl.emitter_sets.iter_mut() {
+                for em in set.emitters.iter_mut() {
+                    shift(&mut em.texture_index);
+                }
+            }
+        }
+        for set in self.pristine.iter_mut() {
+            for snapshot in set.iter_mut() {
+                shift(&mut snapshot.texture_index);
+            }
+        }
+        self.selected_texture = None;
+        self.eff_dirty_at = Some(Instant::now());
     }
 
     fn draw_texture_import(&mut self, ui: &mut Ui, index: usize, texture: &TextureInfo) {
@@ -1695,9 +2104,26 @@ impl EffEditor {
             let pool = self.texture_pool.clone();
             let can_convert = texture.convertible && pool.is_some();
 
+            // ONE export button, whose form the "Raw channels" box decides — the same box that
+            // decides what the preview shows and how an imported PNG is read. Two buttons made
+            // the form settable in two places that could disagree with the preview; with one,
+            // what you see is what you get and there is nothing to keep in sync.
+            let form = self.texture_form();
             if ui
-                .add_enabled(can_convert, egui::Button::new("Export PNG…").small())
-                .on_hover_text("Save this texture as a PNG to paint over")
+                .add_enabled(can_convert, egui::Button::new("Export PNG").small())
+                .on_hover_text(match form {
+                    crate::texture_import::Form::Editable => {
+                        "Save what the preview is showing as something you can paint on: black \
+                         where the effect is empty, white where it is solid, and it keeps its \
+                         transparency. Either edit works, so painting black erases and so does \
+                         erasing."
+                    }
+                    crate::texture_import::Form::Raw => {
+                        "Save the texture's stored channels as the file holds them. Only useful \
+                         if you know the packing — and 'Raw channels' has to stay ticked to \
+                         import it back."
+                    }
+                })
                 .on_disabled_hover_text(if pool.is_none() {
                     "This eff has no texture archive".to_string()
                 } else {
@@ -1705,18 +2131,31 @@ impl EffEditor {
                 })
                 .clicked()
             {
+                // The suffix keeps the two forms apart on disk. Importing the wrong one puts the
+                // shape in the wrong channel, and the filename is the only warning you get.
+                let suffix = if form == crate::texture_import::Form::Raw {
+                    "_raw"
+                } else {
+                    ""
+                };
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title("Export texture as PNG")
-                    .set_file_name(format!("{name}.png"))
+                    .set_file_name(format!("{name}{suffix}.png"))
                     .add_filter("PNG", &["png"])
                     .save_file()
                 {
                     let pool = pool.clone().unwrap_or_default();
                     self.texture_note = Some(
-                        match crate::texture_import::export_png(&pool, index, &name)
+                        match crate::texture_import::export_png(&pool, index, &name, form)
                             .and_then(|png| Ok(std::fs::write(&path, png)?))
                         {
-                            Ok(()) => (format!("exported {name}.png"), true),
+                            Ok(()) => (
+                                format!(
+                                    "exported {name}{suffix}.png ({})",
+                                    describe_form(&pool, index, &name, form)
+                                ),
+                                true,
+                            ),
                             Err(e) => (format!("export failed: {e}"), false),
                         },
                     );
@@ -1724,11 +2163,21 @@ impl EffEditor {
             }
 
             if ui
-                .add_enabled(can_convert, egui::Button::new("Replace with PNG…").small())
-                .on_hover_text(
-                    "Use your own image for this texture. EVERY emitter that samples it \
-                     changes — this replaces the texture, not just this emitter's use of it.",
-                )
+                .add_enabled(can_convert, egui::Button::new("Replace with PNG").small())
+                .on_hover_text(match form {
+                    crate::texture_import::Form::Editable => {
+                        "Use your own image for this texture, read the same way 'Export PNG' \
+                         wrote it: black is empty, white is solid.\n\nEVERY emitter that samples \
+                         this texture changes — it replaces the texture, not just this emitter's \
+                         use of it."
+                    }
+                    crate::texture_import::Form::Raw => {
+                        "Use your own image, read as the texture's stored channels. Only correct \
+                         for a PNG exported with 'Raw channels' ticked.\n\nEVERY emitter that \
+                         samples this texture changes — it replaces the texture, not just this \
+                         emitter's use of it."
+                    }
+                })
                 .on_disabled_hover_text(if pool.is_none() {
                     "This eff has no texture archive".to_string()
                 } else {
@@ -1745,22 +2194,31 @@ impl EffEditor {
                     // looking at it — not silently, mid carrier build, minutes later.
                     let pool = pool.clone().unwrap_or_default();
                     let names: Vec<String> = self.texture_names();
-                    match std::fs::read(&path).map_err(anyhow::Error::from).and_then(
-                        |png| crate::texture_import::replace_with_png(&pool, &names, index, &png),
-                    ) {
+                    match std::fs::read(&path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|png| {
+                            crate::texture_import::replace_with_png(
+                                &pool, &names, index, &png, form,
+                            )
+                        }) {
                         Ok((_, report)) => {
                             self.pending_texture_imports
                                 .push(crate::mod_project::TextureImport {
                                     texture_name: name.clone(),
                                     png_path: path.to_string_lossy().to_string(),
+                                    raw: form == crate::texture_import::Form::Raw,
                                 });
+                            let shape = match report.layout {
+                                Some(layout) => format!(" — {}", layout_note(layout)),
+                                None => String::new(),
+                            };
                             let note = match &report.format_substituted_from {
                                 Some(original) => format!(
-                                    "{name}: {}×{} — {original} cannot be written, saved as {}",
+                                    "{name}: {}×{} — {original} cannot be written, saved as {}{shape}",
                                     report.width, report.height, report.format
                                 ),
                                 None => format!(
-                                    "{name}: {}×{} {}",
+                                    "{name}: {}×{} {}{shape}",
                                     report.width, report.height, report.format
                                 ),
                             };
@@ -1785,11 +2243,14 @@ impl EffEditor {
                         .push(crate::mod_project::TextureImport {
                             texture_name: name.clone(),
                             png_path: String::new(),
+                            raw: false,
                         });
                     self.eff_dirty_at = Some(Instant::now());
                 }
             }
         });
+
+        self.draw_texture_pool_ops(ui, index, texture);
 
         if let Some(existing) = &replaced {
             ui.label(
@@ -2046,6 +2507,33 @@ impl EffEditor {
     }
 }
 
+/// Plain-English name for what a texture carries, for the panel and the import note.
+fn layout_note(layout: crate::texture_import::Layout) -> &'static str {
+    use crate::texture_import::Layout;
+    match layout {
+        Layout::Mask => "a black-and-white mask: black is empty, white is solid",
+        Layout::Matte { .. } => "a shape on a flat colour: black is empty, white is solid",
+        Layout::Opaque => "a fully opaque image: every pixel draws",
+        Layout::ColorAlpha => "colour plus its own transparency — keep the alpha channel",
+    }
+}
+
+/// What the panel is currently showing, so the form in use is never a guess.
+fn describe_form(
+    pool: &[u8],
+    index: usize,
+    name: &str,
+    form: crate::texture_import::Form,
+) -> String {
+    if form == crate::texture_import::Form::Raw {
+        return "raw stored channels".to_string();
+    }
+    match crate::texture_import::layout_of_public(pool, index, name) {
+        Ok(layout) => layout_note(layout).to_string(),
+        Err(_) => "editable form".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2275,6 +2763,31 @@ mod tests {
         let after = editor.collect_authored_edits();
         assert_eq!(after.len(), 1, "the edit is back in the panel's diff");
         assert_eq!(after[0].fields.scale, Some(2.5));
+    }
+
+    /// Recording a transplant marks the project unsent AND reloads the eff from the merged
+    /// preview. The reload used to clear the marker, so the Send button lit for a frame and went
+    /// back to grey — the user was never told the running game hadn't been given the transplant.
+    #[test]
+    fn a_reload_keeps_the_unsent_marker() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        editor.mark_unsent();
+        // The load itself fails (nothing on disk here); what matters is that it no longer wipes
+        // the marker on its way in, which the old reset did before this early return.
+        editor.load_eff(Path::new("/effect/fighter/kirby/_transplant_preview.eff"));
+        assert!(
+            editor.eff_dirty_at.is_some(),
+            "a reload cleared the unsent marker"
+        );
+    }
+
+    /// Handing everything to the game is what clears it — from any caller, not just the button.
+    #[test]
+    fn requesting_a_live_apply_clears_the_unsent_marker() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        editor.mark_unsent();
+        editor.request_live_apply();
+        assert!(editor.eff_dirty_at.is_none());
     }
 
     /// A project load still pushes, so opening a project gets the game showing it.

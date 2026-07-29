@@ -84,11 +84,21 @@ pub struct EffMod {
     /// Pool textures the user replaced with their own image.
     #[serde(default)]
     pub textures: Vec<TextureImport>,
+    /// Pool textures the user ADDED, beyond the ones the eff shipped with.
+    #[serde(default)]
+    pub textures_added: Vec<TextureAddition>,
+    /// Names of pool textures the user removed.
+    #[serde(default)]
+    pub textures_removed: Vec<String>,
 }
 
 impl EffMod {
     pub fn is_empty(&self) -> bool {
-        self.authored.is_empty() && self.transplants.is_empty() && self.textures.is_empty()
+        self.authored.is_empty()
+            && self.transplants.is_empty()
+            && self.textures.is_empty()
+            && self.textures_added.is_empty()
+            && self.textures_removed.is_empty()
     }
 }
 
@@ -105,6 +115,36 @@ impl EffMod {
 pub struct TextureImport {
     pub texture_name: String,
     pub png_path: String,
+    /// The PNG holds the texture's STORED channels rather than the editable form.
+    ///
+    /// Recorded per import because the two are not interchangeable: reading an editable image as
+    /// raw (or the reverse) puts the shape in the wrong channel, which the game draws as a solid
+    /// square. Defaults to false, so a project written before this field existed is read as
+    /// editable — the only form there was.
+    #[serde(default)]
+    pub raw: bool,
+}
+
+/// A pool texture the user ADDED, on top of the ones the eff shipped with.
+///
+/// This is how one effect gets a texture of its own. A pool texture is shared by every emitter
+/// that samples it, and the `ef_cmn_*` names are shared by dozens of effects inside a single eff,
+/// so editing one to change a single effect changes all of them. Adding a private copy and
+/// repointing just that emitter is the only way to alter one effect and leave the rest alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextureAddition {
+    /// The new pool texture's name — unique within the eff.
+    pub texture_name: String,
+    /// The existing pool texture this one is shaped like: it supplies the format, the channel
+    /// swizzle and the required dimensions, and the pixels too when `png_path` is empty.
+    pub template_name: String,
+    /// Pixels from this PNG. Empty means "an exact copy of `template_name`", which is a rename
+    /// rather than a re-encode and so loses nothing.
+    #[serde(default)]
+    pub png_path: String,
+    /// The PNG holds stored channels rather than the editable form. See [`TextureImport::raw`].
+    #[serde(default)]
+    pub raw: bool,
 }
 
 /// One emitter's edited authored fields. Names are stored alongside indices; appliers

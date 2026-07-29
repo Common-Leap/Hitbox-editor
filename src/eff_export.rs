@@ -94,6 +94,8 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
     donor_root: &std::path::Path,
     authored: &[CarrierAuthored],
     textures: &[TextureImport],
+    added_textures: &[crate::mod_project::TextureAddition],
+    removed_textures: &[String],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<u8>> {
     // A carrier-native selection needs no transplant. The runtime remap already turns an `_os`
@@ -103,6 +105,8 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
     // texture the bytes MUST be rebuilt, otherwise those silently do not ship.
     if authored.is_empty()
         && textures.is_empty()
+        && added_textures.is_empty()
+        && removed_textures.is_empty()
         && !ops.is_empty()
         && ops
             .iter()
@@ -320,6 +324,10 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
         }
     }
 
+    // Textures the user ADDED go in before the authored edits, so a swap can resolve one by
+    // name, and after the prune, so the prune cannot drop one nothing samples yet.
+    apply_texture_additions(&mut carrier, added_textures, warnings)?;
+
     // Bake authored edits into the CLONED entries, last — after the transplant has created
     // them and after the shader-safety check, so an edit can never mask a bad clone.
     //
@@ -356,10 +364,173 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
     }
 
     apply_texture_imports(&mut carrier, textures, warnings)?;
+    // Removals last: the swaps that moved emitters off these textures have now been applied.
+    apply_texture_removals(&mut carrier, removed_textures, warnings)?;
 
     carrier
         .save()
         .context("effect_library failed to encode the runtime carrier .eff")
+}
+
+/// Every texture GUID some surviving emitter samples.
+fn sampled_texture_ids(ptcl: &effect_library::PtclFile) -> std::collections::HashSet<u64> {
+    let mut used = std::collections::HashSet::new();
+    for set in &ptcl.emitter_list.emitter_sets {
+        visit_emitters_ref(&set.emitters, &mut |em| {
+            let d = &em.data;
+            for id in [
+                d.sampler0.as_ref().map(|s| s.texture_id),
+                d.sampler1.as_ref().map(|s| s.texture_id),
+                d.sampler2.as_ref().map(|s| s.texture_id),
+                d.sampler3.as_ref().map(|s| s.texture_id),
+                d.sampler4.as_ref().map(|s| s.texture_id),
+                d.sampler5.as_ref().map(|s| s.texture_id),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                used.insert(id);
+            }
+        });
+    }
+    used
+}
+
+/// Grow the pool with the textures the user added.
+///
+/// Runs BEFORE authored edits, because a texture swap resolves its target by NAME against the
+/// descriptor table (`apply_authored`) — an addition applied afterwards would not exist yet and
+/// the swap would be skipped with a warning. And AFTER pruning, so the pruner cannot drop a
+/// texture nothing samples yet: the emitter that will use it is repointed by an edit that has not
+/// run.
+///
+/// A missing template is a WARNING, not a failure — same rule as a missing authored edit. A
+/// stale addition must not take a working carrier down with it.
+fn apply_texture_additions(
+    file: &mut effect_library::NamcoEffectFile,
+    additions: &[crate::mod_project::TextureAddition],
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let Some(textures) = file
+        .ptcl_file
+        .as_mut()
+        .and_then(|ptcl| ptcl.texture_info.as_mut())
+    else {
+        for add in additions {
+            warnings.push(format!("texture-add:{}", add.texture_name));
+        }
+        return Ok(());
+    };
+
+    for add in additions {
+        let names: Vec<String> = textures
+            .descriptors
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        if names.iter().any(|n| *n == add.texture_name) {
+            // Already present: a rebuild of a project that has been sent before.
+            continue;
+        }
+        let Some(template) = names.iter().position(|n| *n == add.template_name) else {
+            warnings.push(format!("texture-add:{}", add.texture_name));
+            continue;
+        };
+        let Some(pool) = textures.binary_data.as_ref() else {
+            warnings.push(format!("texture-add:{}", add.texture_name));
+            continue;
+        };
+        let rebuilt = if add.png_path.is_empty() {
+            crate::texture_import::duplicate_texture(pool, &names, template, &add.texture_name)
+                .with_context(|| {
+                    format!(
+                        "duplicating '{}' as '{}'",
+                        add.template_name, add.texture_name
+                    )
+                })?
+        } else {
+            let png = std::fs::read(&add.png_path).with_context(|| {
+                format!(
+                    "new texture '{}': cannot read {}",
+                    add.texture_name, add.png_path
+                )
+            })?;
+            let form = if add.raw {
+                crate::texture_import::Form::Raw
+            } else {
+                crate::texture_import::Form::Editable
+            };
+            let (rebuilt, _) = crate::texture_import::add_texture_from_png(
+                pool,
+                &names,
+                template,
+                &add.texture_name,
+                &png,
+                form,
+            )
+            .with_context(|| format!("adding {} as '{}'", add.png_path, add.texture_name))?;
+            rebuilt
+        };
+        let taken: Vec<u64> = textures.descriptors.iter().map(|d| d.id).collect();
+        let id = crate::texture_import::unused_descriptor_id(&taken, &add.texture_name);
+        textures
+            .descriptors
+            .push(effect_library::ptcl_file::TextureDescriptor {
+                id,
+                name: add.texture_name.clone(),
+            });
+        textures.binary_data = Some(rebuilt);
+    }
+    Ok(())
+}
+
+/// Drop the textures the user removed.
+///
+/// Runs LAST, so the swaps that moved emitters off the doomed texture have already been applied.
+/// A texture something still samples is KEPT, with a warning: writing a pool without it would
+/// leave that emitter addressing a GUID no descriptor holds, which renders as nothing at all.
+/// The editor blocks the delete for the same reason, so reaching this is either a stale project
+/// or a swap that could not be placed.
+fn apply_texture_removals(
+    file: &mut effect_library::NamcoEffectFile,
+    removals: &[String],
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if removals.is_empty() {
+        return Ok(());
+    }
+    let Some(ptcl) = file.ptcl_file.as_mut() else {
+        return Ok(());
+    };
+    let still_used = sampled_texture_ids(ptcl);
+    let Some(textures) = ptcl.texture_info.as_mut() else {
+        return Ok(());
+    };
+    for name in removals {
+        let names: Vec<String> = textures
+            .descriptors
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        let Some(index) = names.iter().position(|n| n == name) else {
+            continue; // already gone, or pruned — nothing to do
+        };
+        if still_used.contains(&textures.descriptors[index].id) {
+            warnings.push(format!("texture-in-use:{name}"));
+            continue;
+        }
+        let Some(pool) = textures.binary_data.as_ref() else {
+            continue;
+        };
+        let rebuilt = crate::texture_import::remove_texture(pool, &names, index)
+            .with_context(|| format!("removing texture '{name}'"))?;
+        textures.descriptors.remove(index);
+        textures.binary_data = Some(rebuilt);
+    }
+    Ok(())
 }
 
 /// Replace pool textures with the user's own images.
@@ -407,9 +578,25 @@ fn apply_texture_imports(
                 import.texture_name, import.png_path
             )
         })?;
-        let names: Vec<String> = textures.descriptors.iter().map(|d| d.name.clone()).collect();
-        let (rebuilt, report) = crate::texture_import::replace_with_png(pool, &names, index, &png)
-            .with_context(|| format!("importing {} over '{}'", import.png_path, import.texture_name))?;
+        let names: Vec<String> = textures
+            .descriptors
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        let form = if import.raw {
+            crate::texture_import::Form::Raw
+        } else {
+            crate::texture_import::Form::Editable
+        };
+        let (rebuilt, report) = crate::texture_import::replace_with_png(
+            pool, &names, index, &png, form,
+        )
+        .with_context(|| {
+            format!(
+                "importing {} over '{}'",
+                import.png_path, import.texture_name
+            )
+        })?;
         if let Some(original) = &report.format_substituted_from {
             // The user asked for THIS image on THIS texture and got it, but not in the format
             // the game shipped — worth saying, since a normal map re-encoded as colour will
@@ -488,6 +675,59 @@ fn silence_carrier_native_effects(
             set.emitters.clear();
         }
     }
+}
+
+/// Entry (kind) names in `file` whose emitters sample the named pool texture, with the emitter
+/// set each one owns.
+///
+/// A texture import names a texture, not an effect, but the carrier can only hold textures its
+/// own entries reference. This is how the live-carrier build turns "replace this texture" into
+/// "and therefore clone these effects", so the pool the import lands on actually contains it.
+/// All six sampler slots are checked, not just `sampler0` — a texture used only as a distortion
+/// or mask input is still a texture the user can replace.
+pub fn entries_sampling_texture(
+    file: &effect_library::NamcoEffectFile,
+    texture_name: &str,
+) -> Vec<(String, usize)> {
+    let Some(ptcl) = file.ptcl_file.as_ref() else {
+        return Vec::new();
+    };
+    let Some(id) = ptcl
+        .texture_info
+        .as_ref()
+        .and_then(|info| info.descriptors.iter().find(|d| d.name == texture_name))
+        .map(|d| d.id)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (index, name) in file.entry_names.iter().enumerate() {
+        let Some(set_idx) = (file.entries[index].emitter_set_id as usize).checked_sub(1) else {
+            continue;
+        };
+        let Some(set) = ptcl.emitter_list.emitter_sets.get(set_idx) else {
+            continue;
+        };
+        let mut samples = false;
+        visit_emitters_ref(&set.emitters, &mut |em| {
+            let d = &em.data;
+            samples |= [
+                d.sampler0.as_ref().map(|s| s.texture_id),
+                d.sampler1.as_ref().map(|s| s.texture_id),
+                d.sampler2.as_ref().map(|s| s.texture_id),
+                d.sampler3.as_ref().map(|s| s.texture_id),
+                d.sampler4.as_ref().map(|s| s.texture_id),
+                d.sampler5.as_ref().map(|s| s.texture_id),
+            ]
+            .iter()
+            .flatten()
+            .any(|tid| *tid == id);
+        });
+        if samples {
+            out.push((name.clone(), set_idx));
+        }
+    }
+    out
 }
 
 /// Drop every texture and primitive no surviving emitter samples.
@@ -901,6 +1141,15 @@ fn rebuild_eff_bytes_filtered(
             )?;
         }
     }
+    // Same order as the carrier build, and for the same reasons: added textures before the
+    // authored edits (a swap resolves its target by name, so it has to exist first), replacements
+    // after (they land on whichever texture will actually be sampled), removals last (the swaps
+    // that moved emitters off them have run by then).
+    //
+    // Warnings go to stderr rather than a channel: the export UI reports the file it wrote, and
+    // anything dropped here has already been surfaced by the live carrier build.
+    let mut warnings = Vec::new();
+    apply_texture_additions(&mut namco, &eff.textures_added, &mut warnings)?;
     {
         let ptcl = namco
             .ptcl_file
@@ -910,11 +1159,8 @@ fn rebuild_eff_bytes_filtered(
             apply_authored(ptcl, edit)?;
         }
     }
-    // This path does not prune, so an import only has to find its texture by name. Warnings
-    // go to stderr rather than a channel: the export UI reports the file it wrote, and a
-    // missing import here has already been surfaced by the live carrier build.
-    let mut warnings = Vec::new();
     apply_texture_imports(&mut namco, &eff.textures, &mut warnings)?;
+    apply_texture_removals(&mut namco, &eff.textures_removed, &mut warnings)?;
     for warning in &warnings {
         eprintln!("[EFF-EXPORT] warning: {warning}");
     }
@@ -1606,6 +1852,7 @@ mod tests {
             }],
             transplants: Vec::new(),
             textures: Vec::new(),
+            ..Default::default()
         };
         let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, None).expect("rebuild");
         let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
@@ -1659,7 +1906,11 @@ mod tests {
             .as_ref()
             .and_then(|p| p.texture_info.as_ref())
             .expect("textures");
-        let names: Vec<String> = textures.descriptors.iter().map(|d| d.name.clone()).collect();
+        let names: Vec<String> = textures
+            .descriptors
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
         let original_pool = textures.binary_data.clone().expect("pool");
 
         // Replace the first texture Visionary can convert.
@@ -1671,12 +1922,17 @@ mod tests {
                     .map(|d| d.convertible)
                     .unwrap_or(false)
             })
-            .map(|(_, n)| n.clone())
+            .map(|(i, n)| (i, n.clone()))
             .expect("a convertible texture");
+        // An import has to keep the texture's dimensions, so build the stand-in at whatever size
+        // the chosen texture actually is rather than a fixed 64×64.
+        let (index, name) = name;
+        let shape =
+            crate::texture_import::describe(&original_pool, index, &name).expect("describe");
 
         let scratch = tempfile::tempdir().expect("scratch dir");
         let png_path = scratch.path().join("import.png");
-        let mut image = image::RgbaImage::new(64, 64);
+        let mut image = image::RgbaImage::new(shape.width, shape.height);
         for (x, y, px) in image.enumerate_pixels_mut() {
             *px = image::Rgba([(x * 4) as u8, (y * 4) as u8, 0xC0, 0xFF]);
         }
@@ -1689,7 +1945,9 @@ mod tests {
             textures: vec![crate::mod_project::TextureImport {
                 texture_name: name.clone(),
                 png_path: png_path.to_string_lossy().to_string(),
+                raw: false,
             }],
+            ..Default::default()
         };
         let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, None).expect("rebuild");
         let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
@@ -1723,8 +1981,155 @@ mod tests {
             crate::texture_import::describe(new_pool, new_index, &name).expect("describe imported");
         assert_eq!(
             (described.width, described.height),
-            (64, 64),
-            "the imported image's dimensions did not reach the pool"
+            (shape.width, shape.height),
+            "an import must land at the texture's own size"
+        );
+    }
+
+    /// The whole point of an added texture: give ONE emitter its own copy, edit that, and leave
+    /// every other user of the original alone.
+    ///
+    /// Drives the real export path so the ordering constraints are exercised for real — the
+    /// addition has to land before the authored swap can resolve it by name, and the swap has to
+    /// land before the removal will let the original go.
+    #[test]
+    fn an_added_texture_isolates_one_emitter_and_the_original_is_untouched() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/kirby/ef_kirby.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let before = effect_library::NamcoEffectFile::load(&bytes).expect("parse");
+        let ptcl = before.ptcl_file.as_ref().expect("ptcl");
+        let info = ptcl.texture_info.as_ref().expect("textures");
+        let names: Vec<String> = info.descriptors.iter().map(|d| d.name.clone()).collect();
+
+        // Pick a texture more than one emitter samples — that is the case worth proving.
+        let counts = {
+            let mut counts: std::collections::HashMap<u64, usize> = Default::default();
+            for set in &ptcl.emitter_list.emitter_sets {
+                super::visit_emitters_ref(&set.emitters, &mut |em| {
+                    if let Some(s) = em.data.sampler0.as_ref() {
+                        *counts.entry(s.texture_id).or_default() += 1;
+                    }
+                });
+            }
+            counts
+        };
+        let (shared_id, users) = counts
+            .iter()
+            .filter(|(_, n)| **n >= 2)
+            .max_by_key(|(_, n)| **n)
+            .map(|(id, n)| (*id, *n))
+            .expect("some texture is sampled by two or more emitters");
+        let shared_name = info
+            .descriptors
+            .iter()
+            .find(|d| d.id == shared_id)
+            .map(|d| d.name.clone())
+            .expect("descriptor for the shared texture");
+
+        // Find one emitter that samples it, and record where it lives.
+        let mut target: Option<(usize, String, usize, String)> = None;
+        for (set_idx, set) in ptcl.emitter_list.emitter_sets.iter().enumerate() {
+            let mut emitter_idx = 0usize;
+            super::visit_emitters_ref(&set.emitters, &mut |em| {
+                if target.is_none()
+                    && em.data.sampler0.as_ref().map(|s| s.texture_id) == Some(shared_id)
+                {
+                    let name = em.data.name.clone().unwrap_or_default();
+                    target = Some((set_idx, set.name.clone(), emitter_idx, name));
+                }
+                emitter_idx += 1;
+            });
+            if target.is_some() {
+                break;
+            }
+        }
+        let (set_idx, set_name, emitter_idx, emitter_name) = target.expect("an emitter using it");
+
+        let copy_name = crate::texture_import::unique_texture_name(&names, &shared_name);
+        let eff = crate::mod_project::EffMod {
+            source_rel: SRC.to_string(),
+            textures_added: vec![crate::mod_project::TextureAddition {
+                texture_name: copy_name.clone(),
+                template_name: shared_name.clone(),
+                png_path: String::new(), // a straight copy
+                raw: false,
+            }],
+            authored: vec![AuthoredEdit {
+                set_name: set_name.clone(),
+                entry_name: String::new(),
+                set_idx,
+                emitter_name: emitter_name.clone(),
+                emitter_idx,
+                fields: EmitterFieldEdits {
+                    texture_name: Some(copy_name.clone()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, None).expect("rebuild");
+        let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
+        let after_ptcl = after.ptcl_file.as_ref().expect("ptcl");
+        let after_info = after_ptcl.texture_info.as_ref().expect("textures");
+
+        // The copy exists, with an id of its own.
+        let copy = after_info
+            .descriptors
+            .iter()
+            .find(|d| d.name == copy_name)
+            .expect("the added texture is in the pool");
+        assert_ne!(
+            copy.id, shared_id,
+            "the copy must have its own descriptor id"
+        );
+        assert_eq!(
+            after_info.descriptors.len(),
+            info.descriptors.len() + 1,
+            "exactly one texture should have been added"
+        );
+
+        // The targeted emitter moved to the copy; everyone else still uses the original.
+        let after_counts = {
+            let mut counts: std::collections::HashMap<u64, usize> = Default::default();
+            for set in &after_ptcl.emitter_list.emitter_sets {
+                super::visit_emitters_ref(&set.emitters, &mut |em| {
+                    if let Some(s) = em.data.sampler0.as_ref() {
+                        *counts.entry(s.texture_id).or_default() += 1;
+                    }
+                });
+            }
+            counts
+        };
+        assert_eq!(
+            after_counts.get(&copy.id).copied().unwrap_or(0),
+            1,
+            "exactly one emitter should sample the copy"
+        );
+        assert_eq!(
+            after_counts.get(&shared_id).copied().unwrap_or(0),
+            users - 1,
+            "the other users of '{shared_name}' must be left on it"
+        );
+
+        // And a removal is REFUSED while anything still samples the texture, rather than writing
+        // a pool that leaves an emitter addressing a GUID no descriptor holds.
+        let mut warnings = Vec::new();
+        let mut still = effect_library::NamcoEffectFile::load(&rebuilt).expect("reload");
+        super::apply_texture_removals(&mut still, &[shared_name.clone()], &mut warnings)
+            .expect("a refused removal is not an error");
+        assert_eq!(warnings, vec![format!("texture-in-use:{shared_name}")]);
+        assert!(
+            still
+                .ptcl_file
+                .as_ref()
+                .and_then(|p| p.texture_info.as_ref())
+                .is_some_and(|t| t.descriptors.iter().any(|d| d.name == shared_name)),
+            "an in-use texture must survive the removal attempt"
         );
     }
 
@@ -1749,11 +2154,68 @@ mod tests {
                 // Deliberately a path that does not exist: a missing NAME must be caught
                 // before the file is ever read, so this must not surface as an IO error.
                 png_path: "/nonexistent/nope.png".into(),
+                raw: false,
             }],
             &mut warnings,
         )
         .expect("a stale import must not fail the build");
         assert_eq!(warnings, vec!["texture:ef_not_a_real_texture".to_string()]);
+    }
+
+    /// The point of [`entries_sampling_texture`] is that cloning what it returns carries the
+    /// texture into the carrier's pool. Assert exactly that, end to end: strip the eff down to
+    /// the entries it names and check the texture survives the prune. A helper that returned
+    /// plausible-looking but wrong entries would leave the import landing on a pool that still
+    /// does not hold the texture — the silent no-op this whole path exists to prevent.
+    #[test]
+    fn cloning_the_entries_that_sample_a_texture_carries_it_along() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const KIRBY: &str = "effect/fighter/kirby/ef_kirby.eff";
+        let bytes = std::fs::read(root.join(KIRBY)).expect("Kirby eff");
+        let file = effect_library::NamcoEffectFile::load(&bytes).expect("Kirby parse");
+        let descriptors: Vec<(String, u64)> = file
+            .ptcl_file
+            .as_ref()
+            .and_then(|p| p.texture_info.as_ref())
+            .map(|t| {
+                t.descriptors
+                    .iter()
+                    .map(|d| (d.name.clone(), d.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(!descriptors.is_empty(), "Kirby has pool textures");
+
+        let mut checked = 0;
+        for (name, id) in descriptors.iter().take(12) {
+            let entries = super::entries_sampling_texture(&file, name);
+            if entries.is_empty() {
+                continue; // an unsampled texture has no effects to clone — nothing to assert
+            }
+            let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+            let stripped_bytes =
+                super::strip_donor_eff_bytes(&bytes, &names).expect("strip to sampling entries");
+            let stripped =
+                effect_library::NamcoEffectFile::load(&stripped_bytes).expect("stripped parse");
+            let survived = stripped
+                .ptcl_file
+                .as_ref()
+                .and_then(|p| p.texture_info.as_ref())
+                .is_some_and(|t| t.descriptors.iter().any(|d| d.id == *id));
+            assert!(
+                survived,
+                "'{name}' was dropped by the prune even though {names:?} were said to sample it"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no sampled texture found in Kirby — the test proved nothing"
+        );
     }
 
     /// A color edit on ONE emitter must leave every other emitter byte-identical.
@@ -1821,6 +2283,7 @@ mod tests {
                 },
             }],
             transplants: Vec::new(),
+            ..Default::default()
         };
         let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, Some(&root)).expect("rebuild");
         let after = effect_library::NamcoEffectFile::load(&rebuilt).expect("parse rebuilt");
@@ -1929,6 +2392,8 @@ mod tests {
                 CARRIER,
                 &ops,
                 &root,
+                &[],
+                &[],
                 &[],
                 &[],
                 &mut Vec::new(),
@@ -2093,6 +2558,8 @@ mod tests {
             CARRIER,
             &[op],
             &root,
+            &[],
+            &[],
             &[],
             &[],
             &mut Vec::new(),
@@ -2341,6 +2808,8 @@ mod tests {
             &root,
             &[],
             &[],
+            &[],
+            &[],
             &mut Vec::new(),
         )
         .expect("Daisy carrier build");
@@ -2437,6 +2906,8 @@ mod tests {
             &[op],
             &root,
             std::slice::from_ref(&authored),
+            &[],
+            &[],
             &[],
             &mut Vec::new(),
         )
@@ -2630,6 +3101,8 @@ mod tests {
             &root,
             std::slice::from_ref(&authored),
             &[],
+            &[],
+            &[],
             &mut Vec::new(),
         )
         .expect("carrier build");
@@ -2757,6 +3230,8 @@ mod tests {
                 std::slice::from_ref(&op),
                 &root,
                 std::slice::from_ref(&authored),
+                &[],
+                &[],
                 &[],
                 &mut skipped,
             )
@@ -3037,6 +3512,8 @@ mod tests {
             &root,
             std::slice::from_ref(&authored),
             &[],
+            &[],
+            &[],
             &mut warnings,
         )
         .expect("mixed carrier build");
@@ -3180,6 +3657,8 @@ mod tests {
             CARRIER,
             &ops,
             &root,
+            &[],
+            &[],
             &[],
             &[],
             &mut Vec::new(),
@@ -3401,6 +3880,8 @@ mod tests {
             &root,
             &[],
             &[],
+            &[],
+            &[],
             &mut warnings,
         )
         .expect("mixed carrier build");
@@ -3512,6 +3993,8 @@ mod tests {
             &root,
             &[],
             &[],
+            &[],
+            &[],
             &mut warnings,
         )
         .expect("carrier build");
@@ -3585,6 +4068,8 @@ mod tests {
             &[op],
             &root,
             std::slice::from_ref(&orphan),
+            &[],
+            &[],
             &[],
             &mut skipped,
         )
@@ -3677,10 +4162,7 @@ fn apply_authored(ptcl: &mut effect_library::PtclFile, edit: &AuthoredEdit) -> R
                 .as_ref()
                 .map(|info| info.descriptors.as_slice())
                 .unwrap_or_default();
-            let id = descriptors
-                .iter()
-                .find(|d| d.name == wanted)
-                .map(|d| d.id);
+            let id = descriptors.iter().find(|d| d.name == wanted).map(|d| d.id);
             if id.is_none() {
                 // Dropping the swap leaves the original texture — wrong, but it still renders.
                 // Writing a GUID no descriptor holds would make the emitter sample nothing.
@@ -3961,6 +4443,7 @@ mod bench {
                 one_slot_slots: Vec::new(),
                 replace_entry: None,
             }],
+            ..Default::default()
         };
 
         let t = Instant::now();
@@ -3993,6 +4476,8 @@ mod bench {
                 CARRIER_REL,
                 &eff.transplants,
                 &root,
+                &[],
+                &[],
                 &[],
                 &[],
                 &mut warnings,
@@ -4089,6 +4574,8 @@ mod perf_tests {
             &ops,
             &root,
             std::slice::from_ref(&authored),
+            &[],
+            &[],
             &[],
             &mut Vec::new(),
         )
