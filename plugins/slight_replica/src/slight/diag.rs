@@ -25,6 +25,20 @@ static REC_GONE: AtomicU64 = AtomicU64::new(0); // is_exist_effect said gone
 static REC_DEAD_ACCESSOR: AtomicU64 = AtomicU64::new(0); // owning agent no longer live
 static REC_EXPIRED: AtomicU64 = AtomicU64::new(0); // synthetic TTL ran out
 
+// Frame-time window, in `nn::os::GetSystemTick` ticks. Reset every time a STATS line is
+// emitted, so each line describes only the 30 frames since the previous one.
+//
+// This exists so a tester can answer "is the plugin the bottleneck?" from one pasted log line,
+// without anyone having to be online to interrogate them. A healthy frame is well under the
+// 16.6 ms budget; the Windows filesystem-stall regression showed up here as 5-20 ms.
+static FRAME_TICKS_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+static FRAME_TICKS_MAX: AtomicU64 = AtomicU64::new(0);
+static FRAME_TICKS_SUM: AtomicU64 = AtomicU64::new(0);
+static FRAME_TICKS_N: AtomicU64 = AtomicU64::new(0);
+
+/// SSBU's `GetSystemTick` counter runs at ~19.2 MHz (see `systems::overload_timer`).
+const TICKS_PER_MS: f64 = 19_200.0;
+
 // Pending flush + edit-apply counters.
 static FLUSHED: AtomicU64 = AtomicU64::new(0);
 static EDITS_OK: AtomicU64 = AtomicU64::new(0);
@@ -124,8 +138,34 @@ pub fn note_edit(id: u64, found: bool, exists: bool, applied: bool) {
     ));
 }
 
+/// Record one `run_one_frame` duration. Cheap enough for the per-frame path: four relaxed
+/// atomics, no allocation, no locking.
+pub fn note_frame_ticks(ticks: u64) {
+    FRAME_TICKS_MIN.fetch_min(ticks, Ordering::Relaxed);
+    FRAME_TICKS_MAX.fetch_max(ticks, Ordering::Relaxed);
+    FRAME_TICKS_SUM.fetch_add(ticks, Ordering::Relaxed);
+    FRAME_TICKS_N.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Drain the frame-time window as `(min_ms, avg_ms, max_ms)` and start a fresh one.
+fn take_frame_ms() -> (f64, f64, f64) {
+    let n = FRAME_TICKS_N.swap(0, Ordering::Relaxed);
+    let sum = FRAME_TICKS_SUM.swap(0, Ordering::Relaxed);
+    let min = FRAME_TICKS_MIN.swap(u64::MAX, Ordering::Relaxed);
+    let max = FRAME_TICKS_MAX.swap(0, Ordering::Relaxed);
+    if n == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    (
+        min as f64 / TICKS_PER_MS,
+        sum as f64 / n as f64 / TICKS_PER_MS,
+        max as f64 / TICKS_PER_MS,
+    )
+}
+
 /// Periodic stats line (call from the per-frame driver). `pending_depth` growing = flush
-/// starvation; `tracker` growing without bound = the leak.
+/// starvation; `tracker` growing without bound = the leak; `frame_ms` avg near or above 16.6
+/// = the plugin itself is missing the frame budget.
 pub fn note_stats(
     frame: u64,
     tracker_count: usize,
@@ -134,9 +174,11 @@ pub fn note_stats(
     live_fighters: usize,
     live_weapons: usize,
 ) {
+    let (fmin, favg, fmax) = take_frame_ms();
     push(format!(
         "STATS frame={frame} tracker={tracker_count} pend={pending_depth} outbox={outbox_depth} \
          agents={live_fighters}f/{live_weapons}w \
+         frame_ms={fmin:.2}/{favg:.2}/{fmax:.2} \
          spawns={} (fighter={} follow={} synth={}) new={} reshow={} dedup={} \
          rec_gone={} rec_dead={} rec_ttl={} flushed={} edits={}ok/{}fail",
         SPAWNS.load(Ordering::Relaxed),

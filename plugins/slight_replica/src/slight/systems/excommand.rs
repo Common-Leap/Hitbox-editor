@@ -202,7 +202,10 @@ pub fn push(cmd: BufferedCommand) {
 }
 
 pub fn on_frame() {
-    poll_sd();
+    // `poll_sd` runs on the throttled SD tick (see `slight::sd_poll`), not here — it is a
+    // directory enumeration, and one per frame is what put Windows testers at 10 fps. The rest
+    // of this function is pure memory work and must keep running every frame: these commands
+    // drive live effect manipulation from the stick, so losing frames would be visible.
     drive_live_commands();
     run_ready_commands();
     BUFFER.lock().retain_mut(|c| c.tick());
@@ -307,9 +310,24 @@ fn collect_target_ids(kind: CommandName, boid_filter: Option<u32>) -> Vec<u64> {
 /// `poll_sd` consumes every `.txt` it finds, so without this it ate the files the plugin
 /// itself writes there. `client_id.txt` is rewritten on every editor connect, which made
 /// this permanent: the poller retried it every tick forever (see the rename note below).
-const RESERVED_USER_FILES: &[&str] = &["client_id.txt", "gateway.txt"];
+///
+/// `win_detect.txt` and `effect_names.txt` are the user's own configuration, read by
+/// `systems::win_screen` and `effect_viewer::effect_names`. They are plain `.txt` in this
+/// directory too, so the poller would parse them as commands and move them away — silently
+/// reverting win detection to its built-in defaults and the name dictionary to hex.
+const RESERVED_USER_FILES: &[&str] = &[
+    "client_id.txt",
+    "gateway.txt",
+    "win_detect.txt",
+    "effect_names.txt",
+];
 
-fn poll_sd() {
+/// Where consumed scripts are parked, so they stop inflating the per-tick enumeration.
+fn consumed_dir() -> std::path::PathBuf {
+    std::path::Path::new(USER_DIR).join("consumed")
+}
+
+pub fn poll_sd() {
     let Ok(entries) = std::fs::read_dir(USER_DIR) else {
         return;
     };
@@ -340,11 +358,17 @@ fn poll_sd() {
         for line in csv::split_lines(&text) {
             parse_line(&line);
         }
+        // Consumed scripts move to a subdirectory rather than being renamed in place. A
+        // `.done` left beside the scripts stayed in this directory forever, so the enumeration
+        // above grew for the whole session — every consumed command made the poll a little
+        // more expensive. `consumed/` has no extension, so the filter above skips it.
+        //
         // Clear the destination first. The Switch/emulator FS fails RenameFile when the
         // target exists (POSIX would silently replace it), so a leftover `.done` from an
         // earlier run made this rename fail EVERY tick — the script was re-read, re-parsed
         // and re-renamed forever, several hundred times a second, on the game thread.
-        let done = path.with_extension("done");
+        let done = consumed_dir().join(format!("{name}.done"));
+        let _ = std::fs::create_dir_all(consumed_dir());
         let _ = std::fs::remove_file(&done);
         if std::fs::rename(&path, &done).is_err() {
             // Still stuck: delete outright rather than let it spin. Losing one consumed

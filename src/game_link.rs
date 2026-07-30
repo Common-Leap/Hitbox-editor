@@ -580,6 +580,10 @@ struct Shared {
     /// this exceeds whatever was live when the send started — otherwise the previous carrier,
     /// still up and still reporting ready, reads as instant success.
     carrier_gen: u64,
+    /// Why the plugin rejected the last carrier push, if it did. Taken by the app, which turns
+    /// it into a status line and stops waiting — a rejected push never advances `carrier_gen`,
+    /// so without this the editor waits for a carrier that is never coming.
+    carrier_error: Option<String>,
     /// (fighter kind, motion hash) → number of completed playbacks the plugin reported.
     /// A bump means "every line that motion produces has now been streamed".
     capture_ends: BTreeMap<(i32, u64), u64>,
@@ -602,6 +606,7 @@ impl Default for Shared {
             carrier_kinds: 0,
             carrier_seq: 0,
             carrier_gen: 0,
+            carrier_error: None,
             capture_ends: BTreeMap::new(),
             outbox: Vec::new(),
             last_error: None,
@@ -881,6 +886,11 @@ impl GameLink {
     /// Donor-bytes generation of the carrier currently live in game.
     pub fn carrier_gen(&self) -> u64 {
         self.shared.lock().map(|s| s.carrier_gen).unwrap_or(0)
+    }
+
+    /// Take the reason the plugin rejected the last carrier push, clearing it.
+    pub fn take_carrier_error(&self) -> Option<String> {
+        self.shared.lock().ok().and_then(|mut s| s.carrier_error.take())
     }
 
     pub fn captures_seq(&self) -> u64 {
@@ -1177,6 +1187,13 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             s.carrier_kinds = c.get("kinds").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             s.carrier_gen = c.get("gen").and_then(|v| v.as_u64()).unwrap_or(0);
             s.carrier_seq += 1;
+        }
+        "CarrierError" => {
+            s.carrier_error = body
+                .get("CarrierError")
+                .and_then(|c| c.get("reason"))
+                .and_then(|r| r.as_str())
+                .map(str::to_owned);
         }
         "Remove" => {
             if let Some(id) = body

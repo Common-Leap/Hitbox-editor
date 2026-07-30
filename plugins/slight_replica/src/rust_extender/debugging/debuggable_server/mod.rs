@@ -62,6 +62,14 @@ pub fn resync_if_requested() {
     skyline::println!("[SLight] RPM resync — flushed {count} kind tab(s)");
 }
 
+/// Is there anywhere for an emitted message to go? Callers that build an expensive payload
+/// should check this FIRST — `emit` drops the message otherwise, and the serialization to
+/// produce it would be pure waste (see `notify_effect`).
+fn emit_wanted() -> bool {
+    crate::rust_extender::net::simple_server::has_client()
+        || crate::slight::smash_utils::debug_logging_enabled()
+}
+
 fn emit(header: &str, body: &serde_json::Value) {
     if crate::rust_extender::net::simple_server::has_client() {
         let body_str = serde_json::to_string(body).unwrap_or_else(|_| "{}".into());
@@ -69,7 +77,19 @@ fn emit(header: &str, body: &serde_json::Value) {
         crate::rust_extender::net::simple_server::queue(format!(
             r#"{{"header":"{header}","body":{body_esc}}}"#
         ));
-    } else {
+    } else if crate::slight::smash_utils::debug_logging_enabled() {
+        // With no editor connected this used to write an SD file per message, unconditionally.
+        // `notify_effect` runs once per effect SPAWN (the spawn hook queues a notify and drains
+        // the queue inline, up to 64 jobs a tick), so a busy match created dozens of brand-new
+        // files per frame — on the game thread, for a directory nothing ever reads and nothing
+        // ever cleans up. File creation is the most expensive filesystem operation Windows has:
+        // an MFT record, a directory-index insert, and a fresh file for Defender to scan. It
+        // also got progressively slower as the directory filled.
+        //
+        // Dropping instead is safe: everything is re-sent when a client arrives. Kind tabs go
+        // through `resync_if_requested`, the carrier report through `reset_carrier_status_latch`,
+        // and the ACMD log through `hitbox_viewer::requeue_all` — all three fire on connect.
+        // The fallback survives behind the debug switch for when someone actually wants it.
         sd_fallback(header, body);
     }
 }
@@ -88,6 +108,13 @@ fn sd_fallback(header: &str, body: &serde_json::Value) {
 }
 
 pub fn notify_effect(id: u64, name: &str, data: &EffectData) {
+    // The hottest emitter in the plugin: once per effect spawn, dozens of times a frame in a
+    // busy match. Everything below allocates and serializes twice, so bail before paying for a
+    // payload that `emit` would only drop. Kind tabs are re-sent in full on connect
+    // (`resync_if_requested`), so nothing is lost by skipping this while disconnected.
+    if !emit_wanted() {
+        return;
+    }
     let rpm = RpmEffectData::from_effect_data(data);
     let value_in_json = serde_json::to_string(&rpm).unwrap_or_else(|_| "{}".into());
     // The pins-only sparse form rides along so a fresh editor can tell user overrides
@@ -267,30 +294,48 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         }
         match serde_json::from_value::<Vec<DonorBytes>>(bytes_v.clone()) {
             Ok(list) => {
-                let decoded: Vec<(String, Vec<u8>)> = list
-                    .into_iter()
-                    .filter_map(|d| {
-                        let bytes = if !d.file.is_empty() {
-                            let at = format!("sd:/{}", d.file);
-                            match std::fs::read(&at) {
-                                Ok(b) => Some(b),
-                                Err(e) => {
-                                    // Never silently fall back to a stale in-memory buffer: a
-                                    // missing payload must be visible, not mistaken for "no
-                                    // change".
-                                    crate::slight::diag::note(format!(
-                                        "donor_bytes: cannot read {at}: {e}"
-                                    ));
-                                    None
-                                }
+                let mut decoded: Vec<(String, Vec<u8>)> = Vec::with_capacity(list.len());
+                let mut failed: Option<String> = None;
+                for d in list {
+                    let bytes = if !d.file.is_empty() {
+                        let at = format!("sd:/{}", d.file);
+                        match std::fs::read(&at) {
+                            Ok(b) => Some(b),
+                            Err(e) => {
+                                failed = Some(format!("cannot read {at}: {e}"));
+                                None
                             }
-                        } else {
-                            crate::slight::effect_viewer::effect_reload::b64_decode(&d.b64)
-                        };
-                        bytes.map(|bytes| (d.path, bytes))
-                    })
-                    .collect();
-                crate::slight::effect_viewer::effect_reload::set_donor_bytes(decoded);
+                        }
+                    } else {
+                        let b = crate::slight::effect_viewer::effect_reload::b64_decode(&d.b64);
+                        if b.is_none() {
+                            failed = Some(format!("undecodable base64 payload for {}", d.path));
+                        }
+                        b
+                    };
+                    match bytes {
+                        Some(bytes) => decoded.push((d.path, bytes)),
+                        None => break,
+                    }
+                }
+                if let Some(why) = failed {
+                    // All-or-nothing, and this is load-bearing. An EMPTY donor list is a
+                    // command — it is how the editor tears the live carrier down (see the
+                    // editor's `clear_all_game_edits`). Dropping unreadable entries and
+                    // carrying on would turn a failed transfer into that command: it would
+                    // wipe DONOR_BYTES while the aliases the editor sends microseconds later
+                    // still point at the carrier, and the next spawn of an aliased effect
+                    // would resolve to a resource with no bytes behind it. This plugin is
+                    // built `panic = "abort"`, so that took the whole game down.
+                    //
+                    // Leave the previously staged buffers untouched and say so instead.
+                    crate::slight::diag::note(format!(
+                        "donor_bytes REJECTED, previous staging kept: {why}"
+                    ));
+                    notify_carrier_error(&why);
+                } else {
+                    crate::slight::effect_viewer::effect_reload::set_donor_bytes(decoded);
+                }
             }
             Err(e) => crate::slight::diag::note(format!("donor_bytes parse error: {e}")),
         }
@@ -609,6 +654,19 @@ fn parse_new_value(id: u64, val: &serde_json::Value) -> ParsedEdit {
 /// needs it to tell "the carrier from my previous send is still up" from "my new bytes are
 /// live" — without it, a second send saw state=2/object=up immediately and reported success
 /// before the game had taken anything.
+/// Tell the editor a carrier push was rejected, and why.
+///
+/// Without this the editor sits on "waiting for game…" forever when a payload never arrives,
+/// because the carrier status it polls simply never advances. The reason is the useful part:
+/// a `cannot read sd:/effect_viewer/payload/...` here means the editor wrote the payload
+/// somewhere that is not the emulator's SD root.
+pub fn notify_carrier_error(reason: &str) {
+    emit(
+        "CarrierError",
+        &serde_json::json!({ "CarrierError": { "reason": reason } }),
+    );
+}
+
 pub fn notify_carrier_status(state: u8, kinds: usize, spawned: bool, generation: u64) {
     emit(
         "CarrierStatus",

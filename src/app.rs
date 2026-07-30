@@ -819,6 +819,12 @@ impl VisionaryApp {
         // Install image loaders — this also ensures font atlas is properly initialized
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
+        // Before anything touches the SD card — `clear_stale_live_state` just below is the
+        // first caller — publish the user's explicit emulator SD root, if they set one.
+        // Probing finds the standard install locations; portable emulator installs keep their
+        // SD next to the executable and can only be found by being told.
+        crate::scratch_dirs::set_emulator_sd_override(load_config_path(SD_ROOT_CONFIG_KEY));
+
         // Live edits must not survive a restart — see `clear_stale_live_state`.
         Self::clear_stale_live_state();
 
@@ -3961,7 +3967,7 @@ impl VisionaryApp {
     ///
     /// Called once at startup. Loading a project re-publishes everything it needs.
     fn clear_stale_live_state() {
-        let Some(sd) = dirs::home_dir().map(|h| h.join(".local/share/eden/sdmc")) else {
+        let Some(sd) = crate::scratch_dirs::emulator_sd_root() else {
             return;
         };
         for dir in [
@@ -3999,8 +4005,8 @@ impl VisionaryApp {
         self.carrier_push_callers.clear();
         // Stop serving merged eff files: wipe the SD-side manifest + files (the plugin's
         // registrations stay for this boot but resolve to nothing → vanilla files load).
-        if let Some(dir) = dirs::home_dir()
-            .map(|h| h.join(".local/share/eden/sdmc/effect_viewer/live_eff"))
+        if let Some(dir) = crate::scratch_dirs::emulator_sd_root()
+            .map(|sd| sd.join("effect_viewer/live_eff"))
             .filter(|d| d.is_dir())
         {
             let _ = std::fs::remove_dir_all(&dir);
@@ -4008,8 +4014,8 @@ impl VisionaryApp {
         }
         // Also remove the guaranteed-fallback Arcropolis mod staged by deploy_live_eff
         // (takes effect on the next boot — the off-switch mirror of the staged mod).
-        if let Some(dir) = dirs::home_dir()
-            .map(|h| h.join(".local/share/eden/sdmc/ultimate/mods/effect_viewer_live"))
+        if let Some(dir) = crate::scratch_dirs::emulator_sd_root()
+            .map(|sd| sd.join("ultimate/mods/effect_viewer_live"))
             .filter(|d| d.is_dir())
         {
             let _ = std::fs::remove_dir_all(&dir);
@@ -5943,7 +5949,11 @@ impl VisionaryApp {
         // stable name keeps the directory from growing without bound.
         let name = format!("{}.eff", arc_path.replace(['/', '\\', ':'], "_"));
         let rel = format!("effect_viewer/payload/{name}");
-        if let Some(sd) = dirs::home_dir().map(|h| h.join(".local/share/eden/sdmc")) {
+        // Only ever the REAL SD root. This used to build the path itself and `create_dir_all`
+        // it, which on Windows quietly created a junk tree in the user's profile and reported
+        // success — so this branch was always taken, the base64 fallback below was never
+        // reached, and the plugin was told to read a payload it could not see.
+        if let Some(sd) = crate::scratch_dirs::emulator_sd_root() {
             let dir = sd.join("effect_viewer/payload");
             // Write-then-rename: the plugin must never read a half-written payload.
             let final_path = dir.join(&name);
@@ -6824,13 +6834,14 @@ impl VisionaryApp {
                 return false;
             }
         };
-        let Some(sd) = dirs::home_dir().map(|h| h.join(".local/share/eden/sdmc")) else {
+        // The `ultimate/` validation this used to do inline now lives in `emulator_sd_root`,
+        // which is what every SD-writing path in the editor goes through.
+        let Some(sd) = crate::scratch_dirs::emulator_sd_root() else {
+            self.state.status = "Live deploy: emulator SD card not found. Set VISIONARY_SD_DIR \
+                 to the folder containing your emulator's `ultimate` directory."
+                .into();
             return false;
         };
-        if !sd.join("ultimate").is_dir() {
-            self.state.status = "Live deploy: Eden SD not found (~/.local/share/eden/sdmc)".into();
-            return false;
-        }
         let dir = sd.join("effect_viewer").join("live_eff");
         if std::fs::create_dir_all(&dir).is_err() {
             return false;
@@ -8422,6 +8433,9 @@ impl eframe::App for VisionaryApp {
             // a newer one, not merely when it reports "ready", which the previous carrier
             // already does.
             self.eff_editor.gen_at_send = self.game_link.carrier_gen();
+            // Discard any rejection left over from an earlier send, so it cannot immediately
+            // abort this one.
+            let _ = self.game_link.take_carrier_error();
             self.eff_editor.awaiting_game = Some(std::time::Instant::now());
         } else if self.eff_editor.sending {
             // Deferred by one frame so the spinner paints before the (synchronous) rebuild
@@ -8452,12 +8466,18 @@ impl eframe::App for VisionaryApp {
             // an .nro too old to report). Reports are frame-driven, so at 30 fps under load the
             // first beat can be several seconds out — hence 12s, not 3.
             let silent = reports == 0 && since.elapsed().as_secs() >= 12;
-            if live || silent {
+            // The plugin refused the push — it could not read the payload we pointed it at.
+            // Nothing is coming, so stop waiting now instead of sitting out the silence
+            // timeout and blaming the match for it.
+            let rejected = self.game_link.take_carrier_error();
+            if live || silent || rejected.is_some() {
                 self.eff_editor.awaiting_game = None;
                 // Keep the final reading visible. The indicator vanished too fast to read,
                 // which made the one signal that could settle this undiagnosable.
                 let why = if live {
                     ""
+                } else if rejected.is_some() {
+                    " (the game could not read the payload)"
                 } else {
                     // Reports are frame-driven, so silence means the per-frame driver never
                     // ran — no match in progress, or an .nro too old to report at all.
@@ -8473,6 +8493,11 @@ impl eframe::App for VisionaryApp {
                 if live {
                     self.eff_editor
                         .set_sent_note("carrier live in game — re-trigger the move".to_string());
+                } else if let Some(reason) = rejected {
+                    self.eff_editor.set_sent_note(format!(
+                        "the game could not read the payload ({reason}) — check that Visionary \
+                         is writing to your emulator's SD folder, or set VISIONARY_SD_DIR"
+                    ));
                 } else if silent {
                     self.eff_editor.set_sent_note(
                         "sent, but the game never reported back — start a match and send again"
@@ -9506,6 +9531,12 @@ fn legacy_config_path(key: &str) -> Option<std::path::PathBuf> {
 /// pick has to survive a restart — it used to fall back to the process cwd, i.e. whatever
 /// folder the app happened to be launched from.
 pub(crate) const EFF_ROOT_CONFIG_KEY: &str = "eff_root";
+
+/// Config key for the emulator's SD root — the folder holding `ultimate/`, which is where live
+/// edits are staged for the plugin to read. Left unset, `scratch_dirs::emulator_sd_root` probes
+/// the standard Eden / yuzu / Ryujinx locations for the host platform; set it when the emulator
+/// is a portable install that lives somewhere else entirely.
+pub(crate) const SD_ROOT_CONFIG_KEY: &str = "sd_root";
 
 pub(crate) fn save_config_path(key: &str, path: &std::path::Path) {
     if let Some(dest) = config_path(key) {

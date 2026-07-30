@@ -30,10 +30,6 @@ pub fn install() {
     poll_sd();
 }
 
-pub fn on_frame() {
-    poll_sd();
-}
-
 pub fn is_final_motion(motion: u64) -> bool {
     CONFIG.lock().final_motions.contains(&motion)
 }
@@ -42,7 +38,10 @@ pub fn is_win_status(status: i32) -> bool {
     CONFIG.lock().win_statuses.contains(&status)
 }
 
-fn poll_sd() {
+/// Re-read `win_detect.txt` if it changed. Driven by the throttled SD tick
+/// (`slight::sd_poll`) — this used to run every frame, and the file normally does not exist,
+/// so it was one failing stat per frame on the game thread.
+pub fn poll_sd() {
     let path = std::path::Path::new(WIN_DETECT_FILE);
     let Ok(meta) = std::fs::metadata(path) else {
         return;

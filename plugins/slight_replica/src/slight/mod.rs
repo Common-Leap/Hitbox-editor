@@ -9,6 +9,7 @@ pub mod hitbox_viewer;
 pub mod main_smash;
 pub mod math;
 pub mod pending;
+pub mod sd_poll;
 pub mod slight_consts;
 pub mod smash_utils;
 pub mod systems;

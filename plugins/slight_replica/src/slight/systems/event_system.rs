@@ -185,7 +185,7 @@ fn dispatch(event: GameEvent) {
 }
 
 pub fn on_frame() {
-    crate::slight::systems::win_screen::on_frame();
+    // `win_screen`'s SD config re-read moved to the throttled tick (`slight::sd_poll`).
     for ev in drain() {
         dispatch(ev);
     }

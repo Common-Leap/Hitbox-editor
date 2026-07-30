@@ -188,6 +188,7 @@ unsafe fn handle_frame(lua_state: u64) {
 /// One game frame of SLight processing — the once-per-frame body the original ran inside
 /// the first fighter's frame callback (FUN_71000bf6ac fight-start gate + facade chain).
 fn run_one_frame() {
+    let frame_start = unsafe { skyline::nn::os::GetSystemTick() };
     agents::refresh_all();
 
     let after_win = crate::slight::frame_context::is_after_win();
@@ -206,8 +207,18 @@ fn run_one_frame() {
     // STATS `frame=` field IS the driver heartbeat — if it never appears (or freezes) during
     // a match, the smashline-2 StatusLine::Main driver is dead and every per-frame pipeline
     // (reconcile, edit-poll, pending flush) is dead with it.
+    // Measured before the throttled tick below, so the sample reflects the recurring per-frame
+    // cost rather than being skewed once every 30 frames by the SD poll and the diag flush.
+    crate::slight::diag::note_frame_ticks(
+        unsafe { skyline::nn::os::GetSystemTick() }.wrapping_sub(frame_start),
+    );
+
     let n = ROF_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
     if n % 30 == 0 {
+        // Every SD-card poll in the plugin happens here, on this cadence. See `slight::sd_poll`
+        // for why none of them may run per frame.
+        crate::slight::sd_poll::tick();
+
         let tracker_count = crate::slight::effect_viewer::tracker::EFFECT_TRACKER
             .lock()
             .count();

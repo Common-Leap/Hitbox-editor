@@ -1,5 +1,7 @@
 //! Jorge SLight paths and RPM gateway helpers (`smash_utils.rs` @ 8aad775).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub const DEBUG_LOGGERS: &str = "sd:/slight/debug/loggers/";
 pub const ERROR_LOGS: &str = "sd:/slight/user/error_logs/";
 pub const DEBUGGABLES_DIR: &str = "sd:/slight/user/debuggables/";
@@ -13,6 +15,9 @@ pub fn ensure_slight_dirs() {
     let _ = std::fs::create_dir_all(ERROR_LOGS);
     let _ = std::fs::create_dir_all(DEBUGGABLES_DIR);
     let _ = std::fs::create_dir_all("sd:/slight/user/");
+    // Seed the cached flag so boot-time callers see the same answer they always did, before
+    // the per-match poll tick has run for the first time.
+    refresh_debug_logging();
 }
 
 pub fn rpm_listen_port() -> u16 {
@@ -58,9 +63,27 @@ fn is_dotted_quad(s: &str) -> bool {
     )
 }
 
+/// Last probed state of the debug-logging trigger files.
+///
+/// This used to stat both files on every call, and `debug_logging_enabled` guards 40+ call
+/// sites — six inside `event_system::on_frame`, sixteen in `animation_sequencer` (several in
+/// per-agent loops), more in `article_notifier`'s per-weapon scan. Both lookups normally MISS.
+/// Linux answers a repeated miss out of the negative dentry cache for about a microsecond, so
+/// the cost is invisible there. Windows has no negative-lookup cache: each miss is a full
+/// path parse and directory probe through the emulator's sdmc VFS, with Defender hooking the
+/// open — tens to hundreds of microseconds. At 50+ probes per frame that is most of a 16.6 ms
+/// budget, which is why Windows testers saw ~10 fps and Linux saw nothing.
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+
+/// Re-probe the trigger files. Called from the throttled SD poll tick, not per frame.
+pub fn refresh_debug_logging() {
+    let on = std::path::Path::new(DEBUG_ACTIVATE).exists()
+        && !std::path::Path::new(DEBUG_DEACTIVATE).exists();
+    DEBUG_LOGGING.store(on, Ordering::Relaxed);
+}
+
 pub fn debug_logging_enabled() -> bool {
-    std::path::Path::new(DEBUG_ACTIVATE).exists()
-        && !std::path::Path::new(DEBUG_DEACTIVATE).exists()
+    DEBUG_LOGGING.load(Ordering::Relaxed)
 }
 
 pub fn set_debug_logging(on: bool) {
@@ -70,6 +93,8 @@ pub fn set_debug_logging(on: bool) {
     } else {
         let _ = std::fs::write(DEBUG_DEACTIVATE, b"1");
     }
+    // Write through: an in-process toggle must take effect now, not at the next poll tick.
+    DEBUG_LOGGING.store(on, Ordering::Relaxed);
 }
 
 /// Jorge FUN_7100124b24 — delete SD file if present; returns true when removed.

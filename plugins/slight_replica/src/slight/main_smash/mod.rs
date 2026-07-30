@@ -228,7 +228,9 @@ fn dispatch_frame(weapon: bool, after_win: bool) {
 }
 
 pub fn on_fighter_frame() {
-    crate::slight::frame_context::poll_after_win_triggers();
+    // The `activate.txt` / `deactivate.txt` one-shot trigger poll moved to the throttled SD
+    // tick (`slight::sd_poll`) — it is a delete-if-exists on two paths that normally do not
+    // exist, and one per frame is exactly the kind of failing lookup Windows charges for.
     crate::slight::systems::guard_stance::begin_fighter_frame();
     let after_win = crate::slight::frame_context::is_after_win();
     if !after_win {
