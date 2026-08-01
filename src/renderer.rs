@@ -537,6 +537,7 @@ impl HitboxRenderState {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Rendering helpers remain grouped before callbacks.
 mod tests {
     #[test]
     fn synthetic_top_uses_animated_trans_translation() {

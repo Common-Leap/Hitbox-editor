@@ -1,20 +1,34 @@
 use crate::data::{fighter_display_name, AppState, Hitbox, MoveEntry};
 use crate::renderer::{HitboxRenderState, ViewportCallback};
 use egui::{Color32, RichText, ScrollArea, Ui};
-use glam;
 /// Main egui application for Visionary.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Whether the game has reached the terminal state requested by a carrier send.
+///
+/// A populated snapshot needs a newly disk-loaded, spawned carrier. An empty snapshot is a
+/// teardown command, and is acknowledged by a fresh status report showing the idle state.
+/// Keeping this distinction in one pure predicate makes it difficult for the status text and
+/// the timeout path to disagree about whether a restore actually succeeded.
+fn carrier_send_reached_goal(
+    carrier_expected: bool,
+    state: u8,
+    kinds: usize,
+    spawned: bool,
+    took_our_bytes: bool,
+    fresh_report: bool,
+) -> bool {
+    if carrier_expected {
+        state == 2 && spawned && took_our_bytes
+    } else {
+        state == 0 && kinds == 0 && !spawned && fresh_report
+    }
+}
+
 // ── Enum combo helpers ────────────────────────────────────────────────────────
 
-fn enum_combo<'a>(
-    ui: &mut egui::Ui,
-    value: &mut String,
-    id: &str,
-    label: &str,
-    options: &[&'a str],
-) {
+fn enum_combo(ui: &mut egui::Ui, value: &mut String, id: &str, label: &str, options: &[&str]) {
     ui.horizontal(|ui| {
         ui.label(label);
         egui::ComboBox::from_id_salt(id)
@@ -23,7 +37,7 @@ fn enum_combo<'a>(
                 // A current value the tables cannot name (a raw number from an exotic
                 // capture) is offered first, so the list ALWAYS contains — and highlights —
                 // what is actually active instead of showing nothing as selected.
-                if !value.is_empty() && !options.iter().any(|o| *o == value.as_str()) {
+                if !value.is_empty() && !options.contains(&value.as_str()) {
                     let current = value.clone();
                     ui.selectable_value(value, current.clone(), current.as_str());
                     ui.separator();
@@ -154,7 +168,7 @@ fn angle_picker(ui: &mut egui::Ui, angle: &mut i32) {
             #[allow(deprecated)]
             {
                 ui.memory_mut(|m| {
-                    let _ = m.toggle_popup(popup_id);
+                    m.toggle_popup(popup_id);
                 });
             }
         }
@@ -172,7 +186,7 @@ fn angle_picker(ui: &mut egui::Ui, angle: &mut i32) {
                 {
                     *angle = 0;
                     ui.memory_mut(|m| {
-                        let _ = m.close_popup(popup_id);
+                        m.close_popup(popup_id);
                     });
                 }
                 for &(name, val) in SPECIAL_ANGLES {
@@ -313,16 +327,52 @@ fn effect_name_hash(name: &str) -> u64 {
 /// Shared by the carrier build and the authored-edit pass on purpose: when those two disagreed
 /// about a name, an edit was attached to an entry the carrier never created, which failed the
 /// build and silently took every unrelated transplant with it.
+/// Does a transplant with this donor path need its content carried in the live carrier?
+///
+/// Everything with a real donor does, including `effect/system/` (`ef_common`, `ef_item`).
+///
+/// System donors were excluded for a long time, and the nearby comment explained it as "those
+/// effs are always resident". That is true, and it does mean their BYTES need not be co-loaded —
+/// but it was also read as "so the carrier need not hold them", which does not follow. A
+/// transplant introduces a new entry name that exists in no loaded eff, so nothing can serve it;
+/// the snapshot then came out empty and the deploy fell through to the merged-fighter-eff path,
+/// which is the mechanism this design exists to avoid. That is the same defect the own-eff
+/// exclusion had, for the same reason, and it is why this filter is otherwise unconditional.
+///
+/// What actually made system transplants destructive was never the carrying — it was the NAME
+/// they were carried under. See `carrier_stored_name`: a copy stored as `sys_bomb_b` shadows
+/// ef_common's resident kind. Fixing the name is what makes this safe; excluding the donor only
+/// traded one failure for another.
+///
+/// Callers must SAY when they drop an op. Dropping one silently is what produced the original
+/// report: no carrier op meant no carrier, no spec, and an editor waiting forever on a carrier
+/// generation that was never coming.
+fn rides_the_carrier(src_file_rel: &str) -> bool {
+    !src_file_rel.is_empty()
+}
+
 fn carrier_stored_name(op: &crate::mod_project::TransplantOp, own_prefix: Option<&str>) -> String {
     let donor_rel = op.src_file_rel.to_lowercase();
     let donor_name = op.src_set_name.to_lowercase();
-    if !own_prefix.is_some_and(|p| donor_rel.starts_with(p)) {
+    // Reusing the donor's name is only safe when nothing else in the match answers to it. The
+    // carrier's entry names become live effect KINDS, so storing a copy under a name the game
+    // already has registered puts two effects on one hash.
+    //
+    // "The carrier fighter's own eff" was the original test for that, and it is right as far as
+    // it goes — a foreign fighter or assist is not in the match, so `pickel_tnt` collides with
+    // nothing. It misses the effs that are resident in EVERY match: `ef_common` and `ef_item`.
+    // Storing `sys_bomb_b` in the carrier shadowed ef_common's own kind, which made the game's
+    // SYS_* effects resolve to a carrier copy that was not up (they stopped rendering), and left
+    // the retire waiting on a kind that can never unregister because ef_common still holds it
+    // (`AUTO_CARRIER_AWAIT_KIND_UNREGISTER registered=1`, forever).
+    let collides_with_a_resident_kind = own_prefix.is_some_and(|p| donor_rel.starts_with(p))
+        || donor_rel.starts_with("effect/system");
+    if !collides_with_a_resident_kind {
         return donor_name;
     }
     let clone = op.new_entry_name.to_lowercase();
     // A transplant onto ITSELF (replacing an entry with its own content) carries no distinct
-    // name. Storing the copy under the donor's name would collide with the resident kind, so
-    // fall back to the reserved internal namespace, which nothing else can name.
+    // name, so fall back to the reserved internal namespace, which nothing else can name.
     if clone.is_empty() || clone == donor_name {
         format!("{}{donor_name}", crate::mod_project::EDIT_CLONE_PREFIX)
     } else {
@@ -559,6 +609,8 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
     }
 }
 
+type AcmdFetchResult = (String, String, Result<String, String>);
+
 pub struct VisionaryApp {
     state: AppState,
     move_list: Vec<MoveEntry>,
@@ -583,7 +635,7 @@ pub struct VisionaryApp {
     move_list_receiver: Option<std::sync::mpsc::Receiver<Vec<MoveEntry>>>,
     /// In-flight "Fetch ACMD" result: `(fighter, move, body or error)`. The fetch used to run
     /// inline and blocked the UI thread for a whole GitHub round trip on every click.
-    acmd_receiver: Option<std::sync::mpsc::Receiver<(String, String, Result<String, String>)>>,
+    acmd_receiver: Option<std::sync::mpsc::Receiver<AcmdFetchResult>>,
     // Cached bone names for dropdown
     bone_names: Vec<String>,
     show_debug: bool,
@@ -1551,7 +1603,11 @@ impl VisionaryApp {
                     self.state.effects_pristine = self.state.effects.clone();
                     self.state.selected_effect_call = None;
                     self.apply_effect_call_edits_to_current();
+                    self.push_effect_rules();
                     self.state.effect_script = effect_script;
+                    if self.apply_saved_hitbox_edits_to_current() {
+                        self.push_hitbox_rules();
+                    }
 
                     // Jump the timeline to the earliest active window (hitbox or effect).
                     if let Some(first) = self.state.hitboxes.first() {
@@ -2130,48 +2186,9 @@ impl VisionaryApp {
             &fighter.display_name,
             &move_name,
             script,
+            self.state.hitboxes_pristine.clone(),
             self.state.hitboxes.clone(),
         );
-    }
-
-    fn export_acmd_source(&mut self) {
-        let fighter = match self
-            .state
-            .selected_fighter
-            .and_then(|i| self.state.fighters.get(i))
-        {
-            Some(f) => f.name.clone(),
-            None => return,
-        };
-        let move_name = match &self.state.selected_move {
-            Some(m) => m.name.clone(),
-            None => return,
-        };
-
-        let script = rebuild_script_from_hitboxes(&self.state.script, &self.state.hitboxes);
-
-        let mut dialog = rfd::FileDialog::new();
-        if let Some(dir) = &self.export_dir {
-            dialog = dialog.set_directory(dir);
-        }
-        let dest = match dialog.pick_folder() {
-            Some(d) => d,
-            None => return,
-        };
-        self.export_dir = Some(dest.clone());
-        save_config_path("export_dir", &dest);
-
-        let plugin_name = format!(
-            "{}_{}_mod",
-            fighter,
-            move_name.to_lowercase().replace(' ', "_")
-        );
-        let edits = vec![(fighter.clone(), move_name.clone(), script)];
-        let project = crate::acmd::build_mod_project(&edits, &plugin_name);
-        match write_mod_project(&project, &dest) {
-            Ok(root) => self.state.status = format!("Exported project to {}", root.display()),
-            Err(e) => self.state.status = format!("Export failed: {}", e),
-        }
     }
 
     fn draw_left_panel(&mut self, ui: &mut Ui) {
@@ -2409,16 +2426,18 @@ impl VisionaryApp {
                         .max()
                         .map(|m| m + 1)
                         .unwrap_or(0);
-                    let mut hb = Hitbox::default();
-                    hb.id = next_id;
-                    hb.bone_name = self.add_bone.clone();
-                    hb.damage = self.add_damage;
-                    hb.angle = self.add_angle;
-                    hb.kb_scaling = self.add_kb_scaling;
-                    hb.kb_base = self.add_kb_base;
-                    hb.size = self.add_size;
-                    hb.active_start = self.state.current_frame;
-                    hb.active_end = self.state.current_frame + 5;
+                    let hb = Hitbox {
+                        id: next_id,
+                        bone_name: self.add_bone.clone(),
+                        damage: self.add_damage,
+                        angle: self.add_angle,
+                        kb_scaling: self.add_kb_scaling,
+                        kb_base: self.add_kb_base,
+                        size: self.add_size,
+                        active_start: self.state.current_frame,
+                        active_end: self.state.current_frame + 5,
+                        ..Default::default()
+                    };
                     self.state.hitboxes.push(hb);
                     self.show_add_hitbox = false;
                 }
@@ -2782,14 +2801,12 @@ impl VisionaryApp {
                             }
                             ui.end_row();
 
-                            if ec.effect_name_alt.is_some() {
+                            if let Some(effect_name_alt) = ec.effect_name_alt.as_mut() {
                                 ui.label("Flip effect");
                                 changed |= ui
                                     .add(
-                                        egui::TextEdit::singleline(
-                                            ec.effect_name_alt.as_mut().unwrap(),
-                                        )
-                                        .desired_width(140.0),
+                                        egui::TextEdit::singleline(effect_name_alt)
+                                            .desired_width(140.0),
                                     )
                                     .on_hover_text(
                                         "Alternate graphic selected by the ACMD flip command",
@@ -3291,12 +3308,42 @@ impl VisionaryApp {
         }
     }
 
+    /// Reapply the saved hitbox/script record for the move that is currently open. The source
+    /// loader always establishes `hitboxes_pristine` first, so live rules still compare against
+    /// the game's real script rather than against a previously edited project snapshot.
+    fn apply_saved_hitbox_edits_to_current(&mut self) -> bool {
+        let Some(key) = self.current_move_key() else {
+            return false;
+        };
+        let Some((fighter, move_name)) = key.split_once('/') else {
+            return false;
+        };
+        let Some(record) = self
+            .state
+            .edit_log
+            .entries
+            .get(fighter)
+            .and_then(|moves| moves.get(move_name))
+            .cloned()
+        else {
+            return false;
+        };
+        if self.state.hitboxes_pristine.is_empty() && !record.hitboxes_pristine.is_empty() {
+            self.state.hitboxes_pristine = record.hitboxes_pristine;
+        }
+        self.state.script = record.script;
+        self.state.hitboxes = record.hitboxes;
+        true
+    }
+
     /// Fold the eff editor's current diff into the per-fighter project store.
     fn sync_eff_mods_from_editor(&mut self) {
         let Some(rel) = self.eff_editor.loaded_rel() else {
             return;
         };
         let authored = self.eff_editor.collect_authored_edits();
+        let rosters = self.eff_editor.collect_rosters();
+        let entry_edits = self.eff_editor.collect_entry_edits();
         let fighter = crate::mod_project::fighter_from_source_rel(&rel);
         let entry = self.eff_mods.entry(fighter.clone()).or_default();
         // NEVER key the project to the transient merged preview — rebuilding from it
@@ -3307,6 +3354,8 @@ impl VisionaryApp {
             entry.source_rel = format!("effect/fighter/{fighter}/ef_{fighter}.eff");
         }
         entry.authored = authored; // transplant records are preserved as-is
+        entry.rosters = rosters;
+        entry.entry_edits = entry_edits;
     }
 
     fn build_project(&mut self) -> crate::mod_project::ModProjectFile {
@@ -3368,7 +3417,7 @@ impl VisionaryApp {
                     }),
                     speed: (!identity_speed).then_some(form.speed),
                 };
-                let mut owners: Vec<String> = self
+                let mut owners: Vec<(String, String, Vec<crate::data::EffectCall>)> = self
                     .state
                     .effect_call_full
                     .iter()
@@ -3377,17 +3426,32 @@ impl VisionaryApp {
                             .iter()
                             .any(|c| effect_name_hash(&c.effect_name) == hash)
                     })
-                    .filter_map(|(key, _)| key.split_once('/').map(|(f, _)| f.to_string()))
+                    .filter_map(|(key, calls)| {
+                        key.split_once('/').map(|(fighter, move_name)| {
+                            (fighter.to_string(), move_name.to_string(), calls.clone())
+                        })
+                    })
                     .collect();
-                owners.sort();
-                owners.dedup();
+                owners.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+                owners.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
                 if owners.is_empty() {
                     if let Some(f) = &selected {
-                        owners.push(f.clone());
+                        let fm = project.fighters.entry(f.clone()).or_default();
+                        if !fm
+                            .live_tweaks
+                            .iter()
+                            .any(|existing| existing.effect_name == tweak.effect_name)
+                        {
+                            fm.live_tweaks.push(tweak.clone());
+                        }
                     }
                 }
-                for f in owners {
-                    let fm = project.fighters.entry(f).or_default();
+                for (fighter, move_name, calls) in owners {
+                    let fm = project.fighters.entry(fighter).or_default();
+                    // A live tweak is emitted immediately after each affected ACMD spawn. Keep
+                    // the complete effect script even when the spawn itself was not edited, or
+                    // a tweak-only project would serialize correctly but export no code.
+                    fm.effect_calls_full.entry(move_name).or_insert(calls);
                     if !fm
                         .live_tweaks
                         .iter()
@@ -3401,13 +3465,14 @@ impl VisionaryApp {
         project
     }
 
-    fn save_project(&mut self) {
+    fn export_project(&mut self) {
         let project = self.build_project();
         if project.is_empty() {
-            self.state.status = "No edits to save yet.".into();
+            self.state.status = "No edits to export yet.".into();
             return;
         }
         let mut dialog = rfd::FileDialog::new()
+            .set_title("Export editable mod project…")
             .set_file_name(crate::mod_project::PROJECT_FILE_NAME)
             .add_filter("Mod project", &["json"]);
         if let Some(dir) = &self.export_dir {
@@ -3416,12 +3481,15 @@ impl VisionaryApp {
         let Some(path) = dialog.save_file() else {
             return;
         };
-        match serde_json::to_string_pretty(&project)
-            .map_err(anyhow::Error::from)
-            .and_then(|json| std::fs::write(&path, json).map_err(anyhow::Error::from))
-        {
-            Ok(()) => self.state.status = format!("Project saved to {}", path.display()),
-            Err(e) => self.state.status = format!("Project save failed: {e}"),
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(crate::mod_export::slugify)
+            .unwrap_or_else(|| "project".into());
+        let asset_dir = format!("{stem}_assets");
+        match crate::mod_export::write_portable_project(&project, &path, &asset_dir) {
+            Ok(()) => self.state.status = format!("Project exported to {}", path.display()),
+            Err(e) => self.state.status = format!("Project export failed: {e}"),
         }
     }
 
@@ -3435,35 +3503,62 @@ impl VisionaryApp {
         self.load_project_from(&path);
     }
 
-    /// Export everything as an installable mod:
-    ///   mod/     — drop-in Arcropolis data mod (rebuilt eff files + info.toml)
-    ///   source/  — buildable smashline project (also auto-compiled in the background;
-    ///              the built .nro lands in plugin/, build output in build.log)
-    ///   modproject.json — re-openable for further editing
+    /// Export one directly installable ARCropolis mod folder. The generated Skyline plugin
+    /// supplies ACMD/effect-spawn edits and rebuilt EFF files live beside it in the same mod.
     fn export_full_mod(&mut self) {
+        self.export_mod(false);
+    }
+
+    /// Export editable artifacts with rebuilt effect data and Rust ACMD source in clearly
+    /// separate folders. No automatic build is started for this developer-facing path.
+    fn export_developer_files(&mut self) {
+        self.export_mod(true);
+    }
+
+    fn export_mod(&mut self, developer: bool) {
         let project = self.build_project();
         if project.is_empty() {
             self.state.status = "No edits to export yet.".into();
             return;
         }
-        let mut dialog = rfd::FileDialog::new().set_title("Export mod into folder…");
+        let title = if developer {
+            "Export developer files into folder…"
+        } else {
+            "Export ARCropolis mod folder…"
+        };
+        let mut dialog = rfd::FileDialog::new().set_title(title);
         if let Some(dir) = &self.export_dir {
             dialog = dialog.set_directory(dir);
         }
-        let Some(dest) = dialog.pick_folder() else {
+        let Some(parent) = dialog.pick_folder() else {
             return;
         };
-        self.export_dir = Some(dest.clone());
-        save_config_path("export_dir", &dest);
+        self.export_dir = Some(parent.clone());
+        save_config_path("export_dir", &parent);
+        let slug = crate::mod_export::slugify(&project.name);
+        let export_name = if developer {
+            format!("{slug}_developer_files")
+        } else {
+            slug.clone()
+        };
+        let dest = unused_export_root(&parent, &export_name);
 
         let mut report: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
-        // 1. Data mod: rebuilt eff files under mod/effect/fighter/<name>/… + info.toml.
+        // 1. Data mod: rebuilt eff files under effect/fighter/<name>/… + info.toml.
         //    One-slot-scoped transplants additionally write ef_<fighter>_cXX.eff per slot
         //    (the "One-Slot Effects" plugin's file naming; the slotted file replaces the
         //    base file for that costume, so it carries the unscoped transplants too).
-        let mod_dir = dest.join("mod");
+        let mod_dir = if developer {
+            dest.join("effect_mod")
+        } else {
+            dest.clone()
+        };
+        let has_eff = project
+            .fighters
+            .values()
+            .any(|fighter| fighter.eff.as_ref().is_some_and(|eff| !eff.is_empty()));
         for (fighter, fm) in &project.fighters {
             match &fm.eff {
                 Some(eff) if !eff.is_empty() => {
@@ -3498,11 +3593,7 @@ impl VisionaryApp {
                     };
                     // Base file: authored edits + costume-unscoped ops. Skip only when
                     // literally nothing lands in it.
-                    let base_has_content = !eff.authored.is_empty()
-                        || eff
-                            .transplants
-                            .iter()
-                            .any(|op| op.one_slot_slots.is_empty());
+                    let base_has_content = crate::mod_export::base_eff_has_content(eff);
                     let mut ok = true;
                     if base_has_content {
                         if let Err(e) = write_variant(None) {
@@ -3569,34 +3660,28 @@ impl VisionaryApp {
                     .map(move |(m, calls)| (f.clone(), m.clone(), calls.clone()))
             })
             .collect();
-        let live_tweaks: Vec<crate::mod_project::LiveTweak> = {
-            let mut v: Vec<crate::mod_project::LiveTweak> = Vec::new();
-            for fm in project.fighters.values() {
-                for t in &fm.live_tweaks {
-                    if !v.iter().any(|x| x.effect_name == t.effect_name) {
-                        v.push(t.clone());
-                    }
-                }
+        let plugin_name = crate::mod_export::plugin_name(&project);
+        let generated_source = match crate::mod_export::source_project(&project) {
+            Ok(source) => source,
+            Err(error) => {
+                self.state.status = format!("Export failed: {error}");
+                return;
             }
-            v
         };
-        let plugin_name = format!(
-            "{}_plugin",
-            self.project_name.to_lowercase().replace([' ', '-'], "_")
-        );
-        let has_source = !acmd_edits.is_empty() || !effect_edits.is_empty();
+        let has_source = generated_source.is_some();
         let mut source_root: Option<std::path::PathBuf> = None;
-        if has_source {
-            let src_project = crate::acmd::build_mod_project_full(
-                &acmd_edits,
-                &effect_edits,
-                &live_tweaks,
-                &plugin_name,
-            );
-            match write_mod_project(&src_project, &dest.join("source")) {
-                Ok(root) => {
+        if let Some(src_project) = generated_source {
+            let root = if developer {
+                dest.join("acmd_source")
+            } else {
+                crate::scratch_dirs::app_storage_root()
+                    .join("export-source")
+                    .join(&plugin_name)
+            };
+            match crate::mod_export::write_source_project(&src_project, &root) {
+                Ok(()) => {
                     report.push(format!(
-                        "source: {} move script(s), {} effect script(s)",
+                        "ACMD source: {} move script(s), {} effect script(s)",
                         acmd_edits.len(),
                         effect_edits.len()
                     ));
@@ -3608,55 +3693,82 @@ impl VisionaryApp {
             report.push("source: no hitbox/spawn edits — skipped".into());
         }
 
-        // info.toml so mod/ drops straight into Arcropolis' mods folder.
-        let _ = std::fs::create_dir_all(&mod_dir);
-        let info = format!(
-            "display_name = \"{name}\"\nauthors = \"Visionary\"\nversion = \"1.0.0\"\ndescription = \"Exported by Visionary\"\ncategory = \"Misc\"\n",
-            name = self.project_name
-        );
-        if let Err(e) = std::fs::write(mod_dir.join("info.toml"), info) {
-            errors.push(format!("info.toml: {e}"));
+        // info.toml sits beside rebuilt EFF files so Arcropolis can load that folder directly.
+        if has_eff || has_source {
+            let _ = std::fs::create_dir_all(&mod_dir);
+            let display_name = serde_json::to_string(&self.project_name)
+                .unwrap_or_else(|_| "\"Visionary mod\"".into());
+            let info = format!(
+                "display_name = {display_name}\nauthors = \"Visionary\"\nversion = \"1.0.0\"\ndescription = \"Exported by Visionary\"\ncategory = \"Misc\"\n"
+            );
+            if let Err(e) = std::fs::write(mod_dir.join("info.toml"), info) {
+                errors.push(format!("info.toml: {e}"));
+            }
         }
 
         // Top-level README: what goes where.
-        let readme = format!(
-            "# {name}\n\n\
-             Exported by Visionary.\n\n\
-             ## Install\n\n\
-             1. `mod/` → copy to `sd:/ultimate/mods/{name}/` (Arcropolis data mod: eff files).\n\
-             2. `plugin/lib{plugin}.nro` → copy to `atmosphere/contents/01006A800016E000/romfs/skyline/plugins/`\n   \
-                (on emulator: the title's LayeredFS `romfs/skyline/plugins/`). Appears after the\n   \
-                background build finishes — see build.log; or build manually with `source/build.sh`.\n\n\
-             ## Re-editing\n\n\
-             Open `modproject.json` via Mod → Load Project… in the toolkit.\n",
-            name = self.project_name,
-            plugin = plugin_name,
-        );
+        let readme = if developer {
+            let effect_note = if has_eff {
+                "`effect_mod/` contains the rebuilt Arcropolis effect files.\n"
+            } else {
+                "This project has no EFF data edits, so no effect mod folder is needed.\n"
+            };
+            let source_note = if has_source {
+                "`acmd_source/` contains the editable Skyline/Smashline Rust project for hitbox and effect-spawn edits.\n\
+                 Build it with `bash acmd_source/build.sh`.\n"
+            } else {
+                "This project has no hitbox or effect-spawn edits, so no ACMD source folder is needed.\n"
+            };
+            format!(
+                "# {name} developer files\n\n\
+                 {effect_note}\
+                 {source_note}",
+                name = self.project_name,
+            )
+        } else {
+            let plugin_note = if has_source {
+                "ARCropolis chainloads the generated ACMD plugin from this mod's root `plugin.nro`."
+            } else {
+                "This project has no ACMD edits, so this mod does not need a Skyline plugin."
+            };
+            let copy_note =
+                format!("Copy this entire `{slug}/` folder into `<SD root>/ultimate/mods/`.");
+            let effect_note = if has_eff {
+                "ARCropolis loads the effect files from this mod's `effect/` folder.".to_string()
+            } else {
+                "This project has no Arcropolis effect files.".to_string()
+            };
+            format!(
+                "# {name}\n\n\
+                 {copy_note}\n\n\
+                 {effect_note} {plugin_note}\n",
+                name = self.project_name,
+            )
+        };
         let _ = std::fs::write(dest.join("README.md"), readme);
 
-        // 3. The project file itself — makes the exported mod re-openable for editing.
-        match serde_json::to_string_pretty(&project) {
-            Ok(json) => {
-                if let Err(e) =
-                    std::fs::write(dest.join(crate::mod_project::PROJECT_FILE_NAME), json)
-                {
-                    errors.push(format!("modproject.json: {e}"));
-                }
+        // 3. Mod-folder exports compile the generated plugin in the background and keep the NRO
+        // inside that ARCropolis mod. Developer exports intentionally stop at editable source.
+        if !developer && errors.is_empty() {
+            if let Some(src_root) = source_root {
+                let nro = dest.join("plugin.nro");
+                self.spawn_export_build(dest.clone(), src_root, plugin_name, nro);
             }
-            Err(e) => errors.push(format!("modproject.json: {e}")),
-        }
-
-        // 4. Compile the source in the background; copy the nro into plugin/ on success.
-        if let Some(src_root) = source_root {
-            self.spawn_export_build(dest.clone(), src_root, plugin_name);
         }
 
         self.state.status = if errors.is_empty() {
+            let result = if developer {
+                "Developer files exported"
+            } else if has_source {
+                "Mod folder staged"
+            } else {
+                "Mod folder ready"
+            };
             format!(
-                "Mod exported to {} — {}{}",
+                "{result} at {} — {}{}",
                 dest.display(),
                 report.join(" · "),
-                if has_source {
+                if has_source && !developer {
                     " · building plugin…"
                 } else {
                     ""
@@ -3671,13 +3783,14 @@ impl VisionaryApp {
         };
     }
 
-    /// Run `cargo skyline build --release` on the exported source in a background thread.
-    /// Progress lands in `self.export_build`; the finished nro is copied to `<dest>/plugin/`.
+    /// Run `cargo skyline build --release` on generated source in a background thread.
+    /// Progress lands in `self.export_build`; the finished NRO is copied inside the mod folder.
     fn spawn_export_build(
         &mut self,
         dest: std::path::PathBuf,
         src_root: std::path::PathBuf,
         plugin_name: String,
+        nro_destination: std::path::PathBuf,
     ) {
         let state = std::sync::Arc::new(std::sync::Mutex::new(ExportBuildState {
             done: false,
@@ -3701,14 +3814,13 @@ impl VisionaryApp {
                         let nro = src_root
                             .join("target/aarch64-skyline-switch/release")
                             .join(format!("lib{plugin_name}.nro"));
-                        let plugin_dir = dest.join("plugin");
-                        let _ = std::fs::create_dir_all(&plugin_dir);
-                        match std::fs::copy(&nro, plugin_dir.join(format!("lib{plugin_name}.nro")))
-                        {
-                            Ok(_) => format!("plugin built → plugin/lib{plugin_name}.nro"),
+                        let parent = nro_destination.parent().unwrap_or(&dest);
+                        let _ = std::fs::create_dir_all(parent);
+                        match std::fs::copy(&nro, &nro_destination) {
+                            Ok(_) => format!("Mod folder ready → {}", dest.display()),
                             Err(e) => format!(
-                                "plugin built but nro copy failed ({e}) — see {}",
-                                nro.display()
+                                "plugin built but the mod folder is incomplete ({e}) — see {}",
+                                dest.join("build.log").display()
                             ),
                         }
                     } else {
@@ -3725,7 +3837,7 @@ impl VisionaryApp {
     }
 
     fn load_project_from(&mut self, path: &std::path::Path) {
-        let project: crate::mod_project::ModProjectFile = match std::fs::read_to_string(path)
+        let mut project: crate::mod_project::ModProjectFile = match std::fs::read_to_string(path)
             .map_err(anyhow::Error::from)
             .and_then(|s| serde_json::from_str(&s).map_err(anyhow::Error::from))
         {
@@ -3735,11 +3847,47 @@ impl VisionaryApp {
                 return;
             }
         };
+        if let Err(error) = crate::mod_export::validate_project(&project)
+            .and_then(|_| crate::mod_export::resolve_project_assets(&mut project, path))
+        {
+            self.state.status = format!("Project load failed: {error}");
+            return;
+        }
+
+        // Loading is replacement, not an undocumented merge. Clear the previous project's
+        // runtime rules/carrier first, then replace every local edit store so saving immediately
+        // after a load reproduces exactly the file that was opened.
+        self.clear_all_game_edits();
+        let previously_loaded_eff = self
+            .eff_editor
+            .loaded_rel()
+            .filter(|relative| !crate::scratch_dirs::is_transplant_preview_name(relative));
+        self.eff_editor.reset_project_state();
+        self.state.edit_log.entries.clear();
+        self.state.effect_call_edits.clear();
+        self.state.effect_call_full.clear();
+        self.eff_mods.clear();
+        self.live_overrides = crate::game_link::LiveOverrides::default();
+        self.state.hitboxes = self.state.hitboxes_pristine.clone();
+        if let Some(relative) = previously_loaded_eff {
+            let base = self.resolve_eff_source(&relative);
+            if base.is_file() {
+                self.eff_editor.queue_load(&base);
+            }
+        }
         self.project_name = project.name.clone();
         let mut n_acmd = 0;
         let mut n_calls = 0;
         let mut n_eff = 0;
-        for (fighter, fm) in project.fighters {
+        for (fighter, mut fm) in project.fighters {
+            for (move_name, record) in &mut fm.acmd {
+                if record.hitboxes_pristine.is_empty() {
+                    if let Some(body) = crate::acmd::cached_script_body(&fighter, move_name) {
+                        record.hitboxes_pristine =
+                            crate::acmd::parse_acmd_script(&body).to_hitboxes();
+                    }
+                }
+            }
             n_acmd += fm.acmd.len();
             if !fm.acmd.is_empty() {
                 self.state
@@ -3770,7 +3918,13 @@ impl VisionaryApp {
                         *r = r.to_lowercase();
                     }
                 }
-                n_eff += eff.authored.len() + eff.transplants.len();
+                n_eff += eff.authored.len()
+                    + eff.transplants.len()
+                    + eff.textures.len()
+                    + eff.textures_added.len()
+                    + eff.textures_removed.len()
+                    + eff.rosters.len()
+                    + eff.entry_edits.len();
                 self.eff_mods.insert(fighter.clone(), eff);
             }
             // Live color/speed tweaks: restore into the override store and re-send.
@@ -3796,7 +3950,10 @@ impl VisionaryApp {
         }
 
         // Re-apply to what's currently loaded and push it live.
+        self.apply_saved_hitbox_edits_to_current();
         self.apply_effect_call_edits_to_current();
+        self.push_hitbox_rules();
+        let pending_hitbox_live = self.push_all_saved_hitbox_rules();
         self.push_effect_rules();
         self.push_effect_aliases();
         // Rebuild merged views for every fighter with transplant ops so the eff editor and
@@ -3818,15 +3975,13 @@ impl VisionaryApp {
         {
             if let Some(eff) = self.eff_mods.get(&fighter).cloned() {
                 let src = self.resolve_eff_source(&eff.source_rel);
-                if self.eff_editor.loaded_rel().as_deref() == Some(eff.source_rel.as_str()) {
-                    self.eff_editor.apply_authored_edits(&eff.authored);
-                    // Push the project's authored edits into the running game by rebuilding
-                    // the eff (per-emitter exact); serviced next frame after the editor runs.
-                    if !eff.authored.is_empty() {
-                        self.eff_editor.request_live_apply();
-                    }
-                } else if src.exists() {
+                if src.exists() {
+                    // Always start a loaded project from the canonical base EFF. Applying a new
+                    // project directly onto the previous project's in-memory diff compounds
+                    // authored values and can leave removed structures behind.
                     self.eff_editor.queue_load(&src);
+                    self.eff_editor
+                        .queue_structure_edits(eff.rosters.clone(), eff.entry_edits.clone());
                     self.eff_editor.queue_edits(eff.authored.clone());
                     self.eff_editor.open = true;
                 }
@@ -3836,6 +3991,11 @@ impl VisionaryApp {
             "Project '{}' loaded: {n_acmd} move edit(s), {n_calls} effect-call edit(s), {n_eff} eff edit(s)",
             self.project_name
         );
+        if pending_hitbox_live > 0 {
+            self.state.status.push_str(&format!(
+                " — {pending_hitbox_live} hitbox change(s) need the move opened or performed once for live preview"
+            ));
+        }
     }
 
     /// "Game has existing edits" prompt: the plugin persists pins across sessions, so a
@@ -4304,9 +4464,13 @@ impl VisionaryApp {
             self.state.effects = effects;
             self.state.selected_effect_call = None;
             self.apply_effect_call_edits_to_current();
+            self.push_effect_rules();
         }
         self.state.acmd_source = "Live capture".into();
         self.acmd_error = None;
+        if self.apply_saved_hitbox_edits_to_current() {
+            self.push_hitbox_rules();
+        }
         let mut status =
             format!("Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) from live game capture");
         if let Some(note) = self.capture_vs_script_offset() {
@@ -4391,7 +4555,6 @@ impl VisionaryApp {
         bone_rev: &HashMap<u64, String>,
         labels: &HashMap<u64, String>,
     ) -> Option<crate::data::Hitbox> {
-        use crate::game_link::LuaArgWire as A;
         if args.len() < 17 {
             return None;
         }
@@ -4406,7 +4569,11 @@ impl VisionaryApp {
                 })
                 .unwrap_or_default()
         };
-        let bool_at = |i: usize| matches!(args.get(i), Some(A::Bool(true)));
+        // Lua scripts do not consistently push flag slots as Bool. Some use Int/Num, and the
+        // plugin deliberately preserves that source type when rewriting. Decode all scalar
+        // representations here so an integer-backed true flag does not arrive in the editor as
+        // false and get written back incorrectly on the next edit.
+        let bool_at = |i: usize| i64_at(i).is_some_and(|v| v != 0);
         let bone_hash = args.get(2).and_then(|a| a.as_hash())?;
         let bone_name = bone_rev
             .get(&bone_hash)
@@ -4622,7 +4789,7 @@ impl VisionaryApp {
                 }
             } else if line.func.starts_with("ATTACK") {
                 if let Some(hb) =
-                    Self::hitbox_from_capture(&line.args, line.frame, &bone_rev, &attr_labels)
+                    Self::hitbox_from_capture(&line.args, line.frame, bone_rev, attr_labels)
                 {
                     // Same id re-captured (multi-part moves): keep the earliest frame.
                     if !hitboxes
@@ -4641,8 +4808,7 @@ impl VisionaryApp {
                     }
                 }
             } else if line.func == "CATCH" {
-                if let Some(hb) = Self::hitbox_from_capture_grab(&line.args, line.frame, &bone_rev)
-                {
+                if let Some(hb) = Self::hitbox_from_capture_grab(&line.args, line.frame, bone_rev) {
                     if !hitboxes.iter().any(|h| {
                         h.category == 1 && h.id == hb.id && h.active_start == hb.active_start
                     }) {
@@ -4724,7 +4890,7 @@ impl VisionaryApp {
     ///   * exact (id, start-frame) pair changed → frame-scoped override,
     ///   * pristine occurrence with no current match → frame-scoped suppress (deleted/retimed),
     ///   * current occurrence with no pristine match → inject (added/retimed),
-    /// each suppress/override windowed to its own frame so the other hits are untouched.
+    ///     each suppress/override windowed to its own frame so the other hits are untouched.
     fn push_hitbox_rules(&mut self) {
         let Some(mv_key) = self.current_move_key() else {
             return;
@@ -4780,7 +4946,7 @@ impl VisionaryApp {
                         suppress: false,
                         frame_start: fs,
                         frame_end: fe,
-                        overrides: Some(Self::hitbox_overrides(h)),
+                        overrides: Some(Self::hitbox_overrides(h, p)),
                         inject: None,
                     });
                 }
@@ -4853,47 +5019,209 @@ impl VisionaryApp {
         }
     }
 
-    /// Every modeled ATTACK slot as an override (unchanged values are harmless rewrites).
+    /// Rebuild live hitbox rules for every move in a loaded project, not just the move currently
+    /// open in the UI. Projects written before `hitboxes_pristine` was added cannot safely
+    /// derive suppress/retime rules; those moves are counted so the load status can tell the
+    /// user to open or perform them once and recover a baseline.
+    fn push_all_saved_hitbox_rules(&mut self) -> usize {
+        let records: Vec<(String, String, crate::data::EditRecord)> = self
+            .state
+            .edit_log
+            .entries
+            .iter()
+            .flat_map(|(fighter, moves)| {
+                moves.iter().map(move |(move_name, record)| {
+                    (fighter.clone(), move_name.clone(), record.clone())
+                })
+            })
+            .collect();
+        let mut incomplete = 0;
+        for (fighter, move_name, record) in records {
+            if record.hitboxes_pristine.is_empty() {
+                incomplete += 1;
+                continue;
+            }
+            let motion = hash40::hash40(&move_name.to_lowercase()).0;
+            let captures = self
+                .game_link
+                .latest_run_for(motion, fighter_kind_id(&fighter));
+            let family_prefix = |category: u8| match category {
+                1 => "CATCH",
+                2 => "AREA_WIND",
+                _ => "ATTACK",
+            };
+            let donor_for = |category: u8, id: u32| {
+                let prefix = family_prefix(category);
+                captures
+                    .iter()
+                    .find(|capture| {
+                        capture.func.starts_with(prefix)
+                            && capture.args.first().and_then(|arg| arg.as_i64()) == Some(id as i64)
+                    })
+                    .or_else(|| {
+                        captures
+                            .iter()
+                            .find(|capture| capture.func.starts_with(prefix))
+                    })
+            };
+            let pristine = &record.hitboxes_pristine;
+            let current = &record.hitboxes;
+            let mut current_used = vec![false; current.len()];
+            let mut pristine_used = vec![false; pristine.len()];
+            let mut rules = Vec::new();
+
+            for (pristine_index, original) in pristine.iter().enumerate() {
+                if let Some(current_index) =
+                    current.iter().enumerate().position(|(index, hitbox)| {
+                        !current_used[index]
+                            && hitbox.id == original.id
+                            && hitbox.active_start == original.active_start
+                    })
+                {
+                    current_used[current_index] = true;
+                    pristine_used[pristine_index] = true;
+                    let edited = &current[current_index];
+                    if edited != original {
+                        let (frame_start, frame_end) =
+                            Self::rule_frame_window(original.active_start);
+                        rules.push(crate::game_link::HitboxRuleWire {
+                            motion,
+                            category: original.category,
+                            hitbox_id: (original.category != 2).then_some(original.id as u64),
+                            suppress: false,
+                            frame_start,
+                            frame_end,
+                            overrides: Some(Self::hitbox_overrides(edited, original)),
+                            inject: None,
+                        });
+                    }
+                }
+            }
+            for (index, original) in pristine.iter().enumerate() {
+                if pristine_used[index] {
+                    continue;
+                }
+                let (frame_start, frame_end) = Self::rule_frame_window(original.active_start);
+                rules.push(crate::game_link::HitboxRuleWire {
+                    motion,
+                    category: original.category,
+                    hitbox_id: (original.category != 2).then_some(original.id as u64),
+                    suppress: true,
+                    frame_start,
+                    frame_end,
+                    overrides: None,
+                    inject: None,
+                });
+            }
+            for (index, edited) in current.iter().enumerate() {
+                if current_used[index] {
+                    continue;
+                }
+                let args = match edited.category {
+                    1 => Self::build_catch_args(edited, donor_for(1, edited.id)),
+                    2 => None,
+                    _ => Self::build_attack_args(edited, donor_for(0, edited.id)),
+                };
+                if let Some(args) = args {
+                    rules.push(crate::game_link::HitboxRuleWire {
+                        motion,
+                        category: edited.category,
+                        hitbox_id: None,
+                        suppress: false,
+                        frame_start: None,
+                        frame_end: None,
+                        overrides: None,
+                        inject: Some(crate::game_link::InjectRuleWire {
+                            frame: Self::script_to_motion_frame(edited.active_start),
+                            args,
+                        }),
+                    });
+                } else {
+                    incomplete += 1;
+                }
+            }
+            let key = format!("{fighter}/{move_name}");
+            if rules.is_empty() {
+                self.hitbox_rules_store.remove(&key);
+            } else {
+                self.hitbox_rules_store.insert(key, rules);
+            }
+        }
+        let all: Vec<_> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        incomplete
+    }
+
+    /// Only modeled ATTACK slots that differ from the captured/source hitbox.
     ///
-    /// The attribute slots are encoded back from their symbolic names to the lua numbers the
-    /// plugin pushes; a name this build cannot resolve encodes to `None` and the game keeps
-    /// its own value rather than getting a garbage slot.
-    fn hitbox_overrides(h: &crate::data::Hitbox) -> crate::game_link::HbOverridesWire {
+    /// Sparse values are required for correctness, not just smaller JSON. A few script slots use
+    /// a Hash sentinel for "not supplied" even though the editor exposes a numeric value. If all
+    /// fields are sent every time, editing Damage also destroys those sentinels. With a sparse
+    /// diff, an explicitly edited value can replace a sentinel while every untouched slot keeps
+    /// its exact Lua value and type.
+    fn hitbox_overrides(
+        h: &crate::data::Hitbox,
+        p: &crate::data::Hitbox,
+    ) -> crate::game_link::HbOverridesWire {
         use crate::param_labels as pl;
+        fn changed<T: PartialEq + Copy>(now: T, was: T) -> Option<T> {
+            (now != was).then_some(now)
+        }
+        let attr = |now: &str, was: &str, table: crate::param_labels::ConstTable| {
+            (now != was).then(|| pl::encode_const(table, now)).flatten()
+        };
+        let capsule_changed = h.capsule_end != p.capsule_end;
         crate::game_link::HbOverridesWire {
-            damage: Some(h.damage),
-            angle: Some(h.angle as i64),
-            kbg: Some(h.kb_scaling as i64),
-            fkb: Some(h.fkb as i64),
-            bkb: Some(h.kb_base as i64),
-            size: Some(h.size),
-            x: Some(h.offset_x),
-            y: Some(h.offset_y),
-            z: Some(h.offset_z),
-            x2: h.capsule_end.map(|c| c[0]),
-            y2: h.capsule_end.map(|c| c[1]),
-            z2: h.capsule_end.map(|c| c[2]),
-            hitlag: Some(h.hitlag_mult),
-            sdi: Some(h.sdi_mult),
-            setoff: pl::encode_const(pl::SETOFF_KIND, &h.setoff_kind),
-            lr_check: pl::encode_const(pl::LR_CHECK, &h.lr_check),
-            clang: Some(h.is_clang),
-            add_attack: Some(h.is_add_attack as i64),
-            hitbox_attr: Some(h.hitbox_attr),
-            ground_or_air: Some(h.ground_or_air as i64),
-            mtk: Some(h.is_mtk),
-            shield_disable: Some(h.is_shield_disable),
-            reflectable: Some(h.is_reflectable),
-            absorbable: Some(h.is_absorbable),
-            landing_attack: Some(h.is_landing_attack),
-            situation_mask: pl::encode_const(pl::SITUATION_MASK, &h.situation_mask),
-            category_mask: pl::encode_const(pl::CATEGORY_MASK, &h.category_mask),
-            part_mask: pl::encode_const(pl::PART_MASK, &h.part_mask),
-            no_finish_camera: Some(h.no_finish_camera),
-            collision_attr: pl::encode_collision_attr(&h.collision_attr),
-            sound_level: pl::encode_const(pl::SOUND_LEVEL, &h.sound_level),
-            sound_attr: pl::encode_const(pl::SOUND_ATTR, &h.sound_attr),
-            attack_region: pl::encode_const(pl::ATTACK_REGION, &h.attack_region),
+            part: changed(h.part as i64, p.part as i64),
+            bone: (h.bone_name != p.bone_name)
+                .then(|| hash40::hash40(&h.bone_name.to_lowercase()).0),
+            damage: changed(h.damage, p.damage),
+            angle: changed(h.angle as i64, p.angle as i64),
+            kbg: changed(h.kb_scaling as i64, p.kb_scaling as i64),
+            fkb: changed(h.fkb as i64, p.fkb as i64),
+            bkb: changed(h.kb_base as i64, p.kb_base as i64),
+            size: changed(h.size, p.size),
+            x: changed(h.offset_x, p.offset_x),
+            y: changed(h.offset_y, p.offset_y),
+            z: changed(h.offset_z, p.offset_z),
+            x2: capsule_changed
+                .then(|| h.capsule_end.map(|c| c[0]))
+                .flatten(),
+            y2: capsule_changed
+                .then(|| h.capsule_end.map(|c| c[1]))
+                .flatten(),
+            z2: capsule_changed
+                .then(|| h.capsule_end.map(|c| c[2]))
+                .flatten(),
+            capsule: capsule_changed.then_some(h.capsule_end.is_some()),
+            hitlag: changed(h.hitlag_mult, p.hitlag_mult),
+            sdi: changed(h.sdi_mult, p.sdi_mult),
+            setoff: attr(&h.setoff_kind, &p.setoff_kind, pl::SETOFF_KIND),
+            lr_check: attr(&h.lr_check, &p.lr_check, pl::LR_CHECK),
+            clang: changed(h.is_clang, p.is_clang),
+            add_attack: changed(h.is_add_attack as i64, p.is_add_attack as i64),
+            hitbox_attr: changed(h.hitbox_attr, p.hitbox_attr),
+            ground_or_air: changed(h.ground_or_air as i64, p.ground_or_air as i64),
+            mtk: changed(h.is_mtk, p.is_mtk),
+            shield_disable: changed(h.is_shield_disable, p.is_shield_disable),
+            reflectable: changed(h.is_reflectable, p.is_reflectable),
+            absorbable: changed(h.is_absorbable, p.is_absorbable),
+            landing_attack: changed(h.is_landing_attack, p.is_landing_attack),
+            situation_mask: attr(&h.situation_mask, &p.situation_mask, pl::SITUATION_MASK),
+            category_mask: attr(&h.category_mask, &p.category_mask, pl::CATEGORY_MASK),
+            part_mask: attr(&h.part_mask, &p.part_mask, pl::PART_MASK),
+            no_finish_camera: changed(h.no_finish_camera, p.no_finish_camera),
+            collision_attr: (h.collision_attr != p.collision_attr)
+                .then(|| pl::encode_collision_attr(&h.collision_attr))
+                .flatten(),
+            sound_level: attr(&h.sound_level, &p.sound_level, pl::SOUND_LEVEL),
+            sound_attr: attr(&h.sound_attr, &p.sound_attr, pl::SOUND_ATTR),
+            attack_region: attr(&h.attack_region, &p.attack_region, pl::ATTACK_REGION),
         }
     }
 
@@ -4905,7 +5233,7 @@ impl VisionaryApp {
         donor: Option<&crate::game_link::CaptureLine>,
     ) -> Option<Vec<crate::game_link::LuaArgWire>> {
         use crate::game_link::LuaArgWire as A;
-        let mut args = donor.filter(|d| d.args.len() >= 33)?.args.clone();
+        let mut args = donor.filter(|d| d.args.len() >= 36)?.args.clone();
         args[0] = A::Int(h.id as i64);
         args[1] = A::Int(h.part as i64);
         args[2] = A::Hash(hash40::hash40(&h.bone_name.to_lowercase()).0);
@@ -4934,9 +5262,10 @@ impl VisionaryApp {
         args[16] = A::Num(h.sdi_mult);
 
         // Attribute slots: keep the donor's TYPE for each slot (the lua side is type
-        // sensitive) and only swap the value in. Names this build cannot resolve leave the
-        // donor's own value in place, as do Hash/Nil slots (slot 20 carries a
-        // `Hash40("no")` sentinel when the script passed NaN).
+        // sensitive) and swap the value in. Names this build cannot resolve leave the donor's
+        // own value in place. A sentinel/unexpected source type gets the editor's declared
+        // type: injection is used for an added or retimed attack and must carry every modeled
+        // property, including one the source represented with `Hash40("no")`/Nil.
         use crate::param_labels as pl;
         let mut set_scalar = |idx: usize, v: Option<i64>| {
             let Some(v) = v else { return };
@@ -4947,7 +5276,7 @@ impl VisionaryApp {
                 A::Int(_) => A::Int(v),
                 A::Num(_) => A::Num(v as f32),
                 A::Bool(_) => A::Bool(v != 0),
-                _ => return,
+                _ => A::Int(v),
             };
             args[idx] = next;
         };
@@ -4971,10 +5300,11 @@ impl VisionaryApp {
         match args.get(21) {
             Some(A::Num(_)) => args[21] = A::Num(h.hitbox_attr),
             Some(A::Int(_)) => args[21] = A::Int(h.hitbox_attr as i64),
-            _ => {}
+            Some(_) => args[21] = A::Num(h.hitbox_attr),
+            None => {}
         }
         if let Some(hash) = pl::encode_collision_attr(&h.collision_attr) {
-            if matches!(args.get(32), Some(A::Hash(_))) {
+            if args.len() > 32 {
                 args[32] = A::Hash(hash);
             }
         }
@@ -5831,6 +6161,11 @@ impl VisionaryApp {
         // wipe `authored` on the next sync. (deploy_live_eff still bakes them for the
         // game — live parity — this file is the editing baseline.)
         eff.authored.clear();
+        // Emitter lists and spawn structures are diffed against this baseline too, so baking
+        // them in would make the editor read them as "same as the file" and drop them on the
+        // next sync — exactly the failure the authored edits above are held back to avoid.
+        eff.rosters.clear();
+        eff.entry_edits.clear();
         let root = self.eff_editor.export_root().to_path_buf();
         let src_path = root.join(&eff.source_rel);
         let tmp = src_path
@@ -6075,11 +6410,24 @@ impl VisionaryApp {
             .map(|eff| {
                 eff.transplants
                     .iter()
-                    .filter(|op| {
-                        let rel = op.src_file_rel.to_lowercase();
-                        !rel.is_empty() && !rel.starts_with("effect/system")
-                    })
+                    .filter(|op| rides_the_carrier(&op.src_file_rel))
                     .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        // An op the carrier cannot take has to be reported, not dropped in silence. Silence here
+        // reads as "sent" and leaves the user waiting on a carrier that was never going to exist.
+        // Nothing with a real donor path is refused today; this stays so that if a donor class is
+        // ever excluded again, it cannot be excluded quietly.
+        let skipped_donors: Vec<String> = carrier_fighter
+            .as_ref()
+            .and_then(|f| self.eff_mods.get(f))
+            .map(|eff| {
+                eff.transplants
+                    .iter()
+                    .filter(|op| !op.src_file_rel.is_empty())
+                    .filter(|op| !rides_the_carrier(&op.src_file_rel))
+                    .map(|op| format!("{} ({})", op.src_set_name, op.src_file_rel))
                     .collect()
             })
             .unwrap_or_default();
@@ -6147,7 +6495,9 @@ impl VisionaryApp {
             // Only the selected fighter's edits ride the carrier: there is ONE live carrier
             // and it is attached to that fighter's target, so folding another fighter's
             // clones in would bloat it with entries nothing can spawn.
-            if Some(fighter.to_lowercase()) != carrier_fighter || eff.authored.is_empty() {
+            if Some(fighter.to_lowercase()) != carrier_fighter
+                || (eff.authored.is_empty() && eff.rosters.is_empty() && eff.entry_edits.is_empty())
+            {
                 continue;
             }
             let src_rel = if eff.source_rel.is_empty() {
@@ -6162,20 +6512,64 @@ impl VisionaryApp {
             // `entry_name` existed) are SKIPPED rather than guessed: `src_set_name` resolves
             // against `entry_names`, so passing an emitter-set name there names a kind that
             // does not exist and ships a carrier the game's loader can hang on.
-            let mut by_entry: Vec<(String, usize, Vec<crate::mod_project::AuthoredEdit>)> =
-                Vec::new();
+            //
+            // An edited emitter LIST rides the same clone, and is grouped the same way: it is a
+            // change to the same entry, and shipping it separately would mean two clones of one
+            // effect racing to be the one the alias points at.
+            type CarrierGroup = (
+                String,
+                usize,
+                Vec<crate::mod_project::AuthoredEdit>,
+                Option<crate::mod_project::EmitterRoster>,
+                Option<crate::mod_project::EntryEdit>,
+            );
+            let mut by_entry: Vec<CarrierGroup> = Vec::new();
             for edit in &eff.authored {
                 if edit.entry_name.is_empty() {
                     continue;
                 }
-                match by_entry.iter_mut().find(|(n, _, _)| *n == edit.entry_name) {
-                    Some((_, _, v)) => v.push(edit.clone()),
-                    None => {
-                        by_entry.push((edit.entry_name.clone(), edit.set_idx, vec![edit.clone()]))
-                    }
+                match by_entry.iter_mut().find(|(n, ..)| *n == edit.entry_name) {
+                    Some((_, _, v, _, _)) => v.push(edit.clone()),
+                    None => by_entry.push((
+                        edit.entry_name.clone(),
+                        edit.set_idx,
+                        vec![edit.clone()],
+                        None,
+                        None,
+                    )),
                 }
             }
-            for (entry_name, set_idx, edits) in by_entry {
+            for roster in &eff.rosters {
+                if roster.entry_name.is_empty() {
+                    continue;
+                }
+                match by_entry.iter_mut().find(|(n, ..)| *n == roster.entry_name) {
+                    Some((_, _, _, slot, _)) => *slot = Some(roster.clone()),
+                    None => by_entry.push((
+                        roster.entry_name.clone(),
+                        roster.set_idx,
+                        Vec::new(),
+                        Some(roster.clone()),
+                        None,
+                    )),
+                }
+            }
+            for header in &eff.entry_edits {
+                match by_entry
+                    .iter_mut()
+                    .find(|(name, ..)| name.eq_ignore_ascii_case(&header.entry_name))
+                {
+                    Some((_, _, _, _, slot)) => *slot = Some(header.clone()),
+                    None => by_entry.push((
+                        header.entry_name.clone(),
+                        0,
+                        Vec::new(),
+                        None,
+                        Some(header.clone()),
+                    )),
+                }
+            }
+            for (entry_name, set_idx, edits, roster, entry_edit) in by_entry {
                 let entry_lc = entry_name.to_lowercase();
 
                 // Is this edit targeting an entry that is ITSELF a transplant? The editor
@@ -6202,6 +6596,8 @@ impl VisionaryApp {
                     carrier_authored.push(crate::eff_export::CarrierAuthored {
                         set_name: carrier_stored_name(t, own_prefix.as_deref()),
                         edits,
+                        roster,
+                        entry_edit,
                     });
                     continue;
                 }
@@ -6223,6 +6619,8 @@ impl VisionaryApp {
                 carrier_authored.push(crate::eff_export::CarrierAuthored {
                     set_name: clone_name.clone(),
                     edits,
+                    roster,
+                    entry_edit,
                 });
                 authored_aliases.push((entry_lc, clone_name));
             }
@@ -6536,8 +6934,7 @@ impl VisionaryApp {
                             .iter()
                             .filter_map(|w| w.strip_prefix("edit:").map(str::to_string))
                             .collect();
-                        carrier_authored
-                            .retain(|c| !skipped_authored.iter().any(|s| *s == c.set_name));
+                        carrier_authored.retain(|c| !skipped_authored.contains(&c.set_name));
                         if !skipped_authored.is_empty() {
                             carrier_dropped_edits = skipped_authored;
                         }
@@ -6690,7 +7087,15 @@ impl VisionaryApp {
         // file on the SD card.
         // Ordered most-actionable first: a mesh conflict means what shipped is visibly wrong in
         // a way nothing else will explain, so it outranks the ordinary success line.
-        if let Some(conflict) = &carrier_mesh_conflict {
+        //
+        // A refused transplant outranks even that. Nothing was sent for it, so every other line
+        // here would be describing a build the user's effect is not in.
+        if !skipped_donors.is_empty() {
+            self.state.status = format!(
+                "NOT sent — the live carrier cannot take {}. Export the eff to use these.",
+                skipped_donors.join(", ")
+            );
+        } else if let Some(conflict) = &carrier_mesh_conflict {
             self.state.status = format!("Model data — {conflict}");
         } else if carrier_added && !carrier_textures_in_use.is_empty() {
             self.state.status = format!(
@@ -6915,6 +7320,11 @@ impl VisionaryApp {
         let (edits, transplants) = entry
             .map(|e| (e.authored.len(), e.transplants.len()))
             .unwrap_or((0, 0));
+        // The completion condition depends on what we are asking the plugin to do. A populated
+        // snapshot succeeds when a new live carrier object appears; an empty snapshot succeeds
+        // when the old object and all of its kinds are gone. Treating both as "wait for live"
+        // made a successful restore sit for 25 seconds and then report a failure.
+        self.eff_editor.carrier_expected = entry.is_some_and(|e| !e.is_empty());
         // Publish through the CARRIER, not the fighter's own eff. The fighter eff cannot be
         // reloaded mid-match (`reparse_game_path` rebuilds from the resident buffer and never
         // re-requests the file — `cb_game=0`), so edits only appeared after a full reboot. The
@@ -7992,6 +8402,21 @@ impl eframe::App for VisionaryApp {
         // Restore/track persisted window geometry.
         self.update_window_geometry(&ctx);
 
+        // The editor is a separate viewport, so give it a real keyboard route in addition to
+        // the Windows menu. This is useful when the pointer is busy on another monitor and also
+        // makes the most important live-edit surface reachable without precise menu clicking.
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::E)
+        }) {
+            let was_closed = !self.eff_editor.open;
+            self.eff_editor.open = true;
+            if was_closed {
+                if let Some(path) = self.current_eff_path.clone() {
+                    self.eff_editor.queue_load(&path);
+                }
+            }
+        }
+
         // Background "Fetch ACMD" result
         self.poll_acmd_fetch();
 
@@ -8195,7 +8620,7 @@ impl eframe::App for VisionaryApp {
 
                 ui.menu_button("Windows", |ui| {
                     let eff_toggle = ui
-                        .checkbox(&mut self.eff_editor.open, "Eff Editor")
+                        .checkbox(&mut self.eff_editor.open, "Eff Editor  Ctrl+Shift+E")
                         .on_hover_text("Edit .eff authored values with in-game live preview (separate window)");
                     if eff_toggle.changed() && self.eff_editor.open {
                         // Opening the window always shows the selected fighter's eff (a
@@ -8226,11 +8651,11 @@ impl eframe::App for VisionaryApp {
                         ui.add(egui::TextEdit::singleline(&mut self.project_name).desired_width(140.0));
                     });
                     ui.separator();
-                    if ui.button("Save Project…")
-                        .on_hover_text("Save every edit (hitboxes, effect calls, eff values) as a project JSON")
+                    if ui.button("Export Project…")
+                        .on_hover_text("Export an editable modproject.json and its assets separately from installable mod and developer files")
                         .clicked()
                     {
-                        self.save_project();
+                        self.export_project();
                         ui.close();
                     }
                     if ui.button("Load Project…")
@@ -8262,21 +8687,22 @@ impl eframe::App for VisionaryApp {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Export Full Mod…")
-                        .on_hover_text("Rebuilt eff files + smashline source + project JSON into a folder you pick")
+                    if ui
+                        .add_enabled(
+                            self.export_build.is_none(),
+                            egui::Button::new("Export Mod Folder…"),
+                        )
+                        .on_hover_text("Export one complete ARCropolis mod folder, including effects and a built ACMD plugin at plugin.nro")
                         .clicked()
                     {
                         self.export_full_mod();
                         ui.close();
                     }
-                    let can_export = self.state.selected_fighter.is_some()
-                        && self.state.selected_move.is_some()
-                        && !self.state.script.stmts.is_empty();
-                    if ui.add_enabled(can_export, egui::Button::new("Export Source"))
-                        .on_hover_text("Export edited hitboxes as smashline Rust source code")
+                    if ui.button("Export Developer Files…")
+                        .on_hover_text("Export rebuilt effect files and editable ACMD Rust source in separate folders")
                         .clicked()
                     {
-                        self.export_acmd_source();
+                        self.export_developer_files();
                         ui.close();
                     }
                 });
@@ -8433,9 +8859,16 @@ impl eframe::App for VisionaryApp {
             // a newer one, not merely when it reports "ready", which the previous carrier
             // already does.
             self.eff_editor.gen_at_send = self.game_link.carrier_gen();
+            self.eff_editor.carrier_reports_at_send = self.game_link.carrier_status().2;
             // Discard any rejection left over from an earlier send, so it cannot immediately
             // abort this one.
             let _ = self.game_link.take_carrier_error();
+            // Start the stall clock fresh. Between sends the carrier sits in its live state for
+            // as long as the user is editing, so a timer left running from the PREVIOUS send is
+            // already past the threshold — and `live` is false on the first frame of a new send
+            // (the game has not taken our bytes yet), so the stall check fired instantly and
+            // reported "the previous carrier is not releasing" after 0.0s.
+            self.eff_editor.carrier_state_since = None;
             self.eff_editor.awaiting_game = Some(std::time::Instant::now());
         } else if self.eff_editor.sending {
             // Deferred by one frame so the spinner paints before the (synchronous) rebuild
@@ -8456,7 +8889,15 @@ impl eframe::App for VisionaryApp {
             // spawn yet.
             let generation = self.game_link.carrier_gen();
             let took_our_bytes = generation > self.eff_editor.gen_at_send;
-            let live = state == 2 && spawned && took_our_bytes;
+            let fresh_report = reports > self.eff_editor.carrier_reports_at_send;
+            let live = carrier_send_reached_goal(
+                self.eff_editor.carrier_expected,
+                state,
+                kinds,
+                spawned,
+                took_our_bytes,
+                fresh_report,
+            );
             // No deadline on a swap that is making progress. The game stays playable for the
             // whole teardown, so giving up bought nothing — it only abandoned a swap that was
             // still going to land, and the give-up path itself is the disruptive one.
@@ -8466,11 +8907,41 @@ impl eframe::App for VisionaryApp {
             // an .nro too old to report). Reports are frame-driven, so at 30 fps under load the
             // first beat can be several seconds out — hence 12s, not 3.
             let silent = reports == 0 && since.elapsed().as_secs() >= 12;
+            // Reporting but not MOVING is a third outcome, and it used to wait forever.
+            //
+            // The no-deadline rule above is right about a swap in progress, but "in progress" is
+            // not the same as "reporting". A swap that is working walks through its states; a
+            // wedged one repeats a single state indefinitely. Both were indistinguishable here,
+            // so two different dead ends waited forever: state 0 (bytes sent, plugin alive, swap
+            // never started) and a teardown that stops advancing (the editor sat on "retiring the
+            // previous carrier"). Timing the CURRENT state rather than the whole wait separates
+            // them from a slow-but-advancing swap, which resets the clock every transition.
+            //
+            // Clearing only stops the indicator — it tears nothing down — so this cannot abandon
+            // a swap that would still have landed; it just stops claiming one is coming.
+            //
+            // 25s per state is well past the 12s silence bail and past any single transition
+            // observed on a loaded match: a false "stuck" would be worse than a slow spinner.
+            let state_since = match self.eff_editor.carrier_state_since {
+                Some((seen, at)) if seen == state => at,
+                _ => {
+                    let now = std::time::Instant::now();
+                    self.eff_editor.carrier_state_since = Some((state, now));
+                    now
+                }
+            };
+            // BOTH clocks must pass. `carrier_state_since` is reset when a send is armed, so the
+            // per-state timer alone would do — but gating on THIS wait's age too means no stale
+            // timer, from any path, can report a stall before the user has actually waited.
+            let stalled = reports > 0
+                && !live
+                && state_since.elapsed().as_secs() >= 25
+                && since.elapsed().as_secs() >= 25;
             // The plugin refused the push — it could not read the payload we pointed it at.
             // Nothing is coming, so stop waiting now instead of sitting out the silence
             // timeout and blaming the match for it.
             let rejected = self.game_link.take_carrier_error();
-            if live || silent || rejected.is_some() {
+            if live || silent || stalled || rejected.is_some() {
                 self.eff_editor.awaiting_game = None;
                 // Keep the final reading visible. The indicator vanished too fast to read,
                 // which made the one signal that could settle this undiagnosable.
@@ -8478,6 +8949,16 @@ impl eframe::App for VisionaryApp {
                     ""
                 } else if rejected.is_some() {
                     " (the game could not read the payload)"
+                } else if stalled && state == 0 {
+                    // Bytes went out, plugin is alive, but no swap ever began. Name the two
+                    // things that actually produce this — neither is visible from the editor.
+                    " (plugin is reporting but never staged the carrier — is the carrier item \
+                     held, and is the .nro current?)"
+                } else if stalled {
+                    // Mid-swap and no longer advancing. The usual cause is the previous carrier
+                    // refusing to release, which a reload of the match clears.
+                    " (the swap stopped advancing in this state — the previous carrier is not \
+                     releasing; reload the match)"
                 } else {
                     // Reports are frame-driven, so silence means the per-frame driver never
                     // ran — no match in progress, or an .nro too old to report at all.
@@ -8491,8 +8972,15 @@ impl eframe::App for VisionaryApp {
                 ));
                 self.eff_editor.carrier_ok = live;
                 if live {
-                    self.eff_editor
-                        .set_sent_note("carrier live in game — re-trigger the move".to_string());
+                    if self.eff_editor.carrier_expected {
+                        self.eff_editor.set_sent_note(
+                            "carrier live in game — re-trigger the move".to_string(),
+                        );
+                    } else {
+                        self.eff_editor.set_sent_note(
+                            "carrier cleared in game — original effects restored".to_string(),
+                        );
+                    }
                 } else if let Some(reason) = rejected {
                     self.eff_editor.set_sent_note(format!(
                         "the game could not read the payload ({reason}) — check that Visionary \
@@ -9167,25 +9655,30 @@ fn find_nuanmb(motion_dir: &Path, label: &str, hash: u64) -> Option<PathBuf> {
 
 /// Rebuild an AcmdScript by patching AttackCall values from the edited Hitbox list.
 /// Non-attack statements (frame, wait, raw, etc.) are preserved verbatim.
-/// Hitboxes are matched by `id`; the last edited Hitbox with a given id wins.
+///
+/// A hitbox id is reusable: multi-hit scripts routinely spawn id 0 at several different
+/// frames. Matching by id alone made the last edited phase overwrite every earlier phase on
+/// export. Match by `(id, script spawn frame)` and consume same-frame duplicates in source
+/// order, which is the same identity the live-rule path uses.
 fn rebuild_script_from_hitboxes(
     original: &crate::data::AcmdScript,
     hitboxes: &[crate::data::Hitbox],
 ) -> crate::data::AcmdScript {
     use crate::data::{AcmdScript, AcmdStmt, AttackCall, ExcuteStmt};
 
-    // Build a lookup: id → latest Hitbox
-    let mut by_id: std::collections::HashMap<u32, &crate::data::Hitbox> =
-        std::collections::HashMap::new();
+    let mut by_spawn: std::collections::HashMap<
+        (u32, u32),
+        std::collections::VecDeque<&crate::data::Hitbox>,
+    > = std::collections::HashMap::new();
     for hb in hitboxes {
-        by_id.insert(hb.id, hb);
+        by_spawn
+            .entry((hb.id, hb.active_start))
+            .or_default()
+            .push_back(hb);
     }
 
-    fn patch_attack(
-        call: &AttackCall,
-        by_id: &std::collections::HashMap<u32, &crate::data::Hitbox>,
-    ) -> AttackCall {
-        if let Some(hb) = by_id.get(&call.id) {
+    fn patch_attack(call: &AttackCall, hb: Option<&crate::data::Hitbox>) -> AttackCall {
+        if let Some(hb) = hb {
             AttackCall {
                 id: hb.id,
                 part: hb.part,
@@ -9229,35 +9722,63 @@ fn rebuild_script_from_hitboxes(
 
     fn patch_stmts(
         stmts: &[AcmdStmt],
-        by_id: &std::collections::HashMap<u32, &crate::data::Hitbox>,
-    ) -> Vec<AcmdStmt> {
-        stmts
-            .iter()
-            .map(|stmt| match stmt {
+        start_frame: f32,
+        by_spawn: &mut std::collections::HashMap<
+            (u32, u32),
+            std::collections::VecDeque<&crate::data::Hitbox>,
+        >,
+    ) -> (Vec<AcmdStmt>, f32) {
+        let mut frame = start_frame;
+        let mut out = Vec::with_capacity(stmts.len());
+        for stmt in stmts {
+            match stmt {
+                AcmdStmt::Frame(f) => {
+                    frame = *f;
+                    out.push(stmt.clone());
+                }
+                AcmdStmt::Wait(w) => {
+                    frame += *w;
+                    out.push(stmt.clone());
+                }
                 AcmdStmt::Excute(inner) => {
+                    let spawn = crate::data::script_frame(frame);
                     let patched = inner
                         .iter()
                         .map(|s| match s {
                             ExcuteStmt::Attack(call) => {
-                                ExcuteStmt::Attack(patch_attack(call, by_id))
+                                let hb = by_spawn
+                                    .get_mut(&(call.id, spawn))
+                                    .and_then(|queue| queue.pop_front());
+                                ExcuteStmt::Attack(patch_attack(call, hb))
                             }
                             other => other.clone(),
                         })
                         .collect();
-                    AcmdStmt::Excute(patched)
+                    out.push(AcmdStmt::Excute(patched));
                 }
-                AcmdStmt::Loop { count, body } => AcmdStmt::Loop {
-                    count: *count,
-                    body: patch_stmts(body, by_id),
-                },
-                other => other.clone(),
-            })
-            .collect()
+                AcmdStmt::Loop { count, body } => {
+                    // A loop body is emitted once in source, so it can carry only one set of
+                    // attribute values. Patch that body at its first iteration and still walk
+                    // the remaining iterations to keep the following frame calculation exact.
+                    let (patched, next) = patch_stmts(body, frame, by_spawn);
+                    frame = next;
+                    for _ in 1..*count {
+                        let (_, next) = patch_stmts(body, frame, by_spawn);
+                        frame = next;
+                    }
+                    out.push(AcmdStmt::Loop {
+                        count: *count,
+                        body: patched,
+                    });
+                }
+                AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => out.push(stmt.clone()),
+            }
+        }
+        (out, frame)
     }
 
-    AcmdScript {
-        stmts: patch_stmts(&original.stmts, &by_id),
-    }
+    let (stmts, _) = patch_stmts(&original.stmts, 0.0, &mut by_spawn);
+    AcmdScript { stmts }
 }
 
 /// Build a whole ACMD script from a hitbox list (capture-sourced moves have no base script
@@ -9515,6 +10036,22 @@ fn write_mod_project(
     Ok(root)
 }
 
+/// Pick a fresh export directory without deleting or mixing with an older package. Re-exporting
+/// to the same parent therefore cannot leave stale EFF or plugin files in the new result.
+fn unused_export_root(parent: &std::path::Path, base_name: &str) -> std::path::PathBuf {
+    let first = parent.join(base_name);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2..=9999 {
+        let candidate = parent.join(format!("{base_name}_{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{base_name}_{}", std::process::id()))
+}
+
 // ── Persistent config ─────────────────────────────────────────────────────────
 
 fn config_path(key: &str) -> Option<std::path::PathBuf> {
@@ -9756,6 +10293,30 @@ fn save_recent_effs(list: &[PathBuf]) {
 }
 
 #[cfg(test)]
+mod carrier_send_state_tests {
+    use super::carrier_send_reached_goal;
+
+    #[test]
+    fn populated_snapshot_requires_its_new_live_object() {
+        assert!(carrier_send_reached_goal(true, 2, 5, true, true, true));
+        assert!(!carrier_send_reached_goal(true, 2, 5, true, false, true));
+        assert!(!carrier_send_reached_goal(true, 2, 5, false, true, true));
+    }
+
+    #[test]
+    fn empty_snapshot_succeeds_on_a_fresh_idle_report() {
+        // Clearing does not read a replacement EFF from disk, so its generation need not move.
+        assert!(carrier_send_reached_goal(false, 0, 0, false, false, true));
+        // A status that predates the send is not an acknowledgement.
+        assert!(!carrier_send_reached_goal(false, 0, 0, false, false, false));
+        // An old object or any lingering kind means teardown is not complete yet.
+        assert!(!carrier_send_reached_goal(false, 0, 1, false, false, true));
+        assert!(!carrier_send_reached_goal(false, 0, 0, true, false, true));
+        assert!(!carrier_send_reached_goal(false, 2, 5, true, true, true));
+    }
+}
+
+#[cfg(test)]
 mod window_geometry_tests {
     use super::{WindowGeometry, MIN_VISIBLE_PX, MIN_WINDOW_SIZE};
 
@@ -9868,6 +10429,115 @@ mod window_geometry_tests {
         );
         assert_eq!(parsed["main"], g(0.0, 0.0, 1400.0, 900.0));
         assert_eq!(parsed["transplant"], g(1500.0, 80.0, 560.0, 720.0));
+    }
+}
+
+#[cfg(test)]
+mod carrier_op_selection_tests {
+    use super::{carrier_stored_name, rides_the_carrier};
+    use crate::mod_project::TransplantOp;
+
+    fn op(donor_rel: &str, donor_name: &str, new_name: &str) -> TransplantOp {
+        TransplantOp {
+            new_entry_name: new_name.to_string(),
+            src_file_rel: donor_rel.to_string(),
+            src_set_name: donor_name.to_string(),
+            src_set_idx: 0,
+            one_slot_slots: Vec::new(),
+            replace_entry: None,
+        }
+    }
+
+    /// Every transplant with a real donor rides the carrier, system effs included.
+    ///
+    /// Excluding a donor class is not a neutral act: a transplant names an entry no loaded eff
+    /// has, so an excluded op leaves the carrier snapshot empty and the deploy falls through to
+    /// the merged-fighter-eff path this design exists to avoid.
+    #[test]
+    fn every_real_donor_rides_the_carrier() {
+        for rel in [
+            "effect/fighter/kirby/ef_kirby.eff",
+            "effect/assist/bomberman/ef_bomberman.eff",
+            "effect/system/common/ef_common.eff",
+            "effect/system/item/ef_item.eff",
+            "EFFECT/SYSTEM/COMMON/EF_COMMON.EFF",
+        ] {
+            assert!(rides_the_carrier(rel), "'{rel}' must ride the carrier");
+        }
+        assert!(
+            !rides_the_carrier(""),
+            "the empty placeholder carries nothing"
+        );
+    }
+
+    /// The carrier must never store a copy under a name the running game already answers to.
+    ///
+    /// Carrier entry names become live effect kinds. `ef_common` and `ef_item` are resident in
+    /// EVERY match, so storing `sys_bomb_b` puts the carrier's copy on the same hash as the
+    /// game's own: SYS_* spawns resolved to a carrier that was not up and stopped rendering, and
+    /// the carrier could never retire because `retiring_carrier_kinds_present` kept finding
+    /// ef_common's copy of the kind (`AUTO_CARRIER_AWAIT_KIND_UNREGISTER registered=1`, forever).
+    #[test]
+    fn a_resident_donors_copy_is_never_stored_under_its_own_name() {
+        let own = Some("effect/fighter/kirby/");
+        for (rel, donor, new_name) in [
+            (
+                "effect/system/common/ef_common.eff",
+                "sys_bomb_b",
+                "sys_bomb_b_tp",
+            ),
+            (
+                "effect/system/item/ef_item.eff",
+                "sys_item_hit",
+                "sys_item_hit_tp",
+            ),
+            (
+                "effect/fighter/kirby/ef_kirby.eff",
+                "kirby_dash",
+                "kirby_dash_tp",
+            ),
+        ] {
+            let stored = carrier_stored_name(&op(rel, donor, new_name), own);
+            assert_ne!(
+                stored, donor,
+                "'{donor}' from {rel} is resident in the match — storing the carrier copy under \
+                 that name shadows the game's own kind and wedges the carrier retire"
+            );
+        }
+    }
+
+    /// A resident donor with no distinct clone name falls back to the reserved namespace rather
+    /// than reusing the donor's, which is the collision this rule exists to prevent.
+    #[test]
+    fn a_resident_donor_without_a_clone_name_uses_the_reserved_namespace() {
+        let stored = carrier_stored_name(
+            &op(
+                "effect/system/common/ef_common.eff",
+                "sys_bomb_b",
+                "sys_bomb_b",
+            ),
+            Some("effect/fighter/kirby/"),
+        );
+        assert!(
+            stored.starts_with(crate::mod_project::EDIT_CLONE_PREFIX),
+            "expected the reserved namespace, got '{stored}'"
+        );
+        assert_ne!(stored, "sys_bomb_b");
+    }
+
+    /// A donor that is NOT in the match keeps its own name — that is what the live remap expects,
+    /// and there is no kind to collide with.
+    #[test]
+    fn a_foreign_donor_keeps_its_donor_name() {
+        let stored = carrier_stored_name(
+            &op(
+                "effect/fighter/pickel/ef_pickel.eff",
+                "pickel_tnt",
+                "pickel_tnt_tp",
+            ),
+            Some("effect/fighter/kirby/"),
+        );
+        assert_eq!(stored, "pickel_tnt");
     }
 }
 
@@ -10044,7 +10714,7 @@ mod live_effect_capture_tests {
                 A::Num(8.0),
                 A::Num(6.0),
             ]);
-            args.extend(std::iter::repeat(A::Nil).take(24));
+            args.extend(std::iter::repeat_n(A::Nil, 24));
             CaptureLine {
                 kind: 6,
                 motion: hash40::hash40("attack_air_n").0,
@@ -10084,5 +10754,252 @@ mod live_effect_capture_tests {
         // Never cleared — the same 9999 sentinel the script path uses, not a made-up length.
         let boxes = VisionaryApp::hitboxes_from_captures(&[attack(0, 9.0)], &bones, &attrs);
         assert_eq!(boxes[0].active_end, 9999);
+    }
+
+    /// Every control in the attack property editor must have a live-wire representation, and
+    /// an untouched control must not be serialized at all. The latter is what preserves the
+    /// source Lua slot's exact type/sentinel while a neighbouring field is edited.
+    #[test]
+    fn every_attack_property_has_a_sparse_live_override() {
+        let pristine = Hitbox::default();
+        let mut edited = pristine.clone();
+        edited.part = 2;
+        edited.bone_name = "handr".into();
+        edited.damage = 17.5;
+        edited.angle = 45;
+        edited.kb_scaling = 123;
+        edited.fkb = 4;
+        edited.kb_base = 67;
+        edited.size = 8.25;
+        edited.offset_x = 1.0;
+        edited.offset_y = 2.0;
+        edited.offset_z = 3.0;
+        edited.capsule_end = Some([4.0, 5.0, 6.0]);
+        edited.hitlag_mult = 1.5;
+        edited.sdi_mult = 0.5;
+        edited.setoff_kind = "ATTACK_SETOFF_KIND_THRU".into();
+        edited.lr_check = "ATTACK_LR_CHECK_B".into();
+        edited.is_clang = true;
+        edited.is_add_attack = 3;
+        edited.hitbox_attr = 0.75;
+        edited.ground_or_air = 2;
+        edited.is_mtk = true;
+        edited.is_shield_disable = true;
+        edited.is_reflectable = true;
+        edited.is_absorbable = true;
+        edited.is_landing_attack = false;
+        edited.situation_mask = "COLLISION_SITUATION_MASK_A".into();
+        edited.category_mask = "COLLISION_CATEGORY_MASK_FIGHTER".into();
+        edited.part_mask = "COLLISION_PART_MASK_BODY_HEAD".into();
+        edited.no_finish_camera = true;
+        edited.collision_attr = "collision_attr_fire".into();
+        edited.sound_level = "ATTACK_SOUND_LEVEL_L".into();
+        edited.sound_attr = "COLLISION_SOUND_ATTR_FIRE".into();
+        edited.attack_region = "ATTACK_REGION_MAGIC".into();
+
+        let ov = VisionaryApp::hitbox_overrides(&edited, &pristine);
+        let json = serde_json::to_value(&ov).unwrap();
+        for key in [
+            "part",
+            "bone",
+            "damage",
+            "angle",
+            "kbg",
+            "fkb",
+            "bkb",
+            "size",
+            "x",
+            "y",
+            "z",
+            "x2",
+            "y2",
+            "z2",
+            "capsule",
+            "hitlag",
+            "sdi",
+            "setoff",
+            "lr_check",
+            "clang",
+            "add_attack",
+            "hitbox_attr",
+            "ground_or_air",
+            "mtk",
+            "shield_disable",
+            "reflectable",
+            "absorbable",
+            "landing_attack",
+            "situation_mask",
+            "category_mask",
+            "part_mask",
+            "no_finish_camera",
+            "collision_attr",
+            "sound_level",
+            "sound_attr",
+            "attack_region",
+        ] {
+            assert!(json.get(key).is_some(), "edited field '{key}' was not sent");
+        }
+
+        let untouched =
+            serde_json::to_value(VisionaryApp::hitbox_overrides(&pristine, &pristine)).unwrap();
+        assert_eq!(untouched.as_object().unwrap().len(), 0);
+
+        let mut capsule = pristine.clone();
+        capsule.capsule_end = Some([1.0, 2.0, 3.0]);
+        let removed = VisionaryApp::hitbox_overrides(&pristine, &capsule);
+        assert_eq!(removed.capsule, Some(false));
+        assert_eq!((removed.x2, removed.y2, removed.z2), (None, None, None));
+
+        // The same complete property set must survive the source/export representation.
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let mut source_hb = pristine.clone();
+        source_hb.active_start = 3;
+        edited.active_start = 3;
+        let source = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(source_hb.to_attack_call())]),
+            ],
+        };
+        let round_trip = rebuild_script_from_hitboxes(&source, &[edited.clone()]).to_hitboxes();
+        assert_eq!(round_trip, vec![edited]);
+    }
+
+    /// Captured flag slots occur as Bool, Int, or Num depending on the script. All three must
+    /// show the same value in the editor or merely loading a move changes its attributes.
+    #[test]
+    fn live_capture_accepts_every_scalar_flag_representation() {
+        let bone = hash40::hash40("top").0;
+        let mut args = vec![A::Nil; 36];
+        args[0] = A::Int(0);
+        args[1] = A::Int(0);
+        args[2] = A::Hash(bone);
+        args[19] = A::Int(1);
+        args[23] = A::Num(1.0);
+        args[24] = A::Bool(true);
+        args[25] = A::Int(0);
+        args[26] = A::Num(1.0);
+        args[27] = A::Bool(true);
+        args[31] = A::Int(1);
+        let hb = VisionaryApp::hitbox_from_capture(
+            &args,
+            0.0,
+            &HashMap::from([(bone, "top".into())]),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(hb.is_clang);
+        assert!(hb.is_mtk);
+        assert!(hb.is_shield_disable);
+        assert!(!hb.is_reflectable);
+        assert!(hb.is_absorbable);
+        assert!(hb.is_landing_attack);
+        assert!(hb.no_finish_camera);
+    }
+
+    /// Reusing an ATTACK id at a later frame creates another hit, not another reference to one
+    /// global record. Export must retain independent attributes for both phases.
+    #[test]
+    fn acmd_export_keeps_reused_hitbox_ids_independent() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let mut first = Hitbox {
+            id: 0,
+            active_start: 3,
+            ..Default::default()
+        };
+        let mut second = first.clone();
+        second.active_start = 8;
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(first.to_attack_call())]),
+                AcmdStmt::Frame(8.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(second.to_attack_call())]),
+            ],
+        };
+        first.damage = 4.0;
+        second.damage = 19.0;
+        second.angle = 80;
+        let rebuilt = rebuild_script_from_hitboxes(&original, &[first, second]);
+        let hitboxes = rebuilt.to_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+        assert_eq!((hitboxes[0].damage, hitboxes[0].angle), (4.0, 361));
+        assert_eq!((hitboxes[1].damage, hitboxes[1].angle), (19.0, 80));
+    }
+
+    /// A partial/old capture cannot safely seed all 36 ATTACK slots. It must be rejected rather
+    /// than indexing past the captured vector while building an injected hitbox.
+    #[test]
+    fn attack_injection_requires_the_complete_argument_vector() {
+        let donor = CaptureLine {
+            kind: 6,
+            motion: 1,
+            frame: 1.0,
+            func: "ATTACK".into(),
+            args: vec![A::Nil; 35],
+            run: 1,
+        };
+        assert!(VisionaryApp::build_attack_args(&Hitbox::default(), Some(&donor)).is_none());
+    }
+
+    /// Added and retimed attacks are replayed from a captured 36-slot donor. Even when that
+    /// donor used Nil/Hash sentinels, every property represented by the editor must be written
+    /// into the injected call rather than silently inheriting or dropping the edit.
+    #[test]
+    fn attack_injection_writes_every_property_over_sentinel_slots() {
+        let donor = CaptureLine {
+            kind: 6,
+            motion: 1,
+            frame: 1.0,
+            func: "ATTACK".into(),
+            args: vec![A::Nil; 36],
+            run: 1,
+        };
+        let h = Hitbox {
+            id: 7,
+            part: 2,
+            bone_name: "handr".into(),
+            damage: 17.5,
+            angle: 45,
+            kb_scaling: 123,
+            fkb: 4,
+            kb_base: 67,
+            size: 8.25,
+            offset_x: 1.0,
+            offset_y: 2.0,
+            offset_z: 3.0,
+            capsule_end: Some([4.0, 5.0, 6.0]),
+            hitlag_mult: 1.5,
+            sdi_mult: 0.5,
+            setoff_kind: "ATTACK_SETOFF_KIND_THRU".into(),
+            lr_check: "ATTACK_LR_CHECK_B".into(),
+            is_clang: true,
+            is_add_attack: 3,
+            hitbox_attr: 0.75,
+            ground_or_air: 2,
+            is_mtk: true,
+            is_shield_disable: true,
+            is_reflectable: true,
+            is_absorbable: true,
+            is_landing_attack: false,
+            situation_mask: "COLLISION_SITUATION_MASK_A".into(),
+            category_mask: "COLLISION_CATEGORY_MASK_FIGHTER".into(),
+            part_mask: "COLLISION_PART_MASK_BODY_HEAD".into(),
+            no_finish_camera: true,
+            collision_attr: "collision_attr_fire".into(),
+            sound_level: "ATTACK_SOUND_LEVEL_L".into(),
+            sound_attr: "COLLISION_SOUND_ATTR_FIRE".into(),
+            attack_region: "ATTACK_REGION_MAGIC".into(),
+            ..Default::default()
+        };
+
+        let args = VisionaryApp::build_attack_args(&h, Some(&donor)).unwrap();
+        assert_eq!(args.len(), 36);
+        assert!(args.iter().all(|arg| !matches!(arg, A::Nil)));
+        assert_eq!(args[0], A::Int(7));
+        assert_eq!(args[1], A::Int(2));
+        assert_eq!(args[20], A::Int(3));
+        assert_eq!(args[21], A::Num(0.75));
+        assert_eq!(args[32], A::Hash(hash40::hash40("collision_attr_fire").0));
     }
 }

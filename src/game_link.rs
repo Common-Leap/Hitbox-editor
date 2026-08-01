@@ -226,6 +226,10 @@ pub struct CaptureLine {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HbOverridesWire {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bone: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub damage: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub angle: Option<i64>,
@@ -249,6 +253,10 @@ pub struct HbOverridesWire {
     pub y2: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub z2: Option<f32>,
+    /// Explicit capsule state. `Some(false)` is distinct from an absent x2/y2/z2 override:
+    /// it replaces the source call's numeric second endpoint with three Lua nils.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hitlag: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -890,7 +898,10 @@ impl GameLink {
 
     /// Take the reason the plugin rejected the last carrier push, clearing it.
     pub fn take_carrier_error(&self) -> Option<String> {
-        self.shared.lock().ok().and_then(|mut s| s.carrier_error.take())
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|mut s| s.carrier_error.take())
     }
 
     pub fn captures_seq(&self) -> u64 {
@@ -1045,10 +1056,7 @@ fn extract_frames(buf: &mut String) -> Vec<String> {
     const OPEN: &str = "<TCP_MESSAGE>";
     const CLOSE: &str = "</TCP_MESSAGE>";
     let mut out = Vec::new();
-    loop {
-        let (Some(s), Some(e)) = (buf.find(OPEN), buf.find(CLOSE)) else {
-            break;
-        };
+    while let (Some(s), Some(e)) = (buf.find(OPEN), buf.find(CLOSE)) {
         if e < s {
             // Torn close tag before an open — drop the garbage prefix.
             *buf = buf[e + CLOSE.len()..].to_string();
@@ -1463,7 +1471,11 @@ mod tests {
             .iter()
             .filter_map(|l| l.args.first().and_then(|a| a.as_hash()))
             .collect();
-        assert_eq!(effects, vec![0xAA, 0xCC], "the older branch must not leak in");
+        assert_eq!(
+            effects,
+            vec![0xAA, 0xCC],
+            "the older branch must not leak in"
+        );
 
         // The settle window watches the CURRENT run, so its count must not include the old one.
         assert_eq!(link.captures_count(0x1234, Some(8)), 2);
@@ -1518,10 +1530,7 @@ mod tests {
         let link = GameLink::default();
         feed(
             &link,
-            &[
-                capture_frame(8, 0x1234, 3.0),
-                capture_frame(8, 0x1234, 9.0),
-            ],
+            &[capture_frame(8, 0x1234, 3.0), capture_frame(8, 0x1234, 9.0)],
         );
         assert_eq!(link.latest_run_for(0x1234, Some(8)).len(), 2);
     }
@@ -1649,6 +1658,9 @@ mod tests {
             frame_start: None,
             frame_end: None,
             overrides: Some(HbOverridesWire {
+                part: Some(2),
+                bone: Some(0x112233),
+                capsule: Some(false),
                 setoff: Some(1),
                 lr_check: Some(3),
                 clang: Some(true),
@@ -1676,6 +1688,9 @@ mod tests {
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
         let v: serde_json::Value = serde_json::from_str(inner).unwrap();
         let ov = &v["hitbox_rules"][0]["overrides"];
+        assert_eq!(ov["part"].as_i64(), Some(2));
+        assert_eq!(ov["bone"].as_u64(), Some(0x112233));
+        assert_eq!(ov["capsule"].as_bool(), Some(false));
         assert_eq!(ov["setoff"].as_i64(), Some(1));
         assert_eq!(ov["lr_check"].as_i64(), Some(3));
         assert_eq!(ov["clang"].as_bool(), Some(true));
@@ -1731,19 +1746,21 @@ mod tests {
     #[test]
     fn outbound_live_tweak_omits_spawn_transform_fields() {
         let link = GameLink::default();
-        let mut data = RpmEffectData::default();
-        data.pos = Point3D {
-            x: 6.0,
-            y: -2.0,
-            z: 1.5,
+        let mut data = RpmEffectData {
+            pos: Point3D {
+                x: 6.0,
+                y: -2.0,
+                z: 1.5,
+            },
+            rot: Point3D {
+                x: 0.0,
+                y: 110.0,
+                z: 0.0,
+            },
+            scale: 0.7,
+            speed: 1.25,
+            ..Default::default()
         };
-        data.rot = Point3D {
-            x: 0.0,
-            y: 110.0,
-            z: 0.0,
-        };
-        data.scale = 0.7;
-        data.speed = 1.25;
         data.rainbow.color.red = 0.5;
         link.send_modifier_edit(0x1311e844a4, &data, false);
 
@@ -1763,8 +1780,10 @@ mod tests {
     #[test]
     fn outbound_authored_modifiers_only_add_scale() {
         let link = GameLink::default();
-        let mut data = RpmEffectData::default();
-        data.scale = 1.75;
+        let mut data = RpmEffectData {
+            scale: 1.75,
+            ..Default::default()
+        };
         data.pos.x = 99.0;
         link.send_modifier_edit(0x109297479a, &data, true);
 

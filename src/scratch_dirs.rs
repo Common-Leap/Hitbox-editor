@@ -63,7 +63,9 @@ pub fn emulator_sd_root() -> Option<PathBuf> {
         return path.is_dir().then_some(path);
     }
 
-    sd_root_candidates().into_iter().find(is_emulator_sd_root)
+    sd_root_candidates()
+        .into_iter()
+        .find(|path| is_emulator_sd_root(path.as_path()))
 }
 
 /// The standard SD locations to probe, most likely first. Split out so the path spelling can
@@ -90,7 +92,7 @@ fn sd_root_candidates() -> Vec<PathBuf> {
 /// directory, the same test the live-deploy path has always used — distinguishes the real SD
 /// from that leftover. Being too strict is the safe direction: callers fall back to sending
 /// payloads over the wire, which works everywhere.
-fn is_emulator_sd_root(path: &PathBuf) -> bool {
+fn is_emulator_sd_root(path: &Path) -> bool {
     path.join("ultimate").is_dir()
 }
 
@@ -162,8 +164,8 @@ mod tests {
     #[test]
     fn a_directory_without_ultimate_is_not_an_sd_root() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_emulator_sd_root(&dir.path().to_path_buf()));
+        assert!(!is_emulator_sd_root(dir.path()));
         std::fs::create_dir(dir.path().join("ultimate")).unwrap();
-        assert!(is_emulator_sd_root(&dir.path().to_path_buf()));
+        assert!(is_emulator_sd_root(dir.path()));
     }
 }

@@ -28,7 +28,11 @@ use std::time::Instant;
 
 use egui::Ui;
 
-use crate::effects::{load_effect, ColorKey, EmitterDef, PtclFile, TextureInfo};
+use crate::eff_attrs::{AttrKind, AttrValue};
+use crate::effects::{
+    load_effect, ColorKey, EffEntryInfo, EffModelInfo, EffVariantInfo, EmitterDef, PtclFile,
+    TextureInfo,
+};
 use crate::game_link::{GameLink, LinkStatus};
 use crate::mod_project::{AuthoredEdit, EmitterFieldEdits, TransplantOp};
 
@@ -44,11 +48,14 @@ type TexturePreviewKey = (PathBuf, usize, String, bool, u128, u64);
 /// Pristine copy of the editable authored fields of one emitter.
 #[derive(Clone)]
 struct EmitterSnapshot {
-    emission_rate: f32,
-    lifetime: f32,
-    scale: f32,
-    color_scale: f32,
-    emitter_scale: glam::Vec3,
+    /// Every attribute as loaded, aligned to [`crate::eff_attrs::table`].
+    attrs: Vec<Option<AttrValue>>,
+    subsections: Vec<crate::effects::EmitterSubsectionDef>,
+    /// Name and nesting as loaded. Not restored by [`Self::restore`], which resets an emitter's
+    /// VALUES — where an emitter sits in the list is the emitter-list editor's business, and a
+    /// duplicate keeps its own name through a value reset.
+    name: String,
+    depth: u8,
     color0: Vec<ColorKey>,
     color1: Vec<ColorKey>,
     alpha0_keys: Vec<ColorKey>,
@@ -58,11 +65,10 @@ struct EmitterSnapshot {
 impl EmitterSnapshot {
     fn of(e: &EmitterDef) -> Self {
         Self {
-            emission_rate: e.emission_rate,
-            lifetime: e.lifetime,
-            scale: e.scale,
-            color_scale: e.color_scale,
-            emitter_scale: e.emitter_scale,
+            attrs: e.attrs.clone(),
+            subsections: e.subsections.clone(),
+            name: e.name.clone(),
+            depth: e.depth,
             color0: e.color0.clone(),
             color1: e.color1.clone(),
             alpha0_keys: e.alpha0_keys.clone(),
@@ -71,16 +77,264 @@ impl EmitterSnapshot {
     }
 
     fn restore(&self, e: &mut EmitterDef) {
-        e.emission_rate = self.emission_rate;
-        e.lifetime = self.lifetime;
-        e.scale = self.scale;
-        e.color_scale = self.color_scale;
-        e.emitter_scale = self.emitter_scale;
+        e.attrs = self.attrs.clone();
+        e.subsections = self.subsections.clone();
         e.color0 = self.color0.clone();
         e.color1 = self.color1.clone();
         e.alpha0_keys = self.alpha0_keys.clone();
         e.texture_index = self.texture_index;
     }
+
+    /// The emitter this snapshot was taken of, as the file has it.
+    ///
+    /// Lets an emitter list be rebuilt from the pristine snapshots rather than from whatever is
+    /// currently on screen, which is what makes re-applying a saved list idempotent — applying it
+    /// twice would otherwise duplicate the duplicates.
+    fn to_def(&self, source_idx: usize) -> EmitterDef {
+        EmitterDef {
+            name: self.name.clone(),
+            attrs: self.attrs.clone(),
+            subsections: self.subsections.clone(),
+            depth: self.depth,
+            source_idx,
+            color0: self.color0.clone(),
+            color1: self.color1.clone(),
+            alpha0_keys: self.alpha0_keys.clone(),
+            texture_index: self.texture_index,
+        }
+    }
+}
+
+/// Read one attribute off an emitter by id, for the handful of places that want a specific
+/// attribute rather than the whole table (the Basics rows, the spawn summary).
+fn attr(e: &EmitterDef, id: &str) -> Option<AttrValue> {
+    crate::eff_attrs::index_of(id).and_then(|i| e.attrs.get(i).copied().flatten())
+}
+
+fn attr_f32(e: &EmitterDef, id: &str) -> f32 {
+    attr(e, id).map(|v| v.as_f32()).unwrap_or(0.0)
+}
+
+/// Write one attribute by id, leaving an emitter that has no such block untouched.
+fn set_attr(e: &mut EmitterDef, id: &str, value: AttrValue) {
+    if let Some(i) = crate::eff_attrs::index_of(id) {
+        if let Some(slot) = e.attrs.get_mut(i) {
+            if slot.is_some() {
+                *slot = Some(value);
+            }
+        }
+    }
+}
+
+fn set_key_component(
+    emitter: &mut EmitterDef,
+    table: &str,
+    index: usize,
+    component: &str,
+    value: f32,
+) {
+    set_attr(
+        emitter,
+        &format!("emitter_static.{table}.keys[{index}].{component}"),
+        AttrValue::Float(value),
+    );
+}
+
+fn key_component(emitter: &EmitterDef, table: &str, index: usize, component: &str) -> Option<f32> {
+    attr(
+        emitter,
+        &format!("emitter_static.{table}.keys[{index}].{component}"),
+    )
+    .map(AttrValue::as_f32)
+}
+
+/// Keep the colour/keyframe convenience controls and the complete attribute table on the same
+/// underlying values. Which scalar is effective follows the same precedence as the exporter.
+fn effective_keys_to_attrs(emitter: &mut EmitterDef) {
+    let color0_animated = attr(emitter, "emitter_static.num_color0_keys")
+        .is_some_and(|v| v.as_i64() > 0)
+        && attr(emitter, "particle_color.color0_type").is_some_and(|v| v.as_i64() != 0);
+    let color1_animated = attr(emitter, "emitter_static.num_color1_keys")
+        .is_some_and(|v| v.as_i64() > 0)
+        && attr(emitter, "particle_color.color1_type").is_some_and(|v| v.as_i64() != 0);
+    let alpha0_animated =
+        attr(emitter, "emitter_static.num_alpha0_keys").is_some_and(|v| v.as_i64() > 0);
+
+    let color0 = emitter.color0.clone();
+    for (i, key) in color0.iter().enumerate() {
+        if color0_animated {
+            for (component, value) in [
+                ("x", key.r),
+                ("y", key.g),
+                ("z", key.b),
+                ("time", key.frame),
+            ] {
+                set_key_component(emitter, "color0", i, component, value);
+            }
+        } else if i == 0 {
+            let prefix =
+                if attr(emitter, "particle_color.color0_type").is_some_and(|v| v.as_i64() == 0) {
+                    "particle_color.color0_"
+                } else {
+                    "emitter_info.color0_"
+                };
+            for (suffix, value) in [("r", key.r), ("g", key.g), ("b", key.b)] {
+                set_attr(
+                    emitter,
+                    &format!("{prefix}{suffix}"),
+                    AttrValue::Float(value),
+                );
+            }
+        }
+    }
+
+    let color1 = emitter.color1.clone();
+    for (i, key) in color1.iter().enumerate() {
+        if color1_animated {
+            for (component, value) in [
+                ("x", key.r),
+                ("y", key.g),
+                ("z", key.b),
+                ("time", key.frame),
+            ] {
+                set_key_component(emitter, "color1", i, component, value);
+            }
+        } else if i == 0 {
+            let prefix =
+                if attr(emitter, "particle_color.color1_type").is_some_and(|v| v.as_i64() == 0) {
+                    "particle_color.color1_"
+                } else {
+                    "emitter_info.color1_"
+                };
+            for (suffix, value) in [("r", key.r), ("g", key.g), ("b", key.b)] {
+                set_attr(
+                    emitter,
+                    &format!("{prefix}{suffix}"),
+                    AttrValue::Float(value),
+                );
+            }
+        }
+    }
+
+    let alpha0 = emitter.alpha0_keys.clone();
+    for (i, key) in alpha0.iter().enumerate() {
+        if alpha0_animated {
+            set_key_component(emitter, "alpha0", i, "x", key.r);
+            set_key_component(emitter, "alpha0", i, "time", key.frame);
+        } else if i == 0 {
+            let id = if attr(emitter, "particle_color.alpha0_type").is_some_and(|v| v.as_i64() == 0)
+            {
+                "particle_color.alpha0"
+            } else {
+                "emitter_info.color0_a"
+            };
+            set_attr(emitter, id, AttrValue::Float(key.r));
+        }
+    }
+}
+
+fn attrs_to_effective_keys(emitter: &mut EmitterDef) {
+    let color0_animated = attr(emitter, "emitter_static.num_color0_keys")
+        .is_some_and(|v| v.as_i64() > 0)
+        && attr(emitter, "particle_color.color0_type").is_some_and(|v| v.as_i64() != 0);
+    let color1_animated = attr(emitter, "emitter_static.num_color1_keys")
+        .is_some_and(|v| v.as_i64() > 0)
+        && attr(emitter, "particle_color.color1_type").is_some_and(|v| v.as_i64() != 0);
+    let alpha0_animated =
+        attr(emitter, "emitter_static.num_alpha0_keys").is_some_and(|v| v.as_i64() > 0);
+
+    if color0_animated {
+        for i in 0..emitter.color0.len() {
+            if let Some(value) = key_component(emitter, "color0", i, "x") {
+                emitter.color0[i].r = value;
+            }
+            if let Some(value) = key_component(emitter, "color0", i, "y") {
+                emitter.color0[i].g = value;
+            }
+            if let Some(value) = key_component(emitter, "color0", i, "z") {
+                emitter.color0[i].b = value;
+            }
+            if let Some(value) = key_component(emitter, "color0", i, "time") {
+                emitter.color0[i].frame = value;
+            }
+        }
+    } else {
+        let prefix = if attr(emitter, "particle_color.color0_type").is_some_and(|v| v.as_i64() == 0)
+        {
+            "particle_color.color0_"
+        } else {
+            "emitter_info.color0_"
+        };
+        let rgb = [
+            attr_f32(emitter, &format!("{prefix}r")),
+            attr_f32(emitter, &format!("{prefix}g")),
+            attr_f32(emitter, &format!("{prefix}b")),
+        ];
+        if let Some(key) = emitter.color0.first_mut() {
+            [key.r, key.g, key.b] = rgb;
+        }
+    }
+    if color1_animated {
+        for i in 0..emitter.color1.len() {
+            if let Some(value) = key_component(emitter, "color1", i, "x") {
+                emitter.color1[i].r = value;
+            }
+            if let Some(value) = key_component(emitter, "color1", i, "y") {
+                emitter.color1[i].g = value;
+            }
+            if let Some(value) = key_component(emitter, "color1", i, "z") {
+                emitter.color1[i].b = value;
+            }
+            if let Some(value) = key_component(emitter, "color1", i, "time") {
+                emitter.color1[i].frame = value;
+            }
+        }
+    } else {
+        let prefix = if attr(emitter, "particle_color.color1_type").is_some_and(|v| v.as_i64() == 0)
+        {
+            "particle_color.color1_"
+        } else {
+            "emitter_info.color1_"
+        };
+        let rgb = [
+            attr_f32(emitter, &format!("{prefix}r")),
+            attr_f32(emitter, &format!("{prefix}g")),
+            attr_f32(emitter, &format!("{prefix}b")),
+        ];
+        if let Some(key) = emitter.color1.first_mut() {
+            [key.r, key.g, key.b] = rgb;
+        }
+    }
+    if alpha0_animated {
+        for i in 0..emitter.alpha0_keys.len() {
+            if let Some(value) = key_component(emitter, "alpha0", i, "x") {
+                emitter.alpha0_keys[i].r = value;
+            }
+            if let Some(value) = key_component(emitter, "alpha0", i, "time") {
+                emitter.alpha0_keys[i].frame = value;
+            }
+        }
+    } else {
+        let id = if attr(emitter, "particle_color.alpha0_type").is_some_and(|v| v.as_i64() == 0) {
+            "particle_color.alpha0"
+        } else {
+            "emitter_info.color0_a"
+        };
+        let value = attr_f32(emitter, id);
+        if let Some(key) = emitter.alpha0_keys.first_mut() {
+            key.r = value;
+        }
+    }
+}
+
+/// Which view the emitter column is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmitterTab {
+    /// The selected emitter's own values.
+    Attributes,
+    /// What this effect brings on screen at all: which emitters play, which extra parts start
+    /// when, and which model comes with it.
+    Spawning,
 }
 
 /// One named effect entry inside the loaded .eff (name → emitter set).
@@ -135,6 +389,13 @@ pub struct EffEditor {
     pending_select: Option<String>,
     /// Authored edits applied once the queued eff loads.
     pending_edits: Option<Vec<AuthoredEdit>>,
+    /// Emitter lists and spawn structures to apply once the queued eff loads. Applied BEFORE
+    /// [`Self::pending_edits`], for the same reason the exporter applies them first: they decide
+    /// which emitters an authored edit has to land on.
+    pending_structure: Option<(
+        Vec<crate::mod_project::EmitterRoster>,
+        Vec<crate::mod_project::EntryEdit>,
+    )>,
     /// Whether applying [`Self::pending_edits`] should also push them to the running game.
     ///
     /// True when a project was just opened — the point is to get the game showing it. False
@@ -194,6 +455,15 @@ pub struct EffEditor {
     entry_filter: String,
     selected_entry: Option<usize>,
     selected_emitter: usize,
+    /// Substring filter over the attribute tree in the emitter panel.
+    attr_filter: String,
+    /// Which half of the emitter column is showing: the selected emitter's attributes, or the
+    /// entry's spawn structure (its emitter list, its parts, its model).
+    emitter_tab: EmitterTab,
+    /// Spawn structure of the loaded eff's entries, as edited. Parallel to `entries` by name.
+    entry_info: Vec<EffEntryInfo>,
+    /// The same, as loaded — what an edit is diffed against.
+    entry_pristine: Vec<EffEntryInfo>,
 
     // Transplant state
     /// The main editor's selected fighter — target for transplant ops (set by the app).
@@ -218,6 +488,14 @@ pub struct EffEditor {
     /// Carrier generation that was live in game when the current send started. The send is
     /// complete only once the game reports a NEWER one — see `awaiting_game`.
     pub gen_at_send: u64,
+    /// Whether the snapshot being sent contains anything that needs a live carrier object.
+    /// An empty snapshot is a teardown request, whose successful terminal state is the exact
+    /// opposite: no kinds and no object.
+    pub carrier_expected: bool,
+    /// Carrier-status sequence at send time. Empty snapshots do not perform a new disk read,
+    /// so their generation intentionally does not advance; a fresh idle report acknowledges
+    /// that the teardown reached the game.
+    pub carrier_reports_at_send: u64,
     /// Set once the snapshot has left the app: we are now waiting for the GAME to take it
     /// (bytes decompress, resource service settles, carrier object comes up). Cleared when
     /// the plugin reports the carrier live, or on timeout.
@@ -226,6 +504,11 @@ pub struct EffEditor {
     /// Surfaced rather than hidden because "the spinner cleared too early" has been
     /// diagnosed by guesswork twice now, and the raw signal settles it.
     pub carrier_report: (u8, usize, bool),
+    /// The carrier state last seen, and when it was first seen. A swap that is progressing moves
+    /// through its states; one that is wedged sits in a single state forever. Without this the
+    /// only distinction available was "reported anything at all", which cannot tell a teardown
+    /// still running from one that has stopped moving — so a stuck retire waited indefinitely.
+    pub carrier_state_since: Option<(u8, Instant)>,
     /// Carrier generation the game last reported. Compared against `gen_at_send` to tell a
     /// freshly-taken carrier from the previous one still sitting there reporting ready.
     pub carrier_gen_now: u64,
@@ -248,6 +531,7 @@ impl Default for EffEditor {
             pending_load: None,
             pending_select: None,
             pending_edits: None,
+            pending_structure: None,
             pending_edits_push_live: false,
             export_root: std::env::current_dir().unwrap_or_default(),
             eff_files: Vec::new(),
@@ -275,6 +559,10 @@ impl Default for EffEditor {
             entry_filter: String::new(),
             selected_entry: None,
             selected_emitter: 0,
+            attr_filter: String::new(),
+            emitter_tab: EmitterTab::Attributes,
+            entry_info: Vec::new(),
+            entry_pristine: Vec::new(),
             target_fighter: None,
             pending_transplants: Vec::new(),
             pending_transplant_removals: Vec::new(),
@@ -283,8 +571,11 @@ impl Default for EffEditor {
             live_deploy_at: None,
             sending: false,
             gen_at_send: 0,
+            carrier_expected: false,
+            carrier_reports_at_send: 0,
             awaiting_game: None,
             carrier_report: (0, 0, false),
+            carrier_state_since: None,
             carrier_gen_now: 0,
             last_carrier_result: None,
             carrier_ok: false,
@@ -307,7 +598,7 @@ fn scan_eff_files(root: &Path, out: &mut Vec<PathBuf>) {
             let is_preview = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| crate::scratch_dirs::is_transplant_preview_name(n))
+                .map(crate::scratch_dirs::is_transplant_preview_name)
                 .unwrap_or(false);
             if !is_preview {
                 out.push(path);
@@ -334,29 +625,50 @@ fn field_edits(em: &EmitterDef, pr: &EmitterSnapshot, tex_names: &[String]) -> E
             .and_then(|i| tex_names.get(i as usize))
             .cloned();
     }
-    if diff(em.emission_rate, pr.emission_rate) {
-        f.emission_rate = Some(em.emission_rate);
+    // Every attribute that now reads differently from the file. Recorded by id rather than by
+    // position: the table's order is stable within a run but the id is what a project file has
+    // to survive on.
+    for (i, attr) in crate::eff_attrs::table().iter().enumerate() {
+        let (Some(now), Some(was)) = (
+            em.attrs.get(i).copied().flatten(),
+            pr.attrs.get(i).copied().flatten(),
+        ) else {
+            continue;
+        };
+        // A non-finite value cannot be written to the project file at all — serde_json refuses
+        // NaN and infinity — so it is dropped here rather than failing the whole save.
+        if now.same(was) || !now.is_storable() {
+            continue;
+        }
+        f.attrs.insert(attr.id.to_string(), now);
     }
-    if diff(em.lifetime, pr.lifetime) {
-        f.lifetime = Some(em.lifetime);
-    }
-    if diff(em.scale, pr.scale) {
-        f.scale = Some(em.scale);
-    }
-    if diff(em.color_scale, pr.color_scale) {
-        f.color_scale = Some(em.color_scale);
-    }
-    if diff(em.emitter_scale.x, pr.emitter_scale.x)
-        || diff(em.emitter_scale.y, pr.emitter_scale.y)
-        || diff(em.emitter_scale.z, pr.emitter_scale.z)
-    {
-        f.emitter_scale = Some([em.emitter_scale.x, em.emitter_scale.y, em.emitter_scale.z]);
+    for (index, now) in em.subsections.iter().enumerate() {
+        let Some(was) = pr.subsections.get(index) else {
+            continue;
+        };
+        if now.magic != was.magic {
+            continue;
+        }
+        let bytes: std::collections::BTreeMap<usize, u8> = now
+            .data
+            .iter()
+            .zip(&was.data)
+            .enumerate()
+            .filter_map(|(offset, (now, was))| (now != was).then_some((offset, *now)))
+            .collect();
+        if !bytes.is_empty() {
+            f.subsections.push(crate::mod_project::SubsectionEdit {
+                index,
+                magic: now.magic.clone(),
+                bytes,
+            });
+        }
     }
     let keys_differ = |a: &[ColorKey], b: &[ColorKey]| {
         a.len() != b.len()
-            || a.iter()
-                .zip(b)
-                .any(|(x, y)| diff(x.r, y.r) || diff(x.g, y.g) || diff(x.b, y.b))
+            || a.iter().zip(b).any(|(x, y)| {
+                diff(x.r, y.r) || diff(x.g, y.g) || diff(x.b, y.b) || diff(x.frame, y.frame)
+            })
     };
     if keys_differ(&em.color0, &pr.color0) {
         f.color0 = Some(em.color0.iter().map(|k| [k.r, k.g, k.b, k.frame]).collect());
@@ -369,11 +681,321 @@ fn field_edits(em: &EmitterDef, pr: &EmitterSnapshot, tex_names: &[String]) -> E
             .alpha0_keys
             .iter()
             .zip(&pr.alpha0_keys)
-            .any(|(x, y)| diff(x.r, y.r))
+            .any(|(x, y)| diff(x.r, y.r) || diff(x.frame, y.frame))
     {
         f.alpha0 = Some(em.alpha0_keys.iter().map(|k| [k.r, k.frame]).collect());
     }
     f
+}
+
+/// The half-open range covering an emitter and everything nested under it.
+///
+/// The emitter list is flat and parent-first, so a subtree is the emitter plus every following
+/// row deeper than it, up to the next row at its own depth or shallower.
+fn subtree(emitters: &[EmitterDef], i: usize) -> std::ops::Range<usize> {
+    let Some(root) = emitters.get(i) else {
+        return i..i;
+    };
+    let end = emitters[i + 1..]
+        .iter()
+        .position(|e| e.depth <= root.depth)
+        .map(|offset| i + 1 + offset)
+        .unwrap_or(emitters.len());
+    i..end
+}
+
+/// Move an emitter and every descendant by the same nesting-depth delta.
+fn shift_subtree_depth(emitters: &mut [EmitterDef], i: usize, delta: i16) -> bool {
+    let range = subtree(emitters, i);
+    if range.is_empty() || delta == 0 {
+        return false;
+    }
+    for emitter in &mut emitters[range] {
+        emitter.depth = (emitter.depth as i16 + delta).max(0) as u8;
+    }
+    true
+}
+
+/// A name for a duplicated emitter that no sibling already has.
+///
+/// Emitters are addressed by name by every path that ships an edit — the exporter resolves an
+/// authored edit and a roster slot both by (name, index) — so two emitters called the same thing
+/// would make one of them unaddressable. The `_copy` / `_copy2` shape keeps the original name
+/// readable in the middle of a twenty-emitter set.
+fn unique_emitter_name(base: &str, existing: &[EmitterDef]) -> String {
+    // Only a `_copy` suffix this function itself added is stripped, so copying `arc2` yields
+    // `arc2_copy` rather than `arc_copy` — which would collide with a copy of `arc`.
+    let stem = match base.rsplit_once("_copy") {
+        Some((head, digits)) if digits.chars().all(|c| c.is_ascii_digit()) => head,
+        _ => base,
+    };
+    let taken = |name: &str| existing.iter().any(|e| e.name == name);
+    let first = format!("{stem}_copy");
+    if !taken(&first) {
+        return first;
+    }
+    (2..)
+        .map(|n| format!("{stem}_copy{n}"))
+        .find(|name| !taken(name))
+        .unwrap_or(first)
+}
+
+/// The attributes the emitter panel puts above the group tree, in this order. These are the ones
+/// an effect edit almost always starts from; every one of them is also in its own group below.
+const BASIC_ATTRS: &[&str] = &[
+    "emitter_static.color_scale",
+    "emission.rate",
+    "particle_data.life",
+    "emitter_info.scale_x",
+    "emitter_info.scale_y",
+    "emitter_info.scale_z",
+];
+
+/// Draw one attribute's editor. Returns whether the value changed.
+///
+/// The widget follows the attribute's kind rather than its storage: a flag is a checkbox even
+/// though the file holds a byte, and a named type is a dropdown even though the file holds an
+/// index. Values outside the names a type declares are shown as the raw number instead of being
+/// clamped into range — vanilla data does carry a few, and silently rewriting one to "the nearest
+/// thing we have a name for" would be an edit the user never made.
+fn attr_widget(ui: &mut Ui, attr: &crate::eff_attrs::Attr, value: &mut AttrValue) -> bool {
+    match attr.kind {
+        AttrKind::Float { speed } => {
+            let mut v = value.as_f32();
+            let changed = ui
+                .add(egui::DragValue::new(&mut v).speed(speed as f64))
+                .changed();
+            if changed {
+                *value = AttrValue::Float(v);
+            }
+            changed
+        }
+        AttrKind::Int => {
+            let mut v = value.as_i64();
+            let changed = ui.add(egui::DragValue::new(&mut v).speed(1.0)).changed();
+            if changed {
+                *value = AttrValue::Int(v);
+            }
+            changed
+        }
+        AttrKind::UInt => {
+            let mut v = value.as_u64();
+            let changed = ui.add(egui::DragValue::new(&mut v).speed(1.0)).changed();
+            if changed {
+                *value = AttrValue::UInt(v);
+            }
+            changed
+        }
+        AttrKind::Flag => {
+            let mut on = value.as_bool();
+            let changed = ui.checkbox(&mut on, "").changed();
+            if changed {
+                *value = AttrValue::Int(i64::from(on));
+            }
+            changed
+        }
+        AttrKind::Enum(names) => {
+            let current = value.as_i64();
+            let label = names
+                .get(current.max(0) as usize)
+                .map(|n| (*n).to_string())
+                .unwrap_or_else(|| format!("{current} (unnamed)"));
+            let mut changed = false;
+            egui::ComboBox::from_id_salt(attr.id)
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for (i, name) in names.iter().enumerate() {
+                        if ui.selectable_label(current == i as i64, *name).clicked() {
+                            *value = AttrValue::Int(i as i64);
+                            changed = true;
+                        }
+                    }
+                });
+            changed
+        }
+    }
+}
+
+/// How an attribute's value reads in the "orig" column.
+fn attr_text(attr: &crate::eff_attrs::Attr, value: AttrValue) -> String {
+    match attr.kind {
+        AttrKind::Float { .. } => format!("{:.3}", value.as_f32()),
+        AttrKind::Int => value.as_i64().to_string(),
+        AttrKind::UInt => value.as_u64().to_string(),
+        AttrKind::Flag => if value.as_bool() { "on" } else { "off" }.to_string(),
+        AttrKind::Enum(names) => names
+            .get(value.as_i64().max(0) as usize)
+            .map(|n| (*n).to_string())
+            .unwrap_or_else(|| value.as_i64().to_string()),
+    }
+}
+
+/// Draw a set of attribute rows as a three-column grid: label, editor, original value.
+///
+/// Rows the emitter does not carry are skipped, not greyed: an emitter with no sampler 2 has no
+/// sampler-2 wrap mode to show, and a disabled control implies there is a value behind it.
+fn attr_rows(
+    ui: &mut Ui,
+    salt: &str,
+    em: &mut EmitterDef,
+    pr: &EmitterSnapshot,
+    ids: &[&str],
+) -> bool {
+    let indices: Vec<usize> = ids
+        .iter()
+        .filter_map(|id| crate::eff_attrs::index_of(id))
+        .collect();
+    attr_rows_by_index(ui, salt, em, pr, &indices)
+}
+
+fn attr_rows_by_index(
+    ui: &mut Ui,
+    salt: &str,
+    em: &mut EmitterDef,
+    pr: &EmitterSnapshot,
+    indices: &[usize],
+) -> bool {
+    let table = crate::eff_attrs::table();
+    let mut changed = false;
+    egui::Grid::new(salt)
+        .num_columns(3)
+        .striped(true)
+        .show(ui, |ui| {
+            for &i in indices {
+                let (Some(attr), Some(Some(mut value))) = (table.get(i), em.attrs.get(i).copied())
+                else {
+                    continue;
+                };
+                let orig = pr.attrs.get(i).copied().flatten();
+                let edited = orig.is_some_and(|o| !o.same(value));
+
+                let label = if edited {
+                    egui::RichText::new(attr.label).color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60))
+                } else {
+                    egui::RichText::new(attr.label)
+                };
+                ui.label(label)
+                    .on_hover_text(format!("{}\n\n{}", attr.doc, attr.id));
+
+                if attr_widget(ui, attr, &mut value) {
+                    em.attrs[i] = Some(value);
+                    changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    if let Some(orig) = orig {
+                        ui.label(
+                            egui::RichText::new(format!("orig {}", attr_text(attr, orig)))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                        // Reset is per attribute rather than per group: with three hundred rows,
+                        // "put this one back" is the operation you actually want, and the
+                        // emitter-wide reset is still one button away.
+                        if edited
+                            && ui
+                                .small_button("↺")
+                                .on_hover_text("Reset to the file's value")
+                                .clicked()
+                        {
+                            em.attrs[i] = Some(orig);
+                            changed = true;
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    changed
+}
+
+/// The whole emitter, one collapsible group per section of the format.
+///
+/// Three hundred rows is more than anyone wants to scroll, so the groups start collapsed and the
+/// filter is the primary way in: typing `gravity` opens every group holding a match and hides
+/// everything else. Groups with an edit in them are marked and open on their own, because the
+/// question "what did I change on this emitter?" must not require opening thirty headers.
+fn draw_attribute_groups(
+    ui: &mut Ui,
+    em: &mut EmitterDef,
+    pr: &EmitterSnapshot,
+    filter: &mut String,
+) -> bool {
+    let table = crate::eff_attrs::table();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("All attributes").strong());
+        ui.add(
+            egui::TextEdit::singleline(filter)
+                .hint_text("filter, e.g. gravity")
+                .desired_width(160.0),
+        );
+        if !filter.is_empty() && ui.small_button("clear").clicked() {
+            filter.clear();
+        }
+    });
+
+    let needle = filter.to_lowercase();
+    let matches = |a: &crate::eff_attrs::Attr| {
+        needle.is_empty()
+            || a.label.to_lowercase().contains(&needle)
+            || a.id.to_lowercase().contains(&needle)
+            || a.doc.to_lowercase().contains(&needle)
+            || a.group.to_lowercase().contains(&needle)
+    };
+
+    let mut changed = false;
+    for group in crate::eff_attrs::GROUPS {
+        // An attribute the emitter does not carry is not listed at all, so a group that is
+        // entirely absent (no sampler 2 on this emitter) does not draw an empty header either.
+        let rows: Vec<usize> = table
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                a.group == *group && matches(a) && em.attrs.get(*i).copied().flatten().is_some()
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let edited = rows
+            .iter()
+            .filter(
+                |&&i| match (em.attrs[i], pr.attrs.get(i).copied().flatten()) {
+                    (Some(now), Some(was)) => !now.same(was),
+                    _ => false,
+                },
+            )
+            .count();
+
+        let heading = if edited > 0 {
+            egui::RichText::new(format!("{group}  ({edited} edited)"))
+                .color(egui::Color32::from_rgb(0xE0, 0xC0, 0x60))
+        } else {
+            egui::RichText::new(*group)
+        };
+        egui::CollapsingHeader::new(heading)
+            .id_salt(group)
+            .default_open(edited > 0 || !needle.is_empty())
+            .show(ui, |ui| {
+                changed |= attr_rows_by_index(ui, group, em, pr, &rows);
+            });
+    }
+    if !needle.is_empty() && !changed {
+        // A filter that matches nothing is otherwise indistinguishable from every group being
+        // collapsed.
+        let any = table
+            .iter()
+            .enumerate()
+            .any(|(i, a)| matches(a) && em.attrs.get(i).copied().flatten().is_some());
+        if !any {
+            ui.colored_label(
+                egui::Color32::GRAY,
+                format!("no attribute of this emitter matches '{filter}'"),
+            );
+        }
+    }
+    changed
 }
 
 impl EffEditor {
@@ -457,6 +1079,8 @@ impl EffEditor {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         self.entries = entries;
+        self.entry_pristine = loaded.entries.clone();
+        self.entry_info = loaded.entries;
         self.ptcl = Some(ptcl);
         self.texture_pool = loaded.texture_pool;
         self.texture_note = None;
@@ -489,6 +1113,18 @@ impl EffEditor {
         self.pending_edits_push_live = true;
     }
 
+    /// Queue the project's emitter lists and spawn structures for the next load.
+    pub fn queue_structure_edits(
+        &mut self,
+        rosters: Vec<crate::mod_project::EmitterRoster>,
+        entry_edits: Vec<crate::mod_project::EntryEdit>,
+    ) {
+        if rosters.is_empty() && entry_edits.is_empty() {
+            return;
+        }
+        self.pending_structure = Some((rosters, entry_edits));
+    }
+
     pub fn set_target_fighter(&mut self, fighter: Option<String>) {
         self.target_fighter = fighter;
     }
@@ -510,6 +1146,22 @@ impl EffEditor {
     /// The project's texture replacements for the loaded eff, so the panel can show them.
     pub fn set_texture_imports(&mut self, imports: Vec<crate::mod_project::TextureImport>) {
         self.texture_imports = imports;
+    }
+
+    /// Drop project-owned overlays and queued operations before another project replaces it.
+    /// Reloading the base file immediately afterwards resets the current authored diff too.
+    pub fn reset_project_state(&mut self) {
+        self.pending_edits = None;
+        self.pending_structure = None;
+        self.pending_edits_push_live = false;
+        self.pending_texture_imports.clear();
+        self.pending_texture_additions.clear();
+        self.pending_texture_removals.clear();
+        self.pending_transplants.clear();
+        self.pending_transplant_removals.clear();
+        self.texture_imports.clear();
+        self.merged_overlays.clear();
+        self.edit_sources.clear();
     }
 
     /// Pool textures added since the last drain (the app owns the project store).
@@ -616,7 +1268,13 @@ impl EffEditor {
         let tex_names = self.texture_names();
         let mut out = Vec::new();
         for (set_idx, (set, pset)) in ptcl.emitter_sets.iter().zip(&self.pristine).enumerate() {
-            for (em_idx, (em, pr)) in set.emitters.iter().zip(pset.iter()).enumerate() {
+            for (em_idx, em) in set.emitters.iter().enumerate() {
+                // An emitter the roster added has no pristine of its own — it is a copy of one,
+                // and `source_idx` names it. Diffing against that is what keeps a duplicate's
+                // edits down to the fields the user actually changed on the copy.
+                let Some(pr) = pset.get(em.source_idx) else {
+                    continue;
+                };
                 let f = field_edits(em, pr, &tex_names);
                 if !f.is_empty() {
                     // The entry (kind) name is a separate namespace from the emitter-set
@@ -640,6 +1298,220 @@ impl EffEditor {
             }
         }
         out
+    }
+
+    /// Emitter lists that differ from the file's, as the roster records the exporter consumes.
+    ///
+    /// A set whose emitters are untouched produces nothing: the roster rebuilds the set from
+    /// scratch, so recording one for every set would make every export depend on this code
+    /// reproducing the file exactly, for no gain.
+    pub fn collect_rosters(&self) -> Vec<crate::mod_project::EmitterRoster> {
+        let Some(ptcl) = self.ptcl.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (set_idx, (set, pristine)) in ptcl.emitter_sets.iter().zip(&self.pristine).enumerate() {
+            let untouched = set.emitters.len() == pristine.len()
+                && set.emitters.iter().enumerate().all(|(i, em)| {
+                    em.source_idx == i
+                        && pristine
+                            .get(i)
+                            .is_some_and(|p| p.depth == em.depth && p.name == em.name)
+                });
+            if untouched {
+                continue;
+            }
+            out.push(crate::mod_project::EmitterRoster {
+                set_name: set.name.clone(),
+                entry_name: self
+                    .entries
+                    .iter()
+                    .find(|e| e.set_idx == set_idx)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_default(),
+                set_idx,
+                slots: set
+                    .emitters
+                    .iter()
+                    .map(|em| crate::mod_project::EmitterSlot {
+                        source_idx: em.source_idx,
+                        // The name the SOURCE emitter has in the file, which is what the
+                        // exporter looks it up by — not the name of the copy.
+                        source_name: pristine
+                            .get(em.source_idx)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default(),
+                        name: em.name.clone(),
+                        depth: em.depth,
+                    })
+                    .collect(),
+            });
+        }
+        out
+    }
+
+    /// Entry spawn structures that differ from the file's.
+    pub fn collect_entry_edits(&self) -> Vec<crate::mod_project::EntryEdit> {
+        let set_name = |idx: Option<usize>| {
+            idx.and_then(|i| {
+                self.ptcl
+                    .as_ref()?
+                    .emitter_sets
+                    .get(i)
+                    .map(|s| s.name.clone())
+            })
+            .unwrap_or_default()
+        };
+        self.entry_info
+            .iter()
+            .zip(&self.entry_pristine)
+            .filter_map(|(now, was)| {
+                let emitter_set = (now.set_idx != was.set_idx).then(|| set_name(now.set_idx));
+                let variants = (now.variants != was.variants).then(|| {
+                    now.variants
+                        .iter()
+                        .map(|v| crate::mod_project::VariantEdit {
+                            start_frame: v.start_frame,
+                            set_name: set_name(v.set_idx),
+                            bone: v.bone.clone(),
+                        })
+                        .collect()
+                });
+                let model = (now.model != was.model).then(|| match &now.model {
+                    Some(m) => crate::mod_project::ModelEdit {
+                        name: m.name.clone(),
+                        flag: m.flag,
+                    },
+                    // An empty name is how "this effect no longer spawns a model" is expressed;
+                    // there is no other way to say it in the format, where 0 means "none".
+                    None => crate::mod_project::ModelEdit {
+                        name: String::new(),
+                        flag: 0,
+                    },
+                });
+                (emitter_set.is_some() || variants.is_some() || model.is_some()).then(|| {
+                    crate::mod_project::EntryEdit {
+                        entry_name: now.name.clone(),
+                        emitter_set,
+                        variants,
+                        model,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Re-apply saved emitter lists and spawn structures onto the loaded eff.
+    pub fn apply_structure_edits(
+        &mut self,
+        rosters: &[crate::mod_project::EmitterRoster],
+        entry_edits: &[crate::mod_project::EntryEdit],
+    ) {
+        for roster in rosters {
+            let Some(ptcl) = self.ptcl.as_mut() else {
+                return;
+            };
+            let Some(set_idx) = ptcl
+                .emitter_sets
+                .iter()
+                .position(|s| s.name == roster.set_name)
+                .or(Some(roster.set_idx).filter(|i| *i < ptcl.emitter_sets.len()))
+            else {
+                eprintln!(
+                    "[EFF-PROJECT] emitter list for set '{}' does not resolve in this eff",
+                    roster.set_name
+                );
+                continue;
+            };
+            // Built from the PRISTINE snapshots rather than from the list currently on screen.
+            // A roster is a statement about the emitters the FILE has, so re-applying one — which
+            // happens when a second project is opened over an eff this one already rostered —
+            // must start from the same place every time, or the duplicates duplicate.
+            let Some(source) = self.pristine.get(set_idx).map(|snapshots| {
+                snapshots
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| s.to_def(i))
+                    .collect::<Vec<_>>()
+            }) else {
+                continue;
+            };
+            let rebuilt: Vec<EmitterDef> = roster
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    // Stored name at the stored index wins, then the name anywhere, then the
+                    // bare index — the same rule the exporter resolves a slot by.
+                    let named = |i: usize| {
+                        !slot.source_name.is_empty()
+                            && source.get(i).map(|e| &e.name) == Some(&slot.source_name)
+                    };
+                    let idx = if named(slot.source_idx) {
+                        slot.source_idx
+                    } else {
+                        (0..source.len())
+                            .find(|i| named(*i))
+                            .unwrap_or(slot.source_idx)
+                    };
+                    let mut em = source.get(idx)?.clone();
+                    em.source_idx = idx;
+                    em.depth = slot.depth;
+                    if !slot.name.is_empty() {
+                        em.name = slot.name.clone();
+                    }
+                    Some(em)
+                })
+                .collect();
+            if rebuilt.is_empty() && !roster.slots.is_empty() {
+                eprintln!(
+                    "[EFF-PROJECT] emitter list for set '{}' resolved to nothing — left as the \
+                     file has it",
+                    roster.set_name
+                );
+                continue;
+            }
+            ptcl.emitter_sets[set_idx].emitters = rebuilt;
+        }
+
+        for edit in entry_edits {
+            let set_idx = |name: &str| {
+                self.ptcl
+                    .as_ref()
+                    .and_then(|p| p.emitter_sets.iter().position(|s| s.name == name))
+            };
+            let variants: Option<Vec<EffVariantInfo>> = edit.variants.as_ref().map(|list| {
+                list.iter()
+                    .map(|v| EffVariantInfo {
+                        start_frame: v.start_frame,
+                        set_idx: set_idx(&v.set_name),
+                        bone: v.bone.clone(),
+                    })
+                    .collect()
+            });
+            let Some(entry) = self
+                .entry_info
+                .iter_mut()
+                .find(|e| e.name.eq_ignore_ascii_case(&edit.entry_name))
+            else {
+                eprintln!(
+                    "[EFF-PROJECT] spawn edit names entry '{}', which this eff does not have",
+                    edit.entry_name
+                );
+                continue;
+            };
+            if let Some(name) = &edit.emitter_set {
+                entry.set_idx = if name.is_empty() { None } else { set_idx(name) };
+            }
+            if let Some(variants) = variants {
+                entry.variants = variants;
+            }
+            if let Some(model) = &edit.model {
+                entry.model = (!model.name.is_empty()).then(|| EffModelInfo {
+                    name: model.name.clone(),
+                    flag: model.flag,
+                });
+            }
+        }
     }
 
     /// Apply saved authored edits onto the loaded eff. Prefers name matches; falls back to
@@ -674,26 +1546,69 @@ impl EffEditor {
             };
 
             let f = &edit.fields;
+            // The five named scalars predate the attribute table. Fold them in first, so a
+            // project saved by an older build lands on the same fields the table now owns and is
+            // re-recorded as `attrs` the next time the editor collects. `attrs` is applied after
+            // them and therefore wins where a project carries both.
             if let Some(v) = f.emission_rate {
-                em.emission_rate = v;
+                set_attr(em, "emission.rate", AttrValue::Float(v));
             }
             if let Some(v) = f.lifetime {
-                em.lifetime = v;
+                set_attr(em, "particle_data.life", AttrValue::Int(v.round() as i64));
             }
             if let Some(v) = f.scale {
-                em.scale = v;
+                // The old scalar tracked scale_x and applied its RATIO to the other two axes,
+                // which is what preserved authored anisotropy. Reproduce that here rather than
+                // writing v to all three, or reopening an old project would quietly square up
+                // every deliberately-flattened particle.
+                let base = attr_f32(em, "particle_scale.scale_x");
+                let (y, z) = (
+                    attr_f32(em, "particle_scale.scale_y"),
+                    attr_f32(em, "particle_scale.scale_z"),
+                );
+                let r = if base.abs() > 1e-6 { v / base } else { 1.0 };
+                set_attr(em, "particle_scale.scale_x", AttrValue::Float(v));
+                set_attr(
+                    em,
+                    "particle_scale.scale_y",
+                    AttrValue::Float(if base.abs() > 1e-6 { y * r } else { v }),
+                );
+                set_attr(
+                    em,
+                    "particle_scale.scale_z",
+                    AttrValue::Float(if base.abs() > 1e-6 { z * r } else { v }),
+                );
             }
             if let Some(v) = f.color_scale {
-                em.color_scale = v;
+                set_attr(em, "emitter_static.color_scale", AttrValue::Float(v));
             }
             if let Some(v) = f.emitter_scale {
-                em.emitter_scale = glam::Vec3::from(v);
+                set_attr(em, "emitter_info.scale_x", AttrValue::Float(v[0]));
+                set_attr(em, "emitter_info.scale_y", AttrValue::Float(v[1]));
+                set_attr(em, "emitter_info.scale_z", AttrValue::Float(v[2]));
+            }
+            for (id, value) in &f.attrs {
+                set_attr(em, id, *value);
+            }
+            for edit in &f.subsections {
+                let Some(section) = em.subsections.get_mut(edit.index) else {
+                    continue;
+                };
+                if section.magic != edit.magic {
+                    continue;
+                }
+                for (&offset, &value) in &edit.bytes {
+                    if let Some(byte) = section.data.get_mut(offset) {
+                        *byte = value;
+                    }
+                }
             }
             let apply_keys = |dst: &mut Vec<ColorKey>, rows: &Vec<[f32; 4]>| {
                 for (k, row) in dst.iter_mut().zip(rows) {
                     k.r = row[0];
                     k.g = row[1];
                     k.b = row[2];
+                    k.frame = row[3];
                 }
             };
             if let Some(rows) = &f.color0 {
@@ -705,6 +1620,7 @@ impl EffEditor {
             if let Some(rows) = &f.alpha0 {
                 for (k, row) in em.alpha0_keys.iter_mut().zip(rows) {
                     k.r = row[0];
+                    k.frame = row[1];
                 }
             }
             if let Some(wanted) = &f.texture_name {
@@ -715,6 +1631,10 @@ impl EffEditor {
                     em.texture_index = Some(i as u32);
                 }
             }
+            // Older projects stored the friendly colour/key fields separately from the
+            // general attribute map. Fold them into the complete table so both editor views
+            // and the exporter observe the same final values.
+            effective_keys_to_attrs(em);
         }
     }
 
@@ -822,11 +1742,17 @@ impl EffEditor {
             return Vec::new();
         };
         let tex_names = self.texture_names();
+        // Paired by `source_idx`, not by position: once the emitter LIST has been edited the two
+        // are different lengths, and zipping them would diff each emitter against whichever
+        // pristine emitter happened to land at the same index.
         set.emitters
             .iter()
-            .zip(pristine.iter())
             .enumerate()
-            .filter(|(_, (e, p))| !field_edits(e, p, &tex_names).is_empty())
+            .filter(|(_, e)| {
+                pristine
+                    .get(e.source_idx)
+                    .is_none_or(|p| !field_edits(e, p, &tex_names).is_empty())
+            })
             .map(|(i, _)| i)
             .collect()
     }
@@ -904,6 +1830,11 @@ impl EffEditor {
                     self.pending_edits_push_live = false;
                 }
             }
+            // The emitter lists and spawn structures go the same way and for the same reason:
+            // the merged baseline has neither baked in, so a reload would drop them.
+            if self.pending_structure.is_none() {
+                self.queue_structure_edits(self.collect_rosters(), self.collect_entry_edits());
+            }
             self.pending_load = Some(base.to_path_buf());
         }
     }
@@ -939,6 +1870,9 @@ impl EffEditor {
         if let Some(path) = self.pending_load.take() {
             if path.exists() {
                 self.load_eff(&path);
+                if let Some((rosters, entry_edits)) = self.pending_structure.take() {
+                    self.apply_structure_edits(&rosters, &entry_edits);
+                }
                 if let Some(edits) = self.pending_edits.take() {
                     let had_edits = !edits.is_empty();
                     let push_live = std::mem::take(&mut self.pending_edits_push_live);
@@ -1394,6 +2328,41 @@ impl EffEditor {
 
         self.clamp_selected_emitter(set_idx);
 
+        let emitter_count = self
+            .ptcl
+            .as_ref()
+            .and_then(|p| p.emitter_sets.get(set_idx))
+            .map(|s| s.emitters.len())
+            .unwrap_or(0);
+        let mut reset_entry = false;
+        ui.horizontal(|ui| {
+            ui.heading(&entry_name);
+            ui.label(
+                egui::RichText::new(format!("{emitter_count} emitter(s)"))
+                    .color(egui::Color32::LIGHT_GRAY),
+            );
+            reset_entry = ui.small_button("Reset entry").clicked();
+        });
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.emitter_tab, EmitterTab::Attributes, "Attributes")
+                .on_hover_text("Every value of the selected emitter");
+            ui.selectable_value(
+                &mut self.emitter_tab,
+                EmitterTab::Spawning,
+                "Emitters & spawning",
+            )
+            .on_hover_text(
+                "Which emitters this effect plays, which extra parts start when, and which \
+                 model comes with it",
+            );
+        });
+        // Drawn before the borrows below, because it edits the emitter LIST and the entry's
+        // header rather than one emitter's fields.
+        if self.emitter_tab == EmitterTab::Spawning {
+            self.draw_spawning_panel(ui, set_idx, &entry_name);
+            return;
+        }
+
         let Some(ptcl) = self.ptcl.as_mut() else {
             return;
         };
@@ -1406,20 +2375,14 @@ impl EffEditor {
         let Some(pristine_set) = self.pristine.get(set_idx) else {
             return;
         };
-
-        ui.horizontal(|ui| {
-            ui.heading(&entry_name);
-            ui.label(
-                egui::RichText::new(format!("{} emitter(s)", set.emitters.len()))
-                    .color(egui::Color32::LIGHT_GRAY),
-            );
-            if ui.small_button("Reset entry").clicked() {
-                for (e, p) in set.emitters.iter_mut().zip(pristine_set.iter()) {
+        if reset_entry {
+            for e in set.emitters.iter_mut() {
+                if let Some(p) = pristine_set.get(e.source_idx) {
                     p.restore(e);
                 }
-                self.eff_dirty_at = Some(Instant::now());
             }
-        });
+            self.eff_dirty_at = Some(Instant::now());
+        }
 
         // Emitter tabs. Edited ones carry a dot and are tinted: a set can have twenty
         // emitters, and without a marker the only way to find the two you changed was to
@@ -1448,7 +2411,11 @@ impl EffEditor {
         ui.separator();
 
         let ei = self.selected_emitter;
-        let (Some(em), Some(pr)) = (set.emitters.get_mut(ei), pristine_set.get(ei)) else {
+        let Some(em) = set.emitters.get_mut(ei) else {
+            ui.colored_label(egui::Color32::GRAY, "No emitters in this set.");
+            return;
+        };
+        let Some(pr) = pristine_set.get(em.source_idx) else {
             ui.colored_label(egui::Color32::GRAY, "No emitters in this set.");
             return;
         };
@@ -1460,56 +2427,56 @@ impl EffEditor {
         egui::ScrollArea::vertical()
             .id_salt("emitter_fields")
             .show(ui, |ui| {
-                egui::Grid::new("authored_fields")
-                    .num_columns(3)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        let mut scalar =
-                            |ui: &mut Ui, label: &str, v: &mut f32, orig: f32, speed: f64| {
-                                ui.label(label);
-                                changed |= ui
-                                    .add(egui::DragValue::new(v).speed(speed).range(0.0..=f32::MAX))
-                                    .changed();
-                                ui.label(
-                                    egui::RichText::new(format!("orig {orig:.3}"))
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-                                ui.end_row();
-                            };
-                        scalar(ui, "particle scale", &mut em.scale, pr.scale, 0.01);
-                        scalar(ui, "color scale", &mut em.color_scale, pr.color_scale, 0.01);
-                        scalar(
-                            ui,
-                            "emission rate",
-                            &mut em.emission_rate,
-                            pr.emission_rate,
-                            0.05,
-                        );
-                        scalar(ui, "lifetime", &mut em.lifetime, pr.lifetime, 0.5);
+                // The handful of values that get changed on nearly every edit, kept at the top
+                // and out of the group tree. Each one is the SAME attribute the tree below
+                // holds, so editing it here or there is the same edit — there is no second
+                // source of truth to fall out of step.
+                changed |= attr_rows(ui, "authored_fields", em, pr, BASIC_ATTRS);
 
-                        ui.label("emitter scale");
-                        ui.horizontal(|ui| {
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut em.emitter_scale.x).speed(0.01))
-                                .changed();
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut em.emitter_scale.y).speed(0.01))
-                                .changed();
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut em.emitter_scale.z).speed(0.01))
-                                .changed();
+                let particle_scale = [
+                    "particle_scale.scale_x",
+                    "particle_scale.scale_y",
+                    "particle_scale.scale_z",
+                ];
+                // Uniform scale is the common intent, so it gets a control of its own: the
+                // per-axis rows are in the Particle scale group for anisotropy.
+                if particle_scale.iter().all(|id| attr(em, id).is_some()) {
+                    egui::Grid::new("uniform_scale")
+                        .num_columns(3)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("particle scale (all axes)")
+                                .on_hover_text("Scales X, Y and Z together, keeping the ratio the emitter was authored with.");
+                            let base = attr_f32(em, particle_scale[0]);
+                            let mut v = base;
+                            if ui
+                                .add(egui::DragValue::new(&mut v).speed(0.01).range(0.0..=f32::MAX))
+                                .changed()
+                            {
+                                let ratio = if base.abs() > 1e-6 { v / base } else { 0.0 };
+                                for id in particle_scale {
+                                    let now = attr_f32(em, id);
+                                    let scaled = if base.abs() > 1e-6 { now * ratio } else { v };
+                                    set_attr(em, id, AttrValue::Float(scaled));
+                                }
+                                changed = true;
+                            }
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "orig {:.3}",
+                                    pr.attrs
+                                        .get(crate::eff_attrs::index_of(particle_scale[0]).unwrap_or(0))
+                                        .copied()
+                                        .flatten()
+                                        .map(|v| v.as_f32())
+                                        .unwrap_or(0.0)
+                                ))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                            );
+                            ui.end_row();
                         });
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "orig [{:.2}, {:.2}, {:.2}]",
-                                pr.emitter_scale.x, pr.emitter_scale.y, pr.emitter_scale.z
-                            ))
-                            .small()
-                            .color(egui::Color32::GRAY),
-                        );
-                        ui.end_row();
-                    });
+                }
 
                 let mut key_table =
                     |ui: &mut Ui, label: &str, keys: &mut Vec<ColorKey>, orig: &[ColorKey]| {
@@ -1527,11 +2494,10 @@ impl EffEditor {
                                     k.b = rgb[2];
                                     changed = true;
                                 }
-                                ui.label(
-                                    egui::RichText::new(format!("t={:.2}", k.frame))
-                                        .small()
-                                        .monospace(),
-                                );
+                                ui.label("frame");
+                                changed |= ui
+                                    .add(egui::DragValue::new(&mut k.frame).speed(0.1))
+                                    .changed();
                                 if let Some(o) = orig.get(i) {
                                     let mut orig_rgb = [o.r, o.g, o.b];
                                     ui.add_enabled_ui(false, |ui| {
@@ -1560,11 +2526,10 @@ impl EffEditor {
                             changed |= ui
                                 .add(egui::DragValue::new(&mut k.r).speed(0.01).range(0.0..=4.0))
                                 .changed();
-                            ui.label(
-                                egui::RichText::new(format!("t={:.2}", k.frame))
-                                    .small()
-                                    .monospace(),
-                            );
+                            ui.label("frame");
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut k.frame).speed(0.1))
+                                .changed();
                             if let Some(o) = pr.alpha0_keys.get(i) {
                                 ui.label(
                                     egui::RichText::new(format!("orig {:.3}", o.r))
@@ -1590,9 +2555,488 @@ impl EffEditor {
                     pr.restore(em);
                     changed = true;
                 }
+
+                // The friendly controls above are projections of the complete attribute
+                // table below. Synchronize before drawing the table, then flow edits made in
+                // the table back into those projections for the next frame.
+                effective_keys_to_attrs(em);
+
+                ui.add_space(10.0);
+                ui.separator();
+                let attributes_changed =
+                    draw_attribute_groups(ui, em, pr, &mut self.attr_filter);
+                if attributes_changed {
+                    attrs_to_effective_keys(em);
+                    changed = true;
+                }
+                // EffectResearch documents these separately from EmitterData. Keeping them in
+                // the same authored emitter panel makes Send/export semantics identical.
+                let pristine_def = pr.to_def(em.source_idx);
+                changed |= crate::eff_subsections::draw(ui, em, &pristine_def);
             });
 
         self.selected_texture = texture_actions;
+
+        if changed {
+            self.eff_dirty_at = Some(Instant::now());
+        }
+    }
+
+    /// What this effect actually brings on screen: its emitter list, its extra parts, and its
+    /// external model.
+    ///
+    /// Everything here is structure rather than values — it changes what exists, not what one
+    /// emitter looks like — which is why it is a separate view from the attribute tree. The
+    /// three sections answer three different questions:
+    ///   EMITTERS  which emitters play at all, in what order, nested how
+    ///   TIMING    when each of them starts and how long it keeps emitting
+    ///   PARTS     the extra emitter sets a multi-part effect brings in on later frames, and
+    ///             the model that comes with the whole thing
+    fn draw_spawning_panel(&mut self, ui: &mut Ui, set_idx: usize, entry_name: &str) {
+        egui::ScrollArea::vertical()
+            .id_salt("spawning_panel")
+            .show(ui, |ui| {
+                self.draw_emitter_roster(ui, set_idx);
+                ui.add_space(10.0);
+                ui.separator();
+                self.draw_emitter_timing(ui, set_idx);
+                ui.add_space(10.0);
+                ui.separator();
+                self.draw_entry_parts(ui, entry_name);
+            });
+    }
+
+    /// The emitter list: which emitters this effect plays, and their nesting.
+    ///
+    /// Duplicating rather than creating from scratch is deliberate. An emitter carries shader
+    /// indices, a texture GUID and a primitive id that only mean anything against the pools THIS
+    /// eff ships; a blank emitter would reference none of them and draw nothing at best. Every
+    /// emitter here is therefore a copy of one the effect already had, which is also what makes
+    /// the edit expressible as a roster the exporter can re-apply.
+    fn draw_emitter_roster(&mut self, ui: &mut Ui, set_idx: usize) {
+        ui.label(egui::RichText::new("Emitters").strong());
+        let original = self.pristine.get(set_idx).map(|p| p.len()).unwrap_or(0);
+        let Some(set) = self
+            .ptcl
+            .as_mut()
+            .and_then(|p| p.emitter_sets.get_mut(set_idx))
+        else {
+            return;
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "{} now, {original} in the file",
+                set.emitters.len()
+            ))
+            .small()
+            .color(egui::Color32::GRAY),
+        );
+
+        // Collected and applied after the loop: every one of these changes the list being
+        // iterated.
+        let mut duplicate: Option<usize> = None;
+        let mut remove: Option<usize> = None;
+        let mut move_by: Option<(usize, isize)> = None;
+        let mut nest: Option<(usize, i8)> = None;
+        let mut changed = false;
+
+        for (i, em) in set.emitters.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add_space(em.depth as f32 * 14.0);
+                let label = if em.name.is_empty() {
+                    format!("emitter {i}")
+                } else {
+                    em.name.clone()
+                };
+                if ui
+                    .selectable_label(self.selected_emitter == i, label)
+                    .clicked()
+                {
+                    self.selected_emitter = i;
+                    self.emitter_tab = EmitterTab::Attributes;
+                }
+                if ui
+                    .small_button("copy")
+                    .on_hover_text("Add another emitter just like this one")
+                    .clicked()
+                {
+                    duplicate = Some(i);
+                }
+                if ui
+                    .small_button("remove")
+                    .on_hover_text("Stop this emitter from playing at all")
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+                if ui.small_button("↑").on_hover_text("Draw earlier").clicked() {
+                    move_by = Some((i, -1));
+                }
+                if ui.small_button("↓").on_hover_text("Draw later").clicked() {
+                    move_by = Some((i, 1));
+                }
+                if em.depth > 0 && ui.small_button("⇤").on_hover_text("Un-nest").clicked() {
+                    nest = Some((i, -1));
+                }
+                if i > 0
+                    && ui
+                        .small_button("⇥")
+                        .on_hover_text("Nest under the emitter above")
+                        .clicked()
+                {
+                    nest = Some((i, 1));
+                }
+            });
+        }
+
+        // Every one of these operates on an emitter's whole SUBTREE, not on the one row. The
+        // list is flat but the emitters are a tree, and the nesting is carried by `depth` and
+        // position — so moving a parent without its children hands those children to whichever
+        // emitter ends up above them.
+        if let Some(i) = duplicate {
+            let range = subtree(&set.emitters, i);
+            let mut copies: Vec<EmitterDef> = set.emitters[range.clone()].to_vec();
+            // Names are renamed against the list AS IT GROWS, so duplicating a parent with two
+            // identically-shaped children does not produce two emitters called the same thing.
+            let mut taken = set.emitters.clone();
+            for copy in copies.iter_mut() {
+                copy.name = unique_emitter_name(&copy.name, &taken);
+                // `source_idx` keeps pointing at the emitter this was copied FROM, so the copy
+                // is diffed against the same pristine values and the exporter knows what to
+                // clone. It is not the copy's position in the list.
+                taken.push(copy.clone());
+            }
+            if !copies.is_empty() {
+                let at = range.end;
+                set.emitters.splice(at..at, copies);
+                changed = true;
+            }
+        }
+        if let Some(i) = remove {
+            let range = subtree(&set.emitters, i);
+            if !range.is_empty() {
+                set.emitters.drain(range);
+                changed = true;
+            }
+        }
+        if let Some((i, delta)) = move_by {
+            let range = subtree(&set.emitters, i);
+            if !range.is_empty() {
+                let depth = set.emitters[i].depth;
+                if delta > 0 {
+                    // Swap places with the next sibling, taking both subtrees whole.
+                    let next = range.end;
+                    if set.emitters.get(next).is_some_and(|e| e.depth == depth) {
+                        let next_end = subtree(&set.emitters, next).end;
+                        set.emitters[range.start..next_end].rotate_left(range.len());
+                        changed = true;
+                    }
+                } else if range.start > 0 {
+                    // The row above is either the previous sibling's LAST descendant or this
+                    // emitter's parent. Walk back to the previous sibling's root; a parent
+                    // (shallower than us) means there is no earlier sibling to swap with.
+                    let prev = (0..range.start)
+                        .rev()
+                        .find(|&k| set.emitters[k].depth <= depth);
+                    if let Some(prev) = prev.filter(|&k| set.emitters[k].depth == depth) {
+                        set.emitters[prev..range.end].rotate_left(range.start - prev);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if let Some((i, delta)) = nest {
+            // At most one level deeper than the emitter above: any more and there is no emitter
+            // at the depth being asked for, and the exporter would clamp it back anyway.
+            let ceiling = if i == 0 {
+                0
+            } else {
+                set.emitters
+                    .get(i - 1)
+                    .map(|p| p.depth.saturating_add(1))
+                    .unwrap_or(0)
+            };
+            if let Some(root) = set.emitters.get(i) {
+                let old_depth = root.depth;
+                let new_depth = (old_depth as i16 + delta as i16).clamp(0, ceiling as i16) as u8;
+                let applied = new_depth as i16 - old_depth as i16;
+                // Nesting is a tree operation: descendants have to move by the same depth
+                // delta or the root leaves its children behind as siblings.
+                if shift_subtree_depth(&mut set.emitters, i, applied) {
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.clamp_selected_emitter(set_idx);
+            self.eff_dirty_at = Some(Instant::now());
+        }
+    }
+
+    /// When each emitter starts and how long it keeps going — the per-emitter half of an
+    /// effect's timing, gathered into one table so the whole effect's shape is readable at a
+    /// glance rather than one emitter at a time.
+    ///
+    /// These are ordinary attributes, edited here and in the attribute tree alike.
+    fn draw_emitter_timing(&mut self, ui: &mut Ui, set_idx: usize) {
+        const TIMING: &[&str] = &[
+            "emission.start",
+            "emission.timing",
+            "emission.duration",
+            "emission.interval",
+            "emission.rate",
+            "emission.is_one_time",
+            "particle_data.life",
+        ];
+        ui.label(egui::RichText::new("Timing").strong());
+        ui.label(
+            egui::RichText::new(
+                "Start and duration are in frames from when the effect is spawned. An emitter \
+                 with duration 0 emits on its start frame only.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
+        );
+        let Some(pristine) = self.pristine.get(set_idx).cloned() else {
+            return;
+        };
+        let Some(set) = self
+            .ptcl
+            .as_mut()
+            .and_then(|p| p.emitter_sets.get_mut(set_idx))
+        else {
+            return;
+        };
+        let mut changed = false;
+        // A short set opens every emitter, because the whole point of this table is seeing the
+        // effect's timing at once; a long one would be a wall of grids.
+        let open_by_default = set.emitters.len() <= 4;
+        for (i, em) in set.emitters.iter_mut().enumerate() {
+            let Some(pr) = pristine.get(em.source_idx) else {
+                continue;
+            };
+            let name = if em.name.is_empty() {
+                format!("emitter {i}")
+            } else {
+                em.name.clone()
+            };
+            egui::CollapsingHeader::new(name)
+                .id_salt(("timing", i))
+                .default_open(open_by_default)
+                .show(ui, |ui| {
+                    changed |= attr_rows(ui, &format!("timing_rows{i}"), em, pr, TIMING);
+                });
+        }
+        if changed {
+            self.eff_dirty_at = Some(Instant::now());
+        }
+    }
+
+    /// The entry's own spawn structure: the extra parts of a multi-part effect, and the external
+    /// model.
+    ///
+    /// Both live in the eff's header rather than in the particle data, and the live carrier
+    /// rides the same live clone as the selected emitter data. The carrier applies this header
+    /// before cloning, so a changed part list also determines which sets and external model are
+    /// transferred.
+    fn draw_entry_parts(&mut self, ui: &mut Ui, entry_name: &str) {
+        ui.label(egui::RichText::new("Parts & model").strong());
+        let Some(idx) = self
+            .entry_info
+            .iter()
+            .position(|e| e.name.eq_ignore_ascii_case(entry_name))
+        else {
+            ui.colored_label(
+                egui::Color32::GRAY,
+                "This entry is not in the file's entry table, so it has no spawn structure to \
+                 edit.",
+            );
+            return;
+        };
+        let set_names: Vec<String> = self
+            .ptcl
+            .as_ref()
+            .map(|p| p.emitter_sets.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+        let pristine = self.entry_pristine.get(idx).cloned().unwrap_or_default();
+        let Some(entry) = self.entry_info.get_mut(idx) else {
+            return;
+        };
+        let mut changed = false;
+
+        ui.label(
+            egui::RichText::new(
+                "Applies to export and the live carrier. Send, then re-trigger the effect to \
+                 see the new parts, bones, primary set or model.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("primary set");
+            let current = entry
+                .set_idx
+                .and_then(|s| set_names.get(s).cloned())
+                .unwrap_or_else(|| "none".to_string());
+            egui::ComboBox::from_id_salt("entry_primary_set")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(entry.set_idx.is_none(), "none")
+                        .clicked()
+                    {
+                        entry.set_idx = None;
+                        changed = true;
+                    }
+                    for (s, name) in set_names.iter().enumerate() {
+                        if ui
+                            .selectable_label(entry.set_idx == Some(s), name)
+                            .clicked()
+                        {
+                            entry.set_idx = Some(s);
+                            changed = true;
+                        }
+                    }
+                });
+            if entry.set_idx != pristine.set_idx && ui.small_button("Reset").clicked() {
+                entry.set_idx = pristine.set_idx;
+                changed = true;
+            }
+        });
+
+        let mut remove_part: Option<usize> = None;
+        for (i, variant) in entry.variants.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("part {}", i + 1));
+                ui.label("frame");
+                let mut frame = variant.start_frame as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut frame).speed(1.0).range(0..=65535))
+                    .on_hover_text("Frames after the effect starts before this part comes in")
+                    .changed()
+                {
+                    variant.start_frame = frame as u16;
+                    changed = true;
+                }
+                let current = variant
+                    .set_idx
+                    .and_then(|s| set_names.get(s).cloned())
+                    .unwrap_or_else(|| "none".to_string());
+                egui::ComboBox::from_id_salt(("part_set", i))
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(variant.set_idx.is_none(), "none")
+                            .clicked()
+                        {
+                            variant.set_idx = None;
+                            changed = true;
+                        }
+                        for (s, name) in set_names.iter().enumerate() {
+                            if ui
+                                .selectable_label(variant.set_idx == Some(s), name)
+                                .clicked()
+                            {
+                                variant.set_idx = Some(s);
+                                changed = true;
+                            }
+                        }
+                    });
+                ui.label("bone");
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut variant.bone)
+                            .hint_text("effect attachment")
+                            .desired_width(120.0),
+                    )
+                    .on_hover_text("Bone this part attaches to; empty uses the effect attachment")
+                    .changed();
+                if ui.small_button("remove").clicked() {
+                    remove_part = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove_part {
+            entry.variants.remove(i);
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("Add part")
+                .on_hover_text("Play another emitter set as part of this effect")
+                .clicked()
+            {
+                // A new part copies the last one's set rather than defaulting to "none": a part
+                // with no set is a part that does nothing, and every part added this way would
+                // then need a second edit before it did anything at all.
+                let set_idx = entry
+                    .variants
+                    .last()
+                    .and_then(|v| v.set_idx)
+                    .or(entry.set_idx)
+                    .or(if set_names.is_empty() { None } else { Some(0) });
+                let start_frame = entry
+                    .variants
+                    .last()
+                    .map(|v| v.start_frame.saturating_add(1))
+                    .unwrap_or(0);
+                entry.variants.push(EffVariantInfo {
+                    start_frame,
+                    set_idx,
+                    bone: String::new(),
+                });
+                changed = true;
+            }
+            if entry.variants != pristine.variants && ui.small_button("Reset parts").clicked() {
+                entry.variants = pristine.variants.clone();
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("model");
+            let mut has_model = entry.model.is_some();
+            if ui
+                .checkbox(&mut has_model, "")
+                .on_hover_text(
+                    "Whether this effect spawns an external model alongside its particles",
+                )
+                .changed()
+            {
+                entry.model = has_model.then(|| {
+                    pristine.model.clone().unwrap_or(EffModelInfo {
+                        name: String::new(),
+                        flag: 0,
+                    })
+                });
+                changed = true;
+            }
+            if let Some(model) = entry.model.as_mut() {
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut model.name)
+                            .hint_text("model name")
+                            .desired_width(160.0),
+                    )
+                    .changed();
+                ui.label("spawn flag");
+                let mut flag = model.flag as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut flag).speed(1.0).range(0..=255))
+                    .on_hover_text("The model's spawn condition byte, from the eff's model table")
+                    .changed()
+                {
+                    model.flag = flag as u8;
+                    changed = true;
+                }
+            }
+            if entry.model != pristine.model && ui.small_button("Reset model").clicked() {
+                entry.model = pristine.model.clone();
+                changed = true;
+            }
+        });
 
         if changed {
             self.eff_dirty_at = Some(Instant::now());
@@ -1701,8 +3145,17 @@ impl EffEditor {
         let original = self
             .selected_entry
             .map(|entry_idx| self.entries[entry_idx].set_idx)
-            .and_then(|set_idx| self.pristine.get(set_idx))
-            .and_then(|set| set.get(self.selected_emitter))
+            .and_then(|set_idx| {
+                let source = self
+                    .ptcl
+                    .as_ref()?
+                    .emitter_sets
+                    .get(set_idx)?
+                    .emitters
+                    .get(self.selected_emitter)?
+                    .source_idx;
+                self.pristine.get(set_idx)?.get(source)
+            })
             .and_then(|snapshot| snapshot.texture_index);
         if original.map(|o| o as usize) != Some(index) {
             let was = original
@@ -2539,41 +3992,64 @@ mod tests {
     use super::*;
     use crate::effects::{EmitterSet, PtclFile};
 
+    /// A blank emitter at the version Smash's own files use, for the attribute vector.
+    fn test_emitter_data() -> effect_library::EmitterData {
+        crate::eff_attrs::blank_emitter_data(crate::eff_attrs::SSBU_VFX_VERSION)
+    }
+
     /// An editor holding one emitter set with one emitter, loaded from `path`.
     fn editor_with_one_emitter(path: &str) -> EffEditor {
-        let emitter = EmitterDef {
+        // Attributes come from a default emitter rather than a hand-written vector, so the
+        // fixture stays valid as the table grows and every attribute starts out present.
+        let mut emitter = EmitterDef {
             name: "em0".into(),
-            emission_rate: 10.0,
-            lifetime: 30.0,
-            scale: 1.0,
-            color_scale: 1.0,
-            emitter_scale: glam::Vec3::ONE,
+            attrs: crate::eff_attrs::read_all(&test_emitter_data()),
+            subsections: Vec::new(),
+            depth: 0,
+            source_idx: 0,
             color0: Vec::new(),
             color1: Vec::new(),
             alpha0_keys: Vec::new(),
             texture_index: None,
         };
-        let mut editor = EffEditor::default();
-        editor.pristine = vec![vec![EmitterSnapshot::of(&emitter)]];
-        editor.ptcl = Some(PtclFile {
-            emitter_sets: vec![EmitterSet {
-                name: "P_KirbyDash".into(),
-                emitters: vec![emitter],
+        // A blank emitter is all zeros; give the one value these tests tune a baseline of its
+        // own so "put it back to 1.0" is genuinely a return to pristine.
+        set_attr(&mut emitter, TUNED, AttrValue::Float(1.0));
+        let emitter = emitter;
+        EffEditor {
+            pristine: vec![vec![EmitterSnapshot::of(&emitter)]],
+            ptcl: Some(PtclFile {
+                emitter_sets: vec![EmitterSet {
+                    name: "P_KirbyDash".into(),
+                    emitters: vec![emitter],
+                }],
+                bntx_textures: Vec::new(),
+            }),
+            entries: vec![EffEntry {
+                name: "kirby_dash".into(),
+                hash: 0,
+                set_idx: 0,
             }],
-            bntx_textures: Vec::new(),
-        });
-        editor.entries = vec![EffEntry {
-            name: "kirby_dash".into(),
-            hash: 0,
-            set_idx: 0,
-        }];
-        editor.loaded_path = Some(PathBuf::from(path));
-        editor
+            loaded_path: Some(PathBuf::from(path)),
+            ..Default::default()
+        }
     }
+
+    /// The attribute these tests move to make the fixture "edited".
+    const TUNED: &str = "particle_scale.scale_x";
 
     /// Tune the one emitter so the working copy differs from its pristine snapshot.
     fn tune(editor: &mut EffEditor, scale: f32) {
-        editor.ptcl.as_mut().expect("ptcl").emitter_sets[0].emitters[0].scale = scale;
+        set_attr(
+            &mut editor.ptcl.as_mut().expect("ptcl").emitter_sets[0].emitters[0],
+            TUNED,
+            AttrValue::Float(scale),
+        );
+    }
+
+    /// What an edit record says the tuned attribute is now.
+    fn tuned_value(edit: &AuthoredEdit) -> Option<f32> {
+        edit.fields.attrs.get(TUNED).map(|v| v.as_f32())
     }
 
     /// Give the fixture a two-texture pool and point its emitter at the first one.
@@ -2738,7 +4214,7 @@ mod tests {
         assert_eq!(carried.len(), 1);
         assert_eq!(carried[0].set_name, "P_KirbyDash");
         assert_eq!(carried[0].entry_name, "kirby_dash");
-        assert_eq!(carried[0].fields.scale, Some(2.5));
+        assert_eq!(tuned_value(&carried[0]), Some(2.5));
         assert!(
             !editor.pending_edits_push_live,
             "a reload we caused must not deploy to the running game on its own"
@@ -2762,7 +4238,245 @@ mod tests {
         editor.apply_authored_edits(&carried);
         let after = editor.collect_authored_edits();
         assert_eq!(after.len(), 1, "the edit is back in the panel's diff");
-        assert_eq!(after[0].fields.scale, Some(2.5));
+        assert_eq!(tuned_value(&after[0]), Some(2.5));
+    }
+
+    /// A project saved before the attribute table existed carries its edits in five named
+    /// fields. Opening one has to put those values back on the emitter — and re-collecting has
+    /// to record them in the new form, so the project migrates itself by being opened.
+    #[test]
+    fn a_legacy_projects_named_fields_still_land() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let legacy = AuthoredEdit {
+            set_name: "P_KirbyDash".into(),
+            entry_name: "kirby_dash".into(),
+            set_idx: 0,
+            emitter_name: "em0".into(),
+            emitter_idx: 0,
+            fields: EmitterFieldEdits {
+                emission_rate: Some(12.5),
+                lifetime: Some(30.0),
+                color_scale: Some(2.0),
+                emitter_scale: Some([3.0, 4.0, 5.0]),
+                ..Default::default()
+            },
+        };
+        editor.apply_authored_edits(&[legacy]);
+
+        let em = &editor.ptcl.as_ref().expect("ptcl").emitter_sets[0].emitters[0];
+        assert_eq!(attr_f32(em, "emission.rate"), 12.5);
+        assert_eq!(attr(em, "particle_data.life"), Some(AttrValue::Int(30)));
+        assert_eq!(attr_f32(em, "emitter_static.color_scale"), 2.0);
+        assert_eq!(attr_f32(em, "emitter_info.scale_x"), 3.0);
+        assert_eq!(attr_f32(em, "emitter_info.scale_z"), 5.0);
+
+        // Re-collected in the general form, with the named fields no longer in play.
+        let collected = editor.collect_authored_edits();
+        assert_eq!(collected.len(), 1);
+        let fields = &collected[0].fields;
+        assert_eq!(
+            fields.attrs.get("emission.rate").map(|v| v.as_f32()),
+            Some(12.5)
+        );
+        assert_eq!(
+            fields.attrs.get("emitter_info.scale_y").map(|v| v.as_f32()),
+            Some(4.0)
+        );
+        assert!(
+            fields.emission_rate.is_none() && fields.emitter_scale.is_none(),
+            "the named fields are re-recorded as attributes, not carried forward"
+        );
+    }
+
+    #[test]
+    fn friendly_key_controls_and_attribute_rows_stay_in_sync() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let em = &mut editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0];
+        set_attr(em, "emitter_static.num_color0_keys", AttrValue::Int(1));
+        set_attr(em, "particle_color.color0_type", AttrValue::Int(1));
+        em.color0 = vec![ColorKey {
+            frame: 7.5,
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+            a: 1.0,
+        }];
+
+        effective_keys_to_attrs(em);
+        assert_eq!(
+            attr(em, "emitter_static.color0.keys[0].time"),
+            Some(AttrValue::Float(7.5))
+        );
+        assert_eq!(
+            attr(em, "emitter_static.color0.keys[0].z"),
+            Some(AttrValue::Float(0.75))
+        );
+
+        set_attr(
+            em,
+            "emitter_static.color0.keys[0].time",
+            AttrValue::Float(19.0),
+        );
+        set_attr(em, "emitter_static.color0.keys[0].x", AttrValue::Float(0.9));
+        attrs_to_effective_keys(em);
+        assert_eq!(em.color0[0].frame, 19.0);
+        assert_eq!(em.color0[0].r, 0.9);
+    }
+
+    /// A duplicated emitter has to be addressable: its own name, its own row in the list, and a
+    /// roster the exporter can rebuild the set from.
+    #[test]
+    fn duplicating_an_emitter_records_a_roster() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        assert!(
+            editor.collect_rosters().is_empty(),
+            "an untouched set records no emitter list"
+        );
+
+        let set = &mut editor.ptcl.as_mut().expect("ptcl").emitter_sets[0];
+        let mut copy = set.emitters[0].clone();
+        copy.name = unique_emitter_name(&copy.name, &set.emitters);
+        set.emitters.push(copy);
+
+        let rosters = editor.collect_rosters();
+        assert_eq!(rosters.len(), 1);
+        assert_eq!(rosters[0].set_name, "P_KirbyDash");
+        assert_eq!(rosters[0].entry_name, "kirby_dash");
+        let slots = &rosters[0].slots;
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[1].source_idx, 0, "the copy clones the original");
+        assert_eq!(slots[1].source_name, "em0");
+        assert_eq!(slots[1].name, "em0_copy");
+
+        // Re-applying the saved list must give the same two emitters, not four — this is what a
+        // second project open over an already-edited eff does.
+        editor.apply_structure_edits(&rosters, &[]);
+        editor.apply_structure_edits(&rosters, &[]);
+        let names: Vec<String> = editor.ptcl.as_ref().expect("ptcl").emitter_sets[0]
+            .emitters
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(names, vec!["em0".to_string(), "em0_copy".to_string()]);
+    }
+
+    /// The emitter list is flat but the emitters are a tree, and the nesting is carried by
+    /// `depth` plus position. So a list operation that moves a parent without its children hands
+    /// those children to whichever emitter lands above them — the effect keeps playing, with the
+    /// wrong emitter driving the wrong particles. `subtree` is what every one of those operations
+    /// is scoped by, so it is checked directly.
+    #[test]
+    fn a_subtree_covers_an_emitter_and_its_children() {
+        let at = |depth: u8| EmitterDef {
+            name: String::new(),
+            attrs: Vec::new(),
+            subsections: Vec::new(),
+            depth,
+            source_idx: 0,
+            color0: Vec::new(),
+            color1: Vec::new(),
+            alpha0_keys: Vec::new(),
+            texture_index: None,
+        };
+        //  0  A
+        //  1    A1
+        //  2      A1a
+        //  3    A2
+        //  4  B
+        let list: Vec<EmitterDef> = [0u8, 1, 2, 1, 0].iter().map(|d| at(*d)).collect();
+        assert_eq!(
+            subtree(&list, 0),
+            0..4,
+            "a root takes all of its descendants"
+        );
+        assert_eq!(subtree(&list, 1), 1..3, "a child takes its own grandchild");
+        assert_eq!(subtree(&list, 2), 2..3, "a leaf is just itself");
+        assert_eq!(subtree(&list, 3), 3..4);
+        assert_eq!(subtree(&list, 4), 4..5, "the last emitter runs to the end");
+        assert_eq!(subtree(&list, 9), 9..9, "an index past the end is empty");
+    }
+
+    #[test]
+    fn nesting_a_parent_keeps_its_descendants_attached() {
+        let at = |depth: u8| EmitterDef {
+            name: String::new(),
+            attrs: Vec::new(),
+            subsections: Vec::new(),
+            depth,
+            source_idx: 0,
+            color0: Vec::new(),
+            color1: Vec::new(),
+            alpha0_keys: Vec::new(),
+            texture_index: None,
+        };
+        // X, A(A1(A1a), A2), B. Nesting A under X must shift A's entire subtree.
+        let mut list: Vec<_> = [0u8, 0, 1, 2, 1, 0].iter().map(|d| at(*d)).collect();
+        assert!(shift_subtree_depth(&mut list, 1, 1));
+        assert_eq!(
+            list.iter().map(|e| e.depth).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 2, 0]
+        );
+    }
+
+    #[test]
+    fn removing_every_emitter_survives_project_reapply() {
+        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        editor.ptcl.as_mut().unwrap().emitter_sets[0]
+            .emitters
+            .clear();
+        let rosters = editor.collect_rosters();
+        assert_eq!(rosters.len(), 1);
+        assert!(rosters[0].slots.is_empty());
+
+        let mut reloaded = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        reloaded.apply_structure_edits(&rosters, &[]);
+        assert!(reloaded.ptcl.unwrap().emitter_sets[0].emitters.is_empty());
+    }
+
+    /// Draw the whole attribute tree, for real, over a real emitter.
+    ///
+    /// Four hundred rows built from a table means the failure modes are drawing ones: an id
+    /// collision between two widgets, a slice index taken from a lookup that returned None, a
+    /// group whose rows do not exist on this emitter. None of those show up in a type check, and
+    /// all of them are a panic or a frozen control in front of the user. Running the panel
+    /// headlessly is the cheapest way to find them.
+    #[test]
+    fn the_attribute_tree_draws() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        let loaded = match load_effect(&root.join("effect/fighter/mario/ef_mario.eff")) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                eprintln!("skipped: {err}");
+                return;
+            }
+        };
+        let mut em = loaded.ptcl.emitter_sets[0].emitters[0].clone();
+        let pr = EmitterSnapshot::of(&em);
+        let mut filter = String::new();
+        egui::__run_test_ui(|ui| {
+            draw_attribute_groups(ui, &mut em, &pr, &mut filter);
+            attr_rows(ui, "basics", &mut em, &pr, BASIC_ATTRS);
+        });
+
+        // A filter matching almost everything opens almost every group, so this pass actually
+        // lays out the rows rather than just their headers — which is where an id collision or a
+        // bad index would surface.
+        let mut filter = "e".to_string();
+        egui::__run_test_ui(|ui| {
+            draw_attribute_groups(ui, &mut em, &pr, &mut filter);
+        });
+        let mut filter = "gravity".to_string();
+        egui::__run_test_ui(|ui| {
+            draw_attribute_groups(ui, &mut em, &pr, &mut filter);
+        });
+        let mut filter = "no such attribute".to_string();
+        egui::__run_test_ui(|ui| {
+            draw_attribute_groups(ui, &mut em, &pr, &mut filter);
+        });
     }
 
     /// Recording a transplant marks the project unsent AND reloads the eff from the merged

@@ -2,18 +2,19 @@
 mod acmd;
 mod app;
 mod data;
+mod eff_attrs;
 mod eff_editor;
 mod eff_export;
+mod eff_subsections;
 mod effect_pool;
 mod effects;
 mod game_link;
+mod mod_export;
 mod mod_project;
 mod param_labels;
 mod renderer;
 mod scratch_dirs;
 mod texture_import;
-
-use ssbh_wgpu;
 
 fn main() -> anyhow::Result<()> {
     // Force Vulkan backend on Linux — avoids silent failures with RADV + wgpu auto-detection

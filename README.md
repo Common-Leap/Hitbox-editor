@@ -10,6 +10,9 @@ Visionary is a desktop editor for viewing and editing most things about fighters
   and weapon rendering.
 - The [`effect_library`](https://crates.io/crates/effect_library) crate on
   crates.io provides `.eff` parsing, editing, and export.
+- The effect editor exposes the documented emitter, particle, animation,
+  rendering, sampler, shader, and spawn settings described by
+  [EffectResearch](https://github.com/LilyLavender/EffectResearch).
 
 ## Prerequisites
 
@@ -60,6 +63,25 @@ The resulting `lib_effect_viewer.nro` is written beneath
 `plugins/slight_replica/target/aarch64-skyline-switch/release/`. See the
 [plugin guide](plugins/slight_replica/README.md) for deployment, runtime
 dependencies, and live-edit setup.
+
+## Projects and mod exports
+
+The **Mod** menu keeps hitbox, effect-spawn, authored effect, texture, and
+transplant edits together:
+
+- **Export Project** writes a portable `modproject.json`. If imported texture
+  images are used, keep the generated asset folder beside the JSON file. These
+  editable files are exported separately from mod and developer files.
+- **Load Project** replaces the current project, restores every edit, and sends
+  the available live rules and effects to a connected game. Added or retimed
+  move events may ask you to perform that move once so the plugin can capture
+  the original arguments safely.
+- **Export Mod Folder** creates one complete ARCropolis mod directory. Copy that
+  directory into `<SD root>/ultimate/mods/`. Rebuilt effects are under `effect/`,
+  and the built ACMD plugin is chainloaded from `plugin.nro` at the root of the
+  same mod.
+- **Export Developer Files** writes rebuilt effect files to `effect_mod/` and
+  the buildable Rust ACMD project to `acmd_source/`.
 
 ## Additional tools
 

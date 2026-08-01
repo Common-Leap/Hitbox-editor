@@ -1116,6 +1116,7 @@ fn hook_unload_effects(manager: *mut u64, handle: u32) {
     // went missing at frame 30 and never came back. The object being gone is not the same event:
     // `get_num_of_active_item` reached zero well before this ran.
     let carrier_unload = AUTO_CARRIER_PENDING_UNLOAD.load(Ordering::Relaxed) == handle as u64;
+    let live_carrier_unload = AUTO_CARRIER_HANDLE.load(Ordering::Relaxed) == handle as u64;
     if AUTO_CARRIER_STATE.load(Ordering::Relaxed) == 2
         && crate::slight::agent_extender::driver_has_ticked()
     {
@@ -1136,6 +1137,24 @@ fn hook_unload_effects(manager: *mut u64, handle: u32) {
     }
     original!()(manager, handle);
     untrack_slot(handle);
+    // The normal swap path (fixed in bb15679) arms PENDING_UNLOAD before removing the carrier
+    // from its reserve slot. A training reset, KO, or match teardown can reverse that order: the
+    // game unloads this handle while the carrier still appears live, and only the following
+    // fighter frame notices the now-empty slot. Forget the completed live handle here so that
+    // loss recovery cannot arm a wait for an unload event that has already happened. When
+    // `carrier_unload` is true, keep the handle: the normal swap deliberately remembers it for
+    // the manager-cache eviction that makes the replacement re-parse its new EFF bytes.
+    //
+    // Do this after original!(), for the same ownership reason as the pending acknowledgement
+    // below: zero means that the game's real unload call has returned, not merely begun.
+    if live_carrier_unload
+        && !carrier_unload
+        && AUTO_CARRIER_HANDLE
+            .compare_exchange(handle as u64, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    {
+        dlog(&format!("CARRIER_LIVE_UNLOAD_SEEN handle={handle}"));
+    }
     // Acknowledge only after the game's unload has returned. The carrier pump runs on a game
     // thread too, so its next observation now proves the effect owner finished releasing the
     // resident file rather than merely entering this hook.
@@ -1237,7 +1256,6 @@ static AUTO_CARRIER_TARGET: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| M
 /// building over a resource tree that still has an owner produces the invisible second-load
 /// state and leaks another parsed set, so it cannot be part of an indefinitely repeatable cycle.
 const CARRIER_SWAP_MAX_WAIT: u64 = 1800;
-
 
 /// Drop the effect manager's cached entry for the carrier folder so the next load of it fully
 /// re-parses. Returns how many handles were evicted.

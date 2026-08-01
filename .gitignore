@@ -71,3 +71,6 @@ rustc-ice-*.txt
 /legacy/
 /tools/rust-parameter-manager/
 /test-assets/
+
+# Claude Code workspace settings
+.claude/

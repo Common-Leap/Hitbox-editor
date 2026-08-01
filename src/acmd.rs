@@ -222,16 +222,15 @@ fn extract_game_function(source: &str) -> Option<String> {
 
     for line in source.lines() {
         let trimmed = line.trim();
-        if !in_game_fn {
-            if trimmed.contains("game_")
-                && !trimmed.contains("effect_")
-                && !trimmed.contains("sound_")
-                && !trimmed.contains("expression_")
-                && (trimmed.contains("fn game_") || trimmed.starts_with("unsafe extern"))
-            {
-                in_game_fn = true;
-                found = true;
-            }
+        if !in_game_fn
+            && trimmed.contains("game_")
+            && !trimmed.contains("effect_")
+            && !trimmed.contains("sound_")
+            && !trimmed.contains("expression_")
+            && (trimmed.contains("fn game_") || trimmed.starts_with("unsafe extern"))
+        {
+            in_game_fn = true;
+            found = true;
         }
         if in_game_fn {
             result.push_str(line);
@@ -266,16 +265,15 @@ fn extract_effect_function(source: &str) -> Option<String> {
 
     for line in source.lines() {
         let trimmed = line.trim();
-        if !in_effect_fn {
-            if trimmed.contains("effect_")
-                && !trimmed.contains("game_")
-                && !trimmed.contains("sound_")
-                && !trimmed.contains("expression_")
-                && (trimmed.contains("fn effect_") || trimmed.starts_with("unsafe extern"))
-            {
-                in_effect_fn = true;
-                found = true;
-            }
+        if !in_effect_fn
+            && trimmed.contains("effect_")
+            && !trimmed.contains("game_")
+            && !trimmed.contains("sound_")
+            && !trimmed.contains("expression_")
+            && (trimmed.contains("fn effect_") || trimmed.starts_with("unsafe extern"))
+        {
+            in_effect_fn = true;
+            found = true;
         }
         if in_effect_fn {
             result.push_str(line);
@@ -931,9 +929,7 @@ fn tokenize_args(s: &str) -> Vec<String> {
                 current.push(ch);
             }
             ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
                 current.push(ch);
             }
             ',' if depth == 0 => {
@@ -986,7 +982,9 @@ fn const_expr(s: &str) -> String {
 }
 
 fn emit_attack(call: &AttackCall, indent: &str) -> String {
-    let bone = format!("Hash40::new(\"{}\")", call.bone_name);
+    // Skeleton files expose display-case names such as `FootR`, while ACMD hashes the
+    // lowercase resource name (`footr`). Live injection follows the same contract.
+    let bone = format!("Hash40::new(\"{}\")", call.bone_name.to_ascii_lowercase());
     let capsule = match call.capsule_end {
         Some([x, y, z]) => format!("Some({:.1}), Some({:.1}), Some({:.1})", x, y, z),
         None => "None, None, None".to_string(),
@@ -1085,12 +1083,48 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
 
 /// Emit one `unsafe extern "C" fn` for a single move and return
 /// `(fn_name, source_block)`.
+fn script_function_name(prefix: &str, move_name: &str) -> String {
+    let suffix: String = move_name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    format!(
+        "{prefix}_{}",
+        if suffix.is_empty() { "move" } else { &suffix }
+    )
+}
+
+fn rust_module_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_');
+    let mut out = if out.is_empty() {
+        "fighter".to_string()
+    } else {
+        out.to_string()
+    };
+    const KEYWORDS: &[&str] = &[
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn",
+    ];
+    if out.as_bytes()[0].is_ascii_digit() || KEYWORDS.contains(&out.as_str()) {
+        out.insert_str(0, "fighter_");
+    }
+    out
+}
+
 fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, String) {
     // Function name matches the ACMD script convention: game_{movename_no_underscores}
-    let fn_name = format!(
-        "game_{}",
-        move_name.to_lowercase().replace('_', "").replace(' ', "")
-    );
+    let fn_name = script_function_name("game", move_name);
     let body = emit_stmts(&script.stmts, "    ");
     let mut out = String::new();
     out.push_str(&format!(
@@ -1125,10 +1159,7 @@ fn emit_effect_move_fn(
     move_name: &str,
     tweaks: &std::collections::HashMap<u64, crate::mod_project::LiveTweak>,
 ) -> (String, String) {
-    let fn_name = format!(
-        "effect_{}",
-        move_name.to_lowercase().replace('_', "").replace(' ', "")
-    );
+    let fn_name = script_function_name("effect", move_name);
     // A follow effect's end frame is an ACMD event, not an intrinsic particle lifetime.
     // Keep starts and stops in one ordered timeline so a finite `active_end` actually emits
     // EFFECT_OFF_KIND. Stops for an older instance run before starts at the same frame; a
@@ -1172,17 +1203,18 @@ fn emit_effect_move_fn(
 
         for call in starts {
             let (r0, r1, r2) = (call.rotation[0], call.rotation[1], call.rotation[2]);
+            let bone_name = call.bone_name.to_ascii_lowercase();
             if call.follows_bone {
                 out.push_str(&format!(
                     "        macros::EFFECT_FOLLOW(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, true);\n",
-                    call.effect_name, call.bone_name,
+                    call.effect_name, bone_name,
                     call.offset[0], call.offset[1], call.offset[2], r0, r1, r2, call.scale
                 ));
             } else {
                 // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
                 out.push_str(&format!(
                     "        macros::EFFECT(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, 0, 0, 0, 0, 0, 0, false);\n",
-                    call.effect_name, call.bone_name,
+                    call.effect_name, bone_name,
                     call.offset[0], call.offset[1], call.offset[2], r0, r1, r2, call.scale
                 ));
             }
@@ -1297,9 +1329,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 skyline = {{ git = "https://github.com/ultimate-research/skyline-rs" }}
-skyline_smash = {{ git = "https://github.com/ultimate-research/skyline-smash.git", features = ["weak_l2cvalue"] }}
-smash_script = {{ git = "https://github.com/WuBoytH/smash-script.git", branch = "development" }}
-smashline = {{ git = "https://github.com/hdr-development/smashline.git" }}
+skyline_smash = {{ git = "https://github.com/ultimate-research/skyline-smash", features = ["weak_l2cvalue"] }}
+smash_script = {{ git = "https://github.com/WuBoytH/smash-script", rev = "24c5b69b79c7d7b041c3993ecd766ceccf950c2b" }}
+smashline = {{ git = "https://github.com/hdr-development/smashline", rev = "df194a03b918116adb7bda1c2b4565dcd82a4756" }}
 
 [profile.dev]
 panic = "abort"
@@ -1318,13 +1350,28 @@ codegen-units = 1
     let mut fighter_names: Vec<&str> = by_fighter.keys().copied().collect();
     fighter_names.sort();
 
-    let mod_decls: String = fighter_names
+    let mut used_modules: HashMap<String, usize> = HashMap::new();
+    let fighter_modules: Vec<(&str, String)> = fighter_names
         .iter()
-        .map(|f| format!("mod {f};\n"))
+        .map(|fighter| {
+            let base = rust_module_name(fighter);
+            let count = used_modules.entry(base.clone()).or_default();
+            *count += 1;
+            let module = if *count == 1 {
+                base
+            } else {
+                format!("{base}_{}", *count)
+            };
+            (*fighter, module)
+        })
         .collect();
-    let installs: String = fighter_names
+    let mod_decls: String = fighter_modules
         .iter()
-        .map(|f| format!("    {f}::install();\n"))
+        .map(|(_, module)| format!("mod {module};\n"))
+        .collect();
+    let installs: String = fighter_modules
+        .iter()
+        .map(|(_, module)| format!("    {module}::install();\n"))
         .collect();
 
     files.push(GeneratedFile {
@@ -1346,12 +1393,12 @@ pub fn main() {{
     });
 
     // ── Per-fighter files ─────────────────────────────────────────────────
-    for fighter in &fighter_names {
+    for (fighter, module) in &fighter_modules {
         let moves = &by_fighter[fighter];
 
         // src/{fighter}/mod.rs
         files.push(GeneratedFile {
-            rel_path: format!("src/{fighter}/mod.rs"),
+            rel_path: format!("src/{module}/mod.rs"),
             contents: format!(
                 r#"mod acmd;
 
@@ -1387,10 +1434,7 @@ pub fn install() {{
         for (move_name, script) in &sorted_moves {
             let (fn_name, fn_src) = emit_move_fn(script, move_name);
             // The acmd script name used in agent.acmd() is "game_{movename_no_underscores}"
-            let acmd_name = format!(
-                "game_{}",
-                move_name.to_lowercase().replace('_', "").replace(' ', "")
-            );
+            let acmd_name = script_function_name("game", move_name);
             acmd_src.push_str(&fn_src);
             acmd_src.push('\n');
             fn_entries.push((fn_name, acmd_name));
@@ -1418,26 +1462,32 @@ pub fn install() {{
         acmd_src.push_str("}\n");
 
         files.push(GeneratedFile {
-            rel_path: format!("src/{fighter}/acmd.rs"),
+            rel_path: format!("src/{module}/acmd.rs"),
             contents: acmd_src,
         });
     }
 
     // ── README.md ─────────────────────────────────────────────────────────
-    let move_list: String = edits
+    let mut script_list: Vec<String> = edits
         .iter()
-        .map(|(f, m, _)| format!("- {f}: {m}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (hitboxes)"))
+        .chain(
+            effect_edits
+                .iter()
+                .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (effect spawns)")),
+        )
+        .collect();
+    script_list.sort();
+    let move_list = script_list.join("\n");
 
     files.push(GeneratedFile {
         rel_path: "README.md".into(),
         contents: format!(
 r#"# {plugin_name}
 
-Auto-generated hitbox mod for Super Smash Bros. Ultimate.
+Skyline ACMD mod for Super Smash Bros. Ultimate.
 
-## Edited moves
+## Edited scripts
 
 {move_list}
 
@@ -1456,16 +1506,18 @@ target/aarch64-skyline-switch/release/lib{plugin_name}.nro
 
 ## Installing on your Switch
 
-Copy the `.nro` to your SD card:
+Rename the compiled `.nro` to `plugin.nro` and place it at the root of your
+ARCropolis mod folder:
 ```
-atmosphere/contents/01006A800016E000/romfs/skyline/plugins/lib{plugin_name}.nro
+ultimate/mods/<mod folder>/plugin.nro
 ```
 
 ### Required plugins (if not already installed)
-Download and place these in the same `plugins/` folder:
+Make sure the base Skyline/ARCropolis installation already provides these
+runtime components. They are not copied into this mod:
 - [Skyline](https://github.com/skyline-dev/skyline/releases) — copy the `exefs/` folder to `atmosphere/contents/01006A800016E000/`
 - [nro_hook](https://github.com/ultimate-research/nro-hook-plugin/releases) — `libnro_hook.nro`
-- [smashline_hook](https://github.com/blu-dev/smashline_hook/releases) — `libsmashline_hook.nro`
+- [Smashline](https://github.com/HDR-Development/smashline/releases) — `libsmashline_plugin.nro`
 "#,
             plugin_name = plugin_name,
             move_list = move_list,
@@ -1480,8 +1532,8 @@ Download and place these in the same `plugins/` folder:
 authors = "Visionary"
 version = "1.0"
 description = """
-Hitbox mod generated by Visionary.
-Edited moves:
+ACMD mod generated by Visionary.
+Edited scripts:
 {move_list}
 """
 category = "Fighter"
@@ -1506,7 +1558,6 @@ fi
 
 # ── 2. Ensure nightly is installed ───────────────────────────────────────────
 rustup toolchain install nightly
-rustup default nightly
 
 # ── 3. Install cargo-skyline if missing ──────────────────────────────────────
 if ! cargo skyline --version &>/dev/null 2>&1; then
@@ -1528,8 +1579,8 @@ echo ""
 echo "Done! Your plugin is at:"
 echo "  target/aarch64-skyline-switch/release/$(basename "$PWD" | tr '-' '_' | sed 's/^lib//')*.nro"
 echo ""
-echo "Copy it to your SD card:"
-echo "  atmosphere/contents/01006A800016E000/romfs/skyline/plugins/"
+echo "Rename it to plugin.nro and place it at:"
+echo "  ultimate/mods/<mod folder>/plugin.nro"
 "#.to_string(),
     });
 
@@ -1550,7 +1601,6 @@ if %errorlevel% neq 0 (
 
 :: ── 2. Ensure nightly is installed ───────────────────────────────────────────
 rustup toolchain install nightly
-rustup default nightly
 
 :: ── 3. Install cargo-skyline if missing ──────────────────────────────────────
 cargo skyline --version >nul 2>&1
@@ -1569,8 +1619,8 @@ cargo skyline build --release
 
 echo.
 echo Done! Your plugin is in target\aarch64-skyline-switch\release\
-echo Copy the .nro file to:
-echo   atmosphere\contents\01006A800016E000\romfs\skyline\plugins\
+echo Rename the .nro to plugin.nro and place it at:
+echo   ultimate\mods\^<mod folder^>\plugin.nro
 pause
 "#
         .to_string(),
@@ -1610,7 +1660,7 @@ mod tests {
         let atk = crate::data::AttackCall {
             id: 0,
             part: 0,
-            bone_name: "top".into(),
+            bone_name: "Top".into(),
             damage: 8.0,
             angle: 361,
             kb_scaling: 100,
@@ -1656,7 +1706,7 @@ mod tests {
                 effect_name: "sys_attack_arc".into(),
                 effect_name_alt: None,
                 spawn_func: "EFFECT".into(),
-                bone_name: "top".into(),
+                bone_name: "Top".into(),
                 offset: [0.0, 8.0, 0.0],
                 rotation: [0.0, 90.0, 0.0],
                 scale: 1.2,
@@ -1669,7 +1719,7 @@ mod tests {
                 effect_name: "sys_flash".into(),
                 effect_name_alt: None,
                 spawn_func: "EFFECT_FOLLOW".into(),
-                bone_name: "haver".into(),
+                bone_name: "HaveR".into(),
                 offset: [0.0, 0.0, 0.0],
                 rotation: [0.0, 0.0, 0.0],
                 scale: 0.8,
@@ -1709,6 +1759,13 @@ mod tests {
             .find(|f| f.rel_path == "src/mario/acmd.rs")
             .map(|f| f.contents.as_str())
             .expect("generated fighter ACMD");
+        assert!(
+            generated_acmd.contains("Hash40::new(\"top\")")
+                && generated_acmd.contains("Hash40::new(\"haver\")")
+                && !generated_acmd.contains("Hash40::new(\"Top\")")
+                && !generated_acmd.contains("Hash40::new(\"HaveR\")"),
+            "display-case skeleton names must export as lowercase ACMD Hash40 names"
+        );
         assert!(
             generated_acmd.contains("frame(agent.lua_state_agent, 20.0);")
                 && generated_acmd.contains(

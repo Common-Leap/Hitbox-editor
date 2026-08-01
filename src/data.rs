@@ -239,6 +239,9 @@ impl AttackCall {
 }
 
 /// One statement inside an is_excute block.
+// AttackCall is intentionally inline: ATTACK statements dominate these short-lived syntax
+// trees, so boxing every normal statement would add allocations to optimize the rare Raw case.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ExcuteStmt {
     Attack(AttackCall),
@@ -328,6 +331,9 @@ pub struct EditRecord {
     pub fighter_display: String,
     pub move_name: String,
     pub script: AcmdScript,
+    /// Pristine hitboxes used to derive sparse live rules after a project is reopened.
+    #[serde(default)]
+    pub hitboxes_pristine: Vec<Hitbox>,
     pub hitboxes: Vec<Hitbox>,
 }
 
@@ -345,6 +351,7 @@ impl EditLog {
         fighter_display: &str,
         move_name: &str,
         script: AcmdScript,
+        hitboxes_pristine: Vec<Hitbox>,
         hitboxes: Vec<Hitbox>,
     ) {
         self.entries.entry(fighter.to_string()).or_default().insert(
@@ -354,6 +361,7 @@ impl EditLog {
                 fighter_display: fighter_display.to_string(),
                 move_name: move_name.to_string(),
                 script,
+                hitboxes_pristine,
                 hitboxes,
             },
         );
@@ -1033,7 +1041,7 @@ impl EffectScript {
 /// two sources disagreed by a frame on any non-integral value — a `wait(1.5)` landed on 6 from
 /// the game and 5 from the script for the same spawn. Whichever is "right", they have to agree
 /// with each other before a difference between them means anything.
-fn script_frame(frame: f32) -> u32 {
+pub(crate) fn script_frame(frame: f32) -> u32 {
     frame.max(0.0).round() as u32
 }
 
@@ -1057,7 +1065,11 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             scale,
                             follows_bone,
                         } => {
-                            let active_end = if *follows_bone { 9999 } else { script_frame(frame) };
+                            let active_end = if *follows_bone {
+                                9999
+                            } else {
+                                script_frame(frame)
+                            };
                             calls.push(EffectCall {
                                 effect_name: effect_name.clone(),
                                 effect_name_alt: effect_name_alt.clone(),

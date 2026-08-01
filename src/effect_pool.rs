@@ -234,7 +234,7 @@ fn walk_effs(root: &Path, out: &mut Vec<PathBuf>) {
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| crate::scratch_dirs::is_transplant_preview_name(n))
+                .map(crate::scratch_dirs::is_transplant_preview_name)
                 .unwrap_or(false)
             {
                 continue;

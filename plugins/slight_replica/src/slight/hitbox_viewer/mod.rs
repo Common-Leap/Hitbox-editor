@@ -23,7 +23,7 @@
 //!   26 is_absorbable, 27 is_landing_attack, 28 COLLISION_SITUATION_MASK,
 //!   29 COLLISION_CATEGORY_MASK, 30 COLLISION_PART_MASK, 31 no_finish_camera,
 //!   32 collision_attr(h), 33 ATTACK_SOUND_LEVEL, 34 COLLISION_SOUND_ATTR, 35 ATTACK_REGION.
-//! Slots 17..35 are rewritable from `HbOverrides` (see `rewrite_attack_args`).
+//! Slots 1..35 are rewritable from `HbOverrides` (see `rewrite_attack_args`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -189,7 +189,8 @@ static CAPTURE_SEEN: LazyLock<Mutex<HashMap<u32, HashSet<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Not-yet-sent lines. Holds CLONES rather than indices into `CAPTURE_LOG`: the log is pruned
 /// as old runs retire, and indices into a pruned vector name the wrong line.
-static CAPTURE_PENDING: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static CAPTURE_PENDING: LazyLock<Mutex<Vec<CaptureLine>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 /// Completed motions not yet sent (drained strictly AFTER the lines they terminate).
 static END_PENDING: LazyLock<Mutex<Vec<CaptureEnd>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 /// (kind, motion) → the run its last recorded line belonged to, so retirement runs once per
@@ -581,6 +582,8 @@ pub unsafe fn capture_tick(lua_state: u64) {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct HbOverrides {
+    pub part: Option<i64>,
+    pub bone: Option<u64>,
     pub damage: Option<f32>,
     pub angle: Option<i64>,
     pub kbg: Option<i64>,
@@ -593,6 +596,9 @@ pub struct HbOverrides {
     pub x2: Option<f32>,
     pub y2: Option<f32>,
     pub z2: Option<f32>,
+    /// Explicit sphere/capsule state. `None` preserves compatibility with older editors;
+    /// `Some(false)` clears an existing capsule's second endpoint back to Lua nils.
+    pub capsule: Option<bool>,
     pub hitlag: Option<f32>,
     pub sdi: Option<f32>,
     // ── Attribute slots 17..35 ───────────────────────────────────────────────
@@ -726,6 +732,12 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
             }
         }
     };
+    set_int(1, ov.part, &mut vals);
+    if let Some(bone) = ov.bone {
+        if vals.len() > 2 {
+            vals[2] = LuaArg::Hash(bone);
+        }
+    }
     set_num(3, ov.damage, &mut vals);
     set_int(4, ov.angle, &mut vals);
     set_int(5, ov.kbg, &mut vals);
@@ -735,16 +747,24 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
     set_num(9, ov.x, &mut vals);
     set_num(10, ov.y, &mut vals);
     set_num(11, ov.z, &mut vals);
-    set_num(12, ov.x2, &mut vals);
-    set_num(13, ov.y2, &mut vals);
-    set_num(14, ov.z2, &mut vals);
+    if ov.capsule == Some(false) {
+        for idx in 12..=14 {
+            if idx < vals.len() {
+                vals[idx] = LuaArg::Nil;
+            }
+        }
+    } else {
+        set_num(12, ov.x2, &mut vals);
+        set_num(13, ov.y2, &mut vals);
+        set_num(14, ov.z2, &mut vals);
+    }
     set_num(15, ov.hitlag, &mut vals);
     set_num(16, ov.sdi, &mut vals);
 
     // Attribute slots keep the SCRIPT's own lua type and only take a new value. Scripts vary
     // between pushing a given slot as Int, Num or Bool, and the game reads a wrongly-typed
-    // slot as garbage. Hash/Nil slots are left alone entirely: they carry sentinels (slot 20
-    // is `Hash40("no")` when the script passes NaN) that a number would destroy.
+    // slot as garbage. Because overrides are sparse, an unexpected/sentinel source type is
+    // replaced only when the user explicitly edited that slot.
     let set_scalar = |idx: usize, v: Option<i64>, vals: &mut Vec<LuaArg>| {
         let Some(v) = v else { return };
         if idx >= vals.len() {
@@ -754,7 +774,10 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
             LuaArg::Int(_) => LuaArg::Int(v),
             LuaArg::Num(_) => LuaArg::Num(v as f32),
             LuaArg::Bool(_) => LuaArg::Bool(v != 0),
-            _ => return,
+            // Overrides are sparse now, so reaching a sentinel or unexpected source type means
+            // the user explicitly changed this slot. Use the declared editor type rather than
+            // silently ignoring the edit.
+            _ => LuaArg::Int(v),
         };
         vals[idx] = next;
     };
@@ -767,7 +790,7 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
             LuaArg::Bool(_) => LuaArg::Bool(v),
             LuaArg::Int(_) => LuaArg::Int(v as i64),
             LuaArg::Num(_) => LuaArg::Num(if v { 1.0 } else { 0.0 }),
-            _ => return,
+            _ => LuaArg::Bool(v),
         };
         vals[idx] = next;
     };
@@ -779,7 +802,7 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
         let next = match vals[idx] {
             LuaArg::Num(_) => LuaArg::Num(v),
             LuaArg::Int(_) => LuaArg::Int(v as i64),
-            _ => return,
+            _ => LuaArg::Num(v),
         };
         vals[idx] = next;
     };
@@ -799,7 +822,7 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
     set_scalar(30, ov.part_mask, &mut vals);
     set_flag(31, ov.no_finish_camera, &mut vals);
     if let Some(h) = ov.collision_attr {
-        if matches!(vals.get(32), Some(LuaArg::Hash(_))) {
+        if vals.len() > 32 {
             vals[32] = LuaArg::Hash(h);
         }
     }
@@ -881,7 +904,7 @@ unsafe fn hook_attack_clear_all(boma: *mut smash::app::BattleObjectModuleAccesso
 
 // ── CATCH (grabbox) hook ─────────────────────────────────────────────────────
 // Arg layout (0-based): 0 id, 1 bone(h), 2 size, 3 x, 4 y, 5 z, 6 x2, 7 y2, 8 z2
-// (nil = sphere), 9 status, 10 situation. Only geometry (size + offsets) is rewritten.
+// (nil = sphere), 9 status, 10 situation. Bone and geometry are rewritable.
 
 /// Rewrite grab geometry (size at slot 2, offsets 3..8) from HbOverrides.
 unsafe fn rewrite_grab_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg]) {
@@ -893,13 +916,26 @@ unsafe fn rewrite_grab_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg]) {
             }
         }
     };
+    if let Some(bone) = ov.bone {
+        if vals.len() > 1 {
+            vals[1] = LuaArg::Hash(bone);
+        }
+    }
     set(2, ov.size, &mut vals);
     set(3, ov.x, &mut vals);
     set(4, ov.y, &mut vals);
     set(5, ov.z, &mut vals);
-    set(6, ov.x2, &mut vals);
-    set(7, ov.y2, &mut vals);
-    set(8, ov.z2, &mut vals);
+    if ov.capsule == Some(false) {
+        for idx in 6..=8 {
+            if idx < vals.len() {
+                vals[idx] = LuaArg::Nil;
+            }
+        }
+    } else {
+        set(6, ov.x2, &mut vals);
+        set(7, ov.y2, &mut vals);
+        set(8, ov.z2, &mut vals);
+    }
 
     let mut agent = smash::lib::L2CAgent::new(lua_state);
     agent.clear_lua_stack();

@@ -42,6 +42,7 @@ impl ModProjectFile {
         self.fighters.values().all(|f| {
             f.acmd.is_empty()
                 && f.effect_calls.values().all(|v| v.is_empty())
+                && f.effect_calls_full.values().all(|v| v.is_empty())
                 && f.eff.as_ref().map(|e| e.is_empty()).unwrap_or(true)
                 && f.live_tweaks.is_empty()
         })
@@ -90,6 +91,14 @@ pub struct EffMod {
     /// Names of pool textures the user removed.
     #[serde(default)]
     pub textures_removed: Vec<String>,
+    /// Emitter sets whose emitter LIST the user changed — emitters removed, duplicated or
+    /// re-ordered. Recorded per set, and only for sets that differ from the source.
+    #[serde(default)]
+    pub rosters: Vec<EmitterRoster>,
+    /// Effect entries whose spawn structure the user changed: which parts play at which frame,
+    /// and which external model comes with them.
+    #[serde(default)]
+    pub entry_edits: Vec<EntryEdit>,
 }
 
 impl EffMod {
@@ -99,7 +108,83 @@ impl EffMod {
             && self.textures.is_empty()
             && self.textures_added.is_empty()
             && self.textures_removed.is_empty()
+            && self.rosters.is_empty()
+            && self.entry_edits.is_empty()
     }
+}
+
+/// The emitter list one effect should end up with.
+///
+/// Declarative rather than a log of add/remove operations: each slot names an emitter of the
+/// SOURCE set to clone, so applying the roster twice gives the same result as applying it once,
+/// and a source eff that gained an emitter between sessions cannot shift the whole list by one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmitterRoster {
+    pub set_name: String,
+    /// The entry (kind) name that plays this set, for the UI and for carrier retargeting.
+    #[serde(default)]
+    pub entry_name: String,
+    pub set_idx: usize,
+    pub slots: Vec<EmitterSlot>,
+}
+
+/// One emitter in the result, and where its data comes from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmitterSlot {
+    /// Flat parent-first index of the SOURCE emitter this slot clones.
+    pub source_idx: usize,
+    /// Name of that source emitter, preferred over the index when both are available.
+    #[serde(default)]
+    pub source_name: String,
+    /// Name this emitter carries in the result. A duplicate is renamed so that authored edits,
+    /// which address emitters by name, can still tell the two apart.
+    #[serde(default)]
+    pub name: String,
+    /// Nesting depth in the result: 0 is a root emitter, 1 a child of the slot above it.
+    #[serde(default)]
+    pub depth: u8,
+}
+
+/// Changes to what one effect entry SPAWNS — the eff header's side of an effect, as opposed to
+/// the particle data the emitters carry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntryEdit {
+    /// The entry (kind) name, e.g. `kirby_dash`. Entries are addressed by name only: the entry
+    /// table's order is not stable across a transplant, which appends to it.
+    pub entry_name: String,
+    /// Replacement primary emitter set. `None` leaves it alone; `Some("")` removes it.
+    /// Multi-part entries commonly have no primary set because their content lives in variants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emitter_set: Option<String>,
+    /// Replacement part list, each with its own start frame. `None` leaves the entry's parts
+    /// alone; `Some(empty)` makes it a plain single-part effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<Vec<VariantEdit>>,
+    /// Replacement external model. `None` leaves it alone; `Some` with an empty name removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelEdit>,
+}
+
+/// One part of a multi-part effect: an emitter set, when it starts, and what it hangs off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VariantEdit {
+    /// Frames after the effect begins before this part comes in.
+    pub start_frame: u16,
+    /// Emitter set this part plays, by name. Empty means "no set", which the format stores as 0.
+    pub set_name: String,
+    /// Bone the part attaches to. Empty keeps the effect's own attachment.
+    #[serde(default)]
+    pub bone: String,
+}
+
+/// The model an effect spawns alongside its particles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelEdit {
+    /// Model name as the eff's model table spells it. Empty removes the model.
+    pub name: String,
+    /// The model's spawn condition byte.
+    #[serde(default)]
+    pub flag: u8,
 }
 
 /// One pool texture replaced by an image of the user's.
@@ -171,8 +256,22 @@ pub struct AuthoredEdit {
 }
 
 /// Absolute new values (pristine values are re-derivable from the source eff).
+///
+/// `attrs` is the general case and covers every field of the emitter; it is keyed by the stable
+/// ids in [`crate::eff_attrs`]. The named fields below it predate that table and are kept for
+/// projects saved before it existed — the editor re-records them as `attrs` the first time it
+/// loads such a project, and both paths are applied (named first, so `attrs` wins a tie).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EmitterFieldEdits {
+    /// Attribute id → new value, e.g. `"emission.rate": 12.5`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub attrs: std::collections::BTreeMap<String, crate::eff_attrs::AttrValue>,
+    /// Sparse byte edits to emitter child sections. The section index disambiguates repeated
+    /// magic values; the magic prevents a changed source file from applying bytes to the wrong
+    /// section. Storing only changed offsets keeps projects small and avoids embedding source
+    /// subsection blobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subsections: Vec<SubsectionEdit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emission_rate: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,9 +299,19 @@ pub struct EmitterFieldEdits {
     pub texture_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubsectionEdit {
+    pub index: usize,
+    pub magic: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bytes: std::collections::BTreeMap<usize, u8>,
+}
+
 impl EmitterFieldEdits {
     pub fn is_empty(&self) -> bool {
-        self.emission_rate.is_none()
+        self.attrs.is_empty()
+            && self.subsections.is_empty()
+            && self.emission_rate.is_none()
             && self.lifetime.is_none()
             && self.scale.is_none()
             && self.color_scale.is_none()
@@ -215,20 +324,26 @@ impl EmitterFieldEdits {
 
     /// Number of edited fields (for the edit-tree badges).
     pub fn count(&self) -> usize {
-        [
-            self.emission_rate.is_some(),
-            self.lifetime.is_some(),
-            self.scale.is_some(),
-            self.color_scale.is_some(),
-            self.emitter_scale.is_some(),
-            self.color0.is_some(),
-            self.color1.is_some(),
-            self.alpha0.is_some(),
-            self.texture_name.is_some(),
-        ]
-        .iter()
-        .filter(|b| **b)
-        .count()
+        self.attrs.len()
+            + self
+                .subsections
+                .iter()
+                .map(|section| section.bytes.len())
+                .sum::<usize>()
+            + [
+                self.emission_rate.is_some(),
+                self.lifetime.is_some(),
+                self.scale.is_some(),
+                self.color_scale.is_some(),
+                self.emitter_scale.is_some(),
+                self.color0.is_some(),
+                self.color1.is_some(),
+                self.alpha0.is_some(),
+                self.texture_name.is_some(),
+            ]
+            .iter()
+            .filter(|b| **b)
+            .count()
     }
 }
 
