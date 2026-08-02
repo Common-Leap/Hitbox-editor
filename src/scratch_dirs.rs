@@ -74,10 +74,10 @@ fn sd_root_candidates() -> Vec<PathBuf> {
     let data = dirs::data_dir();
     let config = dirs::config_dir();
     [
-        data.as_ref().map(|d| d.join("eden/sdmc")),
-        data.as_ref().map(|d| d.join("yuzu/sdmc")),
-        config.as_ref().map(|c| c.join("Ryujinx/sdcard")),
-        data.as_ref().map(|d| d.join("Ryujinx/sdcard")),
+        data.as_ref().map(|d| d.join("eden").join("sdmc")),
+        data.as_ref().map(|d| d.join("yuzu").join("sdmc")),
+        config.as_ref().map(|c| c.join("Ryujinx").join("sdcard")),
+        data.as_ref().map(|d| d.join("Ryujinx").join("sdcard")),
     ]
     .into_iter()
     .flatten()

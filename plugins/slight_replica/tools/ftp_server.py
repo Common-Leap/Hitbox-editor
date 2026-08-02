@@ -3,8 +3,8 @@
 
 On a real Switch, RustParameterManager (RPM) writes effect-edit/transaction files to
 `sd:/slight/user/debuggables/` over FTP, served by the sys-ftpd sysmodule. An emulator
-cannot run that sysmodule, but its virtual SD card is just a host directory
-(`~/.local/share/eden/sdmc/` for Eden). This serves that directory over FTP so RPM's
+cannot run that sysmodule, but its virtual SD card is just a host directory. This serves
+that declared directory over FTP so RPM's
 uploads land exactly where the in-emulator plugin reads `sd:/...`.
 
 Point RPM's FTP connection (Address / User / Password) at this server. RPM uses
@@ -13,10 +13,10 @@ Point RPM's FTP connection (Address / User / Password) at this server. RPM uses
   User / Password = whatever you pass below (default: slight / slight)
 
 Usage:
-  python3 tools/ftp_server.py                       # serve Eden sdmc on 0.0.0.0:5000
-  python3 tools/ftp_server.py --port 5000 --user slight --password slight
-  python3 tools/ftp_server.py --root /path/to/sdmc  # other emulator / custom SD root
-  python3 tools/ftp_server.py --anonymous           # no auth (anonymous read/write)
+  python tools/ftp_server.py                       # serve Eden sdmc on 0.0.0.0:5000
+  python tools/ftp_server.py --port 5000 --user slight --password slight
+  python tools/ftp_server.py --root <sd-root>      # other emulator / custom SD root
+  python tools/ftp_server.py --anonymous           # no auth (anonymous read/write)
 """
 
 from __future__ import annotations
@@ -25,19 +25,17 @@ import argparse
 import os
 from pathlib import Path
 
-from pyftpdlib.authorizers import DummyAuthorizer
-from pyftpdlib.handlers import FTPHandler
-from pyftpdlib.servers import FTPServer
+from host_paths import eden_sd_directory
 
-DEFAULT_ROOT = Path.home() / ".local/share/eden/sdmc"
 # Full perms: e=cwd l=list r=retr a=append d=dele f=rnfr m=mkd w=stor M=chmod T=mfmt
 FULL_PERM = "elradfmwMT"
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--root", type=Path, default=DEFAULT_ROOT,
-                   help=f"SD root to serve (default: {DEFAULT_ROOT})")
+    default_root = eden_sd_directory()
+    p.add_argument("--root", type=Path, default=default_root,
+                   help=f"SD root to serve (default: {default_root})")
     p.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     p.add_argument("--port", type=int, default=5000, help="FTP port (sys-ftpd default: 5000)")
     p.add_argument("--user", default="slight", help="FTP username (default: slight)")
@@ -47,6 +45,15 @@ def main() -> None:
     p.add_argument("--passive-ports", default="60000-60100",
                    help="Passive port range (default: 60000-60100)")
     args = p.parse_args()
+
+    try:
+        from pyftpdlib.authorizers import DummyAuthorizer
+        from pyftpdlib.handlers import FTPHandler
+        from pyftpdlib.servers import FTPServer
+    except ImportError as error:
+        raise SystemExit(
+            "pyftpdlib is required; install it with `python -m pip install pyftpdlib`"
+        ) from error
 
     root: Path = args.root.expanduser()
     if not root.is_dir():
@@ -83,5 +90,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    os.umask(0o022)
+    if os.name != "nt":
+        os.umask(0o022)
     main()

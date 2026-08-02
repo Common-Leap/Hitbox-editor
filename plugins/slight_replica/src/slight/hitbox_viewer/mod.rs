@@ -1,8 +1,9 @@
 //! hitbox_viewer — live hitbox editing + ACMD capture.
 //!
 //! Mirrors effect_viewer's ACMD approach for the ATTACK family:
-//!   * every hooked call is CAPTURED (pristine args + motion + frame) and streamed to the
-//!     editor as `AcmdCapture` — the editor's "live ACMD" source replacing the GitHub dump;
+//!   * the first playback of each fighter-kind + motion pair is CAPTURED (pristine args +
+//!     motion + frame) and streamed to the editor as `AcmdCapture` — later playbacks cannot
+//!     replace or merge into that snapshot;
 //!   * `hitbox_rules` (full-list replace over TCP) modify args at spawn (rewrite), suppress
 //!     a hitbox entirely (skip original), or INJECT a synthesized ATTACK at a motion frame
 //!     from the per-frame line callback.
@@ -164,39 +165,42 @@ pub struct CaptureEnd {
 /// aerial, a cancel, a branch that only fires sometimes — left the UNION of those runs in the
 /// bucket and the editor showed spawns that never occur together.
 ///
-/// Ids are global and strictly increasing rather than per-object, so a larger id always means
-/// "more recent" no matter which fighter or article produced it. That is the whole property
-/// the editor needs: pick the highest run present and you have exactly one performance.
+/// Ids are global and strictly increasing. A `(fighter kind, motion)` is claimed by the first
+/// battle object that produces a capture line and is never assigned another run until captures
+/// are explicitly cleared. This keeps another instance, replay, cancel follow-up, or reconnect
+/// from replacing a completed snapshot.
 static NEXT_RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 fn next_run() -> u32 {
     NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// How many playbacks of the same (kind, motion) to retain.
-///
-/// Only the newest is ever loaded, but a run still in progress must not evict the last
-/// complete one — the editor may still be settling on it. Two is enough for that and keeps
-/// the log bounded now that every performance re-records instead of deduplicating away.
-const RUNS_KEPT_PER_MOTION: usize = 2;
-
-/// Everything captured this session, newest `RUNS_KEPT_PER_MOTION` runs per (kind, motion).
+/// Everything captured this session, one claimed run per (kind, motion).
 static CAPTURE_LOG: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-/// Dedupe keys, per run. Scoped to the run so a REPLAY re-records its lines (that is the
-/// point of runs) while a line repeated inside one playback is still collapsed. Retired runs
-/// drop their set with their lines, so this cannot grow without bound either.
+/// Dedupe keys within each claimed run.
 static CAPTURE_SEEN: LazyLock<Mutex<HashMap<u32, HashSet<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-/// Not-yet-sent lines. Holds CLONES rather than indices into `CAPTURE_LOG`: the log is pruned
-/// as old runs retire, and indices into a pruned vector name the wrong line.
+/// Not-yet-sent lines. Holds clones so reconnect/resend and network draining never borrow the
+/// immutable session log.
 static CAPTURE_PENDING: LazyLock<Mutex<Vec<CaptureLine>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 /// Completed motions not yet sent (drained strictly AFTER the lines they terminate).
 static END_PENDING: LazyLock<Mutex<Vec<CaptureEnd>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-/// (kind, motion) → the run its last recorded line belonged to, so retirement runs once per
-/// playback instead of once per line. Bounded by the number of distinct moves performed.
-static LAST_RUN_SEEN: LazyLock<Mutex<HashMap<(i32, u64), u32>>> =
+/// One immutable capture owner per fighter-kind + motion. The claim exists as soon as the first
+/// line lands, so another battle object cannot interleave a second run while the move is still
+/// executing. It remains after completion so later activity cannot supersede the snapshot.
+#[derive(Clone, Copy)]
+struct CaptureClaim {
+    boid: u32,
+    run: u32,
+}
+
+static CAPTURE_CLAIMS: LazyLock<Mutex<HashMap<(i32, u64), CaptureClaim>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Set by the TCP server thread and consumed on the game thread before the next capture drain.
+static CLEAR_CAPTURES_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// What one battle object is currently playing, for end-of-motion detection.
 #[derive(Clone, Copy)]
@@ -289,10 +293,8 @@ fn fnv(mut h: u64, v: u64) -> u64 {
 
 /// Record one ACMD call (pristine, pre-rewrite args).
 ///
-/// Dedupe is WITHIN a playback: (func, frame, args) repeated inside one run collapses, but the
-/// next performance of the move gets a fresh run id and records everything again. It used to
-/// dedupe across the whole session ("repeated move playback costs nothing"), which is what let
-/// the editor merge several performances into one script.
+/// Dedupe is within the one claimed playback. Once a fighter-kind + motion has a claim, every
+/// other battle object and every later playback is ignored until an explicit capture clear.
 pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
         as *mut smash::app::BattleObjectModuleAccessor;
@@ -312,13 +314,23 @@ pub unsafe fn record_for_boma(
     if boma.is_null() {
         return;
     }
+    // Fighter move snapshots must never absorb article/weapon/item scripts. `get_kind` values
+    // are category-local, so an article kind can numerically equal the selected fighter kind;
+    // filtering only by kind on the editor side cannot repair that collision after the fact.
+    if smash::app::utility::get_category(&mut *boma)
+        != *smash::lib::lua_const::BATTLE_OBJECT_CATEGORY_FIGHTER
+    {
+        return;
+    }
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
     let kind = smash::app::utility::get_kind(&mut *boma);
 
     // Resolve the run BEFORE the dedupe key — the key is scoped to it, and a new playback
     // must not be silently folded into the previous one's key set.
-    let run = mark_capture_motion((*boma).battle_object_id, motion, kind, frame);
+    let Some(run) = mark_capture_motion((*boma).battle_object_id, motion, kind, frame) else {
+        return;
+    };
 
     // Arm the clear-all gate: a clear is only worth capturing once something is out to clear.
     if is_collision_func(func) {
@@ -347,12 +359,6 @@ pub unsafe fn record_for_boma(
     };
     CAPTURE_PENDING.lock().push(line.clone());
     CAPTURE_LOG.lock().push(line);
-    // Only on the FIRST line of a new run. Retiring scans the whole log, and this is the game
-    // thread — doing it per line would make every capture pay for the size of the session.
-    let first_of_run = LAST_RUN_SEEN.lock().insert((kind, motion), run) != Some(run);
-    if first_of_run {
-        retire_old_runs(kind, motion);
-    }
     CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if func.contains("EFFECT") {
         EFFECT_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -362,33 +368,30 @@ pub unsafe fn record_for_boma(
     CAPTURE_LAST_FRAME.store(frame.to_bits() as u64, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Forget the oldest runs of one (kind, motion), keeping [`RUNS_KEPT_PER_MOTION`].
-///
-/// Every performance now re-records instead of deduplicating away, so without this the log
-/// grows for as long as the game runs. Retiring a run drops its dedupe set too.
-fn retire_old_runs(kind: i32, motion: u64) {
-    let mut log = CAPTURE_LOG.lock();
-    let mut runs: Vec<u32> = log
-        .iter()
-        .filter(|l| l.kind == kind && l.motion == motion)
-        .map(|l| l.run)
-        .collect();
-    runs.sort_unstable();
-    runs.dedup();
-    if runs.len() <= RUNS_KEPT_PER_MOTION {
+/// Ask the game thread to clear capture snapshots and ownership claims. The TCP server thread
+/// must not take these locks directly; parking it against a game-thread holder can freeze Skyline.
+pub fn request_clear_captures() {
+    CLEAR_CAPTURES_REQUESTED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+fn clear_captures_if_requested() {
+    if !CLEAR_CAPTURES_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    let retired: Vec<u32> = runs[..runs.len() - RUNS_KEPT_PER_MOTION].to_vec();
-    log.retain(|l| !(l.kind == kind && l.motion == motion && retired.contains(&l.run)));
-    drop(log);
-    let mut seen = CAPTURE_SEEN.lock();
-    for run in retired {
-        seen.remove(&run);
-    }
+    CAPTURE_LOG.lock().clear();
+    CAPTURE_SEEN.lock().clear();
+    CAPTURE_PENDING.lock().clear();
+    END_PENDING.lock().clear();
+    CAPTURE_CLAIMS.lock().clear();
+    MOTION_WATCH.lock().clear();
+    MOTION_WATCH_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+    crate::rust_extender::debuggable_server::notify_acmd_capture_cleared();
+    crate::slight::diag::note("live ACMD captures cleared");
 }
 
 /// Drain up to `max` unsent capture lines (game thread, per-frame flush).
 pub fn take_pending(max: usize) -> Vec<CaptureLine> {
+    clear_captures_if_requested();
     let mut pending = CAPTURE_PENDING.lock();
     if pending.is_empty() {
         return Vec::new();
@@ -424,61 +427,66 @@ pub fn requeue_all() {
     *CAPTURE_PENDING.lock() = log;
 }
 
-/// Note that `boid` produced a fresh capture line while playing `motion`, and return the run
-/// id of that playback. Starts (or re-arms) the watch that later emits the end-of-motion
-/// marker.
+/// Claim the first playback of `(kind, motion)` for one battle object and return its run id.
+/// Existing claims are immutable: later performances and other instances are ignored.
 ///
 /// This can be the first thing to observe a motion change (an ACMD script can run before the
 /// line callback on the frame a move is cancelled into another), so it also closes out the
 /// motion it replaces — otherwise a cancelled move's end marker would be dropped, and its
 /// lines would be filed under the incoming motion's run.
-fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> u32 {
+fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> Option<u32> {
     let mut finished: Option<(i32, u64, u32)> = None;
-    let run;
     {
         let mut watch = MOTION_WATCH.lock();
         // Battle object ids are reused across matches; keep the map from growing unbounded.
         if watch.len() > 128 {
             watch.clear();
         }
-        let same_motion = match watch.get(&boid) {
-            Some(w) => w.motion == motion,
-            None => false,
-        };
-        if same_motion {
-            // `capture_tick` may already have detected a restart and allocated a fresh run for
-            // this same motion; reuse whatever the watch holds rather than allocating again.
-            let w = watch.get_mut(&boid).expect("same_motion implies present");
+        let continuing = watch
+            .get(&boid)
+            .is_some_and(|w| w.motion == motion && !w.ended && frame + 0.5 >= w.frame);
+        if continuing {
+            let w = watch.get_mut(&boid).expect("continuing implies present");
             w.captured = true;
             w.kind = kind;
-            run = w.run;
-        } else {
-            if let Some(w) = watch.get(&boid) {
-                if w.captured && !w.ended {
-                    finished = Some((w.kind, w.motion, w.run));
-                }
-            }
-            run = next_run();
-            watch.insert(
-                boid,
-                MotionWatch {
-                    motion,
-                    kind,
-                    frame,
-                    captured: true,
-                    ended: false,
-                    run,
-                    open_collisions: false,
-                },
-            );
+            w.frame = frame;
+            return Some(w.run);
         }
-        // Keep the per-frame fast path's flag in step with the map under the same lock.
+        if let Some(w) = watch.remove(&boid) {
+            if w.captured && !w.ended {
+                finished = Some((w.kind, w.motion, w.run));
+            }
+        }
         MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
     }
     if let Some((kind, motion, run)) = finished {
-        push_end(kind, motion, run);
+        finish_capture(boid, kind, motion, run);
     }
-    run
+
+    let run = {
+        let mut claims = CAPTURE_CLAIMS.lock();
+        if claims.contains_key(&(kind, motion)) {
+            return None;
+        }
+        let run = next_run();
+        claims.insert((kind, motion), CaptureClaim { boid, run });
+        run
+    };
+    let mut watch = MOTION_WATCH.lock();
+    watch.insert(
+        boid,
+        MotionWatch {
+            motion,
+            kind,
+            frame,
+            captured: true,
+            ended: false,
+            run,
+            open_collisions: false,
+        },
+    );
+    MOTION_WATCH_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    Some(run)
 }
 
 /// Does this captured function put a collision out? Kept in step with the editor, which
@@ -486,7 +494,7 @@ fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> u32 {
 fn is_collision_func(func: &str) -> bool {
     func.starts_with("ATTACK") && func != "ATTACK_CLEAR_ALL"
         || func == "CATCH"
-        || func.starts_with("AREA_WIND")
+        || func.starts_with("AREA_WIND") && func != "AREA_WIND_ERASE"
 }
 
 /// Note that a collision came out (or was cleared) on `boid`, and report whether a clear is
@@ -503,13 +511,22 @@ fn note_collision(boid: u32, open: bool) -> bool {
 
 fn push_end(kind: i32, motion: u64, run: u32) {
     let mut q = END_PENDING.lock();
-    // Collapse duplicates that pile up while a long capture batch is still draining. Scoped
-    // to the RUN: two performances of the same move are two ends, and folding the second into
-    // the first would leave the editor waiting for a marker that never comes.
+    // Collapse duplicate completion paths for the same claimed run (end frame and motion switch
+    // can be observed on adjacent callbacks).
     if q.iter().any(|e| e.run == run) {
         return;
     }
     q.push(CaptureEnd { kind, motion, run });
+}
+
+fn finish_capture(boid: u32, kind: i32, motion: u64, run: u32) {
+    let owned = CAPTURE_CLAIMS
+        .lock()
+        .get(&(kind, motion))
+        .is_some_and(|claim| claim.boid == boid && claim.run == run);
+    if owned {
+        push_end(kind, motion, run);
+    }
 }
 
 /// Per-agent, per-frame end-of-motion watch (agent_extender line callback).
@@ -548,19 +565,12 @@ pub unsafe fn capture_tick(lua_state: u64) {
         let Some(w) = watch.get_mut(&boid) else {
             return;
         };
-        if w.motion != motion || frame < w.frame {
+        if w.motion != motion || frame + 0.5 < w.frame {
             // Switched away (or looped back to frame 0): the previous playback is over.
             if w.captured && !w.ended {
                 finished = Some((w.kind, w.motion, w.run));
             }
-            w.motion = motion;
-            w.frame = frame;
-            w.captured = false;
-            w.ended = false;
-            // A NEW playback starts here — most importantly the "perform the same move
-            // again" case, which is a frame decrease with no motion change. Allocating the
-            // run now means the first line of that performance is already filed under it.
-            w.run = next_run();
+            watch.remove(&boid);
         } else {
             w.frame = frame;
             // `>=` (not `end - rate`) so the marker is never EARLY: a hitbox on the very
@@ -570,9 +580,10 @@ pub unsafe fn capture_tick(lua_state: u64) {
                 finished = Some((w.kind, w.motion, w.run));
             }
         }
+        MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
     }
     if let Some((kind, motion, run)) = finished {
-        push_end(kind, motion, run);
+        finish_capture(boid, kind, motion, run);
     }
 }
 
@@ -582,6 +593,8 @@ pub unsafe fn capture_tick(lua_state: u64) {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct HbOverrides {
+    /// Complete typed AREA_WIND payload. Wind areas do not use ATTACK's slot layout.
+    pub wind_args: Option<Vec<LuaArg>>,
     pub part: Option<i64>,
     pub bone: Option<u64>,
     pub damage: Option<f32>,
@@ -629,8 +642,11 @@ pub struct HbOverrides {
 pub struct InjectRule {
     /// Motion frame at which to fire (once per motion playback).
     pub frame: f32,
-    /// Complete typed ATTACK arg vector (36 slots).
+    /// Complete typed argument vector for the selected collision family.
     pub args: Vec<LuaArg>,
+    /// Exact AREA_WIND family function. Omitted for attack/grab injections and old editors.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -673,18 +689,17 @@ static HAVE_RULES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Full-list replace (same semantics as effect spawn rules).
 pub fn set_rules(rules: Vec<HitboxRule>) {
-    HAVE_RULES.store(!rules.is_empty(), std::sync::atomic::Ordering::Relaxed);
     let n = rules.len();
-    if let Some(mut guard) = RULES.try_lock() {
+    {
+        let mut guard = RULES.lock();
         *guard = rules;
-    } else {
-        *RULES.lock() = rules;
     }
+    HAVE_RULES.store(n != 0, std::sync::atomic::Ordering::Release);
     crate::slight::diag::note(format!("hitbox_rules set: {n} rule(s)"));
 }
 
 fn any_rules() -> bool {
-    HAVE_RULES.load(std::sync::atomic::Ordering::Relaxed)
+    HAVE_RULES.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// The suppress/override action matching (motion, id, frame), if any. Frame-scoped so one
@@ -703,13 +718,32 @@ fn action_for(
 }
 
 /// Inject rules for a motion, tagged with the collision family to fire through.
-fn injections_for(motion: u64) -> Vec<(usize, u8, InjectRule)> {
+fn injection_fingerprint(motion: u64, category: u8, injection: &InjectRule) -> u64 {
+    let mut hash = fnv(0xcbf2_9ce4_8422_2325, motion);
+    hash = fnv(hash, category as u64);
+    hash = fnv(hash, injection.frame.to_bits() as u64);
+    for byte in injection.command.as_deref().unwrap_or_default().bytes() {
+        hash = fnv(hash, byte as u64);
+    }
+    for arg in &injection.args {
+        hash = fnv(hash, arg.dedupe_bits());
+    }
+    hash
+}
+
+fn injections_for(motion: u64) -> Vec<(u64, u8, InjectRule)> {
     let rules = RULES.lock();
     rules
         .iter()
-        .enumerate()
-        .filter(|(_, r)| r.motion == motion && r.inject.is_some())
-        .map(|(i, r)| (i, r.category, r.inject.clone().unwrap()))
+        .filter(|r| r.motion == motion && r.inject.is_some())
+        .map(|rule| {
+            let injection = rule.inject.clone().unwrap();
+            (
+                injection_fingerprint(rule.motion, rule.category, &injection),
+                rule.category,
+                injection,
+            )
+        })
         .collect()
 }
 
@@ -981,13 +1015,20 @@ unsafe fn hook_catch(lua_state: u64) {
 }
 
 // ── WIND (AREA_WIND family) hooks ────────────────────────────────────────────
-// All args are floats; arity varies (8..10). Semantics are undocumented in the
-// bindings, so we capture the raw args (editor renders best-effort + shows them)
-// and support suppression. Fine-grained rewrite is deferred until the layout is
-// confirmed from real captures.
+// Arity and layout are exact: id, four wind-physics values, object-relative X/Y, then
+// radius (RAD) or width/height (rectangle), with an optional final lifetime.
+
+unsafe fn rewrite_wind_args(lua_state: u64, args: &[LuaArg]) {
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    for arg in args {
+        let mut value = arg.to_l2c();
+        agent.push_lua_stack(&mut value);
+    }
+}
 
 macro_rules! wind_hook {
-    ($hook_name:ident, $target:path, $func:literal) => {
+    ($hook_name:ident, $target:path, $func:literal, $arity:literal) => {
         #[skyline::hook(replace = $target)]
         unsafe fn $hook_name(lua_state: u64) {
             let args = read_args_typed(lua_state, WIND_ARGC_MAX);
@@ -999,11 +1040,21 @@ macro_rules! wind_hook {
                     if !boma.is_null() {
                         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
                         let frame = smash::app::lua_bind::MotionModule::frame(boma);
-                        // Wind has no id — match by motion+frame only.
-                        if let Some((suppress, _ov)) = action_for(CAT_WIND, motion, u64::MAX, frame)
+                        let id = match args.first() {
+                            Some(LuaArg::Int(id)) => *id as u64,
+                            Some(LuaArg::Num(id)) => *id as u64,
+                            _ => u64::MAX,
+                        };
+                        if let Some((suppress, overrides)) = action_for(CAT_WIND, motion, id, frame)
                         {
                             if suppress {
                                 return;
+                            }
+                            if let Some(wind_args) = overrides
+                                .and_then(|value| value.wind_args)
+                                .filter(|args| args.len() == $arity)
+                            {
+                                rewrite_wind_args(lua_state, &wind_args);
                             }
                         }
                     }
@@ -1017,29 +1068,39 @@ macro_rules! wind_hook {
 wind_hook!(
     hook_wind_2nd,
     smash::app::sv_animcmd::AREA_WIND_2ND,
-    "AREA_WIND_2ND"
+    "AREA_WIND_2ND",
+    9
 );
+
+#[skyline::hook(replace = smash::app::lua_bind::AreaModule::erase_wind)]
+unsafe fn hook_erase_wind(boma: *mut smash::app::BattleObjectModuleAccessor, id: i32) -> u64 {
+    record_for_boma(boma, "AREA_WIND_ERASE", &[LuaArg::Int(id as i64)]);
+    original!()(boma, id)
+}
 wind_hook!(
     hook_wind_2nd_rad,
     smash::app::sv_animcmd::AREA_WIND_2ND_RAD,
-    "AREA_WIND_2ND_RAD"
+    "AREA_WIND_2ND_RAD",
+    8
 );
 wind_hook!(
     hook_wind_2nd_rad_arg9,
     smash::app::sv_animcmd::AREA_WIND_2ND_RAD_arg9,
-    "AREA_WIND_2ND_RAD_arg9"
+    "AREA_WIND_2ND_RAD_arg9",
+    9
 );
 wind_hook!(
     hook_wind_2nd_arg10,
     smash::app::sv_animcmd::AREA_WIND_2ND_arg10,
-    "AREA_WIND_2ND_arg10"
+    "AREA_WIND_2ND_arg10",
+    10
 );
 
 // ── Injection (per-frame, from the smashline line callback) ──────────────────
 
-/// (boid, rule idx) → motion frame it last fired at. Refires when the motion loops
-/// (frame goes backwards) or the motion changes.
-static FIRED: LazyLock<Mutex<HashMap<(u32, usize), (u64, f32)>>> =
+/// (boid, exact injection fingerprint) → motion/frame it last fired at. Editing a payload gives
+/// it a new fingerprint and applies it immediately; unchanged injections remain one-shot.
+static FIRED: LazyLock<Mutex<HashMap<(u32, u64), (u64, f32)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Called every frame per agent (agent_extender line callback) with the AGENT'S lua state.
@@ -1052,6 +1113,13 @@ pub unsafe fn inject_tick(lua_state: u64) {
     if boma.is_null() {
         return;
     }
+    // Rules describe the selected fighter's move. Article/weapon motion hashes are not a safe
+    // namespace and can collide with fighter motions, so never inject editor boxes into them.
+    if smash::app::utility::get_category(&mut *boma)
+        != *smash::lib::lua_const::BATTLE_OBJECT_CATEGORY_FIGHTER
+    {
+        return;
+    }
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let injections = injections_for(motion);
     if injections.is_empty() {
@@ -1059,9 +1127,18 @@ pub unsafe fn inject_tick(lua_state: u64) {
     }
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
     let boid = (*boma).battle_object_id;
+    let live_fingerprints: HashSet<u64> = injections
+        .iter()
+        .map(|(fingerprint, _, _)| *fingerprint)
+        .collect();
+    FIRED.lock().retain(|(fired_boid, fingerprint), (fired_motion, _)| {
+        *fired_boid != boid
+            || *fired_motion != motion
+            || live_fingerprints.contains(fingerprint)
+    });
 
-    for (idx, category, inj) in injections {
-        let key = (boid, idx);
+    for (fingerprint, category, inj) in injections {
+        let key = (boid, fingerprint);
         let due = frame >= inj.frame;
         let already = {
             let fired = FIRED.lock();
@@ -1071,9 +1148,52 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 .unwrap_or(false)
         };
         if due && !already {
+            let lifecycle_command = match (category, inj.command.as_deref()) {
+                (CAT_GRAB, Some("GRAB_CLEAR_ALL")) => {
+                    let _g = InjectGuard::new();
+                    smash::app::lua_bind::GrabModule::clear_all(boma);
+                    true
+                }
+                (CAT_WIND, Some("AREA_WIND_ERASE")) => {
+                    let id = match inj.args.first() {
+                        Some(LuaArg::Int(id)) => *id as i32,
+                        Some(LuaArg::Num(id)) => *id as i32,
+                        _ => -1,
+                    };
+                    if id >= 0 {
+                        let _g = InjectGuard::new();
+                        smash::app::lua_bind::AreaModule::erase_wind(boma, id);
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if lifecycle_command {
+                FIRED.lock().insert(key, (motion, frame));
+                crate::slight::diag::note(format!(
+                    "ended collision cat {category} (motion {motion:#x} frame {frame:.1})"
+                ));
+                continue;
+            }
             let mut agent = smash::lib::L2CAgent::new(lua_state);
             agent.clear_lua_stack();
-            for a in &inj.args {
+            let mut args = inj.args.clone();
+            if category == CAT_GRAB && args.len() == 9 {
+                args.push(LuaArg::Int(
+                    *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
+                ));
+                args.push(LuaArg::Int(
+                    *smash::lib::lua_const::COLLISION_SITUATION_MASK_GA as i64,
+                ));
+            }
+            if category == CAT_GRAB && args.len() != CATCH_ARGC as usize {
+                crate::slight::diag::note(format!(
+                    "rejected grab injection with {} args (expected {CATCH_ARGC})",
+                    args.len()
+                ));
+                continue;
+            }
+            for a in &args {
                 let mut v = a.to_l2c();
                 agent.push_lua_stack(&mut v);
             }
@@ -1083,7 +1203,18 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 let _g = InjectGuard::new();
                 match category {
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
-                    CAT_WIND => smash::app::sv_animcmd::AREA_WIND_2ND_arg10(agent.lua_state_agent),
+                    CAT_WIND => match inj.command.as_deref() {
+                        Some("AREA_WIND_2ND_RAD") => {
+                            smash::app::sv_animcmd::AREA_WIND_2ND_RAD(agent.lua_state_agent)
+                        }
+                        Some("AREA_WIND_2ND_RAD_arg9") => {
+                            smash::app::sv_animcmd::AREA_WIND_2ND_RAD_arg9(agent.lua_state_agent)
+                        }
+                        Some("AREA_WIND_2ND") => {
+                            smash::app::sv_animcmd::AREA_WIND_2ND(agent.lua_state_agent)
+                        }
+                        _ => smash::app::sv_animcmd::AREA_WIND_2ND_arg10(agent.lua_state_agent),
+                    },
                     _ => smash::app::sv_animcmd::ATTACK(agent.lua_state_agent),
                 }
             }
@@ -1115,6 +1246,7 @@ pub fn install() {
         hook_wind_2nd_rad,
         hook_wind_2nd_rad_arg9,
         hook_wind_2nd_arg10,
+        hook_erase_wind,
         hook_attack_clear_all
     );
     skyline::println!("[SLight] ACMD ATTACK/CATCH/WIND/CLEAR hooks installed (capture + rules)");

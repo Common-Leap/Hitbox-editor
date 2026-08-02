@@ -41,19 +41,61 @@ character models, motion data, and parameters; the `effect` folder provides the
 
 ## Desktop editor
 
-Build or run Visionary from the repository root:
+Build Visionary from the repository root with the script for your platform.
+
+Windows:
+
+```bat
+build.bat --release
+```
+
+Linux:
 
 ```bash
-cargo build
-cargo run
+bash build.sh --release
 ```
+
+The Linux script also registers the application launcher and scalable icon in
+the current user's desktop environment. Set `VISIONARY_SKIP_DESKTOP_INSTALL=1`
+to build without updating that launcher. For development, run Visionary with
+`cargo run`. Visionary's application ID matches the installed desktop entry so
+Wayland compositors can resolve the icon normally; the icon is also embedded in
+the executable for native window decorations on Windows and X11.
 
 Visionary reads the dumped data from its existing location and remembers the
 selected export root for future sessions.
 
+## Eden emulator setup
+
+Visionary's live preview workflow uses the latest [Eden Nightly
+build](https://eden-emu.dev/downloads/). On the download page, select the
+**Nightly** channel and download the build for your operating system and CPU.
+Eden Nightly changes frequently, so update to the newest build before
+troubleshooting a connection problem.
+
+Configure Eden's network interface before starting the game:
+
+1. Open **Configure → System → Network** in Eden.
+2. Set **Network Interface** to the active network card used by the computer,
+   such as the connected Ethernet or Wi-Fi adapter. Do not leave the interface
+   unselected.
+3. Apply the setting, then start or restart the game.
+
+The network-interface setting is required for the in-game plugin to expose its
+connection to Visionary. The editor connects automatically when Eden and
+Visionary are running on the same computer.
+
 ## In-game plugin
 
-Build the Skyline plugin with:
+Build the Skyline plugin with the script for your platform.
+
+Windows:
+
+```bat
+plugins\slight_replica\scripts\build.bat
+```
+
+Linux:
 
 ```bash
 bash plugins/slight_replica/scripts/build.sh
@@ -63,6 +105,12 @@ The resulting `lib_effect_viewer.nro` is written beneath
 `plugins/slight_replica/target/aarch64-skyline-switch/release/`. See the
 [plugin guide](plugins/slight_replica/README.md) for deployment, runtime
 dependencies, and live-edit setup.
+
+Visionary finds standard Eden, yuzu, and Ryujinx SD-card locations through the
+host operating system's application-data directories. For a portable or custom
+emulator installation, set `VISIONARY_SD_DIR` to the emulator SD root before
+starting Visionary. `VISIONARY_CACHE_DIR` can similarly move Visionary's cache
+and temporary workspace to another location.
 
 ## Projects and mod exports
 

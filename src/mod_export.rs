@@ -546,7 +546,9 @@ mod tests {
         );
         let plugin = plugin_name(&project);
         let built_nro = source_root
-            .join("target/aarch64-skyline-switch/release")
+            .join("target")
+            .join("aarch64-skyline-switch")
+            .join("release")
             .join(format!("lib{plugin}.nro"));
         let installed_nro = package.join("plugin.nro");
         std::fs::create_dir_all(installed_nro.parent().unwrap()).unwrap();

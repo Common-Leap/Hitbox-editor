@@ -26,6 +26,97 @@ fn carrier_send_reached_goal(
     }
 }
 
+/// The editor, ACMD source, exports, and user-facing timeline all use one-based game frames.
+const FIRST_GAME_FRAME: u32 = 1;
+
+/// Convert a game-frame playhead to the zero-based frame index stored in `.nuanmb` animations.
+fn animation_frame_for_game_frame(frame: u32) -> f32 {
+    crate::data::script_to_motion_frame(frame)
+}
+
+/// Left edge of a one-based game frame in a timeline containing `total` frame cells.
+fn timeline_frame_start_fraction(frame: u32, total: u32) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    frame.saturating_sub(FIRST_GAME_FRAME).min(total) as f32 / total as f32
+}
+
+/// Right edge of an inclusive one-based game frame range.
+fn timeline_frame_end_fraction(frame: u32, total: u32) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    frame.min(total) as f32 / total as f32
+}
+
+/// Resolve a pointer position to a valid one-based game frame, including the far-right edge.
+fn timeline_frame_at_fraction(fraction: f32, total: u32) -> u32 {
+    if total == 0 {
+        return FIRST_GAME_FRAME;
+    }
+    ((fraction.clamp(0.0, 1.0) * total as f32).floor() as u32 + FIRST_GAME_FRAME).min(total)
+}
+
+const TIMELINE_ROW_HEIGHT: f32 = 12.0;
+
+fn timeline_content_height(hitboxes: usize, effects: usize) -> f32 {
+    let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
+    let effect_height = (TIMELINE_ROW_HEIGHT * 0.45).max(3.0);
+    let effect_band = if effects == 0 {
+        0.0
+    } else {
+        4.0 + effects as f32 * effect_height
+    };
+    (24.0 + hitbox_band + effect_band).max(24.0)
+}
+
+fn timeline_frame_extent(
+    hitboxes: &[crate::data::Hitbox],
+    effects: &[crate::data::EffectCall],
+) -> u32 {
+    let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
+        [
+            Some(hitbox.active_start),
+            (hitbox.active_end < 9999).then_some(hitbox.active_end),
+        ]
+        .into_iter()
+        .flatten()
+    });
+    let effect_frames = effects.iter().flat_map(|effect| {
+        [
+            Some(effect.active_start),
+            (effect.active_end < 9999).then_some(effect.active_end),
+        ]
+        .into_iter()
+        .flatten()
+    });
+    hitbox_frames.chain(effect_frames).max().unwrap_or(0)
+}
+
+fn timeline_scroll_area(viewport_height: f32) -> egui::ScrollArea {
+    egui::ScrollArea::vertical()
+        .id_salt("hitbox_timeline_scroll")
+        .auto_shrink([false, false])
+        .max_height(viewport_height.max(1.0))
+}
+
+fn hitbox_menu_scroll_area(viewport_height: f32) -> egui::ScrollArea {
+    let viewport_height = viewport_height.max(1.0);
+    egui::ScrollArea::vertical()
+        .id_salt("hitbox_menu_scroll")
+        .auto_shrink([false, false])
+        .min_scrolled_height(viewport_height)
+        .max_height(viewport_height)
+}
+
+/// AREA_WIND uses the gameplay plane's horizontal/vertical coordinates. Model space represents
+/// that plane as Z/Y (the same convention used by `top`-bone ACMD offsets), while model X is
+/// depth. Mapping wind X directly to model X makes the area appear edge-on on the wrong plane.
+fn wind_area_world_point(root: glam::Mat4, horizontal: f32, vertical: f32) -> glam::Vec3 {
+    root.transform_point3(glam::Vec3::new(0.0, vertical, horizontal))
+}
+
 // ── Enum combo helpers ────────────────────────────────────────────────────────
 
 fn enum_combo(ui: &mut egui::Ui, value: &mut String, id: &str, label: &str, options: &[&str]) {
@@ -134,6 +225,31 @@ const SPECIAL_ANGLES: &[(&str, i32)] = &[
     ("Autolink 367", 367),  // pull + momentum, speed capped — most common in Ultimate multi-hits
     ("Autolink 368", 368),  // pull + position vector (e.g. Samus up smash)
 ];
+
+/// Direction shown by the 3D viewport for an ATTACK angle.
+///
+/// Hitbox offsets follow their animated bone, but knockback angles do not inherit that bone's
+/// rotation. The gameplay plane is world Z/Y in the model viewer: 0 degrees points along +Z and
+/// 90 degrees points along +Y. Special angles are state-dependent in game, so their viewport line
+/// uses a representative horizontal direction.
+fn hitbox_launch_direction(angle: i32) -> (glam::Vec3, bool) {
+    let dynamic = SPECIAL_ANGLES.iter().any(|&(_, value)| value == angle);
+    let display_angle = if dynamic { 0 } else { angle.rem_euclid(360) };
+    let radians = (display_angle as f32).to_radians();
+    (glam::Vec3::new(0.0, radians.sin(), radians.cos()), dynamic)
+}
+
+fn lighten_hitbox_color(color: egui::Color32) -> egui::Color32 {
+    const WHITE_BLEND: f32 = 0.32;
+    let lighten =
+        |channel: u8| (channel as f32 + (255.0 - channel as f32) * WHITE_BLEND).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(
+        lighten(color.r()),
+        lighten(color.g()),
+        lighten(color.b()),
+        color.a(),
+    )
+}
 
 /// Short angle label for the hitbox list.
 fn angle_short_label(angle: i32) -> String {
@@ -617,6 +733,8 @@ pub struct VisionaryApp {
     fetching_acmd: bool,
     acmd_error: Option<String>,
     show_add_hitbox: bool,
+    add_hitbox_category: u8,
+    add_wind_radial: bool,
     add_bone: String,
     add_size: f32,
     add_damage: f32,
@@ -639,6 +757,7 @@ pub struct VisionaryApp {
     // Cached bone names for dropdown
     bone_names: Vec<String>,
     show_debug: bool,
+    credits: crate::credits::CreditsWindow,
     show_edit_log: bool,
     export_dir: Option<PathBuf>,
     /// Extra roots holding modded content — added-character mods and slot-add packs. Each
@@ -893,6 +1012,8 @@ impl VisionaryApp {
             fetching_acmd: false,
             acmd_error: None,
             show_add_hitbox: false,
+            add_hitbox_category: 0,
+            add_wind_radial: false,
             add_bone: "top".to_string(),
             add_size: 4.5,
             add_damage: 10.0,
@@ -909,6 +1030,7 @@ impl VisionaryApp {
             acmd_receiver: None,
             bone_names: Vec::new(),
             show_debug: false,
+            credits: crate::credits::CreditsWindow::default(),
             show_edit_log: false,
             export_dir: saved_export_dir,
             extra_roots: saved_mod_roots,
@@ -1279,7 +1401,7 @@ impl VisionaryApp {
         self.state.selected_fighter = Some(idx);
         self.state.selected_move = None;
         self.state.hitboxes.clear();
-        self.state.current_frame = 0;
+        self.state.current_frame = FIRST_GAME_FRAME;
         self.state.total_frames = 0;
         self.move_list.clear();
         self.move_list_receiver = None;
@@ -1413,7 +1535,7 @@ impl VisionaryApp {
     }
 
     fn select_move(&mut self, move_entry: MoveEntry) {
-        self.state.current_frame = 0;
+        self.state.current_frame = FIRST_GAME_FRAME;
         self.state.total_frames = move_entry.frame_count;
         self.state.hitboxes.clear();
         self.state.script = crate::data::AcmdScript::default();
@@ -1540,6 +1662,21 @@ impl VisionaryApp {
         self.apply_acmd_body(&fighter_name, &move_name, body);
     }
 
+    /// Put both fetch paths on the first frame where the move actually shows something.
+    /// Hitboxes and effects are already in the same one-based game-frame space here.
+    fn jump_to_earliest_active_frame(&mut self) {
+        if let Some(first) = self
+            .state
+            .hitboxes
+            .iter()
+            .map(|hitbox| hitbox.active_start)
+            .chain(self.state.effects.iter().map(|effect| effect.active_start))
+            .min()
+        {
+            self.state.current_frame = first.max(FIRST_GAME_FRAME);
+        }
+    }
+
     fn apply_acmd_body(
         &mut self,
         fighter_name: &str,
@@ -1609,19 +1746,12 @@ impl VisionaryApp {
                         self.push_hitbox_rules();
                     }
 
-                    // Jump the timeline to the earliest active window (hitbox or effect).
-                    if let Some(first) = self.state.hitboxes.first() {
-                        if first.active_start > self.state.current_frame {
-                            self.state.current_frame = first.active_start;
-                        }
-                    }
-                    if let Some(min_effect_start) =
-                        self.state.effects.iter().map(|e| e.active_start).min()
-                    {
-                        if min_effect_start > self.state.current_frame {
-                            self.state.current_frame = min_effect_start;
-                        }
-                    }
+                    self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
+                        &self.state.hitboxes,
+                        &self.state.effects,
+                    ));
+
+                    self.jump_to_earliest_active_frame();
                 }
             }
             Err(e) => {
@@ -1735,7 +1865,7 @@ impl VisionaryApp {
                 egui::RichText::new(
                     "All edits across the toolkit — hitboxes (incl. live rules), effect \
                      spawns, live tweaks, and authored eff values. Saved automatically; \
-                     use × to discard (also un-sends the live state).",
+                     use ↶ to restore the source (also un-sends the live state).",
                 )
                 .small()
                 .color(egui::Color32::GRAY),
@@ -1860,7 +1990,13 @@ impl VisionaryApp {
                                         export_move =
                                             Some((fighter_name.clone(), move_name.clone()));
                                     }
-                                    if ui.small_button("×").clicked() {
+                                    if ui
+                                        .small_button("↶")
+                                        .on_hover_text(
+                                            "Discard this move's hitbox edits and restore the source",
+                                        )
+                                        .clicked()
+                                    {
                                         remove_move =
                                             Some((fighter_name.clone(), move_name.clone()));
                                     }
@@ -1897,7 +2033,11 @@ impl VisionaryApp {
                                     ui.label(
                                         egui::RichText::new(txt).small().color(egui::Color32::GRAY),
                                     );
-                                    if ui.small_button("×").clicked() {
+                                    if ui
+                                        .small_button("↶")
+                                        .on_hover_text("Discard these effect-spawn edits")
+                                        .clicked()
+                                    {
                                         remove_call_key = Some(key.clone());
                                     }
                                 });
@@ -1911,7 +2051,7 @@ impl VisionaryApp {
                                 ui.add_space(12.0);
                                 ui.label(egui::RichText::new(&eff.source_rel).small().monospace());
                                 if ui
-                                    .small_button("×")
+                                    .small_button("↶")
                                     .on_hover_text("Discard all authored eff edits")
                                     .clicked()
                                 {
@@ -1969,7 +2109,10 @@ impl VisionaryApp {
                         ui.horizontal(|ui| {
                             ui.add_space(8.0);
                             if ui
-                                .small_button(format!("× all {fighter_display} hitbox edits"))
+                                .small_button(format!("↶ Restore all {fighter_display} hitboxes"))
+                                .on_hover_text(
+                                    "Discard every hitbox edit for this fighter and restore source data",
+                                )
                                 .clicked()
                             {
                                 remove_fighter = Some(fighter_name.clone());
@@ -2010,36 +2153,52 @@ impl VisionaryApp {
             self.export_all_edits();
         }
         if let Some((f, m)) = remove_move {
+            let key = format!("{f}/{m}");
+            let is_active = self.current_move_key().as_deref() == Some(key.as_str());
             self.state.edit_log.remove_move(&f, &m);
-            // Un-send this move's live hitbox rules too.
-            if self
-                .hitbox_rules_store
-                .remove(&format!("{f}/{m}"))
-                .is_some()
-            {
-                let all: Vec<crate::game_link::HitboxRuleWire> = self
-                    .hitbox_rules_store
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect();
-                self.game_link.send_hitbox_rules(&all);
+            self.hitbox_rules_store.remove(&key);
+            if is_active {
+                // The autosave pass runs later in this frame. Restore the working copy now;
+                // otherwise it sees the still-edited boxes and immediately recreates the edit
+                // the user just discarded.
+                self.state.hitboxes = self.state.hitboxes_pristine.clone();
+                self.selected_hitbox = None;
+                self.hitbox_watch = Some((key.clone(), self.state.hitboxes.clone()));
+                self.hitbox_dirty_at = None;
             }
+            let all: Vec<crate::game_link::HitboxRuleWire> = self
+                .hitbox_rules_store
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            self.game_link.send_hitbox_rules(&all);
+            self.state.status = format!("Restored {f}/{m} hitboxes to the source data.");
         }
         if let Some(f) = remove_fighter {
+            let active_key = self.current_move_key();
+            let active_is_removed = active_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(&format!("{f}/")));
             self.state.edit_log.remove_fighter(&f);
-            let before = self.hitbox_rules_store.len();
             self.hitbox_rules_store
                 .retain(|k, _| !k.starts_with(&format!("{f}/")));
-            if self.hitbox_rules_store.len() != before {
-                let all: Vec<crate::game_link::HitboxRuleWire> = self
-                    .hitbox_rules_store
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect();
-                self.game_link.send_hitbox_rules(&all);
+            if active_is_removed {
+                self.state.hitboxes = self.state.hitboxes_pristine.clone();
+                self.selected_hitbox = None;
+                if let Some(key) = active_key {
+                    self.hitbox_watch = Some((key, self.state.hitboxes.clone()));
+                }
+                self.hitbox_dirty_at = None;
             }
+            let all: Vec<crate::game_link::HitboxRuleWire> = self
+                .hitbox_rules_store
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            self.game_link.send_hitbox_rules(&all);
+            self.state.status = format!("Restored all {f} hitboxes to their source data.");
         }
         if let Some(key) = remove_call_key {
             self.state.effect_call_edits.remove(&key);
@@ -2359,18 +2518,12 @@ impl VisionaryApp {
                 {
                     self.load_from_capture();
                 }
-                // Captures accumulate for the whole session, and there is no marker on the
-                // wire separating one performance from the next. So performing a move under
-                // different conditions — grounded then aerial, a cancel, a different branch —
-                // leaves the union in the bucket, and a load shows spawns that never happen
-                // together. Clearing and performing the move once is the reliable answer.
                 if ui
                     .add_enabled(has_capture, egui::Button::new("⌫"))
                     .on_hover_text(
-                        "Forget everything captured so far.\n\nCaptures pile up across the \
-                         whole session, so if you have performed this move more than once (or \
-                         in different situations) the load can show spawns from several runs \
-                         at once. Clear, perform the move once, then hit ⟳ Live.",
+                        "Forget the locked live-ACMD snapshots. Each move is captured from its \
+                         first playback only; clear when you intentionally want to \
+                         record a fresh set.",
                     )
                     .clicked()
                 {
@@ -2400,33 +2553,77 @@ impl VisionaryApp {
 
         if self.show_add_hitbox {
             ui.group(|ui| {
-                ui.label("Bone:");
-                if self.bone_names.is_empty() {
-                    ui.text_edit_singleline(&mut self.add_bone);
-                } else {
-                    egui::ComboBox::from_id_salt("add_bone_select")
-                        .selected_text(&self.add_bone)
+                ui.horizontal(|ui| {
+                    ui.label("Type:");
+                    egui::ComboBox::from_id_salt("add_hitbox_category")
+                        .selected_text(match self.add_hitbox_category {
+                            1 => "Grab",
+                            2 => "Wind",
+                            _ => "Attack",
+                        })
                         .show_ui(ui, |ui| {
-                            for name in &self.bone_names.clone() {
-                                ui.selectable_value(&mut self.add_bone, name.clone(), name);
-                            }
+                            ui.selectable_value(&mut self.add_hitbox_category, 0, "Attack");
+                            ui.selectable_value(&mut self.add_hitbox_category, 1, "Grab");
+                            ui.selectable_value(&mut self.add_hitbox_category, 2, "Wind");
                         });
+                    if self.add_hitbox_category == 2 {
+                        egui::ComboBox::from_id_salt("add_wind_shape")
+                            .selected_text(if self.add_wind_radial {
+                                "Radial"
+                            } else {
+                                "Rectangle"
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.add_wind_radial, false, "Rectangle");
+                                ui.selectable_value(&mut self.add_wind_radial, true, "Radial");
+                            });
+                    }
+                });
+                if self.add_hitbox_category != 2 {
+                    ui.label("Bone:");
+                    if self.bone_names.is_empty() {
+                        ui.text_edit_singleline(&mut self.add_bone);
+                    } else {
+                        egui::ComboBox::from_id_salt("add_bone_select")
+                            .selected_text(&self.add_bone)
+                            .show_ui(ui, |ui| {
+                                for name in &self.bone_names.clone() {
+                                    ui.selectable_value(&mut self.add_bone, name.clone(), name);
+                                }
+                            });
+                    }
                 }
-                ui.add(egui::Slider::new(&mut self.add_size, 0.1..=20.0).text("Size"));
-                ui.add(egui::Slider::new(&mut self.add_damage, 0.0..=50.0).text("Damage"));
-                angle_picker(ui, &mut self.add_angle);
-                ui.add(egui::Slider::new(&mut self.add_kb_base, 0..=200).text("KB Base"));
-                ui.add(egui::Slider::new(&mut self.add_kb_scaling, 0..=200).text("KB Scaling"));
-                if ui.button("Add").clicked() {
+                let size_label = match self.add_hitbox_category {
+                    1 => "Grab size",
+                    2 if self.add_wind_radial => "Radius",
+                    2 => "Half-size",
+                    _ => "Size",
+                };
+                ui.add(egui::Slider::new(&mut self.add_size, 0.1..=50.0).text(size_label));
+                if self.add_hitbox_category == 0 {
+                    ui.add(egui::Slider::new(&mut self.add_damage, 0.0..=50.0).text("Damage"));
+                    angle_picker(ui, &mut self.add_angle);
+                    ui.add(egui::Slider::new(&mut self.add_kb_base, 0..=200).text("KB Base"));
+                    ui.add(egui::Slider::new(&mut self.add_kb_scaling, 0..=200).text("KB Scaling"));
+                }
+                let add_label = match self.add_hitbox_category {
+                    1 => "Add Grab Box",
+                    2 => "Add Wind Box",
+                    _ => "Add Attack Hitbox",
+                };
+                if ui.button(add_label).clicked() {
                     let next_id = self
                         .state
                         .hitboxes
                         .iter()
+                        .filter(|hitbox| hitbox.category == self.add_hitbox_category)
                         .map(|h| h.id)
                         .max()
                         .map(|m| m + 1)
                         .unwrap_or(0);
-                    let hb = Hitbox {
+                    let active_start = self.state.current_frame.max(FIRST_GAME_FRAME);
+                    let active_end = active_start.saturating_add(5);
+                    let mut hb = Hitbox {
                         id: next_id,
                         bone_name: self.add_bone.clone(),
                         damage: self.add_damage,
@@ -2434,24 +2631,74 @@ impl VisionaryApp {
                         kb_scaling: self.add_kb_scaling,
                         kb_base: self.add_kb_base,
                         size: self.add_size,
-                        active_start: self.state.current_frame,
-                        active_end: self.state.current_frame + 5,
+                        active_start,
+                        active_end,
+                        category: self.add_hitbox_category,
                         ..Default::default()
                     };
+                    if self.add_hitbox_category == 1 {
+                        hb.damage = 0.0;
+                        hb.angle = 0;
+                        hb.kb_scaling = 0;
+                        hb.kb_base = 0;
+                    } else if self.add_hitbox_category == 2 {
+                        let args = if self.add_wind_radial {
+                            vec![
+                                next_id as f32,
+                                1.0,
+                                0.0,
+                                1000.0,
+                                1.0,
+                                0.0,
+                                0.0,
+                                self.add_size,
+                            ]
+                        } else {
+                            vec![
+                                next_id as f32,
+                                1.0,
+                                0.0,
+                                1000.0,
+                                1.0,
+                                0.0,
+                                0.0,
+                                self.add_size * 2.0,
+                                self.add_size * 2.0,
+                            ]
+                        };
+                        let wind = crate::data::WindboxData {
+                            command: if self.add_wind_radial {
+                                "AREA_WIND_2ND_RAD".into()
+                            } else {
+                                "AREA_WIND_2ND".into()
+                            },
+                            args,
+                        };
+                        hb = wind.to_hitbox(active_start);
+                        hb.active_end = active_end;
+                    }
                     self.state.hitboxes.push(hb);
+                    self.selected_hitbox = self.state.hitboxes.len().checked_sub(1);
                     self.show_add_hitbox = false;
                 }
             });
         }
 
-        ScrollArea::vertical().id_salt("hitboxes").show(ui, |ui| {
+        let menu_height = ui.available_height();
+        hitbox_menu_scroll_area(menu_height).show(ui, |ui| {
             let mut to_delete = None;
             for (i, hb) in self.state.hitboxes.iter().enumerate() {
                 let color = hitbox_display_color(hb);
                 let selected = self.selected_hitbox == Some(i);
                 ui.horizontal(|ui| {
                     ui.colored_label(color, "*");
-                    let shape = if hb.capsule_end.is_some() {
+                    let shape = if hb.category == 2 {
+                        if hb.wind.as_ref().is_some_and(|wind| wind.is_radial()) {
+                            "◯"
+                        } else {
+                            "▭"
+                        }
+                    } else if hb.capsule_end.is_some() {
                         "⬭"
                     } else {
                         "●"
@@ -2462,8 +2709,20 @@ impl VisionaryApp {
                             shape, hb.id, hb.bone_name, hb.active_start, hb.active_end
                         ),
                         2 => format!(
-                            "{} WIND ~{:.1} [{}-{}]",
-                            shape, hb.size, hb.active_start, hb.active_end
+                            "{} WIND #{} {} [{}-{}]",
+                            shape,
+                            hb.id,
+                            hb.wind
+                                .as_ref()
+                                .map(|wind| if wind.is_radial() {
+                                    format!("RAD r{:.1}", wind.radius())
+                                } else {
+                                    let [width, height] = wind.dimensions();
+                                    format!("RECT {width:.1}×{height:.1}")
+                                })
+                                .unwrap_or_else(|| format!("~{:.1}", hb.size)),
+                            hb.active_start,
+                            hb.active_end
                         ),
                         _ => format!(
                             "{} #{} {} {:.1}dmg {} [{}-{}]",
@@ -2479,52 +2738,68 @@ impl VisionaryApp {
                     if ui.selectable_label(selected, &label).clicked() {
                         self.selected_hitbox = if selected { None } else { Some(i) };
                     }
-                    if ui.small_button("X").clicked() {
+                    if ui
+                        .small_button("🗑")
+                        .on_hover_text("Delete this collision box")
+                        .clicked()
+                    {
                         to_delete = Some(i);
                     }
                 });
             }
             if let Some(i) = to_delete {
                 self.state.hitboxes.remove(i);
-                if self.selected_hitbox == Some(i) {
-                    self.selected_hitbox = None;
-                }
-            }
-        });
-
-        // Property editor for selected hitbox — fields shown depend on the collision family.
-        if let Some(idx) = self.selected_hitbox {
-            let bone_names = self.bone_names.clone();
-            let max_frame = self.state.total_frames.saturating_sub(1).max(1);
-            if let Some(hb) = self.state.hitboxes.get_mut(idx) {
-                ui.separator();
-                let (cat_label, cat_color) = match hb.category {
-                    1 => ("Grab box", egui::Color32::from_rgb(80, 200, 255)),
-                    2 => ("Wind box", egui::Color32::from_rgb(120, 240, 140)),
-                    _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
+                self.selected_hitbox = match self.selected_hitbox {
+                    Some(selected) if selected == i => None,
+                    Some(selected) if selected > i => Some(selected - 1),
+                    selected => selected,
                 };
-                ui.horizontal(|ui| {
-                    ui.heading("Properties");
-                    ui.colored_label(cat_color, cat_label);
-                });
-                ScrollArea::vertical().id_salt("props").show(ui, |ui| {
-                    // ── Bone (all families) ──────────────────────────────
+            }
+
+            // Property editor for selected hitbox — fields shown depend on the collision
+            // family. It shares this one full-height scrollbar with the collision list.
+            if let Some(idx) = self.selected_hitbox {
+                let bone_names = self.bone_names.clone();
+                let max_frame = self
+                    .state
+                    .total_frames
+                    .max(timeline_frame_extent(
+                        &self.state.hitboxes,
+                        &self.state.effects,
+                    ))
+                    .max(FIRST_GAME_FRAME);
+                if let Some(hb) = self.state.hitboxes.get_mut(idx) {
+                    ui.separator();
+                    let (cat_label, cat_color) = match hb.category {
+                        1 => ("Grab box", egui::Color32::from_rgb(80, 200, 255)),
+                        2 => ("Wind box", egui::Color32::from_rgb(120, 240, 140)),
+                        _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
+                    };
                     ui.horizontal(|ui| {
-                        ui.label("Bone:");
-                        if bone_names.is_empty() {
-                            ui.text_edit_singleline(&mut hb.bone_name);
-                        } else {
-                            egui::ComboBox::from_id_salt("edit_bone_select")
-                                .selected_text(&hb.bone_name)
-                                .show_ui(ui, |ui| {
-                                    for name in &bone_names {
-                                        ui.selectable_value(&mut hb.bone_name, name.clone(), name);
-                                    }
-                                });
-                        }
+                        ui.heading("Properties");
+                        ui.colored_label(cat_color, cat_label);
                     });
-                    // Wind has no id; attack + grab do.
+                    // Wind areas are object-relative 2D regions rather than bone-local attack
+                    // spheres. Attack/grab retain the normal bone selector.
                     if hb.category != 2 {
+                        ui.horizontal(|ui| {
+                            ui.label("Bone:");
+                            if bone_names.is_empty() {
+                                ui.text_edit_singleline(&mut hb.bone_name);
+                            } else {
+                                egui::ComboBox::from_id_salt("edit_bone_select")
+                                    .selected_text(&hb.bone_name)
+                                    .show_ui(ui, |ui| {
+                                        for name in &bone_names {
+                                            ui.selectable_value(
+                                                &mut hb.bone_name,
+                                                name.clone(),
+                                                name,
+                                            );
+                                        }
+                                    });
+                            }
+                        });
                         ui.horizontal(|ui| {
                             ui.label("ID:");
                             ui.add(egui::DragValue::new(&mut hb.id));
@@ -2544,26 +2819,88 @@ impl VisionaryApp {
                         wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
                     }
 
-                    // ── Size + position/shape (all families) ─────────────
-                    wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
-                    ui.collapsing("Position / Shape", |ui| {
-                        wide_slider_f32(ui, &mut hb.offset_x, -20.0..=20.0, "Offset X");
-                        wide_slider_f32(ui, &mut hb.offset_y, -20.0..=20.0, "Offset Y");
-                        wide_slider_f32(ui, &mut hb.offset_z, -20.0..=20.0, "Offset Z");
-                        let is_capsule = hb.capsule_end.is_some();
-                        let mut toggle = is_capsule;
-                        ui.checkbox(&mut toggle, "Capsule (second endpoint)");
-                        if toggle && !is_capsule {
-                            hb.capsule_end = Some([hb.offset_x, hb.offset_y, hb.offset_z]);
-                        } else if !toggle && is_capsule {
-                            hb.capsule_end = None;
+                    // ── Size + position/shape ────────────────────────────
+                    if hb.category == 2 {
+                        if let Some(wind) = hb.wind.as_mut().filter(|wind| wind.is_valid()) {
+                            let radial = wind.is_radial();
+                            ui.horizontal(|ui| {
+                                ui.label("ID:");
+                                let mut id = wind.id();
+                                if ui
+                                    .add(egui::DragValue::new(&mut id).range(0..=255))
+                                    .changed()
+                                {
+                                    wind.args[0] = id as f32;
+                                }
+                            });
+                            ui.collapsing("Wind Physics", |ui| {
+                                wide_slider_f32(ui, &mut wind.args[1], 0.0..=5.0, "Strength");
+                                let second = if radial {
+                                    "Radial Falloff"
+                                } else {
+                                    "Direction (degrees)"
+                                };
+                                wide_slider_f32(ui, &mut wind.args[2], -360.0..=360.0, second);
+                                wide_slider_f32(ui, &mut wind.args[3], 0.0..=1000.0, "Speed Limit");
+                                wide_slider_f32(ui, &mut wind.args[4], 0.0..=5.0, "Acceleration");
+                            });
+                            ui.collapsing("Position / Shape", |ui| {
+                                wide_slider_f32(ui, &mut wind.args[5], -50.0..=50.0, "Offset X");
+                                wide_slider_f32(ui, &mut wind.args[6], -50.0..=50.0, "Offset Y");
+                                if radial {
+                                    wide_slider_f32(ui, &mut wind.args[7], 0.1..=100.0, "Radius");
+                                } else {
+                                    wide_slider_f32(ui, &mut wind.args[7], 0.1..=100.0, "Width");
+                                    wide_slider_f32(ui, &mut wind.args[8], 0.1..=100.0, "Height");
+                                }
+                            });
+                            if wind.has_lifetime() {
+                                let last = wind.args.len() - 1;
+                                wide_slider_f32(ui, &mut wind.args[last], 0.0..=600.0, "Lifetime");
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Lifetime: until AreaModule::erase_wind")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                );
+                            }
+                            hb.id = wind.id();
+                            let [x, y] = wind.offset();
+                            hb.offset_x = x;
+                            hb.offset_y = y;
+                            hb.size = if radial {
+                                wind.radius()
+                            } else {
+                                let [width, height] = wind.dimensions();
+                                width.max(height) * 0.5
+                            };
+                        } else {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "This legacy project has no wind payload. Fetch the move again.",
+                            );
                         }
-                        if let Some(ref mut end) = hb.capsule_end {
-                            wide_slider_f32(ui, &mut end[0], -20.0..=20.0, "End X");
-                            wide_slider_f32(ui, &mut end[1], -20.0..=20.0, "End Y");
-                            wide_slider_f32(ui, &mut end[2], -20.0..=20.0, "End Z");
-                        }
-                    });
+                    } else {
+                        wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
+                        ui.collapsing("Position / Shape", |ui| {
+                            wide_slider_f32(ui, &mut hb.offset_x, -20.0..=20.0, "Offset X");
+                            wide_slider_f32(ui, &mut hb.offset_y, -20.0..=20.0, "Offset Y");
+                            wide_slider_f32(ui, &mut hb.offset_z, -20.0..=20.0, "Offset Z");
+                            let is_capsule = hb.capsule_end.is_some();
+                            let mut toggle = is_capsule;
+                            ui.checkbox(&mut toggle, "Capsule (second endpoint)");
+                            if toggle && !is_capsule {
+                                hb.capsule_end = Some([hb.offset_x, hb.offset_y, hb.offset_z]);
+                            } else if !toggle && is_capsule {
+                                hb.capsule_end = None;
+                            }
+                            if let Some(ref mut end) = hb.capsule_end {
+                                wide_slider_f32(ui, &mut end[0], -20.0..=20.0, "End X");
+                                wide_slider_f32(ui, &mut end[1], -20.0..=20.0, "End Y");
+                                wide_slider_f32(ui, &mut end[2], -20.0..=20.0, "End Z");
+                            }
+                        });
+                    }
 
                     // ── Attack-only detail sections ──────────────────────
                     if hb.category == 0 {
@@ -2602,21 +2939,22 @@ impl VisionaryApp {
                         });
                     }
 
-                    if hb.category == 2 {
-                        ui.colored_label(
-                            egui::Color32::GRAY,
-                            "Wind boxes: size / position / timeline are editable and suppressible. \
-                             The rest of the wind parameters use an undocumented arg layout and \
-                             aren't exposed yet.",
-                        );
-                    }
-
                     // ── Timeline (all families) ──────────────────────────
-                    wide_slider_u32(ui, &mut hb.active_start, 0..=max_frame, "Start Frame");
-                    wide_slider_u32(ui, &mut hb.active_end, 0..=max_frame, "End Frame");
-                });
+                    wide_slider_u32(
+                        ui,
+                        &mut hb.active_start,
+                        FIRST_GAME_FRAME..=max_frame,
+                        "Start Frame",
+                    );
+                    wide_slider_u32(
+                        ui,
+                        &mut hb.active_end,
+                        FIRST_GAME_FRAME..=max_frame,
+                        "End Frame",
+                    );
+                }
             }
-        }
+        });
     }
 
     fn draw_effects_panel(&mut self, ui: &mut Ui) {
@@ -3715,7 +4053,7 @@ impl VisionaryApp {
             };
             let source_note = if has_source {
                 "`acmd_source/` contains the editable Skyline/Smashline Rust project for hitbox and effect-spawn edits.\n\
-                 Build it with `bash acmd_source/build.sh`.\n"
+                 Build it with `acmd_source/build.bat` on Windows or `bash acmd_source/build.sh` on Linux.\n"
             } else {
                 "This project has no hitbox or effect-spawn edits, so no ACMD source folder is needed.\n"
             };
@@ -3812,7 +4150,9 @@ impl VisionaryApp {
                     let _ = std::fs::write(dest.join("build.log"), &log);
                     if out.status.success() {
                         let nro = src_root
-                            .join("target/aarch64-skyline-switch/release")
+                            .join("target")
+                            .join("aarch64-skyline-switch")
+                            .join("release")
                             .join(format!("lib{plugin_name}.nro"));
                         let parent = nro_destination.parent().unwrap_or(&dest);
                         let _ = std::fs::create_dir_all(parent);
@@ -4131,14 +4471,14 @@ impl VisionaryApp {
             return;
         };
         for dir in [
-            sd.join("ultimate/mods/effect_viewer_live"),
-            sd.join("effect_viewer/live_eff"),
+            sd.join("ultimate").join("mods").join("effect_viewer_live"),
+            sd.join("effect_viewer").join("live_eff"),
         ] {
             if dir.is_dir() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
         }
-        let pins = sd.join("slight/user/pinned_edits.json");
+        let pins = sd.join("slight").join("user").join("pinned_edits.json");
         if pins.is_file() {
             // Truncate rather than delete: the plugin opens this path on boot and an empty
             // list is the documented "no pins" state.
@@ -4166,7 +4506,7 @@ impl VisionaryApp {
         // Stop serving merged eff files: wipe the SD-side manifest + files (the plugin's
         // registrations stay for this boot but resolve to nothing → vanilla files load).
         if let Some(dir) = crate::scratch_dirs::emulator_sd_root()
-            .map(|sd| sd.join("effect_viewer/live_eff"))
+            .map(|sd| sd.join("effect_viewer").join("live_eff"))
             .filter(|d| d.is_dir())
         {
             let _ = std::fs::remove_dir_all(&dir);
@@ -4175,7 +4515,7 @@ impl VisionaryApp {
         // Also remove the guaranteed-fallback Arcropolis mod staged by deploy_live_eff
         // (takes effect on the next boot — the off-switch mirror of the staged mod).
         if let Some(dir) = crate::scratch_dirs::emulator_sd_root()
-            .map(|sd| sd.join("ultimate/mods/effect_viewer_live"))
+            .map(|sd| sd.join("ultimate").join("mods").join("effect_viewer_live"))
             .filter(|d| d.is_dir())
         {
             let _ = std::fs::remove_dir_all(&dir);
@@ -4208,12 +4548,12 @@ impl VisionaryApp {
 
     /// A plugin-reported motion frame → the script frame the editor shows.
     fn motion_to_script_frame(frame: f32) -> u32 {
-        frame.max(0.0).round() as u32 + 1
+        crate::data::motion_to_script_frame(frame)
     }
 
     /// A script frame the editor holds → the motion frame the plugin will observe.
     fn script_to_motion_frame(frame: u32) -> f32 {
-        frame.saturating_sub(1) as f32
+        crate::data::script_to_motion_frame(frame)
     }
 
     /// Frame window for a live rule scoped to one script frame.
@@ -4323,12 +4663,7 @@ impl VisionaryApp {
         }
         let now = std::time::Instant::now();
         match &mut self.pending_capture {
-            // Same move, more lines: the script is still running — keep waiting.
-            //
-            // The count can also DROP, because it counts the current run only: performing the
-            // move again within the settle window starts a fresh run at one line. That is a
-            // new script arriving, not a finished one, so re-baseline and keep waiting rather
-            // than letting the window expire on a run that has barely started.
+            // Same locked playback, more lines: the script is still running — keep waiting.
             Some(p) if p.motion == motion => {
                 if lines != p.lines {
                     p.lines = lines;
@@ -4338,10 +4673,8 @@ impl VisionaryApp {
             // Another move is settling; `settle_pending_capture` drops it on the next tick.
             Some(_) => {}
             None => {
-                // Arm on an EMPTY move (nothing to lose) or on an UNEDITED live capture of
-                // this same move — re-performing it then REPLACES the whole thing with the
-                // fresh full capture instead of leaving stale partial state around. A GitHub
-                // fetch, or a live capture the user has since edited, is never clobbered.
+                // Arm on an EMPTY move (nothing to lose) or on its UNEDITED live snapshot. A
+                // GitHub fetch, or a live capture the user has since edited, is never clobbered.
                 let empty = self.state.acmd_source.is_empty()
                     && self.state.hitboxes.is_empty()
                     && self.state.effects.is_empty();
@@ -4351,7 +4684,7 @@ impl VisionaryApp {
                     self.pending_capture = Some(PendingCapture {
                         motion,
                         kind,
-                        end_baseline: self.game_link.capture_end_count(motion, kind),
+                        run: self.game_link.latest_run_id(motion, kind).unwrap_or(0),
                         lines,
                         first_line: now,
                         last_line: now,
@@ -4371,8 +4704,8 @@ impl VisionaryApp {
         let Some(p) = self.pending_capture.as_ref() else {
             return;
         };
-        let (motion, kind, end_baseline, first_line, last_line) =
-            (p.motion, p.kind, p.end_baseline, p.first_line, p.last_line);
+        let (motion, kind, run, first_line, last_line) =
+            (p.motion, p.kind, p.run, p.first_line, p.last_line);
 
         // Moved off the move, or real data arrived from elsewhere (GitHub fetch) — drop it.
         // A manual "⟳ Live" click mid-window is deliberately NOT a cancel: letting the window
@@ -4385,7 +4718,7 @@ impl VisionaryApp {
             return;
         }
 
-        let ended = self.game_link.capture_end_count(motion, kind) > end_baseline;
+        let ended = self.game_link.capture_run_complete(kind, motion, run);
         if ended || last_line.elapsed() >= CAPTURE_QUIET || first_line.elapsed() >= CAPTURE_MAX_WAIT
         {
             self.pending_capture = None;
@@ -4471,6 +4804,11 @@ impl VisionaryApp {
         if self.apply_saved_hitbox_edits_to_current() {
             self.push_hitbox_rules();
         }
+        self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
+            &self.state.hitboxes,
+            &self.state.effects,
+        ));
+        self.jump_to_earliest_active_frame();
         let mut status =
             format!("Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) from live game capture");
         if let Some(note) = self.capture_vs_script_offset() {
@@ -4628,6 +4966,7 @@ impl VisionaryApp {
             active_end: u32::MAX,
             hitbox_type: 0,
             category: 0,
+            wind: None,
         })
     }
 
@@ -4675,45 +5014,28 @@ impl VisionaryApp {
         })
     }
 
-    /// AREA_WIND capture → display Hitbox with category=2 (wind). The arg semantics are
-    /// undocumented (all floats); we render a best-effort sphere and keep the raw args so
-    /// the size/offset mapping can be refined once confirmed from real captures. Heuristic:
-    /// the largest-magnitude arg is treated as the reach/size, offsets left at origin.
+    /// AREA_WIND capture → its exact 2D rectangle/radial payload.
     fn hitbox_from_capture_wind(
+        command: &str,
         args: &[crate::game_link::LuaArgWire],
         frame: f32,
     ) -> Option<crate::data::Hitbox> {
-        if args.is_empty() {
+        let expected = match command {
+            "AREA_WIND_2ND_RAD" => 8,
+            "AREA_WIND_2ND_RAD_arg9" => 9,
+            "AREA_WIND_2ND" => 9,
+            "AREA_WIND_2ND_arg10" => 10,
+            _ => return None,
+        };
+        if args.len() != expected {
             return None;
         }
-        let vals: Vec<f32> = args.iter().filter_map(|a| a.as_f32()).collect();
-        // Guess a visible size from the largest-magnitude float (clamped to a sane range).
-        let size = vals
-            .iter()
-            .cloned()
-            .map(f32::abs)
-            .fold(0.0_f32, f32::max)
-            .clamp(1.0, 25.0);
-        let start = Self::motion_to_script_frame(frame);
-        Some(crate::data::Hitbox {
-            id: 0,
-            bone_name: "top".to_string(),
-            size,
-            offset_x: 0.0,
-            offset_y: 0.0,
-            offset_z: 0.0,
-            capsule_end: None,
-            damage: 0.0,
-            angle: 0,
-            kb_scaling: 0,
-            fkb: 0,
-            kb_base: 0,
-            active_start: start,
-            // Open until a clear (or another hitbox with this id) ends it.
-            active_end: u32::MAX,
-            category: 2,
-            ..Default::default()
-        })
+        let values: Option<Vec<f32>> = args.iter().map(|arg| arg.as_f32()).collect();
+        let wind = crate::data::WindboxData {
+            command: command.into(),
+            args: values?,
+        };
+        Some(wind.to_hitbox(Self::motion_to_script_frame(frame)))
     }
 
     /// EFFECT-family capture → EffectCall (arc layout: gfx, joint, pos xyz, rot zr/yr/xr, size).
@@ -4784,8 +5106,23 @@ impl VisionaryApp {
         for (_, line) in ordered {
             if line.func == "ATTACK_CLEAR_ALL" {
                 let end = Self::motion_to_script_frame(line.frame).saturating_sub(1);
-                for hb in hitboxes.iter_mut().filter(|h| h.active_end == u32::MAX) {
+                for hb in hitboxes
+                    .iter_mut()
+                    .filter(|h| h.category != 2 && h.active_end == u32::MAX)
+                {
                     hb.active_end = end.max(hb.active_start);
+                }
+            } else if line.func == "AREA_WIND_ERASE" {
+                let Some(id) = line.args.first().and_then(|arg| arg.as_i64()) else {
+                    continue;
+                };
+                let end = Self::motion_to_script_frame(line.frame).saturating_sub(1);
+                for hitbox in hitboxes.iter_mut().filter(|hitbox| {
+                    hitbox.category == 2
+                        && hitbox.id == id.max(0) as u32
+                        && hitbox.active_start <= end.saturating_add(1)
+                }) {
+                    hitbox.active_end = hitbox.active_end.min(end).max(hitbox.active_start);
                 }
             } else if line.func.starts_with("ATTACK") {
                 if let Some(hb) =
@@ -4816,11 +5153,20 @@ impl VisionaryApp {
                     }
                 }
             } else if line.func.starts_with("AREA_WIND") {
-                if let Some(hb) = Self::hitbox_from_capture_wind(&line.args, line.frame) {
-                    if !hitboxes
-                        .iter()
-                        .any(|h| h.category == 2 && h.active_start == hb.active_start)
-                    {
+                if let Some(hb) =
+                    Self::hitbox_from_capture_wind(line.func.as_str(), &line.args, line.frame)
+                {
+                    if !hitboxes.iter().any(|h| {
+                        h.category == 2 && h.id == hb.id && h.active_start == hb.active_start
+                    }) {
+                        let end = hb.active_start.saturating_sub(1);
+                        if let Some(open) = hitboxes.iter_mut().rev().find(|hitbox| {
+                            hitbox.category == 2
+                                && hitbox.id == hb.id
+                                && hitbox.active_end >= hb.active_start
+                        }) {
+                            open.active_end = end.max(open.active_start);
+                        }
                         hitboxes.push(hb);
                     }
                 }
@@ -4836,10 +5182,9 @@ impl VisionaryApp {
         hitboxes
     }
 
-    /// Reconstruct effect timeline spans from live spawn and stop events. Runtime capture can
-    /// accumulate mutually exclusive branches over several move executions, so every distinct
-    /// observed spawn is retained; time ordering and kill-kind semantics are then applied to
-    /// that complete observed set.
+    /// Reconstruct effect timeline spans from the locked playback's spawn and stop events.
+    /// Every distinct spawn from that one execution is retained; time ordering and kill-kind
+    /// semantics are then applied to the complete snapshot.
     fn effect_calls_from_captures(
         captures: &[crate::game_link::CaptureLine],
         bone_rev: &HashMap<u64, String>,
@@ -4883,6 +5228,57 @@ impl VisionaryApp {
             }
         }
         effects
+    }
+
+    /// Replace an existing wind command instead of mutating its Lua stack in place. This gives
+    /// live edits the same exact command/payload path as newly added wind boxes.
+    fn append_wind_replacement_rules(
+        rules: &mut Vec<crate::game_link::HitboxRuleWire>,
+        motion: u64,
+        original: &crate::data::Hitbox,
+        edited: &crate::data::Hitbox,
+    ) -> bool {
+        let Some(args) = Self::build_wind_args(edited) else {
+            return false;
+        };
+        let (frame_start, frame_end) = Self::rule_frame_window(original.active_start);
+        rules.push(crate::game_link::HitboxRuleWire {
+            motion,
+            category: 2,
+            hitbox_id: Some(original.id as u64),
+            suppress: true,
+            frame_start,
+            frame_end,
+            overrides: None,
+            inject: None,
+        });
+        rules.push(crate::game_link::HitboxRuleWire {
+            motion,
+            category: 2,
+            hitbox_id: None,
+            suppress: false,
+            frame_start: None,
+            frame_end: None,
+            overrides: None,
+            inject: Some(crate::game_link::InjectRuleWire {
+                frame: Self::script_to_motion_frame(edited.active_start),
+                args,
+                command: edited.wind.as_ref().map(|wind| wind.command.clone()),
+            }),
+        });
+        if let Some(end) = Self::collision_end_injection(edited) {
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: 2,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(end),
+            });
+        }
+        true
     }
 
     /// Derive + push the full live hitbox-rule set, matched PER-OCCURRENCE so multi-hit
@@ -4931,24 +5327,31 @@ impl VisionaryApp {
         // Phase 1 — exact (id, start) pairs: unchanged → nothing, changed → scoped override.
         for (pi, p) in pristine.iter().enumerate() {
             if let Some(ci) = current.iter().enumerate().position(|(ci, h)| {
-                !cur_used[ci] && h.id == p.id && h.active_start == p.active_start
+                !cur_used[ci]
+                    && h.category == p.category
+                    && h.id == p.id
+                    && h.active_start == p.active_start
             }) {
                 cur_used[ci] = true;
                 pri_used[pi] = true;
                 let h = &current[ci];
                 if h != p {
-                    let (fs, fe) = win(p.active_start);
-                    rules.push(crate::game_link::HitboxRuleWire {
-                        motion,
-                        category: p.category,
-                        // Wind has no id — match by frame only.
-                        hitbox_id: (p.category != 2).then_some(p.id as u64),
-                        suppress: false,
-                        frame_start: fs,
-                        frame_end: fe,
-                        overrides: Some(Self::hitbox_overrides(h, p)),
-                        inject: None,
-                    });
+                    if p.category == 2 {
+                        missing_donor |=
+                            !Self::append_wind_replacement_rules(&mut rules, motion, p, h);
+                    } else {
+                        let (fs, fe) = win(p.active_start);
+                        rules.push(crate::game_link::HitboxRuleWire {
+                            motion,
+                            category: p.category,
+                            hitbox_id: Some(p.id as u64),
+                            suppress: false,
+                            frame_start: fs,
+                            frame_end: fe,
+                            overrides: Some(Self::hitbox_overrides(h, p)),
+                            inject: None,
+                        });
+                    }
                 }
             }
         }
@@ -4962,7 +5365,7 @@ impl VisionaryApp {
             rules.push(crate::game_link::HitboxRuleWire {
                 motion,
                 category: p.category,
-                hitbox_id: (p.category != 2).then_some(p.id as u64),
+                hitbox_id: Some(p.id as u64),
                 suppress: true,
                 frame_start: fs,
                 frame_end: fe,
@@ -4977,25 +5380,43 @@ impl VisionaryApp {
                 continue;
             }
             // Build the inject arg vector for this collision family.
-            let args = match h.category {
-                1 => Self::build_catch_args(h, donor_for(1, h.id)),
-                2 => None, // wind injection unsupported (undocumented arg semantics)
-                _ => Self::build_attack_args(h, donor_for(0, h.id)),
+            let (args, command) = match h.category {
+                1 => (Self::build_catch_args(h, donor_for(1, h.id)), None),
+                2 => (
+                    Self::build_wind_args(h),
+                    h.wind.as_ref().map(|wind| wind.command.clone()),
+                ),
+                _ => (Self::build_attack_args(h, donor_for(0, h.id)), None),
             };
             match args {
-                Some(args) => rules.push(crate::game_link::HitboxRuleWire {
-                    motion,
-                    category: h.category,
-                    hitbox_id: None,
-                    suppress: false,
-                    frame_start: None,
-                    frame_end: None,
-                    overrides: None,
-                    inject: Some(crate::game_link::InjectRuleWire {
-                        frame: Self::script_to_motion_frame(h.active_start),
-                        args,
-                    }),
-                }),
+                Some(args) => {
+                    rules.push(crate::game_link::HitboxRuleWire {
+                        motion,
+                        category: h.category,
+                        hitbox_id: None,
+                        suppress: false,
+                        frame_start: None,
+                        frame_end: None,
+                        overrides: None,
+                        inject: Some(crate::game_link::InjectRuleWire {
+                            frame: Self::script_to_motion_frame(h.active_start),
+                            args,
+                            command,
+                        }),
+                    });
+                    if let Some(end) = Self::collision_end_injection(h) {
+                        rules.push(crate::game_link::HitboxRuleWire {
+                            motion,
+                            category: h.category,
+                            hitbox_id: None,
+                            suppress: false,
+                            frame_start: None,
+                            frame_end: None,
+                            overrides: None,
+                            inject: Some(end),
+                        });
+                    }
+                }
                 None => missing_donor = true,
             }
         }
@@ -5074,6 +5495,7 @@ impl VisionaryApp {
                 if let Some(current_index) =
                     current.iter().enumerate().position(|(index, hitbox)| {
                         !current_used[index]
+                            && hitbox.category == original.category
                             && hitbox.id == original.id
                             && hitbox.active_start == original.active_start
                     })
@@ -5082,18 +5504,26 @@ impl VisionaryApp {
                     pristine_used[pristine_index] = true;
                     let edited = &current[current_index];
                     if edited != original {
-                        let (frame_start, frame_end) =
-                            Self::rule_frame_window(original.active_start);
-                        rules.push(crate::game_link::HitboxRuleWire {
-                            motion,
-                            category: original.category,
-                            hitbox_id: (original.category != 2).then_some(original.id as u64),
-                            suppress: false,
-                            frame_start,
-                            frame_end,
-                            overrides: Some(Self::hitbox_overrides(edited, original)),
-                            inject: None,
-                        });
+                        if original.category == 2 {
+                            if !Self::append_wind_replacement_rules(
+                                &mut rules, motion, original, edited,
+                            ) {
+                                incomplete += 1;
+                            }
+                        } else {
+                            let (frame_start, frame_end) =
+                                Self::rule_frame_window(original.active_start);
+                            rules.push(crate::game_link::HitboxRuleWire {
+                                motion,
+                                category: original.category,
+                                hitbox_id: Some(original.id as u64),
+                                suppress: false,
+                                frame_start,
+                                frame_end,
+                                overrides: Some(Self::hitbox_overrides(edited, original)),
+                                inject: None,
+                            });
+                        }
                     }
                 }
             }
@@ -5105,7 +5535,7 @@ impl VisionaryApp {
                 rules.push(crate::game_link::HitboxRuleWire {
                     motion,
                     category: original.category,
-                    hitbox_id: (original.category != 2).then_some(original.id as u64),
+                    hitbox_id: Some(original.id as u64),
                     suppress: true,
                     frame_start,
                     frame_end,
@@ -5117,10 +5547,19 @@ impl VisionaryApp {
                 if current_used[index] {
                     continue;
                 }
-                let args = match edited.category {
-                    1 => Self::build_catch_args(edited, donor_for(1, edited.id)),
-                    2 => None,
-                    _ => Self::build_attack_args(edited, donor_for(0, edited.id)),
+                let (args, command) = match edited.category {
+                    1 => (
+                        Self::build_catch_args(edited, donor_for(1, edited.id)),
+                        None,
+                    ),
+                    2 => (
+                        Self::build_wind_args(edited),
+                        edited.wind.as_ref().map(|wind| wind.command.clone()),
+                    ),
+                    _ => (
+                        Self::build_attack_args(edited, donor_for(0, edited.id)),
+                        None,
+                    ),
                 };
                 if let Some(args) = args {
                     rules.push(crate::game_link::HitboxRuleWire {
@@ -5134,8 +5573,21 @@ impl VisionaryApp {
                         inject: Some(crate::game_link::InjectRuleWire {
                             frame: Self::script_to_motion_frame(edited.active_start),
                             args,
+                            command,
                         }),
                     });
+                    if let Some(end) = Self::collision_end_injection(edited) {
+                        rules.push(crate::game_link::HitboxRuleWire {
+                            motion,
+                            category: edited.category,
+                            hitbox_id: None,
+                            suppress: false,
+                            frame_start: None,
+                            frame_end: None,
+                            overrides: None,
+                            inject: Some(end),
+                        });
+                    }
                 } else {
                     incomplete += 1;
                 }
@@ -5177,6 +5629,9 @@ impl VisionaryApp {
         };
         let capsule_changed = h.capsule_end != p.capsule_end;
         crate::game_link::HbOverridesWire {
+            wind_args: (h.wind != p.wind)
+                .then(|| Self::build_wind_args(h))
+                .flatten(),
             part: changed(h.part as i64, p.part as i64),
             bone: (h.bone_name != p.bone_name)
                 .then(|| hash40::hash40(&h.bone_name.to_lowercase()).0),
@@ -5318,7 +5773,25 @@ impl VisionaryApp {
         donor: Option<&crate::game_link::CaptureLine>,
     ) -> Option<Vec<crate::game_link::LuaArgWire>> {
         use crate::game_link::LuaArgWire as A;
-        let mut args = donor.filter(|d| d.args.len() >= 6)?.args.clone();
+        // Preserve a captured grab's status/situation slots when available. A brand-new grab
+        // has no donor, so send its nine geometry slots; the plugin appends the game's normal
+        // CAPTURE_PULLED + GA constants immediately before invoking CATCH.
+        let mut args = donor
+            .filter(|d| d.args.len() == 11)
+            .map(|d| d.args.clone())
+            .unwrap_or_else(|| {
+                vec![
+                    A::Int(0),
+                    A::Hash(0),
+                    A::Num(0.0),
+                    A::Num(0.0),
+                    A::Num(0.0),
+                    A::Num(0.0),
+                    A::Nil,
+                    A::Nil,
+                    A::Nil,
+                ]
+            });
         args[0] = A::Int(h.id as i64);
         args[1] = A::Hash(hash40::hash40(&h.bone_name.to_lowercase()).0);
         args[2] = A::Num(h.size);
@@ -5340,6 +5813,36 @@ impl VisionaryApp {
             }
         }
         Some(args)
+    }
+
+    fn build_wind_args(h: &crate::data::Hitbox) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        h.wind.as_ref().filter(|wind| wind.is_valid()).map(|wind| {
+            wind.args
+                .iter()
+                .copied()
+                .map(crate::game_link::LuaArgWire::Num)
+                .collect()
+        })
+    }
+
+    fn collision_end_injection(
+        h: &crate::data::Hitbox,
+    ) -> Option<crate::game_link::InjectRuleWire> {
+        use crate::game_link::LuaArgWire as A;
+        if h.active_end >= 9999 {
+            return None;
+        }
+        let (command, args) = match h.category {
+            1 => ("GRAB_CLEAR_ALL", Vec::new()),
+            2 => ("AREA_WIND_ERASE", vec![A::Int(h.id as i64)]),
+            _ => return None,
+        };
+        Some(crate::game_link::InjectRuleWire {
+            // active_end is inclusive; the clear belongs on the following game frame.
+            frame: Self::script_to_motion_frame(h.active_end.saturating_add(1)),
+            args,
+            command: Some(command.into()),
+        })
     }
 
     // ── EFF Transplant Studio ─────────────────────────────────────────────────
@@ -5445,6 +5948,8 @@ impl VisionaryApp {
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("eff_transplant"),
             egui::ViewportBuilder::default()
+                .with_app_id(crate::app_icon::APP_ID)
+                .with_icon(crate::app_icon::viewport_icon())
                 .with_title("Transplant Effects — Visionary")
                 .with_inner_size(transplant_size)
                 .with_position(transplant_pos)
@@ -6289,7 +6794,7 @@ impl VisionaryApp {
         // success — so this branch was always taken, the base64 fallback below was never
         // reached, and the plugin was told to read a payload it could not see.
         if let Some(sd) = crate::scratch_dirs::emulator_sd_root() {
-            let dir = sd.join("effect_viewer/payload");
+            let dir = sd.join("effect_viewer").join("payload");
             // Write-then-rename: the plugin must never read a half-written payload.
             let final_path = dir.join(&name);
             let staging = dir.join(format!("{name}.next"));
@@ -8157,12 +8662,15 @@ impl VisionaryApp {
     }
 
     fn draw_scrubber(&mut self, ui: &mut Ui) {
-        if self.state.total_frames == 0 {
+        let total = self.state.total_frames.max(timeline_frame_extent(
+            &self.state.hitboxes,
+            &self.state.effects,
+        ));
+        if total == 0 {
             return;
         }
 
-        let total = self.state.total_frames;
-        let current = self.state.current_frame;
+        let current = self.state.current_frame.clamp(FIRST_GAME_FRAME, total);
 
         // Playback controls
         ui.horizontal(|ui| {
@@ -8171,185 +8679,204 @@ impl VisionaryApp {
                 self.state.playing = !self.state.playing;
             }
             if ui.button("|◀").clicked() {
-                self.state.current_frame = 0;
+                self.state.current_frame = FIRST_GAME_FRAME;
                 self.state.playing = false;
             }
-            ui.label(format!("Frame {} / {}", current + 1, total));
+            ui.label(format!("Frame {} / {}", current, total));
         });
 
-        // Timeline — 24px header + one 16px row per hitbox + a compact 7px row per effect
-        // spawn at the bottom (start→end bars, like hitboxes but smaller).
+        // The existing bottom panel remains the only size control. Dense moves use compact rows
+        // and scroll vertically inside it instead of growing the panel over the editor.
         let n_fx = self.state.effects.len();
-        let hb_band = if self.state.hitboxes.is_empty() {
-            0.0
-        } else {
-            self.state.hitboxes.len() as f32 * 16.0
-        };
-        let fx_band = if n_fx == 0 {
-            0.0
-        } else {
-            4.0 + n_fx as f32 * 7.0
-        };
-        let timeline_height = (24.0 + hb_band + fx_band).max(24.0);
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), timeline_height),
-            egui::Sense::click_and_drag(),
-        );
+        let row_height = TIMELINE_ROW_HEIGHT;
+        let bar_height = (row_height - 2.0).max(3.0);
+        let effect_height = (row_height * 0.45).max(3.0);
+        let hb_band = self.state.hitboxes.len() as f32 * row_height;
+        let timeline_height = timeline_content_height(self.state.hitboxes.len(), n_fx);
+        let timeline_width = ui.available_width().max(1.0);
+        let viewport_height = ui.available_height().max(1.0);
 
-        let painter = ui.painter_at(rect);
-        let w = rect.width();
+        timeline_scroll_area(viewport_height).show(ui, |ui| {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(timeline_width, timeline_height),
+                egui::Sense::click_and_drag(),
+            );
 
-        // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(20, 20, 30));
+            let painter = ui.painter_at(rect);
+            let w = rect.width();
 
-        let frame_to_x = |f: u32| -> f32 { rect.left() + (f as f32 / total as f32) * w };
+            // Background
+            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(20, 20, 30));
 
-        // Hitbox bars
-        for (row, hb) in self.state.hitboxes.iter().enumerate() {
-            let y_top = rect.top() + 24.0 + row as f32 * 16.0;
-            let y_bot = y_top + 14.0;
-            let color = hitbox_display_color(hb);
-            let is_selected = self.selected_hitbox == Some(row);
+            let frame_start_to_x =
+                |f: u32| -> f32 { rect.left() + timeline_frame_start_fraction(f, total) * w };
+            let frame_end_to_x =
+                |f: u32| -> f32 { rect.left() + timeline_frame_end_fraction(f, total) * w };
 
-            let start_x = frame_to_x(hb.active_start);
-            let end_x = if hb.active_end == 9999 {
-                rect.right()
-            } else {
-                frame_to_x(hb.active_end + 1).min(rect.right())
-            };
+            // Hitbox bars
+            for (row, hb) in self.state.hitboxes.iter().enumerate() {
+                let y_top = rect.top() + 24.0 + row as f32 * row_height;
+                let y_bot = y_top + bar_height;
+                let color = hitbox_display_color(hb);
+                let is_selected = self.selected_hitbox == Some(row);
 
-            if end_x > start_x {
-                let bar_rect =
-                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot));
-                let alpha = if is_selected { 230 } else { 180 };
-                painter.rect_filled(
-                    bar_rect,
-                    2.0,
-                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
-                );
-                if is_selected {
-                    painter.rect_stroke(
+                let start_x = frame_start_to_x(hb.active_start);
+                let end_x = if hb.active_end == 9999 {
+                    rect.right()
+                } else {
+                    frame_end_to_x(hb.active_end).min(rect.right())
+                };
+
+                if end_x > start_x {
+                    let bar_rect = egui::Rect::from_min_max(
+                        egui::pos2(start_x, y_top),
+                        egui::pos2(end_x, y_bot),
+                    );
+                    let alpha = if is_selected { 230 } else { 180 };
+                    painter.rect_filled(
                         bar_rect,
                         2.0,
-                        egui::Stroke::new(1.5, egui::Color32::WHITE),
+                        egui::Color32::from_rgba_unmultiplied(
+                            color.r(),
+                            color.g(),
+                            color.b(),
+                            alpha,
+                        ),
+                    );
+                    if is_selected {
+                        painter.rect_stroke(
+                            bar_rect,
+                            2.0,
+                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    // Label inside bar if wide enough
+                    let bar_w = end_x - start_x;
+                    if bar_w > 30.0 && row_height >= 9.0 {
+                        painter.text(
+                            egui::pos2(start_x + 3.0, y_top + bar_height * 0.5),
+                            egui::Align2::LEFT_CENTER,
+                            format!("#{} {}", hb.id, hb.bone_name),
+                            egui::FontId::monospace(10.0),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
+            }
+
+            // Frame tick marks use the same one-based game-frame labels as ACMD and the game UI.
+            for f in FIRST_GAME_FRAME..=total {
+                if f != FIRST_GAME_FRAME && f % 5 != 0 {
+                    continue;
+                }
+                let x = frame_start_to_x(f);
+                let is_ten = f == FIRST_GAME_FRAME || f % 10 == 0;
+                let tick_h = if is_ten { 8.0 } else { 4.0 };
+                painter.line_segment(
+                    [
+                        egui::pos2(x, rect.top()),
+                        egui::pos2(x, rect.top() + tick_h),
+                    ],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+                );
+                if is_ten {
+                    painter.text(
+                        egui::pos2(x + 2.0, rect.top() + 10.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{}", f),
+                        egui::FontId::monospace(9.0),
+                        egui::Color32::from_gray(120),
+                    );
+                }
+            }
+
+            // Effect spawn bars — a compact band below the hitbox rows showing each spawn's
+            // start→end (one-shots get a short fixed window; follow effects extend to the end).
+            let fx_band_top = rect.top() + 24.0 + hb_band + 2.0;
+            for (row, e) in self.state.effects.iter().enumerate() {
+                let y_top = fx_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let end_frame = if e.follows_bone {
+                    if e.active_end >= total {
+                        total
+                    } else {
+                        e.active_end
+                    }
+                } else {
+                    e.active_end
+                        .max(e.active_start.saturating_add(12))
+                        .min(total)
+                };
+                let start_x = frame_start_to_x(e.active_start.min(total));
+                let end_x = frame_end_to_x(end_frame)
+                    .max(start_x + 3.0)
+                    .min(rect.right());
+                let base = if e.disabled {
+                    egui::Color32::from_rgb(110, 110, 110)
+                } else if e.follows_bone {
+                    egui::Color32::from_rgb(255, 165, 0)
+                } else {
+                    egui::Color32::from_rgb(255, 220, 0)
+                };
+                let selected = self.state.selected_effect_call == Some(row);
+                let alpha = if selected { 235 } else { 170 };
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha),
+                );
+                if selected {
+                    painter.rect_stroke(
+                        egui::Rect::from_min_max(
+                            egui::pos2(start_x, y_top),
+                            egui::pos2(end_x, y_bot),
+                        ),
+                        1.0,
+                        egui::Stroke::new(1.0, egui::Color32::WHITE),
                         egui::StrokeKind::Outside,
                     );
                 }
-                // Label inside bar if wide enough
-                let bar_w = end_x - start_x;
-                if bar_w > 30.0 {
-                    painter.text(
-                        egui::pos2(start_x + 3.0, y_top + 7.0),
-                        egui::Align2::LEFT_CENTER,
-                        format!("#{} {}", hb.id, hb.bone_name),
-                        egui::FontId::monospace(10.0),
-                        egui::Color32::WHITE,
-                    );
-                }
             }
-        }
 
-        // Frame tick marks every 5 frames
-        for f in (0..total).step_by(5) {
-            let x = frame_to_x(f);
-            let is_ten = f % 10 == 0;
-            let tick_h = if is_ten { 8.0 } else { 4.0 };
+            // Playhead
+            let px = frame_start_to_x(current);
             painter.line_segment(
-                [
-                    egui::pos2(x, rect.top()),
-                    egui::pos2(x, rect.top() + tick_h),
+                [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
+                egui::Stroke::new(2.0, egui::Color32::WHITE),
+            );
+            // Playhead triangle
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(px, rect.top()),
+                    egui::pos2(px - 5.0, rect.top() - 7.0),
+                    egui::pos2(px + 5.0, rect.top() - 7.0),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
-            );
-            if is_ten {
-                painter.text(
-                    egui::pos2(x + 2.0, rect.top() + 10.0),
-                    egui::Align2::LEFT_CENTER,
-                    format!("{}", f),
-                    egui::FontId::monospace(9.0),
-                    egui::Color32::from_gray(120),
-                );
-            }
-        }
+                egui::Color32::WHITE,
+                egui::Stroke::NONE,
+            ));
 
-        // Effect spawn bars — a compact band below the hitbox rows showing each spawn's
-        // start→end (one-shots get a short fixed window; follow effects extend to the end).
-        let fx_band_top = rect.top() + 24.0 + hb_band + 2.0;
-        for (row, e) in self.state.effects.iter().enumerate() {
-            let y_top = fx_band_top + row as f32 * 7.0;
-            let y_bot = y_top + 6.0;
-            let end_frame = if e.follows_bone {
-                if e.active_end >= total {
-                    total
-                } else {
-                    e.active_end
-                }
-            } else {
-                e.active_end
-                    .max(e.active_start.saturating_add(12))
-                    .min(total)
-            };
-            let start_x = frame_to_x(e.active_start.min(total));
-            let end_x = frame_to_x(end_frame).max(start_x + 3.0).min(rect.right());
-            let base = if e.disabled {
-                egui::Color32::from_rgb(110, 110, 110)
-            } else if e.follows_bone {
-                egui::Color32::from_rgb(255, 165, 0)
-            } else {
-                egui::Color32::from_rgb(255, 220, 0)
-            };
-            let selected = self.state.selected_effect_call == Some(row);
-            let alpha = if selected { 235 } else { 170 };
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
-                1.0,
-                egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha),
-            );
-            if selected {
-                painter.rect_stroke(
-                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
-                    1.0,
-                    egui::Stroke::new(1.0, egui::Color32::WHITE),
-                    egui::StrokeKind::Outside,
-                );
-            }
-        }
-
-        // Playhead
-        let px = frame_to_x(current);
-        painter.line_segment(
-            [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-            egui::Stroke::new(2.0, egui::Color32::WHITE),
-        );
-        // Playhead triangle
-        painter.add(egui::Shape::convex_polygon(
-            vec![
-                egui::pos2(px, rect.top()),
-                egui::pos2(px - 5.0, rect.top() - 7.0),
-                egui::pos2(px + 5.0, rect.top() - 7.0),
-            ],
-            egui::Color32::WHITE,
-            egui::Stroke::NONE,
-        ));
-
-        // Click/drag to scrub — but clicks on hitbox bars select that hitbox instead
-        if response.dragged() || response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                // Only attempt hitbox selection on a clean click (not a drag)
-                let clicked_hitbox = if response.clicked() {
-                    let bar_area_top = rect.top() + 24.0;
-                    if pos.y >= bar_area_top {
-                        let row = ((pos.y - bar_area_top) / 16.0) as usize;
-                        if row < self.state.hitboxes.len() {
-                            let hb = &self.state.hitboxes[row];
-                            let start_x = frame_to_x(hb.active_start);
-                            let end_x = if hb.active_end == 9999 {
-                                rect.right()
-                            } else {
-                                frame_to_x(hb.active_end + 1).min(rect.right())
-                            };
-                            if pos.x >= start_x && pos.x <= end_x {
-                                Some(row)
+            // Click/drag to scrub — but clicks on hitbox bars select that hitbox instead
+            if response.dragged() || response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    // Only attempt hitbox selection on a clean click (not a drag)
+                    let clicked_hitbox = if response.clicked() {
+                        let bar_area_top = rect.top() + 24.0;
+                        if pos.y >= bar_area_top {
+                            let row = ((pos.y - bar_area_top) / row_height) as usize;
+                            if row < self.state.hitboxes.len() {
+                                let hb = &self.state.hitboxes[row];
+                                let start_x = frame_start_to_x(hb.active_start);
+                                let end_x = if hb.active_end == 9999 {
+                                    rect.right()
+                                } else {
+                                    frame_end_to_x(hb.active_end).min(rect.right())
+                                };
+                                if pos.x >= start_x && pos.x <= end_x {
+                                    Some(row)
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
@@ -8358,25 +8885,23 @@ impl VisionaryApp {
                         }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(row) = clicked_hitbox {
-                    self.selected_hitbox = if self.selected_hitbox == Some(row) {
-                        None
-                    } else {
-                        Some(row)
                     };
-                } else {
-                    // Scrub the playhead
-                    let t = ((pos.x - rect.left()) / w).clamp(0.0, 1.0);
-                    self.state.current_frame = (t * total as f32) as u32;
-                    self.state.playing = false;
+
+                    if let Some(row) = clicked_hitbox {
+                        self.selected_hitbox = if self.selected_hitbox == Some(row) {
+                            None
+                        } else {
+                            Some(row)
+                        };
+                    } else {
+                        // Scrub the playhead
+                        let t = ((pos.x - rect.left()) / w).clamp(0.0, 1.0);
+                        self.state.current_frame = timeline_frame_at_fraction(t, total);
+                        self.state.playing = false;
+                    }
                 }
             }
-        }
+        });
     }
 }
 
@@ -8453,7 +8978,7 @@ impl eframe::App for VisionaryApp {
                                 queue,
                                 Some(anim_path.as_path()),
                                 skel_path,
-                                self.state.current_frame as f32,
+                                animation_frame_for_game_frame(self.state.current_frame),
                             );
                         }
                         let weapon_count = rs.weapon_skel_count();
@@ -8498,7 +9023,11 @@ impl eframe::App for VisionaryApp {
             if elapsed >= 1.0 / 24.0 {
                 if self.state.total_frames > 0 {
                     self.state.current_frame =
-                        (self.state.current_frame + 1) % self.state.total_frames;
+                        if self.state.current_frame >= self.state.total_frames {
+                            FIRST_GAME_FRAME
+                        } else {
+                            self.state.current_frame + 1
+                        };
                 } else {
                     // Keep the timeline moving even when only live capture data is loaded.
                     self.state.current_frame = (self.state.current_frame + 1).min(9999);
@@ -8516,6 +9045,8 @@ impl eframe::App for VisionaryApp {
             self.draw_edit_log_window(&ctx);
             self.perf.end("edit_log_window", t);
         }
+
+        self.credits.show(&ctx);
 
         // Top menu bar: File / Windows / Mod + status
         let t_menu = self.perf.start();
@@ -8643,6 +9174,8 @@ impl eframe::App for VisionaryApp {
                             .on_hover_text("View and manage all saved edits");
                     });
                     ui.checkbox(&mut self.show_debug, "Debug");
+                    ui.checkbox(&mut self.credits.open, "Credits")
+                        .on_hover_text("The people who helped make Visionary possible");
                 });
 
                 ui.menu_button("Mod", |ui| {
@@ -8728,8 +9261,11 @@ impl eframe::App for VisionaryApp {
 
         // Bottom timeline
         let t = self.perf.start();
+        let max_scrubber_height = (ui.available_height() * 0.55).max(100.0);
         egui::Panel::bottom("scrubber")
-            .min_size(60.0)
+            .default_size(180.0)
+            .min_size(72.0)
+            .max_size(max_scrubber_height)
             .resizable(true)
             .show_inside(ui, |ui| {
                 ui.add_space(4.0);
@@ -9335,12 +9871,13 @@ impl eframe::App for VisionaryApp {
                 }
 
                 // Paint the animated character. Circle overlays are drawn below by egui.
+                let animation_frame = animation_frame_for_game_frame(self.state.current_frame);
                 let callback = egui_wgpu::Callback::new_paint_callback(
                     rect,
                     ViewportCallback {
                         width: w,
                         height: h,
-                        current_frame: self.state.current_frame as f32,
+                        animation_frame,
                         anim_path: self.current_anim_path.clone(),
                         skel_path: self.current_skel_path.clone(),
                     },
@@ -9356,8 +9893,7 @@ impl eframe::App for VisionaryApp {
                         // `last_frame` is one paint behind. Evaluate the requested frame
                         // directly to keep moving bones/root motion and grabboxes synchronized.
                         let t = self.perf.start();
-                        let bone_matrices =
-                            rs.bone_world_matrices_at(self.state.current_frame as f32);
+                        let bone_matrices = rs.bone_world_matrices_at(animation_frame);
                         self.perf.end("bone_matrices", t);
                         // Keep a positions map for debug display
                         let bone_positions: std::collections::HashMap<String, glam::Vec3> =
@@ -9423,6 +9959,113 @@ impl eframe::App for VisionaryApp {
                                 40,
                             );
 
+                            // Wind areas are defined in the fighter's 2D object space. Render
+                            // their real circle/AABB footprint rather than reusing the 3D ATTACK
+                            // sphere placeholder.
+                            if let Some(wind) = hb
+                                .wind
+                                .as_ref()
+                                .filter(|wind| hb.category == 2 && wind.is_valid())
+                            {
+                                let root = bone_matrices
+                                    .get("top")
+                                    .or_else(|| bone_matrices.get("Top"))
+                                    .copied()
+                                    .unwrap_or(glam::Mat4::IDENTITY);
+                                let root = glam::Mat4::from_translation(root.col(3).truncate());
+                                let [x, y] = wind.offset();
+                                let center = wind_area_world_point(root, x, y);
+
+                                if wind.is_radial() {
+                                    if let Some(screen_center) = rs.world_to_screen(center, rect) {
+                                        let screen_radius = rs
+                                            .world_radius_to_screen(center, wind.radius(), rect)
+                                            .unwrap_or(wind.radius() * 4.0)
+                                            .max(4.0);
+                                        ui.painter().circle(
+                                            screen_center,
+                                            screen_radius,
+                                            fill,
+                                            stroke,
+                                        );
+                                        ui.painter().line_segment(
+                                            [
+                                                screen_center - egui::vec2(screen_radius, 0.0),
+                                                screen_center + egui::vec2(screen_radius, 0.0),
+                                            ],
+                                            egui::Stroke::new(1.0, color.gamma_multiply(0.65)),
+                                        );
+                                        ui.painter().line_segment(
+                                            [
+                                                screen_center - egui::vec2(0.0, screen_radius),
+                                                screen_center + egui::vec2(0.0, screen_radius),
+                                            ],
+                                            egui::Stroke::new(1.0, color.gamma_multiply(0.65)),
+                                        );
+                                        ui.painter().text(
+                                            screen_center + egui::vec2(screen_radius + 3.0, 0.0),
+                                            egui::Align2::LEFT_CENTER,
+                                            format!("WIND #{} RAD", wind.id()),
+                                            egui::FontId::monospace(11.0),
+                                            color,
+                                        );
+                                    }
+                                } else {
+                                    let [width, height] = wind.dimensions();
+                                    let half = glam::Vec2::new(width * 0.5, height * 0.5);
+                                    let corners = [
+                                        glam::Vec2::new(-half.x, -half.y),
+                                        glam::Vec2::new(half.x, -half.y),
+                                        glam::Vec2::new(half.x, half.y),
+                                        glam::Vec2::new(-half.x, half.y),
+                                    ];
+                                    let screen_corners: Option<Vec<egui::Pos2>> = corners
+                                        .iter()
+                                        .map(|corner| {
+                                            let point = wind_area_world_point(
+                                                root,
+                                                x + corner.x,
+                                                y + corner.y,
+                                            );
+                                            rs.world_to_screen(point, rect)
+                                        })
+                                        .collect();
+                                    if let Some(screen_corners) = screen_corners {
+                                        ui.painter().add(egui::Shape::convex_polygon(
+                                            screen_corners,
+                                            fill,
+                                            stroke,
+                                        ));
+                                    }
+                                    if let Some(screen_center) = rs.world_to_screen(center, rect) {
+                                        let angle = wind.args[2].to_radians();
+                                        let length = width.min(height).max(1.0) * 0.35;
+                                        let arrow_end = wind_area_world_point(
+                                            root,
+                                            x + angle.cos() * length,
+                                            y + angle.sin() * length,
+                                        );
+                                        if let Some(screen_end) =
+                                            rs.world_to_screen(arrow_end, rect)
+                                        {
+                                            ui.painter().arrow(
+                                                screen_center,
+                                                screen_end - screen_center,
+                                                stroke,
+                                            );
+                                        }
+                                        ui.painter().text(
+                                            screen_center + egui::vec2(4.0, -4.0),
+                                            egui::Align2::LEFT_BOTTOM,
+                                            format!("WIND #{} RECT", wind.id()),
+                                            egui::FontId::monospace(11.0),
+                                            color,
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+
                             // Get bone world matrix — offsets are in bone local space.
                             // For system/root bones (top, Trans, Rot, throw) the offsets
                             // are effectively in world space, so we only use translation.
@@ -9443,9 +10086,14 @@ impl eframe::App for VisionaryApp {
                             let offset = glam::Vec3::new(hb.offset_x, hb.offset_y, hb.offset_z);
                             let world_pos = bone_mat.transform_point3(offset);
 
-                            if let Some([ex, ey, ez]) = hb.capsule_end {
-                                let end_offset = glam::Vec3::new(ex, ey, ez);
-                                let world_end = bone_mat.transform_point3(end_offset);
+                            let capsule_world_end = hb.capsule_end.map(|[ex, ey, ez]| {
+                                bone_mat.transform_point3(glam::Vec3::new(ex, ey, ez))
+                            });
+                            let launch_center = capsule_world_end
+                                .map(|world_end| (world_pos + world_end) * 0.5)
+                                .unwrap_or(world_pos);
+
+                            if let Some(world_end) = capsule_world_end {
                                 let sp1 = rs.world_to_screen(world_pos, rect);
                                 let sp2 = rs.world_to_screen(world_end, rect);
                                 let r1 = rs
@@ -9501,6 +10149,20 @@ impl eframe::App for VisionaryApp {
                                         format!("#{} {:.0}", hb.id, hb.damage),
                                         egui::FontId::monospace(11.0),
                                         color,
+                                    );
+                                }
+                            }
+
+                            if hb.category == 0 {
+                                let (direction, _) = hitbox_launch_direction(hb.angle);
+                                let launch_end = launch_center + direction * hb.size;
+                                if let (Some(screen_center), Some(screen_end)) = (
+                                    rs.world_to_screen(launch_center, rect),
+                                    rs.world_to_screen(launch_end, rect),
+                                ) {
+                                    ui.painter().line_segment(
+                                        [screen_center, screen_end],
+                                        egui::Stroke::new(2.0, lighten_hitbox_color(color)),
                                     );
                                 }
                             }
@@ -9653,12 +10315,12 @@ fn find_nuanmb(motion_dir: &Path, label: &str, hash: u64) -> Option<PathBuf> {
     None
 }
 
-/// Rebuild an AcmdScript by patching AttackCall values from the edited Hitbox list.
-/// Non-attack statements (frame, wait, raw, etc.) are preserved verbatim.
+/// Rebuild an AcmdScript by patching ATTACK and AREA_WIND values from the edited collision list.
+/// Other statements (frame, wait, raw, etc.) are preserved verbatim.
 ///
 /// A hitbox id is reusable: multi-hit scripts routinely spawn id 0 at several different
 /// frames. Matching by id alone made the last edited phase overwrite every earlier phase on
-/// export. Match by `(id, script spawn frame)` and consume same-frame duplicates in source
+/// export. Match by `(family, id, script spawn frame)` and consume same-frame duplicates in source
 /// order, which is the same identity the live-rule path uses.
 fn rebuild_script_from_hitboxes(
     original: &crate::data::AcmdScript,
@@ -9667,12 +10329,12 @@ fn rebuild_script_from_hitboxes(
     use crate::data::{AcmdScript, AcmdStmt, AttackCall, ExcuteStmt};
 
     let mut by_spawn: std::collections::HashMap<
-        (u32, u32),
+        (u8, u32, u32),
         std::collections::VecDeque<&crate::data::Hitbox>,
     > = std::collections::HashMap::new();
     for hb in hitboxes {
         by_spawn
-            .entry((hb.id, hb.active_start))
+            .entry((hb.category, hb.id, hb.active_start))
             .or_default()
             .push_back(hb);
     }
@@ -9724,7 +10386,7 @@ fn rebuild_script_from_hitboxes(
         stmts: &[AcmdStmt],
         start_frame: f32,
         by_spawn: &mut std::collections::HashMap<
-            (u32, u32),
+            (u8, u32, u32),
             std::collections::VecDeque<&crate::data::Hitbox>,
         >,
     ) -> (Vec<AcmdStmt>, f32) {
@@ -9747,9 +10409,18 @@ fn rebuild_script_from_hitboxes(
                         .map(|s| match s {
                             ExcuteStmt::Attack(call) => {
                                 let hb = by_spawn
-                                    .get_mut(&(call.id, spawn))
+                                    .get_mut(&(0, call.id, spawn))
                                     .and_then(|queue| queue.pop_front());
                                 ExcuteStmt::Attack(patch_attack(call, hb))
+                            }
+                            ExcuteStmt::Wind(call) => {
+                                let hb = by_spawn
+                                    .get_mut(&(2, call.id(), spawn))
+                                    .and_then(|queue| queue.pop_front());
+                                ExcuteStmt::Wind(
+                                    hb.and_then(|hitbox| hitbox.wind.clone())
+                                        .unwrap_or_else(|| call.clone()),
+                                )
                             }
                             other => other.clone(),
                         })
@@ -9781,35 +10452,63 @@ fn rebuild_script_from_hitboxes(
     AcmdScript { stmts }
 }
 
-/// Build a whole ACMD script from a hitbox list (capture-sourced moves have no base script
-/// to patch): frame-grouped ATTACKs, then clear_all after the last active window.
+/// Build a whole ACMD script from a collision list (capture-sourced moves have no base script
+/// to patch). Wind areas retain their exact command family/payload and use `erase_wind`; ATTACK
+/// entries retain the existing frame-grouped `clear_all` behavior.
 fn synthesize_script_from_hitboxes(hitboxes: &[crate::data::Hitbox]) -> crate::data::AcmdScript {
     use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+    use std::collections::BTreeMap;
     if hitboxes.is_empty() {
         return AcmdScript::default();
     }
-    let mut sorted: Vec<&crate::data::Hitbox> = hitboxes.iter().collect();
-    sorted.sort_by_key(|h| (h.active_start, h.id));
 
-    let mut stmts: Vec<AcmdStmt> = Vec::new();
-    let mut current: Option<u32> = None;
-    let mut group: Vec<ExcuteStmt> = Vec::new();
-    for hb in &sorted {
-        if current != Some(hb.active_start) {
-            if !group.is_empty() {
-                stmts.push(AcmdStmt::Excute(std::mem::take(&mut group)));
-            }
-            stmts.push(AcmdStmt::Frame(hb.active_start as f32));
-            current = Some(hb.active_start);
+    // End events are inserted before spawns at the same frame so reusing a wind id does not
+    // immediately erase its replacement.
+    let mut ends: BTreeMap<u32, Vec<ExcuteStmt>> = BTreeMap::new();
+    let mut spawns: BTreeMap<u32, Vec<ExcuteStmt>> = BTreeMap::new();
+    let mut attack_clear_at: Option<u32> = None;
+    for hb in hitboxes {
+        if hb.category == 2 {
+            let Some(wind) = hb.wind.clone().filter(|wind| wind.is_valid()) else {
+                continue;
+            };
+            spawns
+                .entry(hb.active_start)
+                .or_default()
+                .push(ExcuteStmt::Wind(wind));
+            ends.entry(hb.active_end.saturating_add(1))
+                .or_default()
+                .push(ExcuteStmt::EraseWind(hb.id));
+        } else {
+            spawns
+                .entry(hb.active_start)
+                .or_default()
+                .push(ExcuteStmt::Attack(hb.to_attack_call()));
+            attack_clear_at = Some(
+                attack_clear_at
+                    .unwrap_or(0)
+                    .max(hb.active_end.saturating_add(1)),
+            );
         }
-        group.push(ExcuteStmt::Attack(hb.to_attack_call()));
     }
-    if !group.is_empty() {
-        stmts.push(AcmdStmt::Excute(group));
+    if let Some(frame) = attack_clear_at {
+        ends.entry(frame)
+            .or_default()
+            .insert(0, ExcuteStmt::ClearAll);
     }
-    let clear_at = sorted.iter().map(|h| h.active_end).max().unwrap_or(0) + 1;
-    stmts.push(AcmdStmt::Frame(clear_at as f32));
-    stmts.push(AcmdStmt::Excute(vec![ExcuteStmt::ClearAll]));
+
+    let mut frames: Vec<u32> = ends.keys().chain(spawns.keys()).copied().collect();
+    frames.sort_unstable();
+    frames.dedup();
+    let mut stmts = Vec::new();
+    for frame in frames {
+        let mut events = ends.remove(&frame).unwrap_or_default();
+        events.extend(spawns.remove(&frame).unwrap_or_default());
+        if !events.is_empty() {
+            stmts.push(AcmdStmt::Frame(frame as f32));
+            stmts.push(AcmdStmt::Excute(events));
+        }
+    }
     AcmdScript { stmts }
 }
 
@@ -9938,9 +10637,8 @@ struct PendingCapture {
     motion: u64,
     /// Fighter kind the capture is filtered to (None = unknown fighter).
     kind: Option<i32>,
-    /// `capture_end_count` when the first line landed — a bump is the plugin telling us the
-    /// motion ran to its end frame (or was cancelled into another motion).
-    end_baseline: u64,
+    /// Exact claimed playback. Only its matching end marker can complete this snapshot.
+    run: u32,
     /// Lines held for this motion at the last observed growth.
     lines: usize,
     first_line: std::time::Instant,
@@ -10572,6 +11270,64 @@ mod live_effect_capture_tests {
         }
     }
 
+    fn attack_capture(id: i64, frame: f32, bone: u64) -> CaptureLine {
+        let mut args = vec![A::Int(id), A::Int(0), A::Hash(bone)];
+        // damage, angle, kbg, fkb, bkb, size, x, y, z, then nil capsule/property slots.
+        args.extend([
+            A::Num(8.0),
+            A::Int(361),
+            A::Int(100),
+            A::Int(0),
+            A::Int(40),
+            A::Num(4.0),
+            A::Num(0.0),
+            A::Num(8.0),
+            A::Num(6.0),
+        ]);
+        args.extend(std::iter::repeat_n(A::Nil, 24));
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: "ATTACK".into(),
+            args,
+            run: 1,
+        }
+    }
+
+    fn clear_capture(frame: f32) -> CaptureLine {
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: "ATTACK_CLEAR_ALL".into(),
+            args: Vec::new(),
+            run: 1,
+        }
+    }
+
+    fn wind_capture(command: &str, frame: f32, args: &[f32]) -> CaptureLine {
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: command.into(),
+            args: args.iter().copied().map(A::Num).collect(),
+            run: 1,
+        }
+    }
+
+    fn erase_wind_capture(id: i64, frame: f32) -> CaptureLine {
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: "AREA_WIND_ERASE".into(),
+            args: vec![A::Int(id)],
+            run: 1,
+        }
+    }
+
     #[test]
     fn live_effect_layout_accounts_for_dumped_spawn_families() {
         for func in [
@@ -10693,6 +11449,124 @@ mod live_effect_capture_tests {
         assert_eq!(VisionaryApp::script_to_motion_frame(0), 0.0);
     }
 
+    #[test]
+    fn timeline_game_frames_map_to_the_matching_animation_pose() {
+        assert_eq!(animation_frame_for_game_frame(1), 0.0);
+        assert_eq!(animation_frame_for_game_frame(10), 9.0);
+
+        assert_eq!(timeline_frame_start_fraction(1, 60), 0.0);
+        assert_eq!(timeline_frame_start_fraction(10, 60), 9.0 / 60.0);
+        assert_eq!(timeline_frame_end_fraction(15, 60), 15.0 / 60.0);
+
+        assert_eq!(timeline_frame_at_fraction(0.0, 60), 1);
+        assert_eq!(timeline_frame_at_fraction(9.0 / 60.0, 60), 10);
+        assert_eq!(timeline_frame_at_fraction(1.0, 60), 60);
+    }
+
+    #[test]
+    fn wind_coordinates_use_the_same_gameplay_plane_as_top_bone_offsets() {
+        let root = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0));
+        assert_eq!(
+            wind_area_world_point(root, 6.0, 7.0),
+            glam::Vec3::new(2.0, 10.0, 10.0)
+        );
+    }
+
+    #[test]
+    fn launch_direction_uses_the_gameplay_plane_instead_of_bone_rotation() {
+        let (forward, dynamic) = hitbox_launch_direction(0);
+        assert_eq!(forward, glam::Vec3::Z);
+        assert!(!dynamic);
+
+        let (up, _) = hitbox_launch_direction(90);
+        assert!((up - glam::Vec3::Y).length() < 0.0001);
+        let (back, _) = hitbox_launch_direction(180);
+        assert!((back + glam::Vec3::Z).length() < 0.0001);
+
+        let twisted_bone = glam::Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let center = twisted_bone.transform_point3(glam::Vec3::new(1.0, 2.0, 3.0));
+        let launch_end = center + forward * 10.0;
+        assert_eq!(launch_end - center, glam::Vec3::Z * 10.0);
+        assert!((twisted_bone.transform_vector3(forward) - forward).length() > 1.0);
+
+        for special in [361, 363, 365, 366, 367, 368] {
+            let (representative, dynamic) = hitbox_launch_direction(special);
+            assert_eq!(representative, glam::Vec3::Z);
+            assert!(dynamic);
+        }
+
+        let original = egui::Color32::from_rgb(80, 120, 200);
+        let lighter = lighten_hitbox_color(original);
+        assert!(lighter.r() > original.r());
+        assert!(lighter.g() > original.g());
+        assert!(lighter.b() > original.b());
+        assert_eq!(lighter.a(), original.a());
+    }
+
+    #[test]
+    fn github_and_live_fetch_produce_the_same_hitbox_window() {
+        let bone = hash40::hash40("top").0;
+        let source = crate::data::AcmdScript {
+            stmts: vec![
+                crate::data::AcmdStmt::Frame(10.0),
+                crate::data::AcmdStmt::Excute(vec![crate::data::ExcuteStmt::Attack(
+                    Hitbox::default().to_attack_call(),
+                )]),
+                crate::data::AcmdStmt::Frame(16.0),
+                crate::data::AcmdStmt::Excute(vec![crate::data::ExcuteStmt::ClearAll]),
+            ],
+        };
+        let github = source.to_hitboxes();
+        let live = VisionaryApp::hitboxes_from_captures(
+            &[attack_capture(0, 9.0, bone), clear_capture(15.0)],
+            &HashMap::from([(bone, "top".to_string())]),
+            &HashMap::new(),
+        );
+
+        assert_eq!(github.len(), 1);
+        assert_eq!(live.len(), 1);
+        assert_eq!(
+            (github[0].active_start, github[0].active_end),
+            (live[0].active_start, live[0].active_end)
+        );
+        assert_eq!((github[0].active_start, github[0].active_end), (10, 15));
+        assert_eq!(animation_frame_for_game_frame(github[0].active_start), 9.0);
+    }
+
+    #[test]
+    fn live_wind_capture_preserves_geometry_payload_and_erase_lifetime() {
+        let raw = [3.0, 1.0, 80.0, 300.0, 0.8, 4.0, 12.0, 24.0, 16.0, 50.0];
+        let boxes = VisionaryApp::hitboxes_from_captures(
+            &[
+                wind_capture("AREA_WIND_2ND_arg10", 12.0, &raw),
+                // ATTACK_CLEAR_ALL must not end an AreaModule wind area.
+                clear_capture(15.0),
+                erase_wind_capture(3, 20.0),
+            ],
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(boxes.len(), 1);
+        let hitbox = &boxes[0];
+        let wind = hitbox.wind.as_ref().unwrap();
+        assert_eq!(wind.command, "AREA_WIND_2ND_arg10");
+        assert_eq!(wind.args, raw);
+        assert_eq!(wind.offset(), [4.0, 12.0]);
+        assert_eq!(wind.dimensions(), [24.0, 16.0]);
+        assert_eq!((hitbox.active_start, hitbox.active_end), (13, 20));
+
+        let wire = VisionaryApp::build_wind_args(hitbox).unwrap();
+        assert_eq!(wire, raw.into_iter().map(A::Num).collect::<Vec<_>>());
+
+        // Capture-sourced moves have no original script to patch. Synthesis must use the wind
+        // command and erase event, never silently turn the area into ATTACK/clear_all.
+        let synthesized = synthesize_script_from_hitboxes(&boxes);
+        assert_eq!(synthesized.to_hitboxes(), boxes);
+        let exported = crate::acmd::export_acmd_source(&synthesized, "mario", "attack_air_n");
+        assert!(exported.contains("macros::AREA_WIND_2ND_arg10"));
+        assert!(exported.contains("AreaModule::erase_wind"));
+    }
+
     /// A hitbox lasts until it is cleared. This used to be a hardcoded two frames, which is
     /// what made live-fetched hitboxes end far earlier than the script says.
     #[test]
@@ -10700,50 +11574,25 @@ mod live_effect_capture_tests {
         let bone = hash40::hash40("top").0;
         let bones = HashMap::from([(bone, "top".to_string())]);
         let attrs = HashMap::new();
-        let attack = |id: i64, frame: f32| {
-            let mut args = vec![A::Int(id), A::Int(0), A::Hash(bone)];
-            // damage, angle, kbg, fkb, bkb, size, x, y, z, then nil capsule slots.
-            args.extend([
-                A::Num(8.0),
-                A::Int(361),
-                A::Int(100),
-                A::Int(0),
-                A::Int(40),
-                A::Num(4.0),
-                A::Num(0.0),
-                A::Num(8.0),
-                A::Num(6.0),
-            ]);
-            args.extend(std::iter::repeat_n(A::Nil, 24));
-            CaptureLine {
-                kind: 6,
-                motion: hash40::hash40("attack_air_n").0,
-                frame,
-                func: "ATTACK".into(),
-                args,
-                run: 1,
-            }
-        };
-        let clear = |frame: f32| CaptureLine {
-            kind: 6,
-            motion: hash40::hash40("attack_air_n").0,
-            frame,
-            func: "ATTACK_CLEAR_ALL".into(),
-            args: Vec::new(),
-            run: 1,
-        };
 
         // Out at motion 9 (script 10), cleared at motion 15 (script 16) → ends the frame
         // before, 15. The old code would have said 12.
-        let boxes =
-            VisionaryApp::hitboxes_from_captures(&[attack(0, 9.0), clear(15.0)], &bones, &attrs);
+        let boxes = VisionaryApp::hitboxes_from_captures(
+            &[attack_capture(0, 9.0, bone), clear_capture(15.0)],
+            &bones,
+            &attrs,
+        );
         assert_eq!(boxes.len(), 1);
         assert_eq!(boxes[0].active_start, 10);
         assert_eq!(boxes[0].active_end, 15);
 
         // Re-using an id ends the previous hitbox, like the script path does.
         let boxes = VisionaryApp::hitboxes_from_captures(
-            &[attack(0, 9.0), attack(0, 14.0), clear(20.0)],
+            &[
+                attack_capture(0, 9.0, bone),
+                attack_capture(0, 14.0, bone),
+                clear_capture(20.0),
+            ],
             &bones,
             &attrs,
         );
@@ -10752,7 +11601,8 @@ mod live_effect_capture_tests {
         assert_eq!((boxes[1].active_start, boxes[1].active_end), (15, 20));
 
         // Never cleared — the same 9999 sentinel the script path uses, not a made-up length.
-        let boxes = VisionaryApp::hitboxes_from_captures(&[attack(0, 9.0)], &bones, &attrs);
+        let boxes =
+            VisionaryApp::hitboxes_from_captures(&[attack_capture(0, 9.0, bone)], &bones, &attrs);
         assert_eq!(boxes[0].active_end, 9999);
     }
 
@@ -10940,6 +11790,147 @@ mod live_effect_capture_tests {
             run: 1,
         };
         assert!(VisionaryApp::build_attack_args(&Hitbox::default(), Some(&donor)).is_none());
+    }
+
+    #[test]
+    fn a_new_grab_without_a_donor_builds_the_geometry_form() {
+        let grab = Hitbox {
+            id: 4,
+            category: 1,
+            bone_name: "top".into(),
+            size: 6.5,
+            offset_x: 1.0,
+            offset_y: 8.0,
+            offset_z: -2.0,
+            capsule_end: Some([1.0, 3.0, -2.0]),
+            active_start: 1,
+            active_end: 5,
+            ..Default::default()
+        };
+        let args = VisionaryApp::build_catch_args(&grab, None).unwrap();
+        assert_eq!(args.len(), 9);
+        assert_eq!(args[0], A::Int(4));
+        assert_eq!(args[2], A::Num(6.5));
+        assert_eq!(args[6], A::Num(1.0));
+        assert_eq!(args[7], A::Num(3.0));
+        assert_eq!(args[8], A::Num(-2.0));
+
+        let end = VisionaryApp::collision_end_injection(&grab).unwrap();
+        assert_eq!(end.command.as_deref(), Some("GRAB_CLEAR_ALL"));
+        assert_eq!(end.frame, VisionaryApp::script_to_motion_frame(6));
+        assert!(end.args.is_empty());
+    }
+
+    #[test]
+    fn an_added_wind_box_gets_an_id_scoped_end_command() {
+        let wind = Hitbox {
+            id: 7,
+            category: 2,
+            active_start: 10,
+            active_end: 14,
+            ..Default::default()
+        };
+        let end = VisionaryApp::collision_end_injection(&wind).unwrap();
+        assert_eq!(end.command.as_deref(), Some("AREA_WIND_ERASE"));
+        assert_eq!(end.args, vec![A::Int(7)]);
+        assert_eq!(end.frame, VisionaryApp::script_to_motion_frame(15));
+    }
+
+    #[test]
+    fn an_existing_wind_edit_replaces_the_original_with_the_exact_payload() {
+        let args = vec![3.0, 1.0, 80.0, 300.0, 0.8, 4.0, 12.0, 24.0, 16.0, 50.0];
+        let original = Hitbox {
+            id: 3,
+            category: 2,
+            active_start: 10,
+            active_end: 14,
+            wind: Some(crate::data::WindboxData {
+                command: "AREA_WIND_2ND_arg10".into(),
+                args: args.clone(),
+            }),
+            ..Default::default()
+        };
+        let mut edited = original.clone();
+        edited.wind.as_mut().unwrap().args[1] = 2.5;
+
+        let mut rules = Vec::new();
+        assert!(VisionaryApp::append_wind_replacement_rules(
+            &mut rules, 0x1234, &original, &edited
+        ));
+        assert_eq!(rules.len(), 3);
+        assert!(rules[0].suppress);
+        assert!(rules[0].overrides.is_none());
+        let inject = rules[1].inject.as_ref().unwrap();
+        assert_eq!(inject.command.as_deref(), Some("AREA_WIND_2ND_arg10"));
+        assert_eq!(inject.args[1], A::Num(2.5));
+        assert_eq!(
+            rules[2].inject.as_ref().unwrap().command.as_deref(),
+            Some("AREA_WIND_ERASE")
+        );
+    }
+
+    #[test]
+    fn dense_timeline_rows_scale_without_changing_frame_space() {
+        assert_eq!(timeline_content_height(0, 0), 24.0);
+        assert_eq!(timeline_content_height(40, 0), 504.0);
+        assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
+
+        let dense_capture: Vec<Hitbox> = (0..40)
+            .map(|i| Hitbox {
+                id: i,
+                active_start: 5 + i,
+                active_end: 6 + i,
+                ..Default::default()
+            })
+            .collect();
+        assert_eq!(timeline_frame_extent(&dense_capture, &[]), 45);
+
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 180.0),
+            )),
+            ..Default::default()
+        };
+        let mut measured = None;
+        let _ = context.run_ui(input, |ui| {
+            let output = timeline_scroll_area(120.0).show(ui, |ui| {
+                ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), timeline_content_height(40, 0)),
+                    egui::Sense::hover(),
+                );
+            });
+            measured = Some((output.inner_rect.height(), output.content_size.y));
+        });
+        let (viewport_height, content_height) = measured.unwrap();
+        assert!(viewport_height <= 120.01);
+        assert!(content_height >= 504.0);
+    }
+
+    #[test]
+    fn hitbox_menu_scrollbar_uses_the_full_remaining_panel_height() {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(420.0, 500.0),
+            )),
+            ..Default::default()
+        };
+        let mut measured = None;
+        let _ = context.run_ui(input, |ui| {
+            let output = hitbox_menu_scroll_area(360.0).show(ui, |ui| {
+                ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 900.0),
+                    egui::Sense::hover(),
+                );
+            });
+            measured = Some((output.inner_rect.height(), output.content_size.y));
+        });
+        let (viewport_height, content_height) = measured.unwrap();
+        assert!((viewport_height - 360.0).abs() < 0.01);
+        assert!(content_height >= 900.0);
     }
 
     /// Added and retimed attacks are replayed from a captured 36-slot donor. Even when that

@@ -501,17 +501,7 @@ impl HitboxRenderState {
         let transforms = self.camera.transforms(viewport.width(), viewport.height());
         let clip =
             transforms.mvp_matrix * glam::Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
-        if clip.w <= 0.0 {
-            return None;
-        }
-        let ndc = clip.truncate() / clip.w;
-        // Allow a small margin outside NDC so hitboxes near viewport edges still show
-        if ndc.x < -1.5 || ndc.x > 1.5 || ndc.y < -1.5 || ndc.y > 1.5 {
-            return None;
-        }
-        let sx = (ndc.x * 0.5 + 0.5) * viewport.width() + viewport.left();
-        let sy = (-ndc.y * 0.5 + 0.5) * viewport.height() + viewport.top();
-        Some(egui::pos2(sx, sy))
+        clip_to_screen(clip, viewport)
     }
 
     /// Computes the screen-space radius for a sphere of `world_radius` centered at `world_pos`.
@@ -536,9 +526,32 @@ impl HitboxRenderState {
     }
 }
 
+fn clip_to_screen(clip: glam::Vec4, viewport: egui::Rect) -> Option<egui::Pos2> {
+    if !clip.is_finite() || clip.w <= 0.0001 {
+        return None;
+    }
+    // Do not reject X/Y outside NDC here. A large sphere can overlap the viewport while
+    // its center is outside it, and a capsule/wind polygon must retain off-screen endpoints
+    // so its connected in-frame portion can still be painted. `painter_at(viewport)` clips
+    // the finished primitive to the viewport safely.
+    let ndc = clip.truncate() / clip.w;
+    let sx = (ndc.x * 0.5 + 0.5) * viewport.width() + viewport.left();
+    let sy = (-ndc.y * 0.5 + 0.5) * viewport.height() + viewport.top();
+    (sx.is_finite() && sy.is_finite()).then(|| egui::pos2(sx, sy))
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // Rendering helpers remain grouped before callbacks.
 mod tests {
+    #[test]
+    fn offscreen_endpoints_stay_projectable_for_partially_visible_shapes() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        let offscreen = super::clip_to_screen(glam::Vec4::new(2.5, 0.0, 0.0, 1.0), viewport)
+            .expect("front-facing points stay projectable outside NDC");
+        assert!(offscreen.x > viewport.right());
+        assert!(super::clip_to_screen(glam::Vec4::new(0.0, 0.0, 0.0, -1.0), viewport).is_none());
+    }
+
     #[test]
     fn synthetic_top_uses_animated_trans_translation() {
         let expected = glam::Vec3::new(8.0, 1.5, -3.0);
@@ -679,7 +692,9 @@ fn weapon_attach_bone(weapon_dir: &str) -> String {
 pub struct ViewportCallback {
     pub width: f32,
     pub height: f32,
-    pub current_frame: f32,
+    /// Zero-based `.nuanmb` frame index. The app converts its one-based game-frame playhead
+    /// before constructing the callback.
+    pub animation_frame: f32,
     pub anim_path: Option<std::path::PathBuf>,
     pub skel_path: Option<std::path::PathBuf>,
 }
@@ -706,7 +721,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             let w = self.width as u32;
             let h = self.height as u32;
 
-            let frame_changed = (self.current_frame - state.last_frame).abs() > f32::EPSILON;
+            let frame_changed = (self.animation_frame - state.last_frame).abs() > f32::EPSILON;
             let anim_changed = self.anim_path != state.last_anim_path;
             let skel_changed = self.skel_path != state.last_skel_path;
 
@@ -721,9 +736,9 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
                     queue,
                     self.anim_path.as_deref(),
                     self.skel_path.as_deref(),
-                    self.current_frame,
+                    self.animation_frame,
                 );
-                state.last_frame = self.current_frame;
+                state.last_frame = self.animation_frame;
                 state.last_anim_path = self.anim_path.clone();
                 state.last_skel_path = self.skel_path.clone();
             }

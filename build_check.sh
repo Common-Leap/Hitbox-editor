@@ -1,2 +1,4 @@
-#!/bin/bash
-cargo build 2>&1
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build "$@"

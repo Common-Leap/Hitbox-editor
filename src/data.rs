@@ -56,6 +56,11 @@ pub struct Hitbox {
     /// preview color and which plugin family live edits target. Old projects omit it → 0.
     #[serde(default)]
     pub category: u8,
+    /// Exact AREA_WIND payload for category 2. Wind areas are 2D rectangles/circles with a
+    /// different parameter layout from ATTACK, so keeping the original command and every float
+    /// is required for accurate rendering, live rewriting, retiming, and export.
+    #[serde(default)]
+    pub wind: Option<WindboxData>,
 }
 
 impl Default for Hitbox {
@@ -99,6 +104,102 @@ impl Default for Hitbox {
             active_end: 9999,
             hitbox_type: 0,
             category: 0,
+            wind: None,
+        }
+    }
+}
+
+/// Lossless payload for one AREA_WIND_2ND family call.
+///
+/// All four commands share slots 0..7: id, four physics values, X/Y, then radius (radial) or
+/// width (rectangle). Rectangle calls add height at slot 8. The `_arg9`/`_arg10` variants add
+/// a final lifetime; the shorter variants leave the area alive until `erase_wind`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WindboxData {
+    pub command: String,
+    pub args: Vec<f32>,
+}
+
+impl WindboxData {
+    pub fn expected_arity(&self) -> Option<usize> {
+        match self.command.as_str() {
+            "AREA_WIND_2ND_RAD" => Some(8),
+            "AREA_WIND_2ND_RAD_arg9" => Some(9),
+            "AREA_WIND_2ND" => Some(9),
+            "AREA_WIND_2ND_arg10" => Some(10),
+            _ => None,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.expected_arity() == Some(self.args.len())
+    }
+
+    pub fn is_radial(&self) -> bool {
+        self.command.contains("_RAD")
+    }
+
+    pub fn id(&self) -> u32 {
+        self.args.first().copied().unwrap_or(0.0).max(0.0) as u32
+    }
+
+    pub fn has_lifetime(&self) -> bool {
+        (self.is_radial() && self.args.len() >= 9) || (!self.is_radial() && self.args.len() >= 10)
+    }
+
+    pub fn lifetime(&self) -> Option<u32> {
+        self.has_lifetime()
+            .then(|| self.args.last().copied().unwrap_or(0.0).max(0.0) as u32)
+    }
+
+    pub fn offset(&self) -> [f32; 2] {
+        [
+            self.args.get(5).copied().unwrap_or(0.0),
+            self.args.get(6).copied().unwrap_or(0.0),
+        ]
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.args.get(7).copied().unwrap_or(0.0).abs()
+    }
+
+    pub fn dimensions(&self) -> [f32; 2] {
+        [
+            self.args.get(7).copied().unwrap_or(0.0).abs(),
+            self.args.get(8).copied().unwrap_or(0.0).abs(),
+        ]
+    }
+
+    pub fn to_hitbox(&self, active_start: u32) -> Hitbox {
+        let [x, y] = self.offset();
+        let size = if self.is_radial() {
+            self.radius()
+        } else {
+            let [width, height] = self.dimensions();
+            width.max(height) * 0.5
+        };
+        let active_end = self
+            .lifetime()
+            .filter(|life| *life > 0)
+            .map(|life| active_start.saturating_add(life).saturating_sub(1))
+            .unwrap_or(u32::MAX);
+        Hitbox {
+            id: self.id(),
+            bone_name: "top".into(),
+            damage: 0.0,
+            angle: 0,
+            kb_scaling: 0,
+            fkb: 0,
+            kb_base: 0,
+            size,
+            offset_x: x,
+            offset_y: y,
+            offset_z: 0.0,
+            active_start,
+            active_end,
+            category: 2,
+            wind: Some(self.clone()),
+            ..Default::default()
         }
     }
 }
@@ -234,6 +335,7 @@ impl AttackCall {
             active_end: u32::MAX,
             hitbox_type: 0,
             category: 0,
+            wind: None,
         }
     }
 }
@@ -245,6 +347,8 @@ impl AttackCall {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ExcuteStmt {
     Attack(AttackCall),
+    Wind(WindboxData),
+    EraseWind(u32),
     ClearAll,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
@@ -300,9 +404,32 @@ fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) 
                             }
                             hitboxes.push(call.to_hitbox(script_frame(frame)));
                         }
+                        ExcuteStmt::Wind(wind) => {
+                            let spawn = script_frame(frame);
+                            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
+                                hitbox.category == 2
+                                    && hitbox.id == wind.id()
+                                    && hitbox.active_end >= spawn
+                            }) {
+                                existing.active_end =
+                                    spawn.saturating_sub(1).max(existing.active_start);
+                            }
+                            hitboxes.push(wind.to_hitbox(spawn));
+                        }
+                        ExcuteStmt::EraseWind(id) => {
+                            let end = script_frame(frame).saturating_sub(1);
+                            for hitbox in hitboxes.iter_mut().filter(|hitbox| {
+                                hitbox.category == 2
+                                    && hitbox.id == *id
+                                    && hitbox.active_start <= end.saturating_add(1)
+                                    && hitbox.active_end >= end
+                            }) {
+                                hitbox.active_end = end.max(hitbox.active_start);
+                            }
+                        }
                         ExcuteStmt::ClearAll => {
                             let end = script_frame(frame);
-                            for hb in hitboxes.iter_mut() {
+                            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category != 2) {
                                 if hb.active_end == u32::MAX {
                                     hb.active_end = end.saturating_sub(1);
                                 }
@@ -505,7 +632,9 @@ impl Default for AppState {
             selected_move: None,
             hitboxes: Vec::new(),
             script: AcmdScript::default(),
-            current_frame: 0,
+            // ACMD/game frames are one-based. Animation sampling converts this to its
+            // zero-based frame index at the renderer boundary.
+            current_frame: 1,
             total_frames: 0,
             playing: false,
             status: "Select a data root directory to begin.".to_string(),
@@ -1035,14 +1164,24 @@ impl EffectScript {
     }
 }
 
-/// Script frame → the integer frame the editor shows.
+/// ACMD script frame → the one-based game frame the editor shows.
 ///
 /// ROUNDS. This used to truncate (`frame as u32`), while the live-capture path rounded, so the
-/// two sources disagreed by a frame on any non-integral value — a `wait(1.5)` landed on 6 from
-/// the game and 5 from the script for the same spawn. Whichever is "right", they have to agree
-/// with each other before a difference between them means anything.
+/// two sources disagreed by a frame on any non-integral value. Frame zero is only the ACMD
+/// coroutine's initial state; in the game-facing timeline it is frame 1.
 pub(crate) fn script_frame(frame: f32) -> u32 {
-    frame.max(0.0).round() as u32
+    (frame.max(0.0).round() as u32).max(1)
+}
+
+/// The plugin reports `MotionModule::frame`, whose first pose is zero. The editor, ACMD source,
+/// exports, and user-facing timeline all name that same instant game frame 1.
+pub(crate) fn motion_to_script_frame(frame: f32) -> u32 {
+    (frame.max(0.0).round() as u32).saturating_add(1)
+}
+
+/// Convert a one-based game/ACMD frame to the zero-based motion and animation frame index.
+pub(crate) fn script_to_motion_frame(frame: u32) -> f32 {
+    frame.saturating_sub(1) as f32
 }
 
 fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<EffectCall>) -> f32 {
@@ -1349,23 +1488,22 @@ mod tests {
         assert!(!VANILLA_FIGHTERS.contains(&"waluigi"));
     }
 
-    /// The GitHub-script path used to TRUNCATE while the live-capture path rounded, so the
-    /// same underlying frame displayed as two different integers depending on where the move
-    /// was loaded from. Whichever source is authoritative, they have to agree with each other
-    /// first — a one-frame difference between them is only meaningful if it is real.
+    /// GitHub ACMD names game frames directly, while live capture reports the corresponding
+    /// zero-based motion frame. Equal in-game events must resolve to the same editor frame.
     #[test]
-    fn script_frames_round_like_the_live_capture_does() {
-        // How `load_from_capture` turns a MotionModule frame into a displayed frame.
-        let capture = |f: f32| f.max(0.0).round() as u32;
-        for f in [0.0, 0.4, 0.5, 1.0, 4.999_998, 5.0, 5.000_002, 5.5, 9.75] {
+    fn script_and_motion_frames_name_the_same_game_frame() {
+        for script in [1.0, 1.4, 1.5, 2.0, 5.999_998, 6.0, 6.000_002, 6.5, 10.75] {
+            let motion = script - 1.0;
             assert_eq!(
-                script_frame(f),
-                capture(f),
-                "script and capture disagree on frame {f}"
+                script_frame(script),
+                motion_to_script_frame(motion),
+                "script frame {script} and motion frame {motion} describe the same game instant"
             );
         }
-        // Negative frames cannot exist on the timeline; both clamp rather than wrapping.
-        assert_eq!(script_frame(-3.0), 0);
+        assert_eq!(script_frame(0.0), 1);
+        assert_eq!(script_frame(-3.0), 1);
+        assert_eq!(motion_to_script_frame(0.0), 1);
+        assert_eq!(script_to_motion_frame(1), 0.0);
     }
 
     /// `frame()` is absolute and `wait()` is relative — mixing them up silently shifts every

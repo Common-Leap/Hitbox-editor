@@ -1,6 +1,8 @@
 // Visionary: character/circle preview, authored effect editing, and live in-game rendering.
 mod acmd;
 mod app;
+mod app_icon;
+mod credits;
 mod data;
 mod eff_attrs;
 mod eff_editor;
@@ -17,10 +19,17 @@ mod scratch_dirs;
 mod texture_import;
 
 fn main() -> anyhow::Result<()> {
-    // Force Vulkan backend on Linux — avoids silent failures with RADV + wgpu auto-detection
-    std::env::set_var("WGPU_BACKEND", "vulkan");
+    // RADV can fail silently during wgpu's Linux auto-detection. Keep the working Vulkan
+    // default there, while respecting an explicit user choice and leaving Windows to select
+    // DirectX/Vulkan normally.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        std::env::set_var("WGPU_BACKEND", "vulkan");
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_app_id(app_icon::APP_ID)
+            .with_icon(app_icon::viewport_icon())
             .with_title("Visionary")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 600.0]),

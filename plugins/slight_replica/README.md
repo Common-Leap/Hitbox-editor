@@ -9,6 +9,7 @@ editor, and applies hitbox and effect edits while the game is running.
 - The Visionary source
 - A recent Rust toolchain for the desktop editor
 - The Rust Skyline toolchain and `cargo-skyline` for the plugin
+- Python 3 for the portable build, deployment, and optional FTP helpers
 - A Skyline-compatible Super Smash Bros. Ultimate setup
 - Arcropolis, NRO Hook, and the Smashline 2 runtime
 - An ArcExplorer export containing sibling `fighter` and `effect` folders
@@ -29,10 +30,23 @@ needs when Smashline is missing or incompatible.
 
 ## Build Visionary and the plugin
 
-Run the following commands from the Visionary repository root:
+Build the desktop editor from the Visionary repository root:
+
+```console
+cargo build --release
+```
+
+Then build the plugin with the launcher for your platform.
+
+Windows:
+
+```bat
+plugins\slight_replica\scripts\build.bat
+```
+
+Linux:
 
 ```bash
-cargo build --release
 bash plugins/slight_replica/scripts/build.sh
 ```
 
@@ -58,10 +72,21 @@ above. A backup kept beside the plugin — `lib_effect_viewer.nro.bak`, a rename
 copy, an older build — is loaded as a second plugin, so the hooks run twice and
 the frame rate halves. Keep spare builds somewhere else entirely.
 
-The deployment scripts under `scripts/` are convenience helpers for standard
-Eden and Ryujinx installations. Review them before use because emulator data
-directories are configurable and differ across operating systems. Manual
-installation is the portable option.
+The cross-platform deployment helper uses the normal application-data location
+for the selected emulator. A portable or customized install can declare its mod
+root explicitly:
+
+```console
+python plugins/slight_replica/tools/deploy_plugin.py --emulator eden --mod-dir "<Arcropolis mod root>"
+python plugins/slight_replica/tools/deploy_plugin.py --emulator ryujinx --mod-dir "<Arcropolis mod root>"
+```
+
+On Windows, `py -3` can be used in place of `python`. The same locations can be
+declared once through `VISIONARY_EDEN_MOD_DIR` and
+`VISIONARY_RYUJINX_MOD_DIR`. When deploying to Ryujinx, pass
+`--source-mod-dir "<existing Skyline mod root>"` if the Skyline ExeFS and runtime
+NROs should be copied from another installation. Manual installation remains
+available for any custom layout.
 
 ## Prepare the game data
 
@@ -108,14 +133,14 @@ For an emulator, RPM also needs FTP access to the emulator's virtual SD card:
 
 1. Install the FTP helper dependency:
 
-   ```bash
-   python3 -m pip install --user pyftpdlib
+   ```console
+   python -m pip install --user pyftpdlib
    ```
 
 2. Prepare the SLight directories in the emulator's configured SD-card root:
 
-   ```bash
-   python3 plugins/slight_replica/tools/setup_eden_sd.py \
+   ```console
+   python plugins/slight_replica/tools/setup_eden_sd.py \
      --sdmc "<emulator SD root>" \
      --host 127.0.0.1 \
      --port 7878
@@ -123,8 +148,8 @@ For an emulator, RPM also needs FTP access to the emulator's virtual SD card:
 
 3. Start the FTP bridge against that same SD-card root:
 
-   ```bash
-   python3 plugins/slight_replica/tools/ftp_server.py \
+   ```console
+   python plugins/slight_replica/tools/ftp_server.py \
      --root "<emulator SD root>"
    ```
 

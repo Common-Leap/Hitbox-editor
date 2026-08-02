@@ -2,6 +2,7 @@
 name = "visionary"
 version = "0.1.0"
 edition = "2021"
+description = "A desktop editor for Super Smash Bros. Ultimate fighter data"
 
 [[bin]]
 name = "visionary"
@@ -9,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # GUI + rendering
-eframe = { version = "0.34.3", default-features = false, features = ["wayland", "x11", "wgpu"] }
+eframe = { version = "0.34.3", default-features = false, features = ["wgpu"] }
 egui = { version = "0.34.3" }
 egui-wgpu = "0.34.3"
 egui_extras = { version = "0.34.3", features = ["all_loaders"] }
@@ -37,7 +38,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Async + HTTP (for ACMD fetch)
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 # Utilities
 serde = { version = "1", features = ["derive"] }
@@ -47,6 +48,19 @@ anyhow = "1"
 rfd = "0.15"
 dirs = "5"
 tempfile = "3"
+
+# These native window systems only exist on Linux. Keeping them out of the common eframe
+# declaration prevents Windows builds from inheriting host features they cannot use.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.34.3", default-features = false, features = ["wayland", "x11", "wgpu"] }
+
+[build-dependencies]
+winresource = "0.1.31"
+
+[package.metadata.winresource]
+OriginalFilename = "visionary.exe"
+ProductName = "Visionary"
+FileDescription = "Visionary"
 
 # Optimize dependencies in debug builds — wgpu/ssbh_wgpu are unusably slow unoptimized
 [profile.dev.package."*"]

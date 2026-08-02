@@ -175,6 +175,13 @@ pub fn notify_agent_info(info: &crate::slight::systems::agent_info::AgentInfo) {
     emit("AgentInfo", &serde_json::json!({ "AgentInfo": info }));
 }
 
+pub fn notify_acmd_capture_cleared() {
+    emit(
+        "AcmdCaptureCleared",
+        &serde_json::json!({ "AcmdCaptureCleared": true }),
+    );
+}
+
 #[derive(Deserialize)]
 struct PathUpdate {
     path: String,
@@ -210,6 +217,11 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
             "reset_pins" => {
                 crate::slight::effect_viewer::kinds::reset_all_pins();
                 RESYNC.store(true, std::sync::atomic::Ordering::Release);
+            }
+            // Stage capture cleanup for the game thread. Taking the capture locks from this
+            // server thread can park against the game thread and freeze Skyline.
+            "clear_acmd_captures" => {
+                crate::slight::hitbox_viewer::request_clear_captures();
             }
             // Editor deployed/updated merged eff files on the SD — refresh the served map
             // (content is re-read per load; only NEW paths need registration here).

@@ -1898,6 +1898,8 @@ impl EffEditor {
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("eff_editor"),
             egui::ViewportBuilder::default()
+                .with_app_id(crate::app_icon::APP_ID)
+                .with_icon(crate::app_icon::viewport_icon())
                 .with_title("Eff Editor — Visionary")
                 .with_inner_size([1120.0, 680.0])
                 .with_min_inner_size([760.0, 420.0]),
@@ -4077,7 +4079,7 @@ mod tests {
     /// swap landed on no emitter and was simply lost.
     #[test]
     fn selecting_a_smaller_entry_pulls_the_emitter_selection_back_in_range() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         // A second set with three emitters, then back to the one-emitter set.
         let ptcl = editor.ptcl.as_mut().unwrap();
         let template = ptcl.emitter_sets[0].emitters[0].clone();
@@ -4113,7 +4115,7 @@ mod tests {
     /// what `collect_authored_edits` will actually ship.
     #[test]
     fn edited_sets_match_what_gets_sent() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         assert!(editor.edited_sets().is_empty());
 
         tune(&mut editor, 2.5);
@@ -4126,7 +4128,7 @@ mod tests {
 
         // A texture swap is an edit too — the markers must not miss it just because no
         // numeric field moved.
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         with_textures(&mut editor);
         assert!(editor.edited_sets().is_empty());
         editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
@@ -4141,7 +4143,7 @@ mod tests {
     /// no edit record, no export path. It changed the editor's own view and nothing shipped.
     #[test]
     fn a_texture_swap_becomes_an_edit_record_naming_the_texture() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         with_textures(&mut editor);
         assert!(
             editor.collect_authored_edits().is_empty(),
@@ -4162,7 +4164,7 @@ mod tests {
     /// Reset must undo a swap like any other field — it restores from the same snapshot.
     #[test]
     fn resetting_an_emitter_undoes_a_texture_swap() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         with_textures(&mut editor);
         editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
 
@@ -4179,12 +4181,12 @@ mod tests {
     /// whatever pool the reloaded file has.
     #[test]
     fn a_saved_texture_swap_reapplies_onto_the_reloaded_eff() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         with_textures(&mut editor);
         editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0].texture_index = Some(1);
         let saved = editor.collect_authored_edits();
 
-        let mut reloaded = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut reloaded = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         with_textures(&mut reloaded);
         reloaded.apply_authored_edits(&saved);
 
@@ -4199,8 +4201,8 @@ mod tests {
     /// next `sync_eff_mods_from_editor` then writes the empty diff back over the project.
     #[test]
     fn transplanting_carries_emitter_edits_across_the_reload() {
-        let base = PathBuf::from("/effect/fighter/kirby/ef_kirby.eff");
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let base = PathBuf::from("effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         tune(&mut editor, 2.5);
         assert_eq!(
             editor.collect_authored_edits().len(),
@@ -4208,7 +4210,10 @@ mod tests {
             "fixture is edited"
         );
 
-        editor.set_merged_overlay(&base, Some(Path::new("/tmp/_transplant_preview.eff")));
+        editor.set_merged_overlay(
+            &base,
+            Some(Path::new(crate::scratch_dirs::TRANSPLANT_PREVIEW_FILE)),
+        );
 
         let carried = editor.pending_edits.as_ref().expect("edits carried across");
         assert_eq!(carried.len(), 1);
@@ -4225,10 +4230,13 @@ mod tests {
     /// again and the project keeps its `authored` list.
     #[test]
     fn carried_edits_reapply_onto_the_reloaded_eff() {
-        let base = PathBuf::from("/effect/fighter/kirby/ef_kirby.eff");
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let base = PathBuf::from("effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         tune(&mut editor, 2.5);
-        editor.set_merged_overlay(&base, Some(Path::new("/tmp/_transplant_preview.eff")));
+        editor.set_merged_overlay(
+            &base,
+            Some(Path::new(crate::scratch_dirs::TRANSPLANT_PREVIEW_FILE)),
+        );
         let carried = editor.pending_edits.take().expect("edits carried across");
 
         // Stand in for the reload: the merged baseline has the emitter back at pristine.
@@ -4246,7 +4254,7 @@ mod tests {
     /// to record them in the new form, so the project migrates itself by being opened.
     #[test]
     fn a_legacy_projects_named_fields_still_land() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         let legacy = AuthoredEdit {
             set_name: "P_KirbyDash".into(),
             entry_name: "kirby_dash".into(),
@@ -4290,7 +4298,7 @@ mod tests {
 
     #[test]
     fn friendly_key_controls_and_attribute_rows_stay_in_sync() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         let em = &mut editor.ptcl.as_mut().unwrap().emitter_sets[0].emitters[0];
         set_attr(em, "emitter_static.num_color0_keys", AttrValue::Int(1));
         set_attr(em, "particle_color.color0_type", AttrValue::Int(1));
@@ -4327,7 +4335,7 @@ mod tests {
     /// roster the exporter can rebuild the set from.
     #[test]
     fn duplicating_an_emitter_records_a_roster() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         assert!(
             editor.collect_rosters().is_empty(),
             "an untouched set records no emitter list"
@@ -4420,7 +4428,7 @@ mod tests {
 
     #[test]
     fn removing_every_emitter_survives_project_reapply() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         editor.ptcl.as_mut().unwrap().emitter_sets[0]
             .emitters
             .clear();
@@ -4428,7 +4436,7 @@ mod tests {
         assert_eq!(rosters.len(), 1);
         assert!(rosters[0].slots.is_empty());
 
-        let mut reloaded = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut reloaded = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         reloaded.apply_structure_edits(&rosters, &[]);
         assert!(reloaded.ptcl.unwrap().emitter_sets[0].emitters.is_empty());
     }
@@ -4484,11 +4492,11 @@ mod tests {
     /// back to grey — the user was never told the running game hadn't been given the transplant.
     #[test]
     fn a_reload_keeps_the_unsent_marker() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         editor.mark_unsent();
         // The load itself fails (nothing on disk here); what matters is that it no longer wipes
         // the marker on its way in, which the old reset did before this early return.
-        editor.load_eff(Path::new("/effect/fighter/kirby/_transplant_preview.eff"));
+        editor.load_eff(Path::new("effect/fighter/kirby/_transplant_preview.eff"));
         assert!(
             editor.eff_dirty_at.is_some(),
             "a reload cleared the unsent marker"
@@ -4498,7 +4506,7 @@ mod tests {
     /// Handing everything to the game is what clears it — from any caller, not just the button.
     #[test]
     fn requesting_a_live_apply_clears_the_unsent_marker() {
-        let mut editor = editor_with_one_emitter("/effect/fighter/kirby/ef_kirby.eff");
+        let mut editor = editor_with_one_emitter("effect/fighter/kirby/ef_kirby.eff");
         editor.mark_unsent();
         editor.request_live_apply();
         assert!(editor.eff_dirty_at.is_none());

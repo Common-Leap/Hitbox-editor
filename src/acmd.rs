@@ -185,6 +185,18 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 continue;
             }
         }
+        if line.contains("AREA_WIND_2ND") {
+            if let Some(call) = parse_wind_call(line) {
+                stmts.push(ExcuteStmt::Wind(call));
+                continue;
+            }
+        }
+        if line.contains("erase_wind") {
+            if let Some(id) = parse_erase_wind(line) {
+                stmts.push(ExcuteStmt::EraseWind(id));
+                continue;
+            }
+        }
         if line.contains("clear_all") {
             stmts.push(ExcuteStmt::ClearAll);
             continue;
@@ -903,6 +915,50 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     })
 }
 
+fn parse_wind_call(line: &str) -> Option<crate::data::WindboxData> {
+    const COMMANDS: [(&str, usize); 4] = [
+        ("AREA_WIND_2ND_RAD_arg9", 9),
+        ("AREA_WIND_2ND_arg10", 10),
+        ("AREA_WIND_2ND_RAD", 8),
+        ("AREA_WIND_2ND", 9),
+    ];
+    for (command, arity) in COMMANDS {
+        let needle = format!("{command}(");
+        let Some(start) = line.find(&needle) else {
+            continue;
+        };
+        let inner = &line[start + needle.len()..];
+        let end = inner.rfind(')')?;
+        let tokens = tokenize_args(&inner[..end]);
+        let values = if tokens.len() == arity + 1 {
+            &tokens[1..]
+        } else if tokens.len() == arity {
+            &tokens[..]
+        } else {
+            continue;
+        };
+        let args: Option<Vec<f32>> = values
+            .iter()
+            .map(|value| value.trim().parse::<f32>().ok())
+            .collect();
+        return Some(crate::data::WindboxData {
+            command: command.into(),
+            args: args?,
+        });
+    }
+    None
+}
+
+fn parse_erase_wind(line: &str) -> Option<u32> {
+    let start = line.find("erase_wind(")? + "erase_wind(".len();
+    let end = line[start..].rfind(')')? + start;
+    tokenize_args(&line[start..end])
+        .last()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
 /// Strip leading `*` dereference from constant names like `*ATTACK_SETOFF_KIND_ON`.
 fn strip_deref(s: &str) -> String {
     s.trim_start_matches('*').to_string()
@@ -1044,6 +1100,18 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
         .iter()
         .map(|s| match s {
             crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
+            crate::data::ExcuteStmt::Wind(wind) => format!(
+                "{indent}macros::{}(agent, {});",
+                wind.command,
+                wind.args
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            crate::data::ExcuteStmt::EraseWind(id) => {
+                format!("{indent}AreaModule::erase_wind(agent.module_accessor, {id});")
+            }
             crate::data::ExcuteStmt::ClearAll => {
                 format!("{indent}AttackModule::clear_all(agent.module_accessor);")
             }
@@ -1493,7 +1561,15 @@ Skyline ACMD mod for Super Smash Bros. Ultimate.
 
 ## Building
 
-Run the included build script — it handles everything automatically:
+Run the included build script for your platform — it handles everything automatically.
+
+Windows:
+
+```bat
+build.bat
+```
+
+Linux and macOS:
 
 ```sh
 bash build.sh
@@ -1654,6 +1730,60 @@ pub fn export_acmd_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wind_commands_round_trip_with_exact_shapes_and_independent_erases() {
+        let source = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::AREA_WIND_2ND_arg10(agent, 3, 1, 80, 300, 0.8, 4, 12, 24, 16, 50);
+    }
+    frame(agent.lua_state_agent, 7.0);
+    if macros::is_excute(agent) {
+        macros::AREA_WIND_2ND_RAD(agent, 4, 0.5, 0.02, 1000, 1, -2, 6, 18);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        AttackModule::clear_all(agent.module_accessor);
+        AreaModule::erase_wind(agent.module_accessor, 4);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        AreaModule::erase_wind(agent.module_accessor, 3);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let hitboxes = script.to_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+
+        let rect = &hitboxes[0];
+        let rect_wind = rect.wind.as_ref().unwrap();
+        assert_eq!(rect.id, 3);
+        assert_eq!(rect_wind.command, "AREA_WIND_2ND_arg10");
+        assert_eq!(rect_wind.offset(), [4.0, 12.0]);
+        assert_eq!(rect_wind.dimensions(), [24.0, 16.0]);
+        assert_eq!((rect.active_start, rect.active_end), (5, 11));
+
+        let radial = &hitboxes[1];
+        let radial_wind = radial.wind.as_ref().unwrap();
+        assert_eq!(radial.id, 4);
+        assert_eq!(radial_wind.command, "AREA_WIND_2ND_RAD");
+        assert_eq!(radial_wind.offset(), [-2.0, 6.0]);
+        assert_eq!(radial_wind.radius(), 18.0);
+        assert_eq!((radial.active_start, radial.active_end), (7, 8));
+
+        let emitted = export_acmd_source(&script, "mario", "test");
+        assert!(emitted.contains(
+            "macros::AREA_WIND_2ND_arg10(agent, 3, 1, 80, 300, 0.8, 4, 12, 24, 16, 50);"
+        ));
+        assert!(
+            emitted.contains("macros::AREA_WIND_2ND_RAD(agent, 4, 0.5, 0.02, 1000, 1, -2, 6, 18);")
+        );
+        assert!(emitted.contains("AreaModule::erase_wind(agent.module_accessor, 4);"));
+    }
+
     // ═══ Generated-source compile golden ════════════════════════════════════
 
     fn sample_project() -> ModProject {

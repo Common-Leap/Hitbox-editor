@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Visionary
+Comment=Edit Super Smash Bros. Ultimate fighter data
+Exec=visionary
+Icon=visionary
+Terminal=false
+StartupWMClass=Visionary
+Categories=Development;

@@ -9,6 +9,12 @@ Set `SSBU_DUMP_DIR` to the directory containing the input files:
 export SSBU_DUMP_DIR=/path/to/external/ssbu-dumps
 ```
 
+On Windows PowerShell, use:
+
+```powershell
+$env:SSBU_DUMP_DIR = "C:\path\to\external\ssbu-dumps"
+```
+
 Depending on the script, the expected files are `exefs/main`,
 `main_decompressed.bin`, and `main_reloc.bin`. Run `nso_image.py` to generate
 `main_decompressed.bin` in the selected input directory.
