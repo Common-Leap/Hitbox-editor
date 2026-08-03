@@ -10337,140 +10337,124 @@ fn find_nuanmb(motion_dir: &Path, label: &str, hash: u64) -> Option<PathBuf> {
     None
 }
 
-/// Rebuild an AcmdScript by patching ATTACK and AREA_WIND values from the edited collision list.
-/// Other statements (frame, wait, raw, etc.) are preserved verbatim.
+/// Rebuild an ACMD script from the complete edited collision list while retaining every
+/// non-collision statement from the source script.
 ///
-/// A hitbox id is reusable: multi-hit scripts routinely spawn id 0 at several different
-/// frames. Matching by id alone made the last edited phase overwrite every earlier phase on
-/// export. Match by `(family, id, script spawn frame)` and consume same-frame duplicates in source
-/// order, which is the same identity the live-rule path uses.
+/// ATTACK ids and spawn frames are both editable, so neither can identify a source command after
+/// an edit. Patching source commands by either value also cannot represent additions or removals.
+/// Instead, flatten the finite source timeline, discard its old collision commands, and merge a
+/// fresh collision schedule into the retained statements. Finite loops and relative waits become
+/// absolute frame groups, preserving their execution order without tying an edit to its old slot.
 fn rebuild_script_from_hitboxes(
     original: &crate::data::AcmdScript,
     hitboxes: &[crate::data::Hitbox],
 ) -> crate::data::AcmdScript {
-    use crate::data::{AcmdScript, AcmdStmt, AttackCall, ExcuteStmt};
+    use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+    use std::collections::BTreeMap;
 
-    let mut by_spawn: std::collections::HashMap<
-        (u8, u32, u32),
-        std::collections::VecDeque<&crate::data::Hitbox>,
-    > = std::collections::HashMap::new();
-    for hb in hitboxes {
-        by_spawn
-            .entry((hb.category, hb.id, hb.active_start))
-            .or_default()
-            .push_back(hb);
-    }
-
-    fn patch_attack(call: &AttackCall, hb: Option<&crate::data::Hitbox>) -> AttackCall {
-        if let Some(hb) = hb {
-            AttackCall {
-                id: hb.id,
-                part: hb.part,
-                bone_name: hb.bone_name.clone(),
-                damage: hb.damage,
-                angle: hb.angle,
-                kb_scaling: hb.kb_scaling,
-                fkb: hb.fkb,
-                kb_base: hb.kb_base,
-                size: hb.size,
-                offset_x: hb.offset_x,
-                offset_y: hb.offset_y,
-                offset_z: hb.offset_z,
-                capsule_end: hb.capsule_end,
-                hitlag_mult: hb.hitlag_mult,
-                sdi_mult: hb.sdi_mult,
-                setoff_kind: hb.setoff_kind.clone(),
-                lr_check: hb.lr_check.clone(),
-                is_clang: hb.is_clang,
-                is_add_attack: hb.is_add_attack,
-                hitbox_attr: hb.hitbox_attr,
-                ground_or_air: hb.ground_or_air,
-                is_mtk: hb.is_mtk,
-                is_shield_disable: hb.is_shield_disable,
-                is_reflectable: hb.is_reflectable,
-                is_absorbable: hb.is_absorbable,
-                is_landing_attack: hb.is_landing_attack,
-                situation_mask: hb.situation_mask.clone(),
-                category_mask: hb.category_mask.clone(),
-                part_mask: hb.part_mask.clone(),
-                no_finish_camera: hb.no_finish_camera,
-                collision_attr: hb.collision_attr.clone(),
-                sound_level: hb.sound_level.clone(),
-                sound_attr: hb.sound_attr.clone(),
-                attack_region: hb.attack_region.clone(),
-            }
-        } else {
-            call.clone()
-        }
-    }
-
-    fn patch_stmts(
+    /// Expand the source's finite control flow into timestamped non-collision statements.
+    fn retain_non_collisions(
         stmts: &[AcmdStmt],
         start_frame: f32,
-        by_spawn: &mut std::collections::HashMap<
-            (u8, u32, u32),
-            std::collections::VecDeque<&crate::data::Hitbox>,
-        >,
-    ) -> (Vec<AcmdStmt>, f32) {
+        out: &mut Vec<(f32, AcmdStmt)>,
+    ) -> f32 {
         let mut frame = start_frame;
-        let mut out = Vec::with_capacity(stmts.len());
         for stmt in stmts {
             match stmt {
-                AcmdStmt::Frame(f) => {
-                    frame = *f;
-                    out.push(stmt.clone());
-                }
-                AcmdStmt::Wait(w) => {
-                    frame += *w;
-                    out.push(stmt.clone());
-                }
+                AcmdStmt::Frame(value) => frame = *value,
+                AcmdStmt::Wait(value) => frame += *value,
                 AcmdStmt::Excute(inner) => {
-                    let spawn = crate::data::script_frame(frame);
-                    let patched = inner
+                    let retained: Vec<_> = inner
                         .iter()
-                        .map(|s| match s {
-                            ExcuteStmt::Attack(call) => {
-                                let hb = by_spawn
-                                    .get_mut(&(0, call.id, spawn))
-                                    .and_then(|queue| queue.pop_front());
-                                ExcuteStmt::Attack(patch_attack(call, hb))
-                            }
-                            ExcuteStmt::Wind(call) => {
-                                let hb = by_spawn
-                                    .get_mut(&(2, call.id(), spawn))
-                                    .and_then(|queue| queue.pop_front());
-                                ExcuteStmt::Wind(
-                                    hb.and_then(|hitbox| hitbox.wind.clone())
-                                        .unwrap_or_else(|| call.clone()),
-                                )
-                            }
-                            other => other.clone(),
-                        })
+                        .filter(|stmt| matches!(stmt, ExcuteStmt::Raw(_)))
+                        .cloned()
                         .collect();
-                    out.push(AcmdStmt::Excute(patched));
+                    if !retained.is_empty() {
+                        out.push((frame, AcmdStmt::Excute(retained)));
+                    }
                 }
                 AcmdStmt::Loop { count, body } => {
-                    // A loop body is emitted once in source, so it can carry only one set of
-                    // attribute values. Patch that body at its first iteration and still walk
-                    // the remaining iterations to keep the following frame calculation exact.
-                    let (patched, next) = patch_stmts(body, frame, by_spawn);
-                    frame = next;
-                    for _ in 1..*count {
-                        let (_, next) = patch_stmts(body, frame, by_spawn);
-                        frame = next;
+                    for _ in 0..*count {
+                        frame = retain_non_collisions(body, frame, out);
                     }
-                    out.push(AcmdStmt::Loop {
-                        count: *count,
-                        body: patched,
-                    });
                 }
-                AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => out.push(stmt.clone()),
+                AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {
+                    out.push((frame, stmt.clone()));
+                }
             }
         }
-        (out, frame)
+        frame
     }
 
-    let (stmts, _) = patch_stmts(&original.stmts, 0.0, &mut by_spawn);
+    // End events run before spawns at the same frame. This matters when an id is reused: clear the
+    // old collision first, then create its replacement.
+    let mut ends: BTreeMap<u32, Vec<ExcuteStmt>> = BTreeMap::new();
+    let mut spawns: BTreeMap<u32, Vec<ExcuteStmt>> = BTreeMap::new();
+    for hitbox in hitboxes {
+        let start = hitbox.active_start.max(FIRST_GAME_FRAME);
+        let end = hitbox.active_end.max(start);
+        match hitbox.category {
+            0 => {
+                spawns
+                    .entry(start)
+                    .or_default()
+                    .push(ExcuteStmt::Attack(hitbox.to_attack_call()));
+                if end < 9999 {
+                    ends.entry(end.saturating_add(1))
+                        .or_default()
+                        .push(ExcuteStmt::Clear(hitbox.id));
+                }
+            }
+            2 => {
+                let Some(mut wind) = hitbox.wind.clone().filter(|wind| wind.is_valid()) else {
+                    continue;
+                };
+                wind.args[0] = hitbox.id as f32;
+                if wind.has_lifetime() {
+                    let last = wind.args.len() - 1;
+                    wind.args[last] = end.saturating_sub(start).saturating_add(1) as f32;
+                }
+                spawns
+                    .entry(start)
+                    .or_default()
+                    .push(ExcuteStmt::Wind(wind));
+                if end < 9999 {
+                    ends.entry(end.saturating_add(1))
+                        .or_default()
+                        .push(ExcuteStmt::EraseWind(hitbox.id));
+                }
+            }
+            // CATCH is not represented by this source AST. Live grab edits continue to use the
+            // dedicated category-1 rule path and must not be emitted as an ATTACK by accident.
+            _ => {}
+        }
+    }
+
+    let mut timed = Vec::new();
+    retain_non_collisions(&original.stmts, 0.0, &mut timed);
+    let mut event_frames: Vec<u32> = ends.keys().chain(spawns.keys()).copied().collect();
+    event_frames.sort_unstable();
+    event_frames.dedup();
+    for frame in event_frames {
+        let mut events = ends.remove(&frame).unwrap_or_default();
+        events.extend(spawns.remove(&frame).unwrap_or_default());
+        if !events.is_empty() {
+            timed.push((frame as f32, AcmdStmt::Excute(events)));
+        }
+    }
+    // `sort_by` is stable, so retained source statements stay ahead of regenerated collisions at
+    // the same frame. This preserves setup calls that originally preceded ATTACK in an excute.
+    timed.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+
+    let mut stmts = Vec::new();
+    let mut frame = 0.0_f32;
+    for (at, stmt) in timed {
+        if at > 0.0 && at != frame {
+            stmts.push(AcmdStmt::Frame(at));
+            frame = at;
+        }
+        stmts.push(stmt);
+    }
     AcmdScript { stmts }
 }
 
@@ -11797,6 +11781,195 @@ mod live_effect_capture_tests {
         assert_eq!(hitboxes.len(), 2);
         assert_eq!((hitboxes[0].damage, hitboxes[0].angle), (4.0, 361));
         assert_eq!((hitboxes[1].damage, hitboxes[1].angle), (19.0, 80));
+    }
+
+    /// Renumbering a hitbox is an ordinary edit made from the ID drag box. The rebuild used to
+    /// look the collision back up by its *new* id, miss, and silently emit the untouched original
+    /// call — so an export carried none of the move's edits.
+    #[test]
+    fn acmd_export_survives_renumbering_a_hitbox() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let original_hb = Hitbox {
+            id: 0,
+            active_start: 3,
+            bone_name: "footl".into(),
+            damage: 9.0,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(original_hb.to_attack_call())]),
+            ],
+        };
+        let mut edited = original_hb.clone();
+        edited.id = 3;
+        edited.damage = 14.0;
+        let hitboxes = rebuild_script_from_hitboxes(&original, &[edited]).to_hitboxes();
+        assert_eq!(hitboxes.len(), 1);
+        assert_eq!(hitboxes[0].id, 3);
+        assert_eq!(hitboxes[0].damage, 14.0);
+    }
+
+    /// Retiming a collision from the Start Frame slider moved it away from the frame the rebuild
+    /// keyed on, which dropped every other attribute edit with it.
+    #[test]
+    fn acmd_export_survives_retiming_a_hitbox() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let original_hb = Hitbox {
+            id: 0,
+            active_start: 3,
+            damage: 9.0,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(original_hb.to_attack_call())]),
+            ],
+        };
+        let mut edited = original_hb.clone();
+        edited.active_start = 7;
+        edited.damage = 14.0;
+        let hitboxes = rebuild_script_from_hitboxes(&original, &[edited]).to_hitboxes();
+        assert_eq!(hitboxes.len(), 1);
+        assert_eq!(hitboxes[0].active_start, 7);
+        assert_eq!(hitboxes[0].damage, 14.0);
+    }
+
+    /// Two collisions spawned by one `excute` block must not be able to swap attributes just
+    /// because the user gave them each other's ids.
+    #[test]
+    fn acmd_export_keeps_swapped_ids_attached_to_their_own_collision() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let first = Hitbox {
+            id: 0,
+            active_start: 3,
+            damage: 9.0,
+            ..Default::default()
+        };
+        let mut second = first.clone();
+        second.id = 1;
+        second.damage = 5.0;
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::Attack(first.to_attack_call()),
+                    ExcuteStmt::Attack(second.to_attack_call()),
+                ]),
+            ],
+        };
+        let (mut a, mut b) = (first, second);
+        a.id = 1;
+        b.id = 0;
+        let hitboxes = rebuild_script_from_hitboxes(&original, &[a, b]).to_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+        assert_eq!((hitboxes[0].id, hitboxes[0].damage), (1, 9.0));
+        assert_eq!((hitboxes[1].id, hitboxes[1].damage), (0, 5.0));
+    }
+
+    #[test]
+    fn acmd_export_removes_deleted_collisions_without_dropping_other_calls() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let first = Hitbox {
+            id: 0,
+            active_start: 3,
+            active_end: 5,
+            ..Default::default()
+        };
+        let second = Hitbox {
+            id: 1,
+            active_start: 3,
+            active_end: 5,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::Raw("WorkModule::on_flag(agent.module_accessor, 7);".into()),
+                    ExcuteStmt::Attack(first.to_attack_call()),
+                    ExcuteStmt::Attack(second.to_attack_call()),
+                ]),
+                AcmdStmt::Frame(6.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::ClearAll]),
+            ],
+        };
+
+        let rebuilt = rebuild_script_from_hitboxes(&original, &[second]);
+        let hitboxes = rebuilt.to_hitboxes();
+        assert_eq!(hitboxes.len(), 1);
+        assert_eq!(hitboxes[0].id, 1);
+        assert!(rebuilt.stmts.iter().any(|stmt| matches!(
+            stmt,
+            AcmdStmt::Excute(inner)
+                if inner.iter().any(|stmt| matches!(stmt, ExcuteStmt::Raw(line) if line.contains("WorkModule::on_flag")))
+        )));
+    }
+
+    #[test]
+    fn acmd_export_inserts_added_collisions_at_their_edited_frames() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let original_hitbox = Hitbox {
+            id: 0,
+            active_start: 3,
+            active_end: 4,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(original_hitbox.to_attack_call())]),
+                AcmdStmt::Frame(5.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::ClearAll]),
+            ],
+        };
+        let added = Hitbox {
+            id: 3,
+            active_start: 7,
+            active_end: 9,
+            damage: 18.0,
+            ..Default::default()
+        };
+
+        let hitboxes =
+            rebuild_script_from_hitboxes(&original, &[original_hitbox, added]).to_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+        assert_eq!(
+            (
+                hitboxes[1].id,
+                hitboxes[1].active_start,
+                hitboxes[1].active_end,
+                hitboxes[1].damage,
+            ),
+            (3, 7, 9, 18.0)
+        );
+    }
+
+    #[test]
+    fn acmd_export_applies_edited_end_frames_per_collision_id() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let original_hitbox = Hitbox {
+            id: 0,
+            active_start: 3,
+            active_end: 5,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Attack(original_hitbox.to_attack_call())]),
+                AcmdStmt::Frame(6.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::ClearAll]),
+            ],
+        };
+        let mut edited = original_hitbox;
+        edited.active_end = 12;
+
+        let hitboxes = rebuild_script_from_hitboxes(&original, &[edited]).to_hitboxes();
+        assert_eq!(hitboxes.len(), 1);
+        assert_eq!((hitboxes[0].active_start, hitboxes[0].active_end), (3, 12));
     }
 
     /// A partial/old capture cannot safely seed all 36 ATTACK slots. It must be rejected rather

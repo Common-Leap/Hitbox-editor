@@ -349,6 +349,7 @@ pub enum ExcuteStmt {
     Attack(AttackCall),
     Wind(WindboxData),
     EraseWind(u32),
+    Clear(u32),
     ClearAll,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
@@ -423,6 +424,16 @@ fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) 
                                     && hitbox.id == *id
                                     && hitbox.active_start <= end.saturating_add(1)
                                     && hitbox.active_end >= end
+                            }) {
+                                hitbox.active_end = end.max(hitbox.active_start);
+                            }
+                        }
+                        ExcuteStmt::Clear(id) => {
+                            let end = script_frame(frame).saturating_sub(1);
+                            for hitbox in hitboxes.iter_mut().filter(|hitbox| {
+                                hitbox.category != 2
+                                    && hitbox.id == *id
+                                    && hitbox.active_end == u32::MAX
                             }) {
                                 hitbox.active_end = end.max(hitbox.active_start);
                             }
