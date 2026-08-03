@@ -197,6 +197,12 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 continue;
             }
         }
+        if line.contains("AttackModule::clear(") {
+            if let Some(id) = parse_attack_clear(line) {
+                stmts.push(ExcuteStmt::Clear(id));
+                continue;
+            }
+        }
         if line.contains("clear_all") {
             stmts.push(ExcuteStmt::ClearAll);
             continue;
@@ -959,6 +965,16 @@ fn parse_erase_wind(line: &str) -> Option<u32> {
         .ok()
 }
 
+fn parse_attack_clear(line: &str) -> Option<u32> {
+    let start = line.find("AttackModule::clear(")? + "AttackModule::clear(".len();
+    let end = line[start..].find(')')? + start;
+    tokenize_args(&line[start..end])
+        .get(1)?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
 /// Strip leading `*` dereference from constant names like `*ATTACK_SETOFF_KIND_ON`.
 fn strip_deref(s: &str) -> String {
     s.trim_start_matches('*').to_string()
@@ -1111,6 +1127,9 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             ),
             crate::data::ExcuteStmt::EraseWind(id) => {
                 format!("{indent}AreaModule::erase_wind(agent.module_accessor, {id});")
+            }
+            crate::data::ExcuteStmt::Clear(id) => {
+                format!("{indent}AttackModule::clear(agent.module_accessor, {id}, false);")
             }
             crate::data::ExcuteStmt::ClearAll => {
                 format!("{indent}AttackModule::clear_all(agent.module_accessor);")
@@ -1782,6 +1801,26 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             emitted.contains("macros::AREA_WIND_2ND_RAD(agent, 4, 0.5, 0.02, 1000, 1, -2, 6, 18);")
         );
         assert!(emitted.contains("AreaModule::erase_wind(agent.module_accessor, 4);"));
+    }
+
+    #[test]
+    fn id_scoped_attack_clear_round_trips() {
+        let source = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        AttackModule::clear(agent.module_accessor, 3, false);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(matches!(
+            script.stmts.as_slice(),
+            [crate::data::AcmdStmt::Frame(frame), crate::data::AcmdStmt::Excute(inner)]
+                if *frame == 9.0 && matches!(inner.as_slice(), [crate::data::ExcuteStmt::Clear(3)])
+        ));
+        let emitted = export_acmd_source(&script, "mario", "test");
+        assert!(emitted.contains("AttackModule::clear(agent.module_accessor, 3, false);"));
     }
 
     // ═══ Generated-source compile golden ════════════════════════════════════
