@@ -17,6 +17,8 @@ mod param_labels;
 mod renderer;
 mod scratch_dirs;
 mod texture_import;
+#[cfg(target_os = "linux")]
+mod wayland_icon;
 
 fn main() -> anyhow::Result<()> {
     // RADV can fail silently during wgpu's Linux auto-detection. Keep the working Vulkan

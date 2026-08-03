@@ -5357,7 +5357,10 @@ dependencies = [
  "ssbh_wgpu",
  "tempfile",
  "tokio",
+ "wayland-client",
+ "wayland-protocols",
  "wgpu",
+ "winit",
  "winresource",
 ]
 

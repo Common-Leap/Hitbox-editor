@@ -728,6 +728,10 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
 type AcmdFetchResult = (String, String, Result<String, String>);
 
 pub struct VisionaryApp {
+    /// Keeps the Wayland shared-memory icon buffer alive for the root toplevel. winit 0.30
+    /// handles X11 and Windows icons itself; Wayland compositors use the native icon protocol.
+    #[cfg(target_os = "linux")]
+    _wayland_icon: Option<crate::wayland_icon::WaylandIcon>,
     state: AppState,
     move_list: Vec<MoveEntry>,
     fetching_acmd: bool,
@@ -1006,7 +1010,25 @@ impl VisionaryApp {
         let saved_eff_root = load_config_path(EFF_ROOT_CONFIG_KEY);
         let saved_mod_roots = load_mod_roots();
 
+        #[cfg(target_os = "linux")]
+        let wayland_icon = cc.winit_window().and_then(|window| {
+            match crate::wayland_icon::WaylandIcon::attach(
+                window,
+                crate::app_icon::viewport_icon().as_ref(),
+            ) {
+                Ok(icon) => icon,
+                Err(error) => {
+                    if crate::debug_enabled() {
+                        eprintln!("Wayland window icon unavailable: {error:#}");
+                    }
+                    None
+                }
+            }
+        });
+
         let mut app = Self {
+            #[cfg(target_os = "linux")]
+            _wayland_icon: wayland_icon,
             state: AppState::default(),
             move_list: Vec::new(),
             fetching_acmd: false,

@@ -53,6 +53,9 @@ tempfile = "3"
 # declaration prevents Windows builds from inheriting host features they cannot use.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.34.3", default-features = false, features = ["wayland", "x11", "wgpu"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland"] }
+wayland-client = { version = "0.31.14", features = ["system"] }
+wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
 
 [build-dependencies]
 winresource = "0.1.31"
