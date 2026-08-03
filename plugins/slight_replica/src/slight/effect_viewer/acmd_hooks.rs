@@ -39,6 +39,12 @@ static SPAWN_SEEN: parking_lot::Mutex<Option<std::collections::HashMap<u64, Spaw
 /// They differ ⇒ this kind really created an effect (registered). Equal ⇒ NOT-FOUND (a bare
 /// non-zero handle is unreliable — it can be a stale handle from a prior effect).
 fn record_spawn(eff_hash: u64, h_before: u32, h_after: u32) {
+    // Every newly seen kind rewrites the whole file, so a moveset that spawns hundreds of
+    // custom kinds pays for it on the game thread. The file answers a research question, not
+    // a user-facing one — behind the trace opt-in.
+    if !crate::slight::smash_utils::trace_enabled() {
+        return;
+    }
     let created = h_after != h_before && h_after != 0;
     let mut g = match SPAWN_SEEN.try_lock() {
         Some(g) => g,
@@ -537,7 +543,9 @@ unsafe fn spawn_via_carrier(
     }
 
     static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64 {
+    if crate::slight::smash_utils::trace_enabled()
+        && LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64
+    {
         use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
@@ -705,7 +713,7 @@ unsafe fn costume_of(lua_state: u64) -> i32 {
 static REQ_VT_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 unsafe fn log_req_vtable_once(boma: *mut smash::app::BattleObjectModuleAccessor) {
     use std::sync::atomic::Ordering;
-    if REQ_VT_LOGGED.swap(true, Ordering::Relaxed) {
+    if !crate::slight::smash_utils::trace_enabled() || REQ_VT_LOGGED.swap(true, Ordering::Relaxed) {
         return;
     }
     let obj = *((boma as usize + 0x140) as *const usize);
@@ -900,11 +908,18 @@ macro_rules! effect_hook {
                         .first()
                         .map(|v| v.inner.raw & 0xff_ffff_ffff)
                         .unwrap_or(0);
+                    // Unbounded — one line per remapped spawn, so it stays behind the trace
+                    // opt-in rather than writing to SD from inside every ACMD frame.
                     use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("sd:/effect_viewer_os_req.txt")
+                    if let Some(mut f) = crate::slight::smash_utils::trace_enabled()
+                        .then(|| {
+                            std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("sd:/effect_viewer_os_req.txt")
+                                .ok()
+                        })
+                        .flatten()
                     {
                         let _ = writeln!(
                             f,

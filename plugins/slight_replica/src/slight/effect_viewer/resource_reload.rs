@@ -7,6 +7,9 @@
 use smash_arc::{ArcLookup, Hash40, Region, SearchLookup};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// Freeze-pinpoint marker, shared with the rest of the injection path (trace opt-in only).
+use super::effect_reload::mark;
+
 // SSBU 13.0.4 — pointer-to-FilesystemInfo (smashline `resources::types::FilesystemInfo::instance`).
 const FILESYSTEM_INFO_PTR_OFFSET: usize = 0x5331f20;
 
@@ -216,13 +219,10 @@ pub fn inject_resident_buffer(file_hash: u64, buffer: *const u8) -> FillResult {
     if fs.loaded_filepaths.is_null() || fp >= fs.loaded_filepath_len as usize {
         return FillResult::NoArc;
     }
-    let _ = std::fs::write(
-        "sd:/effect_viewer_inject.txt",
-        format!(
-            "step=inject_enter fp={fp} fplen={}\n",
-            fs.loaded_filepath_len
-        ),
-    );
+    mark(&format!(
+        "inject_enter fp={fp} fplen={}",
+        fs.loaded_filepath_len
+    ));
     let fpe = unsafe { &mut *fs.loaded_filepaths.add(fp) };
     let di = fpe.loaded_data_index;
     if di == 0x00ff_ffff || fs.loaded_datas.is_null() || di as usize >= fs.loaded_data_len as usize
@@ -230,41 +230,29 @@ pub fn inject_resident_buffer(file_hash: u64, buffer: *const u8) -> FillResult {
         return FillResult::NoSlot;
     }
     let entry = unsafe { (fs.loaded_datas as *mut u8).add(di as usize * 0x18) };
-    let _ = std::fs::write(
-        "sd:/effect_viewer_inject.txt",
-        format!(
-            "step=inject_read fp={fp} di={di} datalen={}\n",
-            fs.loaded_data_len
-        ),
-    );
+    mark(&format!(
+        "inject_read fp={fp} di={di} datalen={}",
+        fs.loaded_data_len
+    ));
     // SAFETY GATE: only fill a slot whose data buffer is NULL — i.e. the game allocated it
     // (via the directory loader) but the read never completed. NEVER overwrite a non-null
     // buffer; that would be a live file and corrupt the game (the earlier freeze).
     let existing = unsafe { *(entry as *const *const u8) };
-    let _ = std::fs::write(
-        "sd:/effect_viewer_inject.txt",
-        format!(
-            "step=inject_read_ok di={di} existing_null={}\n",
-            existing.is_null()
-        ),
-    );
+    mark(&format!(
+        "inject_read_ok di={di} existing_null={}",
+        existing.is_null()
+    ));
     if !existing.is_null() {
         return FillResult::Occupied(di);
     }
-    let _ = std::fs::write(
-        "sd:/effect_viewer_inject.txt",
-        format!("step=inject_write_start di={di}\n"),
-    );
+    mark(&format!("inject_write_start di={di}"));
     unsafe {
         *(entry as *mut *const u8) = buffer; // +0  data buffer
         *(entry.add(8) as *mut i32) = 0x4000_0000; // +8  refcount — huge so it's never freed
         *entry.add(0xc) = 1; // +0xc in-use flag
         fpe.is_loaded = 1;
     }
-    let _ = std::fs::write(
-        "sd:/effect_viewer_inject.txt",
-        format!("step=inject_write_done di={di}\n"),
-    );
+    mark(&format!("inject_write_done di={di}"));
     FillResult::Filled(fp as u32, di)
 }
 

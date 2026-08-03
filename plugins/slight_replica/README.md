@@ -179,6 +179,19 @@ that port.
 - Runtime diagnostics and saved edits are stored in the `slight` directory on
   the emulated or physical SD card.
 
+## Effect-loader trace
+
+The plugin can log the game's own effect resource loading — directory loads,
+`load_effects` results, effect-set construction and readiness — to a set of
+`effect_viewer_*.txt` files on the SD card. Those hooks run on the game's
+loading thread, underneath Arcropolis, and each logged line is a separate file
+write, so the trace is off by default. It is worth the cost only when
+investigating a specific load.
+
+Create `sd:/slight/debug/trace.txt` before starting the game to enable it, and
+delete the file to turn it back off. With the trace off, the plugin's own log is
+`sd:/slight/diag.txt`, which is buffered and written from the frame path.
+
 ## Project layout
 
 ```text

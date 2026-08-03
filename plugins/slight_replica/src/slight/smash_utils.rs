@@ -9,6 +9,8 @@ pub const GATEWAY_FILE: &str = "sd:/slight/user/gateway.txt";
 pub const CLIENT_ID_FILE: &str = "sd:/slight/user/client_id.txt";
 pub const DEBUG_ACTIVATE: &str = "sd:/slight/debug/activate.txt";
 pub const DEBUG_DEACTIVATE: &str = "sd:/slight/debug/deactivate.txt";
+/// Opt-in for the effect-loader research trace — see [`trace_enabled`].
+pub const DEBUG_TRACE: &str = "sd:/slight/debug/trace.txt";
 
 pub fn ensure_slight_dirs() {
     let _ = std::fs::create_dir_all(DEBUG_LOGGERS);
@@ -75,15 +77,33 @@ fn is_dotted_quad(s: &str) -> bool {
 /// budget, which is why Windows testers saw ~10 fps and Linux saw nothing.
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
+/// Last probed state of the research-trace trigger file.
+///
+/// The effect-loader trace writes a line to the SD card from inside the game's own resource
+/// hooks — `ensure_dir_loaded` and `load_effects` run on the loading thread, while ARCropolis
+/// is servicing that same thread's reads. Each line is a separate open/write/close, thousands
+/// of them while a match loads, and every one of them re-enters `nn::fs` underneath the
+/// loader. That is fine on a dev machine watching a specific bug and ruinous everywhere else:
+/// a heavy mod's fighter can stall or never finish loading (issue #3). Off unless asked for.
+static TRACE: AtomicBool = AtomicBool::new(false);
+
 /// Re-probe the trigger files. Called from the throttled SD poll tick, not per frame.
 pub fn refresh_debug_logging() {
     let on = std::path::Path::new(DEBUG_ACTIVATE).exists()
         && !std::path::Path::new(DEBUG_DEACTIVATE).exists();
     DEBUG_LOGGING.store(on, Ordering::Relaxed);
+    TRACE.store(std::path::Path::new(DEBUG_TRACE).exists(), Ordering::Relaxed);
 }
 
 pub fn debug_logging_enabled() -> bool {
     DEBUG_LOGGING.load(Ordering::Relaxed)
+}
+
+/// True when the user opted into the effect-loader research trace by creating
+/// [`DEBUG_TRACE`]. The observation-only hooks it needs are installed at boot, so the file
+/// has to exist before the game starts; creating it later enables the log writes alone.
+pub fn trace_enabled() -> bool {
+    TRACE.load(Ordering::Relaxed)
 }
 
 pub fn set_debug_logging(on: bool) {

@@ -203,8 +203,11 @@ pub fn track_spawn(
     // so this fires regardless of which one ACMD actually used (req_follow/on_joint/
     // continual/time_follow guessing kept missing). On a refused `_os` request, re-fire
     // controlled variants from this same game-thread context to localize the ADD gate.
-    if effect_names::is_transplant_label(&effect_names::label(eff_hash))
-        || crate::slight::effect_viewer::effect_reload::is_coloaded_kind(eff_hash)
+    // One line per transplant spawn — a continual effect would write once a frame, so it is
+    // behind the trace opt-in.
+    if crate::slight::smash_utils::trace_enabled()
+        && (effect_names::is_transplant_label(&effect_names::label(eff_hash))
+            || crate::slight::effect_viewer::effect_reload::is_coloaded_kind(eff_hash))
     {
         use std::io::Write;
         let gl = unsafe { EffectModule::get_last_handle(module_accessor) as u32 };
@@ -482,7 +485,9 @@ fn remap_eff(
     let out = alias_and_remap(eff_hash, unsafe { costume_of_boma(module_accessor) });
     // Log only when the input is a known merged `_os` kind, so we can see whether remap_eff
     // is even reached for the refused spawn and what it decided.
-    if effect_names::is_transplant_label(&effect_names::label(eff_hash.hash)) {
+    if crate::slight::smash_utils::trace_enabled()
+        && effect_names::is_transplant_label(&effect_names::label(eff_hash.hash))
+    {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)

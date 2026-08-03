@@ -674,6 +674,9 @@ fn ensure_dir_loaded(filesystem: *mut u64, dir_index: u32) -> u64;
 pub static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Append a line to the assist-summon trace with a shared sequence number.
 fn tlog(s: &str) {
+    if !crate::slight::smash_utils::trace_enabled() {
+        return;
+    }
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -1025,9 +1028,13 @@ unsafe fn capture_backtrace() -> Vec<usize> {
 #[skyline::hook(offset = LOAD_EFFECTS_OFFSET)]
 fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 {
     LOAD_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
+    // This hook runs on the game's LOADING thread. Everything below that writes to the SD card
+    // is research instrumentation and stays behind the trace opt-in — see `trace_enabled`.
+    let trace = crate::slight::smash_utils::trace_enabled();
     // Capture the GAME's call stack when it loads the alucard assist (idx=69) mid-match — the
     // return addresses ARE the summon orchestrator we need to replicate for our donor.
-    if !IN_DONOR_LOAD.load(Ordering::Relaxed)
+    if trace
+        && !IN_DONOR_LOAD.load(Ordering::Relaxed)
         && *search_index == 69
         && crate::slight::agent_extender::driver_has_ticked()
     {
@@ -1043,7 +1050,8 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
     }
     // Mark the GAME's own alucard (idx=69) load so hook_build_effect_set logs the a4d90 call it
     // makes INSIDE original — that's the working reference to diff our co-load's a4d90 args against.
-    let mark_game_alucard = !IN_DONOR_LOAD.load(Ordering::Relaxed) && *search_index == 69;
+    let mark_game_alucard =
+        trace && !IN_DONOR_LOAD.load(Ordering::Relaxed) && *search_index == 69;
     if mark_game_alucard {
         GAME_ALUCARD_LOADING.store(true, Ordering::Relaxed);
     }
@@ -1055,7 +1063,9 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
     // RELOAD PROBE (build bb): log every GAME fighter/effect load with its path name, so we can
     // SEE whether a training-mode RESET re-runs the blessed fighter eff-load (our candidate for an
     // automatic, menu-free reload trigger). If kirby's ef_kirby.eff reloads on reset, that's it.
-    if !IN_DONOR_LOAD.load(Ordering::Relaxed) && crate::slight::agent_extender::driver_has_ticked()
+    if trace
+        && !IN_DONOR_LOAD.load(Ordering::Relaxed)
+        && crate::slight::agent_extender::driver_has_ticked()
     {
         let ph = path_hash_from_search_index(*search_index).unwrap_or(0);
         // hash40("effect/fighter/kirby/ef_kirby.eff") lets us spot kirby's eff reload specifically.
@@ -1068,7 +1078,9 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
     }
     // ASSIST TRACE: log EVERY mid-match game load_effects with the shared sequence number, so we
     // can see exactly which dir-loads (residency) precede the assist's load_effects(idx=69).
-    if !IN_DONOR_LOAD.load(Ordering::Relaxed) && crate::slight::agent_extender::driver_has_ticked()
+    if trace
+        && !IN_DONOR_LOAD.load(Ordering::Relaxed)
+        && crate::slight::agent_extender::driver_has_ticked()
     {
         let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
         tlog(&format!(
@@ -1079,7 +1091,8 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
     // Capture the GAME's alucard load (idx==69) MID-MATCH as the working reference — dump its set
     // right after load_effects returns: if +0x540 is already filled here, the game's load fills it
     // synchronously and the difference vs ours is purely the resident-buffer/sub-resource state.
-    if !IN_DONOR_LOAD.load(Ordering::Relaxed)
+    if trace
+        && !IN_DONOR_LOAD.load(Ordering::Relaxed)
         && result == 1
         && *search_index == 69
         && crate::slight::agent_extender::driver_has_ticked()
@@ -1403,6 +1416,9 @@ fn carrier_item_kind(ef_file: &str) -> Option<i32> {
 /// Overwrite the immediate-flush freeze marker: the LAST value written names the last step
 /// reached before a hang (diag notes are ring-buffered and lost on freeze; this isn't).
 pub fn mark(step: &str) {
+    if !crate::slight::smash_utils::trace_enabled() {
+        return;
+    }
     let _ = std::fs::write("sd:/effect_viewer_inject.txt", format!("step={step}\n"));
     // Full trail (append): inject.txt only keeps the LAST step (freeze pinpoint); the trail
     // preserves the whole chain for post-run analysis. Truncated at each reread start.
@@ -1597,7 +1613,7 @@ pub fn coload_remap(hash: u64) -> Option<u64> {
         .lock()
         .get(&(hash & 0xff_ffff_ffff))
         .copied();
-    if let Some(to) = r {
+    if let Some(to) = r.filter(|_| crate::slight::smash_utils::trace_enabled()) {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -1626,7 +1642,7 @@ pub fn coload_map_size() -> usize {
 /// LIVE text memory (Ghidra/capstone-on-file both fail on this segment), for offline capstone.
 pub fn dump_text_windows() {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if DONE.swap(true, Ordering::Relaxed) {
+    if DONE.swap(true, Ordering::Relaxed) || !crate::slight::smash_utils::trace_enabled() {
         return;
     }
     use std::io::Write;
@@ -2645,6 +2661,9 @@ fn enqueue_donors_for(target_handle: u32, target_path_hash: u64) {
 
 /// Append-only donor-coload log (marks.txt gets wiped by each force_reread, hiding this path).
 fn dlog(s: &str) {
+    if !crate::slight::smash_utils::trace_enabled() {
+        return;
+    }
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -2664,7 +2683,7 @@ pub static GAME_WATCH_SET: AtomicUsize = AtomicUsize::new(0);
 /// `sd:/effect_viewer_setdump.txt` (append). Used to diff a working game set vs our stuck one.
 fn dump_set(label: &str, set: usize, len: usize) {
     use std::io::Write;
-    if set == 0 {
+    if set == 0 || !crate::slight::smash_utils::trace_enabled() {
         return;
     }
     let Ok(mut f) = std::fs::OpenOptions::new()
@@ -2745,6 +2764,9 @@ fn dump_set(label: &str, set: usize, len: usize) {
 /// emitter's GPU texture handle. If ours are null where the working set's are real GPU objects,
 /// that's the invisibility cause. Read-only.
 fn dump_emitter_chain(label: &str, set: usize) {
+    if !crate::slight::smash_utils::trace_enabled() {
+        return;
+    }
     use std::io::Write;
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -3285,14 +3307,25 @@ pub fn donor_debug_line() -> String {
 }
 
 pub fn install_hooks() {
+    // Load/unload carry real work (slot tracking, donor co-loads), so they always install.
     skyline::install_hook!(hook_load_effects);
-    skyline::install_hook!(hook_ensure_dir_loaded);
-    skyline::install_hook!(hook_readiness);
     skyline::install_hook!(hook_unload_effects);
-    skyline::install_hook!(hook_drain_queue);
-    skyline::install_hook!(hook_build_effect_set);
-    skyline::println!("[SLight] Effect manager reload hooks installed");
-    crate::slight::diag::note("effect-manager reload hooks installed");
+    // The rest only observe and log. `ensure_dir_loaded` and the readiness check in particular
+    // fire thousands of times while a match loads, on the game's loading thread — installing
+    // them unconditionally put a nest of SD writes underneath the resource loader, where a
+    // mod-heavy fighter could stall out and never reach the match (issue #3). Opt in with
+    // `sd:/slight/debug/trace.txt` before boot when a load actually needs tracing.
+    let trace = crate::slight::smash_utils::trace_enabled();
+    if trace {
+        skyline::install_hook!(hook_ensure_dir_loaded);
+        skyline::install_hook!(hook_readiness);
+        skyline::install_hook!(hook_drain_queue);
+        skyline::install_hook!(hook_build_effect_set);
+    }
+    skyline::println!("[SLight] Effect manager reload hooks installed (trace={trace})");
+    crate::slight::diag::note(format!(
+        "effect-manager reload hooks installed (trace={trace})"
+    ));
 }
 
 /// Unload and reload parsed effect data for the fighter whose eff is `game_path`.

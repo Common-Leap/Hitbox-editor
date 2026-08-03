@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const MANIFEST: &str = "sd:/effect_viewer/live_eff/manifest.json";
 const DIR: &str = "sd:/effect_viewer/live_eff/";
 /// Written into every diag file so on-device logs are attributable to a specific build.
-pub const BUILD_TAG: &str = "2026-07-31c-hitbox-attrs";
+pub const BUILD_TAG: &str = "2026-08-03a-trace-optin";
 
 /// Times [`disk_cb`] served bytes. Split by initiator so we can DECISIVELY answer the
 /// one open question of the whole cross-fighter-live effort: does the game's own resource
@@ -103,6 +103,18 @@ extern "C" fn disk_cb(hash: u64, out: *mut u8, capacity: usize, out_size: &mut u
     // Proof-of-serve trace: this is the ONLY place that knows a load re-read the file.
     // `cb_game>0` is the decisive proof that the GAME'S loader (not just our probe) pulls
     // merged bytes through Arcropolis — i.e. that cross-fighter transplants load at match entry.
+    //
+    // Behind the trace opt-in: the game serves this callback from its loading thread, so the
+    // two writes below land in the middle of Arcropolis's own read. The same counters are in
+    // `effect_viewer_last_reload.txt` and in the probe, both written off that path.
+    if !crate::slight::smash_utils::trace_enabled() {
+        crate::slight::diag::note(format!(
+            "live eff served {} B for {hash:#x} by {}",
+            bytes.len(),
+            if by_probe { "probe" } else { "GAME" }
+        ));
+        return true;
+    }
     let _ = std::fs::write(
         "sd:/effect_viewer_cb.txt",
         format!(
