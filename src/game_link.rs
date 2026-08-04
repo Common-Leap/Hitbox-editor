@@ -103,6 +103,14 @@ pub struct SpawnRuleWire {
     pub rot: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale: Option<f32>,
+    /// Per-spawn playback rate — the live counterpart of the spawn's `LAST_EFFECT_SET_RATE`.
+    ///
+    /// Sent only when the user changed it, so an untouched spawn keeps whatever its script
+    /// asks for. Separate from `scale` because it is not part of the spawn's argument list at
+    /// all: the plugin applies it to the handle after the spawn, and rewrites the script's own
+    /// rate line if there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f32>,
     /// Live retime: re-fire a captured spawn at a new frame (paired with a suppress rule at
     /// the pristine frame). Omitted for plain transform/suppress rules.
     #[serde(skip_serializing_if = "Option::is_none")]

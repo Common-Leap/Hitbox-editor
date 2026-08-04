@@ -45,6 +45,13 @@ pub struct SpawnRule {
     pub rot: Option<[f32; 3]>,
     #[serde(default)]
     pub scale: Option<f32>,
+    /// Per-spawn playback rate — the live form of the spawn's `LAST_EFFECT_SET_RATE`.
+    ///
+    /// Not part of the argument rewrite: the rate is not an argument of any spawn macro. It is
+    /// applied to the handle after the spawn, and the script's own rate line — which runs
+    /// afterwards and would otherwise win — is rewritten to match.
+    #[serde(default)]
+    pub rate: Option<f32>,
 }
 
 impl SpawnRule {
@@ -122,6 +129,18 @@ pub fn transform_for(
                 && r.matches(eff_hash, motion, motion_frame)
         })
         .map(|r| (r.pos, r.rot, r.scale))
+}
+
+/// Per-spawn playback rate for the FIRST non-suppress rule matching this spawn.
+///
+/// Looked up separately from [`transform_for`] because the two travel independently: a spawn
+/// can be retuned without being moved, and moved without being retuned.
+pub fn rate_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<f32> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| !r.suppress && r.rate.is_some() && r.matches(eff_hash, motion, motion_frame))
+        .and_then(|r| r.rate)
 }
 
 // ── Effect kind aliases (live transplant parity) ─────────────────────────────

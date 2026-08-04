@@ -772,6 +772,78 @@ unsafe fn log_req_vtable_once(boma: *mut smash::app::BattleObjectModuleAccessor)
     );
 }
 
+// ── Per-spawn playback rate ───────────────────────────────────────────────────
+//
+// `LAST_EFFECT_SET_RATE` takes no effect kind: it modifies whatever spawned last. So a rule
+// that retunes one spawn's rate cannot be matched at the rate line itself — there is nothing
+// there to match on. The spawn hook, which does know the kind, leaves the wanted rate here for
+// the two places that need it: the handle it applies to right after the spawn, and the
+// script's own rate line, which runs afterwards and would otherwise overwrite it.
+//
+// `f32::to_bits` never produces `NONE`, which is a quiet NaN payload no real rate can be.
+const NO_RATE: u32 = u32::MAX;
+static PENDING_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(NO_RATE);
+
+fn set_pending_rate(rate: Option<f32>) {
+    PENDING_RATE.store(
+        rate.map(f32::to_bits).unwrap_or(NO_RATE),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn pending_rate() -> Option<f32> {
+    match PENDING_RATE.load(std::sync::atomic::Ordering::Relaxed) {
+        NO_RATE => None,
+        bits => Some(f32::from_bits(bits)),
+    }
+}
+
+/// The editor's per-spawn rate, applied to the handle the spawn just produced.
+///
+/// Called with the handle from before the spawn so a kind that created nothing is not credited
+/// with someone else's effect — `get_last_handle` keeps returning the previous one.
+unsafe fn apply_pending_rate(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    h_before: u32,
+    h_after: u32,
+) {
+    if boma.is_null() || h_after == 0 || h_after == h_before {
+        return;
+    }
+    if let Some(rate) = pending_rate() {
+        smash::app::lua_bind::EffectModule::set_rate(boma, h_after, rate);
+    }
+}
+
+/// `LAST_EFFECT_SET_RATE` — timeline data and, when the editor has retuned this spawn, a value
+/// to override.
+///
+/// Recorded so a live capture reconstructs the move's rates: the spawn call itself carries no
+/// rate, so without this line the editor would read every captured effect as having none.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_RATE)]
+unsafe fn hook_last_effect_set_rate(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(lua_state, "LAST_EFFECT_SET_RATE", &typed);
+
+    // Rewrite the argument rather than calling `set_rate` after the original: the original
+    // runs last either way, so anything applied before it would simply be overwritten by the
+    // script's own value. Left in place rather than cleared, because a second rate line still
+    // names the same spawn and must be overridden too.
+    if let Some(rate) = pending_rate() {
+        let mut agent = smash::lib::L2CAgent::new(lua_state);
+        let mut vals = read_all_args(&mut agent, 4);
+        if !vals.is_empty() {
+            vals[0] = L2CValue::new_num(rate);
+            agent.clear_lua_stack();
+            for v in vals.iter_mut() {
+                agent.push_lua_stack(v);
+            }
+        }
+    }
+
+    original!()(lua_state);
+}
+
 /// After original ran (effect spawned): track via the spawn path — result_h = 0 makes
 /// track_spawn resolve the real handle via EffectModule::get_last_handle.
 unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_before: u32) {
@@ -785,6 +857,10 @@ unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_befor
     // across original!() is the reliable signal (a bare non-zero handle can be stale).
     let h_after = smash::app::lua_bind::EffectModule::get_last_handle(boma) as u32;
     record_spawn(args.eff_hash, h_before, h_after);
+    // Before the script's own rate line runs, so a spawn the script never retunes still gets
+    // the editor's rate. When there IS a rate line, it runs after this and would win — which
+    // is why `hook_last_effect_set_rate` rewrites its argument as well.
+    apply_pending_rate(boma, h_before, h_after);
     super::track_spawn(
         boma,
         0,
@@ -833,6 +909,10 @@ macro_rules! effect_hook {
                         &typed,
                     );
                 }
+                // Cleared for every spawn, before any rule is consulted. A rate left over from
+                // the previous spawn would be applied to this one and to whatever rate line
+                // follows it, which is the exact misattribution `LAST_EFFECT_SET_RATE` invites.
+                set_pending_rate(None);
                 // Eff-editor spawn rules: suppression + PER-SPAWN transform, both scoped to
                 // (motion, frame window) so editing one spawn doesn't affect the others.
                 let mut scoped_transform = false;
@@ -884,6 +964,13 @@ macro_rules! effect_hook {
                         }
                         scoped_transform = true;
                     }
+                    // Looked up separately from the transform: a spawn can be retuned without
+                    // being moved, so this must not sit inside the branch above.
+                    set_pending_rate(crate::slight::effect_viewer::spawn_rules::rate_for(
+                        args.eff_hash,
+                        motion,
+                        frame,
+                    ));
                 }
                 // Global kind pin (color/speed multipliers, or legacy global pos/rot) —
                 // only when no per-spawn transform already rewrote the args.
@@ -1398,6 +1485,7 @@ pub fn install() {
         hook_landing_eff_flip,
         hook_down_eff,
         hook_effect_off_kind,
+        hook_last_effect_set_rate,
     );
     skyline::println!("[SLight] ACMD effect hooks installed (25 spawn/stop variants)");
     crate::slight::diag::note("ACMD hooks installed");

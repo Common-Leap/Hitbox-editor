@@ -69,6 +69,20 @@ Two export paths, different rules — do not conflate them:
   drew correctly, and exported a project that did not build. Before adding a family, grep
   `macros.rs` for **every** member by name, and make the verifier block the ones that are not
   there. Do not assume a hooked primitive is an emittable one.
+- **"Parsed into the IR" is not the same as "reaches the export."** The effect export is
+  generated from `EffectCall`s, not from `EffectScript` statements, so a macro can have its own
+  `EffectMacro` variant, parse perfectly, and still be dropped by `eval_effect_stmts` on the way
+  to `EffectCall` — after which the export never sees it. A3 found `LAST_EFFECT_SET_RATE` in
+  exactly that state, described in this file as already done. Before believing a surface is
+  covered, follow the value all the way to the emitted text; and note that
+  `cached_scripts_round_trip_through_the_emitter` only compares `(spawn_func, effect_name)`
+  pairs, so it will not catch a dropped field for you.
+- **A macro that names no target binds to the line above it, and nowhere else.**
+  `LAST_EFFECT_SET_*` modifies whatever spawned last, so there is nothing in the call to match
+  on. Bind it to the immediately preceding recognised spawn and refuse otherwise — reaching
+  further back silently retunes an effect the user never touched. The rule must be implemented
+  identically in the script parser, the live-capture reconstruction, and the write-back
+  scanner; A3 has all three, and they are the pattern to copy.
 - **Symbolic constants need both directions.** The editor holds names, the wire wants numbers.
   A new constant needs a `ConstTable` in [param_labels.rs](src/param_labels.rs) plus
   `decode_const`/`encode_const` coverage, or the live path sends `None` and the game keeps its
@@ -203,17 +217,67 @@ therefore the only one that builds.
 archive wrote. Count the arguments in the corpus first — the one-liner that produced the table
 above is worth rerunning per family.
 
-### [~] A3 — `LAST_EFFECT_SET_RATE` as an editable field
+### [x] A3 — `LAST_EFFECT_SET_RATE` as an editable field
 
-Started 2026-08-04. Blocked by: nothing. Already parsed into the IR
-([acmd.rs:437](src/acmd.rs:437)) and re-emitted. It just has no UI, so the value round-trips
-untouched and can't be changed. Surfaces 1 and 4 are already done; this is 2, 3, 5.
+Done 2026-08-04. All five surfaces; `cargo test` 268 green, both corpus oracles run for real
+(461 files present). The plugin was touched and builds; the `diag.txt` stamp could not be
+checked, because `scripts/build.sh` only writes to `target/output/` and deploying needs a
+running game.
 
-- **Work order:** expose rate on the owning effect call in the Effects panel. It applies to the
-  *last spawned* effect, so it belongs to the spawn above it — bind it there, not as a free row.
-- **Trap:** "last spawned" is positional. Reordering or disabling the spawn above it changes
-  what it modifies. Decide and document what happens then; a silent reattachment is worse than
-  a refusal.
+**The entry's premise was wrong, and wrong in the expensive direction.** It said the value
+"round-trips untouched" with surfaces 1 and 4 already done. Surface 1 was half done and
+surface 4 was not done at all: the rate was parsed into `EffectMacro::LastEffectSetRate` and
+then **dropped** by `eval_effect_stmts` on the way to `EffectCall`. The effect export is
+generated from `EffectCall`s, so it wrote no rate line — every vanilla effect that plays fast
+or slow shipped at normal speed, silently. There are 27 such calls in the local corpus.
+
+The one `LAST_EFFECT_SET_RATE` the emitter *did* write came from `LiveTweak::speed`, an
+unrelated kind-global live control, which is what made the entry look already-done.
+
+**The positional trap, settled.** The rate binds to the spawn *directly above it in the same
+block*, and to nothing otherwise — not to "the last spawn seen". Anything in between breaks
+the pairing: an `EFFECT_OFF_KIND`, a trail, or any line the parser keeps as `Raw`, because a
+`Raw` line could itself be a spawn and then the rate belongs to it. This is stricter than the
+game, whose "last effect" persists across frame blocks. It costs nothing: all 27 corpus calls
+sit directly beneath a recognised spawn. Reordering and disabling then need no special case at
+all — the rate is a field *on* the call, so it moves and disappears with it.
+
+The same rule is implemented three times and the three must agree, or a value is read off one
+call and written into another: `eval_effect_stmts` (script), `effect_calls_from_captures`
+(live capture), and `spawn_and_rate_sites` (write-back).
+
+**Also fixed on the way:**
+
+- **The panel had no rate control at all**, so the checkbox/value pair is new. Off means no
+  line is written, which is not the same as writing 1.0 — that distinction is the whole reason
+  `rate` is an `Option` rather than defaulting to 1.0.
+- **The live surface had no rate anything.** The plugin now hooks
+  `sv_animcmd::LAST_EFFECT_SET_RATE`: it records the line so a captured move comes back with
+  its rates, and rewrites the argument when a spawn rule retuned that spawn. Rewriting is
+  required rather than calling `set_rate` — the script's own line runs last and would
+  overwrite anything applied before it. `SpawnRule.rate` is `Option` + `skip_serializing_if`,
+  so older plugin builds ignore it.
+- **A tweak and a script rate would have emitted two rate lines.** The override wins and
+  exactly one line is written; the verifier warns that a kind-global speed multiplier has
+  taken over a value the script set for one spawn.
+- The rate is spelled `2`, not `2.0` — `LAST_EFFECT_SET_RATE<F: ToF32>` — so the emitter and
+  the write-back put identical text in the file. `check_effect_values` now refuses a
+  non-finite rate, which plain `to_string` would spell `NaN` and break the build.
+
+**Known gaps, deliberately left:**
+
+- A rate that could not be attached is dropped by the export, because the effect export
+  regenerates from `EffectCall`s and drops every unmodelled line already. Not specific to
+  rate; fixing it means teaching the effect export to preserve `Raw`, which is its own task.
+- The live capture stream dedupes on `(motion, kind, frame, func, args)`. Two spawns on one
+  frame with the *same* rate collapse to one rate line, so the second spawn captures with no
+  rate. Conservative — a missing rate, never a wrong one — and it only affects live capture.
+
+**For whoever takes C1 (`LAST_EFFECT_SET_COLOR`, 65 corpus occurrences — more than rate):**
+the attachment rule and its three implementations are the reusable part; copy them rather than
+re-deriving. Colour is three arguments instead of one, and `LAST_EFFECT_SET_ALPHA` (4) and
+`LAST_EFFECT_SET_WORK_INT` (1) are the same shape again — consider one `Option`-per-modifier
+block on `EffectCall` rather than a field each.
 
 ## Hitbox families
 
@@ -271,15 +335,27 @@ volumes. Geometrically these are close to grab boxes, so the panel work is mostl
 
 ### [ ] C1 — The remaining `LAST_EFFECT_SET_*` modifiers
 
-Blocked by: A3 (settles how a "modifies the previous spawn" call is attached).
+Unblocked: A3 is done and settled the attachment rule — bind to the immediately preceding
+recognised spawn, refuse otherwise, and implement it identically in `eval_effect_stmts`,
+`effect_calls_from_captures`, and `spawn_and_rate_sites`. Copy those three, do not re-derive.
 
 `LAST_EFFECT_SET_COLOR`, `_ALPHA`, `_SCALE_W`, `_OFFSET_TO_CAMERA_FLAT`, and
-`LAST_PARTICLE_SET_COLOR`. Same attachment rule as A3; reuse whatever that task settled on.
+`LAST_PARTICLE_SET_COLOR`.
 
+**Measured, not assumed** (local corpus): `_COLOR` 65, `_ALPHA` 4, `_WORK_INT` 1. Colour is by
+far the most common of the family — more than rate's 27 — so it is the one that matters.
+
+- **Work order:** `EffectCall` gained one `Option` field for rate. Five more would be five more
+  fields; consider a single modifier block instead. Whatever the shape, the `None` vs
+  `Some(default)` distinction A3 established has to survive it: "no line" and "a line setting
+  the default" are different exports.
 - **Trap:** kind-level colour/speed overrides already exist on the live wire and apply to
   *every* spawn of an effect. These are per-spawn. Read the comment above `LiveOverride`
   ([game_link.rs:374](src/game_link.rs:374)) before wiring anything — conflating per-kind with
-  per-emitter recoloured whole effects once already.
+  per-emitter recoloured whole effects once already. A3 hit the export half of this: a live
+  speed tweak and a script rate both wanted to write a `LAST_EFFECT_SET_RATE` line. The
+  override wins, exactly one line is emitted, and the verifier warns. Colour needs the same
+  reconciliation, and `emit_effect_move_fn` already has the shape to copy.
 
 ### [ ] C2 — Sword trail joints
 

@@ -1907,6 +1907,7 @@ impl VisionaryApp {
                 &move_name,
                 &self.state.effects,
                 &emitted,
+                &tweaks,
                 &mut report,
             );
             out.push_str(&emitted);
@@ -3969,6 +3970,9 @@ impl VisionaryApp {
                     // No originating macro — exports emit the plain EFFECT_FOLLOW form.
                     extra_args: None,
                     raw_line: None,
+                    // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
+                    // it until the user turns one on in the properties panel.
+                    rate: None,
                 };
                 self.state.effects.push(call.clone());
                 let idx = self.state.effects.len() - 1;
@@ -4226,6 +4230,59 @@ impl VisionaryApp {
                                     orig(ui, format!("orig {:.2}", p.scale));
                                 } else {
                                     ui.label("");
+                                }
+                                ui.end_row();
+
+                                // Playback rate — the `LAST_EFFECT_SET_RATE` line that follows
+                                // this spawn. It belongs here rather than on a row of its own
+                                // because the macro names no effect: it modifies whatever
+                                // spawned last, so it is this spawn's property and travels
+                                // with it when the spawn is disabled or moved.
+                                //
+                                // The checkbox is the difference between "no rate line" and "a
+                                // rate line that happens to say 1.0". Off means the export
+                                // writes nothing, which is not the same as writing the default.
+                                ui.label("Rate");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.rate.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Play this effect faster or slower than authored. \
+                                             Off writes no LAST_EFFECT_SET_RATE line at all.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.rate = on.then_some(1.0);
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(rate) = ec.rate.as_mut() {
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(rate)
+                                                    .speed(0.02)
+                                                    .range(0.0..=f32::MAX),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.rate) {
+                                    Some(Some(rate)) => orig(ui, format!("orig {rate:.2}")),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
                                 }
                                 ui.end_row();
                             }
@@ -6047,6 +6104,10 @@ impl VisionaryApp {
                     .collect::<Option<Vec<_>>>()
             }),
             raw_line: None,
+            // A spawn call carries no rate of its own — it arrives as the separate
+            // `LAST_EFFECT_SET_RATE` capture line that follows, and is attached in
+            // `effect_calls_from_captures`.
+            rate: None,
         })
     }
 
@@ -6163,9 +6224,15 @@ impl VisionaryApp {
         let mut ordered: Vec<_> = captures.iter().enumerate().collect();
         ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
 
-        let mut effects = Vec::new();
+        let mut effects: Vec<crate::data::EffectCall> = Vec::new();
+        // The spawn a `LAST_EFFECT_SET_RATE` line binds to, mirroring the rule the parser
+        // applies to a script. Cleared by every line that pushes no spawn — including a spawn
+        // that was captured but dropped as a `null` sentinel or failed to parse — so a rate
+        // can never quietly land on some earlier effect that merely happens to be last.
+        let mut anchor: Option<usize> = None;
         for (_, line) in ordered {
             if effect_capture_layout(&line.func).is_some() {
+                let mut pushed = false;
                 if let Some(effect) = Self::effect_call_from_capture(
                     &line.func, &line.args, line.frame, bone_rev, eff_rev,
                 ) {
@@ -6179,10 +6246,26 @@ impl VisionaryApp {
                         .is_some_and(|name| name != "null");
                     if !primary_null || alternate_real {
                         effects.push(effect);
+                        pushed = true;
                     }
+                }
+                anchor = pushed.then(|| effects.len() - 1);
+                continue;
+            }
+            // `LAST_EFFECT_SET_RATE` names no effect kind: it modifies whatever spawned last,
+            // so it binds to the capture line above it exactly as the parser binds it to the
+            // macro above it in a script. The sort is stable and both lines share a frame, so
+            // the spawn is still the previous entry here. `anchor` survives, because a second
+            // rate line targets the same spawn and the later one wins.
+            if line.func == "LAST_EFFECT_SET_RATE" {
+                if let (Some(rate), Some(index)) =
+                    (line.args.first().and_then(|arg| arg.as_f32()), anchor)
+                {
+                    effects[index].rate = Some(rate);
                 }
                 continue;
             }
+            anchor = None;
             if line.func != "EFFECT_OFF_KIND" {
                 continue;
             }
@@ -9309,6 +9392,7 @@ impl VisionaryApp {
                                 pos: None,
                                 rot: None,
                                 scale: None,
+                                rate: None,
                                 inject: None,
                             });
                             store.push(crate::game_link::SpawnRuleWire {
@@ -9320,6 +9404,7 @@ impl VisionaryApp {
                                 pos: None,
                                 rot: None,
                                 scale: None,
+                                rate: None,
                                 inject: Some(inject),
                             });
                         }
@@ -9461,6 +9546,7 @@ impl VisionaryApp {
                     pos: None,
                     rot: None,
                     scale: None,
+                    rate: None,
                     inject: None,
                 });
                 continue;
@@ -9479,6 +9565,7 @@ impl VisionaryApp {
                     pos: None,
                     rot: None,
                     scale: None,
+                    rate: None,
                     inject: Some(Self::build_effect_stop_inject(ec)),
                 });
             }
@@ -9508,6 +9595,7 @@ impl VisionaryApp {
                         pos: None,
                         rot: None,
                         scale: None,
+                        rate: None,
                         inject: None,
                     });
                     rules.push(crate::game_link::SpawnRuleWire {
@@ -9519,6 +9607,12 @@ impl VisionaryApp {
                         pos: None,
                         rot: None,
                         scale: None,
+                        // Unconditional here, unlike the transform rule below. An injected
+                        // spawn replays the captured argument list, which is the spawn call
+                        // alone — the script's `LAST_EFFECT_SET_RATE` line is a separate call
+                        // and is not in it. So a retimed or swapped spawn with any rate at
+                        // all has to be told its rate, not just one whose rate was edited.
+                        rate: ec.rate,
                         inject: Some(inject),
                     });
                     continue;
@@ -9530,16 +9624,23 @@ impl VisionaryApp {
             let moved = pristine
                 .map(|p| p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale)
                 .unwrap_or(true);
-            if moved {
+            // The rate rides along on the same rule, and is sent on its own terms: a spawn
+            // whose rate changed but which has not been moved still needs a rule, and one
+            // that moved but kept its rate must not claim to set one. Sending the rate
+            // unconditionally would override the script's own `LAST_EFFECT_SET_RATE` with a
+            // copy of itself, which is harmless until the user edits the script text.
+            let retuned = pristine.map(|p| p.rate != ec.rate).unwrap_or(ec.rate.is_some());
+            if moved || retuned {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
                     motion,
                     frame_start: window.0,
                     frame_end: window.1,
-                    pos: Some(ec.offset),
-                    rot: Some(ec.rotation),
-                    scale: Some(ec.scale),
+                    pos: moved.then_some(ec.offset),
+                    rot: moved.then_some(ec.rotation),
+                    scale: moved.then_some(ec.scale),
+                    rate: retuned.then_some(ec.rate).flatten(),
                     inject: None,
                 });
             }
@@ -12612,6 +12713,52 @@ mod live_effect_capture_tests {
         assert_eq!(
             effect_call_display_name(&calls[0]),
             "sys_dash_smoke (flip; other side none)"
+        );
+    }
+
+    /// A captured spawn call carries no rate — the rate arrives as its own `LAST_EFFECT_SET_RATE`
+    /// line, which names no effect. It has to bind to the spawn directly above it, and to
+    /// nothing at all when the line above spawned nothing, or a move captured from the game
+    /// comes back with one effect wearing another's rate.
+    #[test]
+    fn a_captured_rate_binds_to_the_spawn_above_it_and_no_further() {
+        let smoke = hash40::hash40("sys_atk_smoke").0;
+        let line = hash40::hash40("sys_attack_line").0;
+        let null = hash40::hash40("null").0;
+        let rate = |frame: f32, value: f32| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: "LAST_EFFECT_SET_RATE".into(),
+            args: vec![A::Num(value)],
+            run: 1,
+        };
+        let captures = vec![
+            spawn("EFFECT", 5.0, smoke),
+            rate(5.0, 2.0),
+            spawn("EFFECT_FOLLOW_ALPHA", 5.0, line),
+            rate(5.0, 1.5),
+            // A `null` spawn is dropped as a no-op, so the rate beneath it has no spawn of its
+            // own — and must NOT fall through onto sys_attack_line above.
+            spawn("FOOT_EFFECT", 9.0, null),
+            rate(9.0, 0.25),
+        ];
+
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([
+            (smoke, "sys_atk_smoke".into()),
+            (line, "sys_attack_line".into()),
+            (null, "null".into()),
+        ]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].effect_name, "sys_atk_smoke");
+        assert_eq!(calls[0].rate, Some(2.0));
+        assert_eq!(calls[1].effect_name, "sys_attack_line");
+        assert_eq!(
+            calls[1].rate,
+            Some(1.5),
+            "the orphaned 0.25 must not have overwritten this"
         );
     }
 

@@ -737,10 +737,7 @@ pub fn rewrite_effect_calls(
     edited: &[crate::data::EffectCall],
 ) -> Result<(String, SyncReport)> {
     let ordinals = crate::acmd::parse_effect_script(text).call_macro_ordinals();
-    let sites: Vec<MacroSite> = scan_macro_sites(text, 0..text.len())
-        .into_iter()
-        .filter(|s| is_spawn_macro(&s.name))
-        .collect();
+    let (sites, rate_sites) = spawn_and_rate_sites(text);
 
     let mut report = SyncReport::default();
     if ordinals.len() != pristine.len() {
@@ -823,6 +820,35 @@ pub fn rewrite_effect_calls(
             continue;
         }
         edits.extend(transform_edits(text, macro_site, target));
+
+        // The rate lives on its own line, so turning one on or off is a call added or
+        // removed — structural, and reported. Only retuning an existing one is a value edit.
+        let was = pristine[differs[0]].rate;
+        if was != target.rate {
+            match (was, target.rate, rate_sites.get(ordinal).and_then(Option::as_ref)) {
+                (Some(_), Some(now), Some(rate_site)) => {
+                    if let Some(span) = rate_site.args.get(1) {
+                        edits.extend(to_f32_edit(text, span, now));
+                    }
+                }
+                (None, Some(_), _) => report.skipped.push(format!(
+                    "{label}: `{}` gained a rate — that is a new LAST_EFFECT_SET_RATE line, \
+                     which source syncing does not add",
+                    macro_site.name
+                )),
+                (Some(_), None, _) => report.skipped.push(format!(
+                    "{label}: `{}` lost its rate — source syncing does not delete the \
+                     LAST_EFFECT_SET_RATE line that sets it",
+                    macro_site.name
+                )),
+                (Some(_), Some(_), None) => report.skipped.push(format!(
+                    "{label}: `{}` has a rate in the editor but no LAST_EFFECT_SET_RATE \
+                     directly beneath it in the source — reload the move from source",
+                    macro_site.name
+                )),
+                (None, None, _) => {}
+            }
+        }
     }
 
     report.changed = edits.len();
@@ -878,6 +904,42 @@ fn sync_script(
     Ok(report)
 }
 
+/// The spawn calls in `text`, in ordinal order, each paired with its `LAST_EFFECT_SET_RATE`
+/// line if it has one.
+///
+/// The rate macro names no effect, so the only thing tying it to a spawn is that it comes
+/// directly after one — the same rule `eval_effect_stmts` uses to fill `EffectCall::rate`,
+/// and the two must agree or a value would be read off one call and written into another.
+/// Anything at all between them, including a macro this scanner does not recognise, breaks
+/// the pairing rather than reaching further back for a spawn to claim.
+fn spawn_and_rate_sites(text: &str) -> (Vec<MacroSite>, Vec<Option<MacroSite>>) {
+    let mut spawns: Vec<MacroSite> = Vec::new();
+    let mut rates: Vec<Option<MacroSite>> = Vec::new();
+    let mut adjacent = false;
+    for site in scan_macro_sites(text, 0..text.len()) {
+        if is_spawn_macro(&site.name) {
+            // A trail is a spawn for ordinal purposes but never anchors a rate, matching the
+            // parser — see the `AfterImage` arm of `eval_effect_stmts`.
+            adjacent = !is_trail_macro(&site.name);
+            spawns.push(site);
+            rates.push(None);
+            continue;
+        }
+        if site.name == "LAST_EFFECT_SET_RATE" {
+            if adjacent {
+                if let Some(slot) = rates.last_mut() {
+                    // A second rate line overwrites the first, because in game the later call
+                    // wins and that is the value the parser will have read.
+                    *slot = Some(site);
+                }
+            }
+            continue;
+        }
+        adjacent = false;
+    }
+    (spawns, rates)
+}
+
 /// Whether a scanned macro name is one of the spawn families `call_macro_ordinals` counts.
 fn is_spawn_macro(name: &str) -> bool {
     crate::acmd::is_effect_spawn_macro(name) || is_trail_macro(name)
@@ -892,8 +954,13 @@ fn is_trail_macro(name: &str) -> bool {
     name.starts_with("AFTER_IMAGE4_ON") || name == "AFTER_IMAGE_ON"
 }
 
+/// Everything a value rewrite CAN change about a call — the test for whether every iteration
+/// of a loop body agrees, since they all come off one line of source.
+///
+/// `rate` counts: it is written back from its own line, but that line is inside the loop body
+/// too, so per-iteration rates are no more expressible than per-iteration positions.
 fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
-    a.offset == b.offset && a.rotation == b.rotation && a.scale == b.scale
+    a.offset == b.offset && a.rotation == b.rotation && a.scale == b.scale && a.rate == b.rate
 }
 
 /// Everything a value rewrite CANNOT change about a call.
@@ -1985,6 +2052,93 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(report.changed, 0);
         assert_eq!(report.skipped.len(), 1, "{report:?}");
         assert!(report.skipped[0].contains("no position"), "{report:?}");
+    }
+
+    /// Kirby's down attack, verbatim: two spawns, each with its own rate, in one block. The
+    /// rate macro names no effect, so the only thing saying which spawn a rate belongs to is
+    /// that it sits directly beneath it — and getting that wrong writes one spawn's value
+    /// into the other's line.
+    const RATES: &str = r#"unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 15.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 180, 0, 0.4, 0, 0, 0, 0, 0, 0, false);
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("sys_attack_line"), Hash40::new("sys_attack_line"), Hash40::new("top"), -8, 4, 2.5, 0, 160, 0, 1.1, true, *EF_FLIP_YZ);
+        macros::LAST_EFFECT_SET_RATE(agent, 1.5);
+    }
+}
+"#;
+
+    #[test]
+    fn a_rate_edit_rewrites_only_its_own_spawns_rate_line() {
+        let pristine = crate::acmd::parse_effect_script(RATES).to_effect_calls();
+        assert_eq!(
+            pristine.iter().map(|c| c.rate).collect::<Vec<_>>(),
+            vec![Some(2.0), Some(1.5)]
+        );
+
+        let mut edited = pristine.clone();
+        edited[1].rate = Some(0.75);
+        let (after, report) = rewrite_effect_calls(RATES, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_RATE(agent, 2);"),
+            "the first spawn's rate must be untouched:\n{after}"
+        );
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_RATE(agent, 0.75);"),
+            "the second spawn's rate is the one that changed:\n{after}"
+        );
+        // A whole number stays whole — the slot is generic over `ToF32`, and the emitter
+        // spells it the same way, so the two export paths agree on the text.
+        let mut whole = pristine.clone();
+        whole[0].rate = Some(3.0);
+        let (after, _) = rewrite_effect_calls(RATES, "t", &pristine, &whole).unwrap();
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_RATE(agent, 3);"),
+            "a whole rate must not sprout a decimal point:\n{after}"
+        );
+    }
+
+    /// The rate lives on a line of its own, so switching it on or off adds or deletes a call.
+    /// That is structural, and the house rule is to name it rather than guess where the line
+    /// should go — or, worse, delete one of the user's.
+    #[test]
+    fn turning_a_rate_off_is_reported_rather_than_deleting_the_line() {
+        let pristine = crate::acmd::parse_effect_script(RATES).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].rate = None;
+
+        let (after, report) = rewrite_effect_calls(RATES, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, RATES, "the user's line must still be there");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("lost its rate")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn turning_a_rate_on_is_reported_rather_than_inventing_a_line() {
+        // One spawn with no rate at all, so there is nowhere for a value to be written.
+        let text = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(text).to_effect_calls();
+        assert_eq!(pristine[0].rate, None);
+        let mut edited = pristine.clone();
+        edited[0].rate = Some(1.25);
+
+        let (after, report) = rewrite_effect_calls(text, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, text, "nothing may be inserted into the user's script");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("gained a rate")),
+            "{report:?}"
+        );
     }
 
     /// Selecting calls to sync by transform difference alone meant an edit that changed only

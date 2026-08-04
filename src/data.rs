@@ -1359,6 +1359,16 @@ pub struct EffectCall {
     /// AFTER_IMAGE trail macros); exports re-emit this line as-is.
     #[serde(default)]
     pub raw_line: Option<String>,
+    /// Playback rate from a `LAST_EFFECT_SET_RATE` line following this spawn.
+    ///
+    /// `None` means the script sets no rate and the export writes no line — which is not the
+    /// same as `Some(1.0)`, an explicit rate that happens to be the default. The value belongs
+    /// to the spawn rather than standing on its own because `LAST_EFFECT_SET_RATE` takes no
+    /// effect kind: it modifies whatever was spawned last, so it is a property *of* that
+    /// spawn. Binding it here is also what makes disabling or reordering a spawn carry its
+    /// rate along instead of leaving the line behind to land on someone else's effect.
+    #[serde(default)]
+    pub rate: Option<f32>,
 }
 
 fn default_effect_spawn_func() -> String {
@@ -1425,6 +1435,18 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
             EffectStmt::Wait(w) => frame += w,
             EffectStmt::Raw(_) => {}
             EffectStmt::Excute(macros) => {
+                // Which call, if any, the macro immediately above produced — the anchor a
+                // `LAST_EFFECT_SET_RATE` binds to. It is deliberately cleared by every macro
+                // that spawns nothing, including `Raw`, so a rate can only ever attach to a
+                // spawn this code actually understands.
+                //
+                // At runtime the game's "last effect" persists across frame blocks and across
+                // lines this parser does not recognise, so a stricter rule than the game's
+                // costs coverage in principle. It costs none in practice: all 27
+                // `LAST_EFFECT_SET_RATE` calls in the local corpus sit directly beneath a
+                // recognised spawn in the same block. Guessing the other way would attach a
+                // rate to a spawn several lines up and export it silently onto that one.
+                let mut anchor: Option<usize> = None;
                 for m in macros {
                     match m {
                         EffectMacro::Effect {
@@ -1457,7 +1479,9 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 disabled: false,
                                 extra_args: Some(extra_args.clone()),
                                 raw_line: None,
+                                rate: None,
                             });
+                            anchor = Some(calls.len() - 1);
                         }
                         EffectMacro::EffectOffKind { effect_name } => {
                             // EffectModule::kill_kind closes every live instance of this kind.
@@ -1466,6 +1490,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             }) {
                                 call.active_end = script_frame(frame);
                             }
+                            anchor = None;
                         }
                         EffectMacro::AfterImage {
                             effect_name,
@@ -1487,7 +1512,14 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
+                                rate: None,
                             });
+                            // Deliberately NOT an anchor. A trail produces an `EffectCall` for
+                            // the timeline, but it is drawn by the after-image system rather
+                            // than spawned as an effect, so it is not what `LAST_EFFECT_SET_RATE`
+                            // would find. Nothing in the corpus puts a rate after a trail, so
+                            // refusing costs no coverage and avoids inventing an answer.
+                            anchor = None;
                         }
                         EffectMacro::AfterImageOff => {
                             // Close the most recent open after-image effect.
@@ -1496,8 +1528,16 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             {
                                 call.active_end = script_frame(frame);
                             }
+                            anchor = None;
                         }
-                        EffectMacro::LastEffectSetRate { .. } | EffectMacro::Raw(_) => {}
+                        EffectMacro::LastEffectSetRate { rate } => {
+                            // `anchor` is left in place: two rate lines in a row both name the
+                            // same spawn, and the later one wins, exactly as in game.
+                            if let Some(index) = anchor {
+                                calls[index].rate = Some(*rate);
+                            }
+                        }
+                        EffectMacro::Raw(_) => anchor = None,
                     }
                 }
             }

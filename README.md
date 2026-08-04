@@ -208,6 +208,16 @@ in the file; the shorter commands have no lifetime and run until an
 rather than moved. Switching an area between rectangular and radial is a change
 of command, not of value, so it lands in an export and is reported on source sync.
 
+An effect's playback rate is the `LAST_EFFECT_SET_RATE` line beneath its spawn.
+That macro names no effect — it changes whatever spawned last — so the rate is
+shown as a property of the spawn above it and travels with that spawn when you
+disable or move it. The **Rate** checkbox is the difference between no rate line
+at all and one that happens to say 1.0; turning it on or off adds or removes a
+call, so it lands in an export but is reported when syncing into your own
+source, while changing an existing rate is written straight into the file. A
+rate that does not sit directly beneath a spawn Visionary recognises is left
+alone rather than attached to whichever spawn came before it.
+
 Anything that cannot be written as a value change to an existing argument is
 reported instead of guessed at: a spawn you added or removed, a graphic you
 renamed, a retimed call, one iteration of a `for` loop edited on its own, or a

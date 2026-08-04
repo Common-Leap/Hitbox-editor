@@ -149,7 +149,7 @@ pub fn verify_export(
     for (fighter, move_name, calls) in effect_edits {
         let subject = format!("{fighter} / {move_name}");
         let emitted = crate::acmd::preview_effect_fn(calls, move_name, tweaks);
-        verify_effect_move(&subject, calls, &emitted, &mut report);
+        verify_effect_move(&subject, calls, &emitted, tweaks, &mut report);
         if !sources.iter().any(|text| text.contains(&emitted)) {
             report.blocker(
                 &subject,
@@ -169,8 +169,18 @@ pub fn verify_move(subject: &str, script: &AcmdScript, emitted: &str, report: &m
 }
 
 /// Verify one move's effect script on its own, for the editor's generated-source preview.
-pub fn verify_effect_move(subject: &str, calls: &[EffectCall], emitted: &str, report: &mut Report) {
-    check_effect_fidelity(subject, calls, emitted, report);
+///
+/// `tweaks` are needed, not incidental: a live speed override deliberately replaces a spawn's
+/// own `LAST_EFFECT_SET_RATE` value in the emitted code, so without them a tweaked effect
+/// looks exactly like an export that lost the script's rate.
+pub fn verify_effect_move(
+    subject: &str,
+    calls: &[EffectCall],
+    emitted: &str,
+    tweaks: &[LiveTweak],
+    report: &mut Report,
+) {
+    check_effect_fidelity(subject, calls, emitted, tweaks, report);
     check_effect_values(subject, calls, report);
     for (spawn_func, effect_name) in crate::acmd::export_spawn_downgrades(calls) {
         report.warn(
@@ -454,7 +464,13 @@ fn hitbox_differences(want: &Hitbox, got: &Hitbox) -> Vec<String> {
     out
 }
 
-fn check_effect_fidelity(subject: &str, calls: &[EffectCall], emitted: &str, report: &mut Report) {
+fn check_effect_fidelity(
+    subject: &str,
+    calls: &[EffectCall],
+    emitted: &str,
+    tweaks: &[LiveTweak],
+    report: &mut Report,
+) {
     // The emitter groups spawns by frame, so the read-back order is the timeline order rather
     // than the editor's list order. Sort both the same way before pairing them up.
     let mut specified: Vec<&EffectCall> = calls.iter().filter(|call| !call.disabled).collect();
@@ -508,6 +524,38 @@ fn check_effect_fidelity(subject: &str, calls: &[EffectCall], emitted: &str, rep
                     want.effect_name, want.active_start
                 ),
             );
+        }
+
+        // Rate is checked apart from the fields above because one difference is legitimate:
+        // a live speed override is meant to replace the spawn's authored rate. That still
+        // gets said out loud — the user set a multiplier on an effect kind and it quietly
+        // took over a value the script had chosen, which is worth knowing before shipping.
+        if got.rate != want.rate {
+            let override_rate = tweaks
+                .iter()
+                .find(|tweak| tweak.effect_name.eq_ignore_ascii_case(&want.effect_name))
+                .and_then(|tweak| tweak.speed);
+            if override_rate == got.rate {
+                report.warn(
+                    subject,
+                    format!(
+                        "spawn {} on frame {} ships the live speed override ({}) instead of \
+                         the rate its script sets ({})",
+                        want.effect_name,
+                        want.active_start,
+                        got.rate.unwrap_or(1.0),
+                        want.rate.map(|r| r.to_string()).unwrap_or("none".into()),
+                    ),
+                );
+            } else {
+                report.blocker(
+                    subject,
+                    format!(
+                        "spawn {} on frame {} exported a different rate",
+                        want.effect_name, want.active_start
+                    ),
+                );
+            }
         }
     }
 }
@@ -660,6 +708,19 @@ fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report)
                 check_finite(subject, &format!("{label} {axis} rotation"), value, report);
             }
             check_finite(subject, &format!("{label} scale"), call.scale, report);
+        }
+        // Checked for every spawn, trail included: the rate is its own line rather than an
+        // argument of the spawn, so a trail with a rate still emits one. It is written with
+        // plain `to_string`, which spells a non-finite value `NaN` or `inf` — neither of
+        // which is Rust, so nothing downstream would build.
+        if let Some(rate) = call.rate {
+            check_finite(subject, &format!("{label} rate"), rate, report);
+            if rate < 0.0 {
+                report.warn(
+                    subject,
+                    format!("{label} has a negative rate ({rate}), which will not play backwards"),
+                );
+            }
         }
         if call.active_end < call.active_start {
             report.warn(
@@ -863,7 +924,7 @@ mod tests {
                     let calls = crate::acmd::parse_effect_script(body).to_effect_calls();
                     if !calls.is_empty() {
                         let emitted = crate::acmd::preview_effect_fn(&calls, "audit", &[]);
-                        verify_effect_move(&label, &calls, &emitted, &mut report);
+                        verify_effect_move(&label, &calls, &emitted, &[], &mut report);
                         checked += 1;
                     }
                 }
@@ -1047,6 +1108,49 @@ mod tests {
             !verify(&fine).has_blockers(),
             "{}",
             messages(&verify(&fine))
+        );
+    }
+
+    /// A live speed override deliberately replaces the spawn's own rate in the export. That is
+    /// the one rate difference that is not a bug — but it is still a value the user set on an
+    /// effect *kind* quietly taking over one the script chose for a single spawn, so it is
+    /// said out loud rather than suppressed. Any other difference means the export lost a rate.
+    #[test]
+    fn a_speed_override_replacing_a_scripts_rate_is_said_out_loud_but_not_refused() {
+        let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+    }
+}
+"#;
+        let calls = crate::acmd::parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls[0].rate, Some(2.0));
+        let tweaks = vec![LiveTweak {
+            effect_name: "sys_atk_smoke".into(),
+            color: None,
+            speed: Some(0.5),
+        }];
+
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &tweaks);
+        let mut report = Report::default();
+        verify_effect_move("test", &calls, &emitted, &tweaks, &mut report);
+        assert!(!report.has_blockers(), "{}", messages(&report));
+        assert!(
+            messages(&report).contains("ships the live speed override"),
+            "{}",
+            messages(&report)
+        );
+
+        // Without the tweak to explain it, the same divergence is an export that lost a value.
+        let mut report = Report::default();
+        verify_effect_move("test", &calls, &emitted, &[], &mut report);
+        assert!(report.has_blockers(), "{}", messages(&report));
+        assert!(
+            messages(&report).contains("different rate"),
+            "{}",
+            messages(&report)
         );
     }
 

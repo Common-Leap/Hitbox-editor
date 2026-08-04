@@ -1442,21 +1442,30 @@ fn emit_effect_move_fn(
 
         for call in starts {
             out.push_str(&emit_spawn_call(call, "        "));
-            if let Some(tw) = tweaks.get(&tweak_hash(&call.effect_name)) {
-                if let Some([r, g, b, _a]) = tw.color {
-                    out.push_str(&format!(
-                        "        macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
-                        num(r),
-                        num(g),
-                        num(b)
-                    ));
-                }
-                if let Some(rate) = tw.speed {
-                    out.push_str(&format!(
-                        "        macros::LAST_EFFECT_SET_RATE(agent, {});\n",
-                        num(rate)
-                    ));
-                }
+            let tweak = tweaks.get(&tweak_hash(&call.effect_name));
+            if let Some([r, g, b, _a]) = tweak.and_then(|tw| tw.color) {
+                out.push_str(&format!(
+                    "        macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
+                    num(r),
+                    num(g),
+                    num(b)
+                ));
+            }
+            // One rate line, never two. A live speed tweak is a deliberate override of this
+            // kind's playback rate, so it wins over the spawn's own — emitting both would
+            // leave the second one winning anyway, and reading the pair back would attribute
+            // the tweak's value to the script. Otherwise the spawn's rate is written, which
+            // is what makes a vanilla `LAST_EFFECT_SET_RATE` survive an export at all: it is
+            // read into the call and re-emitted here, rather than dropped on the floor.
+            if let Some(rate) = tweak.and_then(|tw| tw.speed).or(call.rate) {
+                // Deliberately not `num`, which puts a decimal point back on: the rate slot is
+                // generic over `ToF32`, so `2` compiles and is what both the archive and the
+                // source write-back spell. Emitting `2.0` here would mean the two export paths
+                // wrote different text for the same value. `check_effect_values` refuses a
+                // non-finite rate, which is the one thing `to_string` cannot spell as Rust.
+                out.push_str(&format!(
+                    "        macros::LAST_EFFECT_SET_RATE(agent, {rate});\n"
+                ));
             }
         }
 
@@ -2277,6 +2286,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                         .collect(),
                 ),
                 raw_line: None,
+                rate: None,
             },
             crate::data::EffectCall {
                 effect_name: "sys_flash".into(),
@@ -2292,6 +2302,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 disabled: false,
                 extra_args: Some(vec!["true".into()]),
                 raw_line: None,
+                rate: None,
             },
         ];
         let tweaks = vec![crate::mod_project::LiveTweak {
@@ -2600,6 +2611,116 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// `LAST_EFFECT_SET_RATE` was parsed into the IR and then dropped on the way to
+    /// `EffectCall`, so the export — which is generated from the calls — wrote no rate line at
+    /// all. Every vanilla effect that plays fast or slow shipped at normal speed.
+    ///
+    /// Kirby's down attack, verbatim: two spawns and two different rates in one block, which
+    /// is what proves the rate binds to the spawn directly above it rather than to whichever
+    /// spawn happens to be last.
+    #[test]
+    fn a_rate_binds_to_the_spawn_above_it_and_survives_an_export() {
+        let src = r#"
+unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 15.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 180, 0, 0.4, 0, 0, 0, 0, 0, 0, false);
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("sys_attack_line"), Hash40::new("sys_attack_line"), Hash40::new("top"), -8, 4, 2.5, 0, 160, 0, 1.1, true, *EF_FLIP_YZ);
+        macros::LAST_EFFECT_SET_RATE(agent, 1.5);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].effect_name, "sys_atk_smoke");
+        assert_eq!(calls[0].rate, Some(2.0));
+        assert_eq!(calls[1].effect_name, "sys_attack_line");
+        assert_eq!(calls[1].rate, Some(1.5));
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "downattackd", &Default::default());
+        // `2`, not `2.0`: the macro is generic over `ToF32`, and this is the spelling the
+        // archive uses and the source write-back produces.
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_RATE(agent, 2);"),
+            "a whole rate must not sprout a decimal point:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_RATE(agent, 1.5);"),
+            "the second spawn's own rate must be written too:\n{emitted}"
+        );
+        let round_tripped = parse_effect_script(&emitted).to_effect_calls();
+        assert_eq!(
+            round_tripped.iter().map(|c| c.rate).collect::<Vec<_>>(),
+            vec![Some(2.0), Some(1.5)],
+            "reading the export back must find the same rates on the same spawns"
+        );
+    }
+
+    /// The rate macro names no effect, so binding it to anything but the spawn directly above
+    /// it is a guess. A line this parser does not model could itself be a spawn, and then the
+    /// rate would be written onto an effect it was never meant to touch.
+    #[test]
+    fn a_rate_with_no_spawn_directly_above_it_attaches_to_nothing() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+        macros::SOME_UNMODELLED_SPAWN(agent, Hash40::new("whatever"));
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].rate, None,
+            "the rate belongs to the unmodelled line above it, not to sys_atk_smoke"
+        );
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        assert!(
+            !emitted.contains("LAST_EFFECT_SET_RATE"),
+            "a rate that could not be attached must not be invented onto a spawn:\n{emitted}"
+        );
+    }
+
+    /// A live speed override is a deliberate replacement of the kind's playback rate. Writing
+    /// both it and the spawn's own rate would leave the second line winning anyway, and would
+    /// read back as though the script had asked for the override's value.
+    #[test]
+    fn a_live_speed_override_replaces_the_spawns_own_rate_rather_than_joining_it() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        let mut tweaks = std::collections::HashMap::new();
+        tweaks.insert(
+            tweak_hash("sys_atk_smoke"),
+            crate::mod_project::LiveTweak {
+                effect_name: "sys_atk_smoke".into(),
+                color: None,
+                speed: Some(0.5),
+            },
+        );
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &tweaks);
+        assert_eq!(
+            emitted.matches("LAST_EFFECT_SET_RATE").count(),
+            1,
+            "exactly one rate line, or the export says two different things:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_RATE(agent, 0.5);"),
+            "the override is the one that must survive:\n{emitted}"
+        );
+    }
+
     /// The macros take rotation as `zr, yr, xr`. Parsing them left to right into `[x, y, z]`
     /// swapped two of the three angles against every other path in the editor.
     #[test]
@@ -2714,6 +2835,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             disabled: false,
             extra_args: None,
             raw_line: None,
+            rate: None,
         };
         let (_, emitted) = emit_effect_move_fn(&[call], "test", &Default::default());
         assert!(
