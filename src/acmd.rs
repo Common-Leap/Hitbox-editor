@@ -448,9 +448,53 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // FLASH / BURN_COLOR and friends: not spawns, but they belong to the effect timeline
+        // and the export regenerates that timeline from scratch, so a line left unmodelled
+        // here is a line the export drops.
+        if let Some((command, has_transition, has_rgba)) = color_macro_layout(line) {
+            if let Some(t) = try_extract(&format!("macros::{command}(")) {
+                let (transition_slot, rgba_slots) = crate::data::color_slots(has_transition);
+                let num = |i: usize| -> Option<f32> { t.get(i)?.trim().parse::<f32>().ok() };
+                // A short call is left as a `Raw` line rather than defaulted into shape: these
+                // arguments are the whole content of the command, so guessing one means
+                // shipping a colour the script never asked for.
+                let transition = transition_slot.map(num);
+                let rgba = has_rgba.then(|| {
+                    let mut out = [0.0; 4];
+                    for (dst, slot) in out.iter_mut().zip(rgba_slots) {
+                        *dst = num(slot)?;
+                    }
+                    Some(out)
+                });
+                if !matches!(transition, Some(None)) && !matches!(rgba, Some(None)) {
+                    macros.push(EffectMacro::Color {
+                        command: command.to_string(),
+                        color: crate::data::ColorCall {
+                            transition: transition.flatten(),
+                            rgba: rgba.flatten(),
+                        },
+                    });
+                    continue;
+                }
+            }
+        }
+
         macros.push(EffectMacro::Raw(line.to_string()));
     }
     macros
+}
+
+/// The colour command this line calls, with its argument layout.
+///
+/// Matched on the trailing `(`, which is what makes the table's order irrelevant here:
+/// `macros::BURN_COLOR_FRAME(` does not contain `macros::BURN_COLOR(`, so the longer name
+/// cannot be read as the shorter one with a stray argument. `effect_spawn_macro_layout` orders
+/// its table longest-first for the same hazard; this one does not have to.
+fn color_macro_layout(line: &str) -> Option<(&'static str, bool, bool)> {
+    crate::data::COLOR_COMMANDS
+        .iter()
+        .copied()
+        .find(|(command, _, _)| line.contains(&format!("macros::{command}(")))
 }
 
 /// Parse statements from an effect_ function body, producing `EffectStmt`.
@@ -508,7 +552,8 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::AFTER_IMAGE4_ON")
             || line.contains("macros::AFTER_IMAGE_ON")
             || line.contains("macros::AFTER_IMAGE_OFF(")
-            || line.contains("macros::LAST_EFFECT_SET_RATE(");
+            || line.contains("macros::LAST_EFFECT_SET_RATE(")
+            || color_macro_layout(line).is_some();
         if is_effect_macro {
             let effect_macros = parse_excute_block_effects(&[line]);
             if !effect_macros.is_empty() {
@@ -1280,6 +1325,12 @@ fn hash_arg(name: &str) -> String {
 /// back to the plain pair. That is the old, compilable behaviour. A tail that is known to be
 /// *empty* is a different thing entirely and is reissued as-is.
 fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
+    // A colour command is not a spawn at all: no graphic, no joint, no transform. Everything
+    // below this point would write arguments it does not have.
+    if let Some(color) = &call.color {
+        return emit_color_call(&call.spawn_func, color, indent);
+    }
+
     // Trail macros take textures and trail parameters, not a transform — there is nothing
     // to rebuild them from, so the source line rides along verbatim apart from the two
     // arguments the editor does expose.
@@ -1331,6 +1382,33 @@ fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
         args.push_str(extra);
     }
     format!("{indent}macros::{}({args});\n", call.spawn_func)
+}
+
+/// Emit one `FLASH` / `BURN_COLOR` line.
+///
+/// The arguments the command does not take are not written, and the ones it does are written
+/// with plain `to_string` rather than `num`: every slot in this family is generic over
+/// `ToF32`, so `2` compiles and is what the archive and the source write-back both spell.
+/// Using `num` here would put a decimal point on, and the two export paths would then disagree
+/// about the text for the same value — the bug A1 fixed for wind and A3 for the effect rate.
+///
+/// A colour whose command takes none is dropped rather than appended, and a missing one for a
+/// command that does take a colour is written as zeroes. Both cases mean the editor's state
+/// and the command name have come apart, which `check_effect_values` reports; emitting the
+/// wrong arity here would break the build instead of the check.
+fn emit_color_call(command: &str, color: &crate::data::ColorCall, indent: &str) -> String {
+    let (has_transition, has_rgba) = crate::data::color_command_layout(command)
+        .unwrap_or((color.transition.is_some(), color.rgba.is_some()));
+    let mut args = String::from("agent");
+    if has_transition {
+        args.push_str(&format!(", {}", color.transition.unwrap_or(0.0)));
+    }
+    if has_rgba {
+        for component in color.rgba.unwrap_or([0.0; 4]) {
+            args.push_str(&format!(", {component}"));
+        }
+    }
+    format!("{indent}macros::{command}({args});\n")
 }
 
 /// Argument slots of an AFTER_IMAGE trail that the editor surfaces as editable fields: the
@@ -1528,6 +1606,9 @@ pub fn export_spawn_downgrades(calls: &[crate::data::EffectCall]) -> Vec<(String
         .filter(|call| {
             !call.disabled
                 && call.raw_line.is_none()
+                // A colour command has no tail to be missing — its arguments are its whole
+                // content and are held as values, so it always re-emits under its own name.
+                && call.color.is_none()
                 && !call.spawn_func.is_empty()
                 && call.extra_args.is_none()
                 // The fallback emits exactly these two, so they are not a downgrade.
@@ -2287,6 +2368,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 ),
                 raw_line: None,
                 rate: None,
+                color: None,
             },
             crate::data::EffectCall {
                 effect_name: "sys_flash".into(),
@@ -2303,6 +2385,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 extra_args: Some(vec!["true".into()]),
                 raw_line: None,
                 rate: None,
+                color: None,
             },
         ];
         let tweaks = vec![crate::mod_project::LiveTweak {
@@ -2685,6 +2768,144 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// The effect export regenerates the whole function from the call list, so a macro that is
+    /// not in that list is a macro the export deletes. `FLASH` and the `BURN_COLOR` family were
+    /// parsed as `Raw` lines and therefore silently dropped from every exported move — 69
+    /// occurrences in the local corpus, including the entire colour ramp below.
+    ///
+    /// Kirby's dash attack, verbatim: the snap-then-interpolate pairing that makes up almost
+    /// every real use of the family, plus the argument-less reset and a spawn in the same
+    /// function to prove the two kinds of entry share a list without disturbing each other.
+    #[test]
+    fn colour_commands_survive_an_export_instead_of_being_dropped() {
+        let src = r#"
+unsafe extern "C" fn effect_attackdash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_NO_STOP(agent, Hash40::new("kirby_dash"), Hash40::new("top"), 0, 6, 5, -90, 0, 160, 0.7, true);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::BURN_COLOR(agent, 2, 0.059, 0.008, 0);
+        macros::BURN_COLOR_FRAME(agent, 4, 2, 0.059, 0.008, 0.9);
+    }
+    frame(agent.lua_state_agent, 30.0);
+    if macros::is_excute(agent) {
+        macros::BURN_COLOR(agent, 2, 0.059, 0.008, 0.9);
+        macros::BURN_COLOR_FRAME(agent, 12, 2, 0.059, 0.008, 0);
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("kirby_dash"), false, true);
+    }
+    frame(agent.lua_state_agent, 42.0);
+    if macros::is_excute(agent) {
+        macros::BURN_COLOR_NORMAL(agent);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        // One spawn plus five colour commands, in script order.
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[0].effect_name, "kirby_dash");
+        assert!(calls[0].color.is_none());
+        let colors: Vec<_> = calls[1..]
+            .iter()
+            .map(|call| (call.spawn_func.as_str(), call.color.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            colors,
+            vec![
+                (
+                    "BURN_COLOR",
+                    crate::data::ColorCall {
+                        transition: None,
+                        rgba: Some([2.0, 0.059, 0.008, 0.0])
+                    }
+                ),
+                (
+                    "BURN_COLOR_FRAME",
+                    crate::data::ColorCall {
+                        transition: Some(4.0),
+                        rgba: Some([2.0, 0.059, 0.008, 0.9])
+                    }
+                ),
+                (
+                    "BURN_COLOR",
+                    crate::data::ColorCall {
+                        transition: None,
+                        rgba: Some([2.0, 0.059, 0.008, 0.9])
+                    }
+                ),
+                (
+                    "BURN_COLOR_FRAME",
+                    crate::data::ColorCall {
+                        transition: Some(12.0),
+                        rgba: Some([2.0, 0.059, 0.008, 0.0])
+                    }
+                ),
+                (
+                    "BURN_COLOR_NORMAL",
+                    crate::data::ColorCall {
+                        transition: None,
+                        rgba: None
+                    }
+                ),
+            ],
+            "the interpolation length is the first argument, and the four after it are the colour"
+        );
+        // A colour command is one instant event: nothing closes it, so it must not be given a
+        // window that an EFFECT_OFF_KIND would then be emitted to end.
+        assert!(calls[1..]
+            .iter()
+            .all(|call| call.active_end == call.active_start));
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "attackdash", &Default::default());
+        // Whole numbers stay whole: every slot in this family is generic over `ToF32`, so this
+        // is the spelling the archive uses and the one the source write-back produces.
+        for line in [
+            "macros::BURN_COLOR(agent, 2, 0.059, 0.008, 0);",
+            "macros::BURN_COLOR_FRAME(agent, 4, 2, 0.059, 0.008, 0.9);",
+            "macros::BURN_COLOR(agent, 2, 0.059, 0.008, 0.9);",
+            "macros::BURN_COLOR_FRAME(agent, 12, 2, 0.059, 0.008, 0);",
+            "macros::BURN_COLOR_NORMAL(agent);",
+        ] {
+            assert!(emitted.contains(line), "missing {line} from:\n{emitted}");
+        }
+        assert_eq!(
+            parse_effect_script(&emitted).to_effect_calls(),
+            calls,
+            "reading the export back must produce the very same calls"
+        );
+    }
+
+    /// A colour command produces an entry in the call list, so it consumes a write-back
+    /// ordinal — and it is not a spawn, so it must not anchor a rate. Getting either half
+    /// wrong writes one call's value into another's line.
+    #[test]
+    fn a_colour_command_takes_an_ordinal_but_never_anchors_a_rate() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+        macros::FLASH(agent, 0.314, 0.235, 0.157, 0.039);
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+    }
+}
+"#;
+        let script = parse_effect_script(src);
+        let calls = script.to_effect_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].rate, None,
+            "the rate sits under the FLASH, not under the spawn — attaching it anyway would \
+             retune an effect the script never asked to retune"
+        );
+        assert_eq!(
+            script.call_macro_ordinals().len(),
+            calls.len(),
+            "every call needs an ordinal or write-back writes into the wrong line"
+        );
+    }
+
     /// A live speed override is a deliberate replacement of the kind's playback rate. Writing
     /// both it and the spawn's own rate would leave the second line winning anyway, and would
     /// read back as though the script had asked for the override's value.
@@ -2836,6 +3057,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             extra_args: None,
             raw_line: None,
             rate: None,
+            color: None,
         };
         let (_, emitted) = emit_effect_move_fn(&[call], "test", &Default::default());
         assert!(

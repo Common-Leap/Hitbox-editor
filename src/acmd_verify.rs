@@ -515,6 +515,10 @@ fn check_effect_fidelity(
             active_start,
             active_end,
             extra_args,
+            // Compared here rather than trusted, because the corpus oracle pairs calls on
+            // `(spawn_func, effect_name)` alone and a colour command has no effect name at
+            // all — every one of them would pair up and compare equal without this line.
+            color,
         );
         for difference in out {
             report.blocker(
@@ -687,7 +691,15 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
 
 fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report) {
     for call in calls.iter().filter(|call| !call.disabled) {
-        let label = format!("spawn {} on frame {}", call.effect_name, call.active_start);
+        // A colour command has no graphic to name it, so it is labelled by its command.
+        let label = match &call.color {
+            Some(_) => format!("{} on frame {}", call.spawn_func, call.active_start),
+            None => format!("spawn {} on frame {}", call.effect_name, call.active_start),
+        };
+        if let Some(color) = &call.color {
+            check_color_values(subject, &label, &call.spawn_func, color, report);
+            continue;
+        }
         // A trail rides along as its own source line, so its names are never re-quoted and its
         // transform is not emitted at all.
         if call.raw_line.is_none() {
@@ -731,6 +743,62 @@ fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report)
                 ),
             );
         }
+    }
+}
+
+/// Everything that can go wrong with a `FLASH` / `BURN_COLOR` line before it reaches a
+/// compiler.
+///
+/// The arity check is the one that matters: these commands are emitted from a table keyed by
+/// the command name, so an editor state holding a transition for a command that has no such
+/// slot — or no colour for one that needs four — writes a call the signature does not accept.
+/// That is a mod that does not build, which is a blocker by the same rule as a wind command an
+/// argument short.
+fn check_color_values(
+    subject: &str,
+    label: &str,
+    command: &str,
+    color: &crate::data::ColorCall,
+    report: &mut Report,
+) {
+    let Some((has_transition, has_rgba)) = crate::data::color_command_layout(command) else {
+        report.blocker(
+            subject,
+            format!("{label} is not a colour command smash-script wraps, so it cannot be written"),
+        );
+        return;
+    };
+    if has_transition != color.transition.is_some() {
+        report.blocker(
+            subject,
+            format!(
+                "{label} takes {} transition length",
+                if has_transition { "a" } else { "no" }
+            ),
+        );
+    }
+    if has_rgba != color.rgba.is_some() {
+        report.blocker(
+            subject,
+            format!("{label} takes {} colour", if has_rgba { "a" } else { "no" }),
+        );
+    }
+    // Every slot is written with plain `to_string`, which spells a non-finite value `NaN` or
+    // `inf`. Neither is Rust, so nothing downstream would build.
+    if let Some(frames) = color.transition {
+        check_finite(subject, &format!("{label} transition"), frames, report);
+        if frames < 0.0 {
+            report.warn(
+                subject,
+                format!("{label} interpolates over {frames} frames, which never completes"),
+            );
+        }
+    }
+    for (channel, value) in ["red", "green", "blue", "blend"]
+        .iter()
+        .zip(color.rgba.unwrap_or([0.0; 4]))
+    {
+        check_finite(subject, &format!("{label} {channel}"), value, report);
     }
 }
 

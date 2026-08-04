@@ -1303,8 +1303,80 @@ pub enum EffectMacro {
     EffectOffKind { effect_name: String },
     /// LAST_EFFECT_SET_RATE — modifies the rate of the last spawned effect.
     LastEffectSetRate { rate: f32 },
+    /// FLASH / BURN_COLOR and their relatives — see [`ColorCall`].
+    Color { command: String, color: ColorCall },
     /// Any unrecognised line, preserved verbatim.
     Raw(String),
+}
+
+/// The colour payload of a `FLASH` / `BURN_COLOR` command.
+///
+/// These tint the fighter's model or the screen flash; they are not spawns and have no
+/// graphic, joint, or transform. The command name itself lives in
+/// [`EffectCall::spawn_func`], which is what every other macro-name comparison in the editor
+/// already reads, so keeping a second copy of it here would be one more thing to hold in step.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ColorCall {
+    /// Frames to interpolate over, for the `_FRM` / `_FRAME` forms. `None` for the rest, and
+    /// that difference is the command's, not the user's: a `FLASH` has no such slot to write
+    /// into, so a transition on one is a change of command rather than of value.
+    #[serde(default)]
+    pub transition: Option<f32>,
+    /// Red, green, blue, and blend strength. `None` for the two commands that take no
+    /// arguments at all — `BURN_COLOR_NORMAL` and `START_INFO_FLASH_EYE`.
+    ///
+    /// Not clamped to 0..=1. The corpus writes `BURN_COLOR(agent, 2, 0.059, 0.008, 0)`, whose
+    /// red is deliberately over-bright; clamping it on the way in would dim every burn in the
+    /// game by the act of loading it.
+    #[serde(default)]
+    pub rgba: Option<[f32; 4]>,
+}
+
+/// The model- and screen-colour commands, as `(command, takes a transition length, takes a
+/// colour)`.
+///
+/// All six are declared in smash-script's `macros.rs`, so all six are emittable. Every
+/// argument is generic over `ToF32`, which is why they are written with plain `to_string`
+/// rather than the decimal-forcing `num` — see the note on [`crate::data::WIND_COMMANDS`].
+///
+/// `FLASH_SET_DIRECTION` is deliberately absent: `sv_animcmd` has it and the corpus uses it
+/// eight times, but smash-script never wrapped it, so modelling it would mean emitting a
+/// macro that does not exist. It stays an unmodelled line, as it is today.
+pub const COLOR_COMMANDS: &[(&str, bool, bool)] = &[
+    ("FLASH", false, true),
+    ("FLASH_FRM", true, true),
+    ("BURN_COLOR", false, true),
+    ("BURN_COLOR_FRAME", true, true),
+    ("BURN_COLOR_NORMAL", false, false),
+    ("START_INFO_FLASH_EYE", false, false),
+];
+
+/// `(takes a transition length, takes a colour)` for a colour command, or `None` if the name
+/// is not one.
+pub fn color_command_layout(name: &str) -> Option<(bool, bool)> {
+    COLOR_COMMANDS
+        .iter()
+        .find(|(command, _, _)| *command == name)
+        .map(|(_, transition, rgba)| (*transition, *rgba))
+}
+
+pub fn is_color_command(name: &str) -> bool {
+    color_command_layout(name).is_some()
+}
+
+/// The argument slot each part of a colour call occupies, counting `agent` as slot 0.
+///
+/// One layout for the whole family: the transition length comes first where there is one, and
+/// the four colour components follow. That uniformity is measured, not assumed —
+/// `BURN_COLOR(agent, 2, 0.059, 0.008, 0)` and
+/// `BURN_COLOR_FRAME(agent, 12, 2, 0.059, 0.008, 0)` are the same four values with a length
+/// pushed in front.
+pub fn color_slots(has_transition: bool) -> (Option<usize>, [usize; 4]) {
+    if has_transition {
+        (Some(1), [2, 3, 4, 5])
+    } else {
+        (None, [1, 2, 3, 4])
+    }
 }
 
 /// A timing statement in an effect_ script — mirrors `AcmdStmt`.
@@ -1369,6 +1441,18 @@ pub struct EffectCall {
     /// rate along instead of leaving the line behind to land on someone else's effect.
     #[serde(default)]
     pub rate: Option<f32>,
+    /// Set when this entry is a colour command rather than a spawn — `FLASH`, `BURN_COLOR`,
+    /// and the rest of [`COLOR_COMMANDS`], with `spawn_func` naming which one.
+    ///
+    /// These share the effect list rather than getting one of their own because everything the
+    /// list already does — reordering, disabling, undo, project save, write-back ordinals,
+    /// export grouping by frame — is exactly what they need too, and a parallel list would be
+    /// a second copy of all of it to keep in step. The cost is that the fields above are
+    /// meaningless here: there is no graphic, joint, transform, or end frame, and every site
+    /// that reads one must check this field first. `active_end` is set equal to `active_start`
+    /// so nothing tries to close a colour command with an `EFFECT_OFF_KIND`.
+    #[serde(default)]
+    pub color: Option<ColorCall>,
 }
 
 fn default_effect_spawn_func() -> String {
@@ -1480,6 +1564,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 extra_args: Some(extra_args.clone()),
                                 raw_line: None,
                                 rate: None,
+                                color: None,
                             });
                             anchor = Some(calls.len() - 1);
                         }
@@ -1513,6 +1598,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
                                 rate: None,
+                                color: None,
                             });
                             // Deliberately NOT an anchor. A trail produces an `EffectCall` for
                             // the timeline, but it is drawn by the after-image system rather
@@ -1536,6 +1622,33 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             if let Some(index) = anchor {
                                 calls[index].rate = Some(*rate);
                             }
+                        }
+                        EffectMacro::Color { command, color } => {
+                            calls.push(EffectCall {
+                                effect_name: String::new(),
+                                effect_name_alt: None,
+                                spawn_func: command.clone(),
+                                bone_name: String::new(),
+                                offset: [0.0; 3],
+                                rotation: [0.0; 3],
+                                scale: 1.0,
+                                follows_bone: false,
+                                active_start: script_frame(frame),
+                                // Not 9999, and not the transition length either. A colour
+                                // command is one instant event: `BURN_COLOR_FRAME` schedules an
+                                // interpolation the game runs on its own, with no closing call
+                                // anywhere for an end frame to mean.
+                                active_end: script_frame(frame),
+                                disabled: false,
+                                extra_args: None,
+                                raw_line: None,
+                                rate: None,
+                                color: Some(color.clone()),
+                            });
+                            // Not a spawn, so not a rate anchor — a `LAST_EFFECT_SET_RATE`
+                            // below a `FLASH` still belongs to whatever spawned before it, and
+                            // the parser refuses to reach past this line to find it.
+                            anchor = None;
                         }
                         EffectMacro::Raw(_) => anchor = None,
                     }
@@ -1565,12 +1678,15 @@ impl EffectScript {
                 match stmt {
                     EffectStmt::Excute(macros) => {
                         for m in macros {
-                            // Only spawns are numbered — they are the only macros that both
-                            // produce a call and carry an editable transform, so the scanner
-                            // counts exactly these and the two sequences stay aligned.
+                            // Every macro that produces an `EffectCall` is numbered, and only
+                            // those — the ordinals index the call list, so a macro counted here
+                            // that produces no call (or a call produced by a macro not counted
+                            // here) shifts every later call onto the wrong line of source.
                             if matches!(
                                 m,
-                                EffectMacro::Effect { .. } | EffectMacro::AfterImage { .. }
+                                EffectMacro::Effect { .. }
+                                    | EffectMacro::AfterImage { .. }
+                                    | EffectMacro::Color { .. }
                             ) {
                                 out.push(*next);
                                 *next += 1;

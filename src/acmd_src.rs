@@ -819,13 +819,23 @@ pub fn rewrite_effect_calls(
             ));
             continue;
         }
+        // A colour command has no transform to write and no rate line beneath it — its
+        // arguments are a length and four components, and nothing else.
+        if let Some(color) = &target.color {
+            edits.extend(color_edits(text, macro_site, color));
+            continue;
+        }
         edits.extend(transform_edits(text, macro_site, target));
 
         // The rate lives on its own line, so turning one on or off is a call added or
         // removed — structural, and reported. Only retuning an existing one is a value edit.
         let was = pristine[differs[0]].rate;
         if was != target.rate {
-            match (was, target.rate, rate_sites.get(ordinal).and_then(Option::as_ref)) {
+            match (
+                was,
+                target.rate,
+                rate_sites.get(ordinal).and_then(Option::as_ref),
+            ) {
                 (Some(_), Some(now), Some(rate_site)) => {
                     if let Some(span) = rate_site.args.get(1) {
                         edits.extend(to_f32_edit(text, span, now));
@@ -919,8 +929,11 @@ fn spawn_and_rate_sites(text: &str) -> (Vec<MacroSite>, Vec<Option<MacroSite>>) 
     for site in scan_macro_sites(text, 0..text.len()) {
         if is_spawn_macro(&site.name) {
             // A trail is a spawn for ordinal purposes but never anchors a rate, matching the
-            // parser — see the `AfterImage` arm of `eval_effect_stmts`.
-            adjacent = !is_trail_macro(&site.name);
+            // parser — see the `AfterImage` arm of `eval_effect_stmts`. A colour command is
+            // counted for the same reason and anchors nothing for the same reason: both
+            // produce an `EffectCall`, so both consume an ordinal, and neither is what
+            // `LAST_EFFECT_SET_RATE` would find at runtime.
+            adjacent = !is_trail_macro(&site.name) && !crate::data::is_color_command(&site.name);
             spawns.push(site);
             rates.push(None);
             continue;
@@ -940,9 +953,16 @@ fn spawn_and_rate_sites(text: &str) -> (Vec<MacroSite>, Vec<Option<MacroSite>>) 
     (spawns, rates)
 }
 
-/// Whether a scanned macro name is one of the spawn families `call_macro_ordinals` counts.
+/// Whether a scanned macro name is one `call_macro_ordinals` counts.
+///
+/// "Spawn" is a slight lie now that colour commands are in the list, but the property that
+/// matters is unchanged: these are exactly the macros that produce an `EffectCall`, so this
+/// predicate and `call_macro_ordinals` must accept the same set or every ordinal past the
+/// first disagreement points at the wrong line of source.
 fn is_spawn_macro(name: &str) -> bool {
-    crate::acmd::is_effect_spawn_macro(name) || is_trail_macro(name)
+    crate::acmd::is_effect_spawn_macro(name)
+        || is_trail_macro(name)
+        || crate::data::is_color_command(name)
 }
 
 /// Whether a scanned macro name starts an AFTER_IMAGE trail.
@@ -960,7 +980,11 @@ fn is_trail_macro(name: &str) -> bool {
 /// `rate` counts: it is written back from its own line, but that line is inside the loop body
 /// too, so per-iteration rates are no more expressible than per-iteration positions.
 fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
-    a.offset == b.offset && a.rotation == b.rotation && a.scale == b.scale && a.rate == b.rate
+    a.offset == b.offset
+        && a.rotation == b.rotation
+        && a.scale == b.scale
+        && a.rate == b.rate
+        && a.color == b.color
 }
 
 /// Everything a value rewrite CANNOT change about a call.
@@ -1003,6 +1027,29 @@ fn transform_edits(
         }
     }
     edits
+}
+
+/// Replacements for one colour command's arguments.
+///
+/// The layout comes from the command found in the *source*, not from what the editor holds:
+/// if the two have come apart, the source is what the spans belong to, and writing a
+/// transition length into a `FLASH` that has no such slot would put it in the red channel.
+fn color_edits(text: &str, site: &MacroSite, color: &crate::data::ColorCall) -> Vec<Replacement> {
+    let Some((has_transition, has_rgba)) = crate::data::color_command_layout(&site.name) else {
+        return Vec::new();
+    };
+    let (transition_slot, rgba_slots) = crate::data::color_slots(has_transition);
+    let mut slots: Vec<(usize, f32)> = Vec::new();
+    if let (Some(slot), Some(value)) = (transition_slot, color.transition) {
+        slots.push((slot, value));
+    }
+    if let (true, Some(rgba)) = (has_rgba, color.rgba) {
+        slots.extend(rgba_slots.into_iter().zip(rgba));
+    }
+    slots
+        .into_iter()
+        .filter_map(|(slot, value)| to_f32_edit(text, site.args.get(slot)?, value))
+        .collect()
 }
 
 /// Rewrite one `game_*` function's source with the editor's edited hitbox values.
@@ -2134,9 +2181,97 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         edited[0].rate = Some(1.25);
 
         let (after, report) = rewrite_effect_calls(text, "t", &pristine, &edited).unwrap();
-        assert_eq!(after, text, "nothing may be inserted into the user's script");
+        assert_eq!(
+            after, text,
+            "nothing may be inserted into the user's script"
+        );
         assert!(
             report.skipped.iter().any(|s| s.contains("gained a rate")),
+            "{report:?}"
+        );
+    }
+
+    /// Kirby's dash attack, verbatim: a spawn and four colour commands, which is what makes
+    /// this a test of the ordinals as much as of the values. A colour command produces a call,
+    /// so it consumes an ordinal; if it did not, every edit after the first `BURN_COLOR` would
+    /// be written into the line belonging to a different call.
+    const COLORS: &str = r#"unsafe extern "C" fn effect_attackdash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_NO_STOP(agent, Hash40::new("kirby_dash"), Hash40::new("top"), 0, 6, 5, -90, 0, 160, 0.7, true);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::BURN_COLOR(agent, 2, 0.059, 0.008, 0);
+        macros::BURN_COLOR_FRAME(agent, 4, 2, 0.059, 0.008, 0.9);
+    }
+    frame(agent.lua_state_agent, 42.0);
+    if macros::is_excute(agent) {
+        macros::BURN_COLOR_NORMAL(agent);
+    }
+}
+"#;
+
+    #[test]
+    fn a_colour_edit_rewrites_only_its_own_commands_arguments() {
+        let pristine = crate::acmd::parse_effect_script(COLORS).to_effect_calls();
+        assert_eq!(pristine.len(), 4);
+
+        let mut edited = pristine.clone();
+        // The interpolating half of the pair only: the snap above it keeps its own values, so
+        // a wrong ordinal or a wrong slot table shows up as the wrong line changing.
+        edited[2].color = Some(crate::data::ColorCall {
+            transition: Some(6.0),
+            rgba: Some([2.0, 0.5, 0.25, 0.9]),
+        });
+
+        let (after, report) = rewrite_effect_calls(COLORS, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("macros::BURN_COLOR(agent, 2, 0.059, 0.008, 0);"),
+            "the snap above must be untouched:\n{after}"
+        );
+        assert!(
+            after.contains("macros::BURN_COLOR_FRAME(agent, 6, 2, 0.5, 0.25, 0.9);"),
+            "the length is slot 1 and the colour follows it — and 6, not 6.0:\n{after}"
+        );
+        assert!(
+            after.contains("macros::BURN_COLOR_NORMAL(agent);"),
+            "an argument-less command has nothing to write and must survive:\n{after}"
+        );
+        // Everything else in the file, comments and formatting included, byte for byte.
+        assert_eq!(
+            after.replace("macros::BURN_COLOR_FRAME(agent, 6, 2, 0.5, 0.25, 0.9);", ""),
+            COLORS.replace(
+                "macros::BURN_COLOR_FRAME(agent, 4, 2, 0.059, 0.008, 0.9);",
+                ""
+            ),
+        );
+    }
+
+    /// Swapping `BURN_COLOR` for `BURN_COLOR_FRAME` adds an argument the existing call does not
+    /// have. That is a change of command, not of value, so it lands in an export and is
+    /// reported here — writing the length into slot 1 would put it in the red channel.
+    #[test]
+    fn changing_which_colour_command_a_call_is_gets_reported() {
+        let pristine = crate::acmd::parse_effect_script(COLORS).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[1].spawn_func = "BURN_COLOR_FRAME".into();
+        edited[1].color = Some(crate::data::ColorCall {
+            transition: Some(3.0),
+            rgba: Some([2.0, 0.059, 0.008, 0.0]),
+        });
+
+        let (after, report) = rewrite_effect_calls(COLORS, "t", &pristine, &edited).unwrap();
+        assert_eq!(
+            after, COLORS,
+            "the user's call must be left exactly as written"
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("changed graphic, joint, timing, or enablement")),
             "{report:?}"
         );
     }

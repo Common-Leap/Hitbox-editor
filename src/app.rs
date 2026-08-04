@@ -3973,6 +3973,9 @@ impl VisionaryApp {
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
                     rate: None,
+                    // This button adds a spawn. Colour commands are added by their own button
+                    // below, because the two share a list but nothing else.
+                    color: None,
                 };
                 self.state.effects.push(call.clone());
                 let idx = self.state.effects.len() - 1;
@@ -6108,6 +6111,60 @@ impl VisionaryApp {
             // `LAST_EFFECT_SET_RATE` capture line that follows, and is attached in
             // `effect_calls_from_captures`.
             rate: None,
+            // `effect_capture_layout` above only matches spawn families, so nothing that
+            // reaches here is a colour command; those are built by `color_call_from_capture`.
+            color: None,
+        })
+    }
+
+    /// FLASH / BURN_COLOR capture → EffectCall.
+    ///
+    /// The plugin records these the same way it records a spawn, so a move captured live comes
+    /// back with its screen and body colouring instead of losing it — which, before this, is
+    /// what happened to every one of them.
+    fn color_call_from_capture(
+        func: &str,
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+    ) -> Option<crate::data::EffectCall> {
+        let (has_transition, has_rgba) = crate::data::color_command_layout(func)?;
+        let (transition_slot, rgba_slots) = crate::data::color_slots(has_transition);
+        // Refused rather than defaulted, for the same reason the script parser refuses a short
+        // call: these arguments are the command's entire content, so a missing one means
+        // shipping a colour nothing asked for.
+        // `color_slots` counts `agent` as slot 0, the way the source text reads; a capture's
+        // argument list has already dropped it, so every slot shifts down by one.
+        let f32_at = |slot: usize| args.get(slot - 1).and_then(|a| a.as_f32());
+        let transition = match transition_slot {
+            Some(slot) => Some(f32_at(slot)?),
+            None => None,
+        };
+        let rgba = if has_rgba {
+            let mut out = [0.0; 4];
+            for (dst, slot) in out.iter_mut().zip(rgba_slots) {
+                *dst = f32_at(slot)?;
+            }
+            Some(out)
+        } else {
+            None
+        };
+        let start = Self::motion_to_script_frame(frame);
+        Some(crate::data::EffectCall {
+            effect_name: String::new(),
+            effect_name_alt: None,
+            spawn_func: func.to_string(),
+            bone_name: String::new(),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: false,
+            active_start: start,
+            active_end: start,
+            disabled: false,
+            extra_args: None,
+            raw_line: None,
+            rate: None,
+            color: Some(crate::data::ColorCall { transition, rgba }),
         })
     }
 
@@ -6263,6 +6320,18 @@ impl VisionaryApp {
                 {
                     effects[index].rate = Some(rate);
                 }
+                continue;
+            }
+            // A colour command produces an entry in this list but is not a spawn, so it ends a
+            // rate's binding rather than becoming its anchor — the same rule the script parser
+            // applies to the `FLASH` line above a `LAST_EFFECT_SET_RATE`.
+            if crate::data::is_color_command(&line.func) {
+                if let Some(color) =
+                    Self::color_call_from_capture(&line.func, &line.args, line.frame)
+                {
+                    effects.push(color);
+                }
+                anchor = None;
                 continue;
             }
             anchor = None;
@@ -9629,7 +9698,9 @@ impl VisionaryApp {
             // that moved but kept its rate must not claim to set one. Sending the rate
             // unconditionally would override the script's own `LAST_EFFECT_SET_RATE` with a
             // copy of itself, which is harmless until the user edits the script text.
-            let retuned = pristine.map(|p| p.rate != ec.rate).unwrap_or(ec.rate.is_some());
+            let retuned = pristine
+                .map(|p| p.rate != ec.rate)
+                .unwrap_or(ec.rate.is_some());
             if moved || retuned {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
