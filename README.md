@@ -240,6 +240,15 @@ use is of exactly that kind — a costume check wrapped around a recolour — so
 those are listed under the generated code as lines the export drops, not attached
 to whichever spawn happens to be nearest.
 
+Throws carry a hit with no volume. `ATTACK_ABS` sets the damage and knockback
+applied to an opponent who is *already* caught, so it has no bone, no size, and
+no position — the fields that would describe those are hidden rather than shown
+as zeros, and it draws on the timeline but never in the viewport. What it does
+have is the outcome it describes, shown as **Applies to**: a catch, a throw, or
+a fighter-specific kind such as Terry's final smash. Two of these often sit in
+one block naming the same id and differing only in that, so they are matched on
+the kind and never on the id.
+
 Intangibility is the **Hurtboxes** section under the collision list. `HIT_NODE`
 and `HIT_NO` set how one bone or one numbered hurtbox group receives hits, and
 the game holds that setting until something takes it back — so a state is shown

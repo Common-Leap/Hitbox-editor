@@ -194,6 +194,16 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 continue;
             }
         }
+        // Safe below the `ATTACK_FUNCS` test above only because that one matches on
+        // `macros::NAME(` with the paren: `macros::ATTACK_ABS(` does not contain
+        // `macros::ATTACK(`. Without the paren this call would be read through `ATTACK`'s
+        // 36-slot layout, which is the cross-family corruption this file keeps warning about.
+        if line.contains("macros::ATTACK_ABS(") {
+            if let Some(call) = parse_attack_abs_call(line) {
+                stmts.push(ExcuteStmt::AttackAbs(call));
+                continue;
+            }
+        }
         if line.contains("AREA_WIND_2ND") {
             if let Some(call) = parse_wind_call(line) {
                 stmts.push(ExcuteStmt::Wind(call));
@@ -970,6 +980,49 @@ fn parse_erase_wind(line: &str) -> Option<u32> {
         .ok()
 }
 
+/// Parse `macros::ATTACK_ABS(...)`, or `None` if the call is not the shape this family takes.
+///
+/// One arity across the whole corpus — 16 arguments in all 32 calls, matching the declaration
+/// in `macros.rs` exactly — so, per this file's rule for families whose arguments carry no
+/// distinguishing shape, a call of any other length is refused rather than reinterpreted.
+///
+/// Slot order, which is NOT `ATTACK`'s: kind, id, damage, angle, kbg, fkb, bkb, hitlag, unk,
+/// lr_check, unk2, unk3, collision_attr, sound_level, sound_attr, attack_region.
+fn parse_attack_abs_call(line: &str) -> Option<crate::data::AttackAbsCall> {
+    const NEEDLE: &str = "macros::ATTACK_ABS(";
+    let start = line.find(NEEDLE)? + NEEDLE.len();
+    let end = line[start..].rfind(')')? + start;
+    let args = tokenize_args(&line[start..end]);
+    // Leading `agent`, then the sixteen.
+    let a = args.get(1..)?;
+    if a.len() != 16 {
+        return None;
+    }
+    let int = |i: usize| a[i].trim().parse::<i32>().ok();
+    Some(crate::data::AttackAbsCall {
+        // Carried verbatim, minus the deref. The corpus has a fighter-specific kind
+        // (`FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL`), so there is no closed set to map onto.
+        kind: strip_deref(&a[0]),
+        id: a[1].trim().parse::<u32>().ok()?,
+        damage: a[2].trim().parse::<f32>().ok()?,
+        angle: int(3)?,
+        kb_scaling: int(4)?,
+        fkb: int(5)?,
+        kb_base: int(6)?,
+        hitlag_mult: a[7].trim().parse::<f32>().ok()?,
+        lr_check: strip_deref(&a[9]),
+        collision_attr: extract_hash40_string(&a[12]).unwrap_or_else(|| a[12].trim().to_string()),
+        sound_level: strip_deref(&a[13]),
+        sound_attr: strip_deref(&a[14]),
+        attack_region: strip_deref(&a[15]),
+        unknowns: (
+            a[8].trim().parse::<f32>().ok()?,
+            a[10].trim().parse::<f32>().ok()?,
+            a[11].trim().parse::<bool>().ok()?,
+        ),
+    })
+}
+
 /// Parse one hurtbox-state or body-collision line, or `None` if this is not one.
 ///
 /// Every member has exactly one arity in the vanilla archive — `HIT_NODE` 30 calls of
@@ -1126,6 +1179,18 @@ pub struct ModProject {
 /// Spell a hitbox property the way an `ATTACK` argument spells it: a lua const gets its
 /// leading `*`, a value that is already a number stays one. Shared with the source
 /// write-back so both routes put the identical text in that slot.
+/// A collision-attr name as the `Hash40` expression an export writes.
+///
+/// Live-captured hitboxes carry the attr as a raw hash rather than a name, because the game
+/// only ever had the hash — so those emit as `Hash40::new_raw`, which is the one form that
+/// reproduces the captured value exactly.
+fn hash40_expr(attr: &str) -> String {
+    match attr.strip_prefix("0x") {
+        Some(hex) => format!("Hash40::new_raw(0x{hex})"),
+        None => format!("Hash40::new(\"{attr}\")"),
+    }
+}
+
 pub fn const_expr(s: &str) -> String {
     let t = s.trim();
     if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
@@ -1175,12 +1240,7 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
         Some([x, y, z]) => format!("Some({}), Some({}), Some({})", num(x), num(y), num(z)),
         None => "None, None, None".to_string(),
     };
-    // Live-captured hitboxes carry the collision attr as a raw hash — emit it as such.
-    let collision_attr = if let Some(hex) = call.collision_attr.strip_prefix("0x") {
-        format!("Hash40::new_raw(0x{hex})")
-    } else {
-        format!("Hash40::new(\"{}\")", call.collision_attr)
-    };
+    let collision_attr = hash40_expr(&call.collision_attr);
     // Always written with the capsule triple, even for a call parsed from the shorter
     // archive form: smash-script declares `x2`/`y2`/`z2` on every member of the family, so
     // the long form is the one that builds. Re-parsing it yields the same hitbox.
@@ -1254,12 +1314,42 @@ fn emit_catch(call: &crate::data::CatchCall, indent: &str) -> String {
     )
 }
 
+/// Emit `macros::ATTACK_ABS`, in its own slot order.
+///
+/// `damage` and `hitlag` go through `num` because the archive writes them with a decimal
+/// point; the knockback triple and the angle are whole numbers there and are written bare.
+/// Matching each family's own spelling is what keeps a re-exported vanilla script textually
+/// identical to the one it came from.
+fn emit_attack_abs(call: &crate::data::AttackAbsCall, indent: &str) -> String {
+    let (unk, unk2, unk3) = call.unknowns;
+    format!(
+        "{indent}macros::ATTACK_ABS(agent, {kind}, {id}, {damage}, {angle}, {kbg}, {fkb}, \
+{bkb}, {hitlag}, {unk}, {lr}, {unk2}, {unk3}, {attr}, {level}, {sound}, {region});",
+        kind = const_expr(&call.kind),
+        id = call.id,
+        damage = num(call.damage),
+        angle = call.angle,
+        kbg = call.kb_scaling,
+        fkb = call.fkb,
+        bkb = call.kb_base,
+        hitlag = num(call.hitlag_mult),
+        unk = num(unk),
+        lr = const_expr(&call.lr_check),
+        unk2 = num(unk2),
+        attr = hash40_expr(&call.collision_attr),
+        level = const_expr(&call.sound_level),
+        sound = const_expr(&call.sound_attr),
+        region = const_expr(&call.attack_region),
+    )
+}
+
 fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<String> {
     stmts
         .iter()
         .map(|s| match s {
             crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
             crate::data::ExcuteStmt::Catch(call) => emit_catch(call, indent),
+            crate::data::ExcuteStmt::AttackAbs(call) => emit_attack_abs(call, indent),
             crate::data::ExcuteStmt::GrabClearAll => {
                 format!("{indent}GrabModule::clear_all(agent.module_accessor);")
             }
@@ -2249,6 +2339,87 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             (hitboxes[0].active_start, hitboxes[0].active_end),
             (1, 1),
             "the jab hitbox is out on frame 1"
+        );
+    }
+
+    /// kirby/ThrowF, verbatim — two `ATTACK_ABS` in one block sharing id 0 and differing only
+    /// by kind, which is the case that makes id-based identity wrong for this family.
+    const THROW_ABS: &str = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ATTACK_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, 0, 5.0, 75, 125, 0, 40, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_THROW);
+        macros::ATTACK_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH, 0, 3.0, 361, 100, 0, 60, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_THROW);
+    }
+}
+"#;
+
+    /// Two calls in one block with the same id are two separate rows, because the *kind* is
+    /// what tells them apart. Keying on id — which every corpus call writes as 0 — would end
+    /// the first the instant the second was read, and a throw would lose its throw half.
+    #[test]
+    fn two_absolute_hits_sharing_an_id_are_told_apart_by_their_kind() {
+        let hitboxes = parse_acmd_script(THROW_ABS).to_hitboxes();
+        let [throw, catch] = &hitboxes[..] else {
+            panic!("expected two rows, got {}", hitboxes.len());
+        };
+        assert_eq!(throw.category, crate::data::CAT_ABS);
+        assert_eq!(
+            throw.abs.as_ref().unwrap().kind,
+            "FIGHTER_ATTACK_ABSOLUTE_KIND_THROW"
+        );
+        assert_eq!(
+            catch.abs.as_ref().unwrap().kind,
+            "FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH"
+        );
+        // Neither ended the other.
+        assert_eq!((throw.active_end, catch.active_end), (9999, 9999));
+        // Slot order is not ATTACK's; these are the values that shift if it were read as one.
+        assert_eq!((throw.damage, throw.angle), (5.0, 75));
+        assert_eq!((throw.kb_scaling, throw.fkb, throw.kb_base), (125, 0, 40));
+        assert_eq!(catch.damage, 3.0);
+        // No volume anywhere in the call — the panel and viewport read these as "not
+        // applicable", so they must not come back as a plausible-looking hitbox at the origin.
+        assert_eq!((throw.size, throw.bone_name.as_str()), (0.0, ""));
+    }
+
+    #[test]
+    fn the_absolute_family_round_trips_through_the_emitter() {
+        let script = parse_acmd_script(THROW_ABS);
+        let exported = export_acmd_source(&script, "kirby", "throw_f");
+        for line in [
+            "*FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, 0, 5.0, 75, 125, 0, 40, 0.0, 1.0, \
+             *ATTACK_LR_CHECK_F, 0.0, true,",
+            "*FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH, 0, 3.0, 361, 100, 0, 60, 0.0, 1.0,",
+        ] {
+            assert!(exported.contains(line), "missing `{line}` in\n{exported}");
+        }
+        assert_eq!(
+            parse_acmd_script(&exported).to_hitboxes().len(),
+            2,
+            "the export must read back as the same two rows"
+        );
+    }
+
+    /// The kind slot takes fighter-specific constants — Terry's final smash has its own — so a
+    /// closed table would rewrite it into someone else's throw. Carried verbatim instead.
+    #[test]
+    fn a_fighter_specific_absolute_kind_survives_the_round_trip() {
+        let source = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ATTACK_ABS(agent, *FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL, 0, 12.0, 361, 100, 0, 30, 0.5, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_L, *COLLISION_SOUND_ATTR_DOLLY_CRITICAL, *ATTACK_REGION_NONE);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert_eq!(
+            script.to_hitboxes()[0].abs.as_ref().unwrap().kind,
+            "FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL"
+        );
+        assert!(
+            export_acmd_source(&script, "dolly", "final_air_start")
+                .contains("*FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL"),
+            "a fighter-specific kind must not be normalised away"
         );
     }
 

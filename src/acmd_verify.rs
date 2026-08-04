@@ -771,12 +771,17 @@ fn check_script_values(subject: &str, script: &AcmdScript, report: &mut Report) 
     }
     for (index, hitbox) in script.to_hitboxes().iter().enumerate() {
         let label = format!("collision {} (id {})", index + 1, hitbox.id);
-        check_hash_name(
-            subject,
-            &format!("{label} joint"),
-            &hitbox.bone_name,
-            report,
-        );
+        // `ATTACK_ABS` has no joint slot at all — it applies to an opponent already caught, so
+        // there is nothing to attach to. Its empty bone name means "not applicable" rather than
+        // "the author left it blank", and demanding one here would fail every Kirby throw.
+        if hitbox.category != crate::data::CAT_ABS {
+            check_hash_name(
+                subject,
+                &format!("{label} joint"),
+                &hitbox.bone_name,
+                report,
+            );
+        }
         for (what, value) in [
             ("damage", hitbox.damage),
             ("size", hitbox.size),

@@ -160,6 +160,17 @@ fn hit_status_short(name: &str) -> &str {
     name.strip_prefix("HIT_STATUS_").unwrap_or(name)
 }
 
+/// `FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH` → `CATCH`.
+///
+/// Trimmed rather than mapped, so a fighter-specific kind still reads as something —
+/// `FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL` becomes `FINAL` rather than falling back to the
+/// full name or, worse, to a wrong entry from a closed table.
+fn abs_kind_short(name: &str) -> &str {
+    name.rsplit_once("ATTACK_ABSOLUTE_KIND_")
+        .map(|(_, tail)| tail)
+        .unwrap_or(name)
+}
+
 fn setoff_combo(ui: &mut egui::Ui, v: &mut String, id: &str) {
     const_combo(ui, v, id, "Setoff Kind:", crate::param_labels::SETOFF_KIND);
 }
@@ -733,6 +744,9 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
     match hb.category {
         1 => Color32::from_rgba_premultiplied(80, 200, 255, 180), // grab — cyan
         2 => Color32::from_rgba_premultiplied(120, 240, 140, 170), // wind — green
+        // Throw damage — violet. It draws on the timeline but never in the viewport: there is
+        // no volume to draw, which is what makes a distinct colour worth having here.
+        crate::data::CAT_ABS => Color32::from_rgba_premultiplied(230, 160, 255, 170),
         _ => hitbox_color(hb.hitbox_type),
     }
 }
@@ -3635,6 +3649,20 @@ impl VisionaryApp {
                             hb.active_start,
                             hb.active_end
                         ),
+                        // No bone and no size to name, so the kind takes their place — it is
+                        // the only thing distinguishing two of these in the same block, and
+                        // kirby/ThrowF has exactly that.
+                        crate::data::CAT_ABS => format!(
+                            "◈ {} {:.1}dmg {} [{}-{}]",
+                            hb.abs
+                                .as_ref()
+                                .map(|a| abs_kind_short(&a.kind))
+                                .unwrap_or("ABS"),
+                            hb.damage,
+                            angle_short_label(hb.angle),
+                            hb.active_start,
+                            hb.active_end
+                        ),
                         _ => format!(
                             "{} #{} {} {:.1}dmg {} [{}-{}]",
                             shape,
@@ -3684,15 +3712,68 @@ impl VisionaryApp {
                     let (cat_label, cat_color) = match hb.category {
                         1 => ("Grab box", egui::Color32::from_rgb(80, 200, 255)),
                         2 => ("Wind box", egui::Color32::from_rgb(120, 240, 140)),
+                        crate::data::CAT_ABS => {
+                            ("Throw damage", egui::Color32::from_rgb(230, 160, 255))
+                        }
                         _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
                     };
                     ui.horizontal(|ui| {
                         ui.heading("Properties");
                         ui.colored_label(cat_color, cat_label);
                     });
+                    // `ATTACK_ABS` applies to an opponent already caught. It has no volume at
+                    // all — no bone, no size, no offsets — so the kind it applies to takes the
+                    // place of all of them, and the geometry blocks below are skipped rather
+                    // than shown zeroed, which would read as a hitbox sitting at the origin.
+                    if hb.category == crate::data::CAT_ABS {
+                        if let Some(abs) = hb.abs.as_mut() {
+                            ui.horizontal(|ui| {
+                                ui.label("Applies to:");
+                                egui::ComboBox::from_id_salt("edit_abs_kind")
+                                    .selected_text(abs_kind_short(&abs.kind))
+                                    .width(150.0)
+                                    .show_ui(ui, |ui| {
+                                        // The known two, plus whatever this script actually
+                                        // wrote. Fighter-specific kinds exist — Terry's final
+                                        // smash has its own — so the current value is always
+                                        // offered even when it is not one of the common ones,
+                                        // rather than being silently replaced on first click.
+                                        for name in [
+                                            "FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH",
+                                            "FIGHTER_ATTACK_ABSOLUTE_KIND_THROW",
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut abs.kind,
+                                                name.into(),
+                                                abs_kind_short(name),
+                                            );
+                                        }
+                                        if !abs.kind.starts_with("FIGHTER_ATTACK_ABSOLUTE_KIND_")
+                                        {
+                                            let own = abs.kind.clone();
+                                            ui.selectable_value(
+                                                &mut abs.kind,
+                                                own.clone(),
+                                                abs_kind_short(&own),
+                                            );
+                                        }
+                                    });
+                            })
+                            .response
+                            .on_hover_text(
+                                "ATTACK_ABS has no position or size. It defines the damage and \
+                                 knockback applied to an opponent who is already caught — this \
+                                 picks which outcome it describes.",
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("ID:");
+                            ui.add(egui::DragValue::new(&mut hb.id));
+                        });
+                    }
                     // Wind areas are object-relative 2D regions rather than bone-local attack
                     // spheres. Attack/grab retain the normal bone selector.
-                    if hb.category != 2 {
+                    if hb.category != 2 && hb.category != crate::data::CAT_ABS {
                         ui.horizontal(|ui| {
                             ui.label("Bone:");
                             if bone_names.is_empty() {
@@ -3747,6 +3828,25 @@ impl VisionaryApp {
                         wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
                         wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
                         wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                    }
+
+                    // The same combat block for a throw, minus the macro dropdown — there is
+                    // only one member of this family. These are genuinely the same arguments,
+                    // in a different slot order, which is why the family gets its own table.
+                    if hb.category == crate::data::CAT_ABS {
+                        wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
+                        angle_picker(ui, &mut hb.angle);
+                        wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
+                        wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
+                        wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                        wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag");
+                        lr_check_combo(ui, &mut hb.lr_check, "abs_lr_check");
+                        ui.collapsing("Effect / Sound", |ui| {
+                            collision_attr_combo(ui, &mut hb.collision_attr, "abs_col_attr");
+                            sound_level_combo(ui, &mut hb.sound_level, "abs_snd_lvl");
+                            sound_attr_combo(ui, &mut hb.sound_attr, "abs_snd_attr");
+                            attack_region_combo(ui, &mut hb.attack_region, "abs_region");
+                        });
                     }
 
                     // ── Size + position/shape ────────────────────────────
@@ -3820,7 +3920,7 @@ impl VisionaryApp {
                                 "This legacy project has no wind payload. Fetch the move again.",
                             );
                         }
-                    } else {
+                    } else if hb.category != crate::data::CAT_ABS {
                         wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
                         ui.collapsing("Position / Shape", |ui| {
                             wide_slider_f32(ui, &mut hb.offset_x, -20.0..=20.0, "Offset X");
@@ -6471,11 +6571,66 @@ impl VisionaryApp {
             category: 0,
             wind: None,
             catch: None,
+            abs: None,
         })
     }
 
     /// CATCH (grabbox) capture → display Hitbox with category=1 (grab).
     /// Arg layout: 0 id, 1 bone(h), 2 size, 3 x, 4 y, 5 z, 6 x2, 7 y2, 8 z2, 9 status, 10 situation.
+    /// Rebuild an `ATTACK_ABS` row from a captured call, through this family's own slots.
+    ///
+    /// The kind arrives as a raw lua number and there is no closed table to decode it against —
+    /// fighter-specific kinds exist — so an unknown value is kept as the number it was. The
+    /// emitter writes a bare number back without a `*`, so that still compiles.
+    fn hitbox_from_capture_abs(
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+    ) -> Option<crate::data::Hitbox> {
+        if args.len() < 16 {
+            return None;
+        }
+        let int = |i: usize| args.get(i).and_then(|a| a.as_i64()).unwrap_or(0);
+        let float = |i: usize| args.get(i).and_then(|a| a.as_f32()).unwrap_or(0.0);
+        let konst = |i: usize, table: crate::param_labels::ConstTable| {
+            crate::param_labels::const_name(table, int(i))
+                .map(str::to_string)
+                .unwrap_or_else(|| int(i).to_string())
+        };
+        let call = crate::data::AttackAbsCall {
+            // Deliberately NOT decoded to a name, and this is not laziness. `lua_const` has 93
+            // `..._ATTACK_ABSOLUTE_KIND_*` constants sharing one namespace with heavy value
+            // collisions: `FIGHTER_ATTACK_ABSOLUTE_KIND_THROW` is `0x0` and so is
+            // `FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL` and most other fighters' finals.
+            // A captured `0` therefore has no recoverable name, and picking the first match
+            // would relabel Terry's final smash as a generic throw. The number is kept, which
+            // `const_expr` writes back bare — no `*` — so it still compiles and still means
+            // exactly what the game did.
+            kind: int(0).to_string(),
+            id: int(1).max(0) as u32,
+            damage: float(2),
+            angle: int(3) as i32,
+            kb_scaling: int(4) as i32,
+            fkb: int(5) as i32,
+            kb_base: int(6) as i32,
+            hitlag_mult: float(7),
+            lr_check: konst(9, crate::param_labels::LR_CHECK),
+            collision_attr: args
+                .get(12)
+                .and_then(|a| a.as_hash())
+                .map(|h| format!("{h:#x}"))
+                .unwrap_or_default(),
+            sound_level: konst(13, crate::param_labels::SOUND_LEVEL),
+            sound_attr: konst(14, crate::param_labels::SOUND_ATTR),
+            attack_region: konst(15, crate::param_labels::ATTACK_REGION),
+            unknowns: (
+                float(8),
+                float(10),
+                args.get(11).and_then(|a| a.as_i64()).unwrap_or(1) != 0,
+            ),
+        };
+        Some(call.to_hitbox(Self::motion_to_script_frame(frame)))
+    }
+
     fn hitbox_from_capture_grab(
         args: &[crate::game_link::LuaArgWire],
         frame: f32,
@@ -6711,6 +6866,23 @@ impl VisionaryApp {
                         && hitbox.active_start <= end.saturating_add(1)
                 }) {
                     hitbox.active_end = hitbox.active_end.min(end).max(hitbox.active_start);
+                }
+            } else if line.func == "ATTACK_ABS" {
+                // Must come BEFORE the `starts_with("ATTACK")` arm below. It shares the prefix
+                // and shares none of the layout — sixteen arguments against thirty-six, in a
+                // different order — so falling through would read a throw's sound attribute as
+                // a hitbox offset and produce a plausible, wrong collision.
+                if let Some(hb) = Self::hitbox_from_capture_abs(&line.args, line.frame) {
+                    // Identity is (id, kind): every vanilla call writes id 0, and a throw
+                    // issues two in one block that differ only by kind.
+                    let kind = hb.abs.as_ref().map(|a| a.kind.clone());
+                    if !hitboxes.iter().any(|h| {
+                        h.category == crate::data::CAT_ABS
+                            && h.abs.as_ref().map(|a| a.kind.clone()) == kind
+                            && h.active_start == hb.active_start
+                    }) {
+                        hitboxes.push(hb);
+                    }
                 }
             } else if line.func.starts_with("ATTACK") {
                 if let Some(hb) = Self::hitbox_from_capture(
@@ -11973,6 +12145,13 @@ impl eframe::App for VisionaryApp {
                         }
 
                         for hb in &self.state.hitboxes {
+                            // `ATTACK_ABS` has no volume and no bone to hang one on. Its size
+                            // and offsets are zero because the call has no such arguments, so
+                            // drawing it would put a dot at the model's origin that looks like
+                            // a hitbox the script does not have.
+                            if hb.category == crate::data::CAT_ABS {
+                                continue;
+                            }
                             let active = hb.active_frames_empty()
                                 || (frame_num >= hb.active_start && frame_num <= hb.active_end);
                             if !active {
@@ -12385,6 +12564,7 @@ fn rebuild_script_from_hitboxes(
                             // source's own as well would double every hitbox.
                             ExcuteStmt::Attack(_)
                             | ExcuteStmt::Catch(_)
+                            | ExcuteStmt::AttackAbs(_)
                             | ExcuteStmt::Wind(_)
                             | ExcuteStmt::EraseWind(_)
                             | ExcuteStmt::Clear(_)
@@ -12453,6 +12633,16 @@ fn rebuild_script_from_hitboxes(
                     ends.entry(end.saturating_add(1))
                         .or_default()
                         .push(ExcuteStmt::EraseWind(hitbox.id));
+                }
+            }
+            // No end event: nothing in the corpus clears one, and inventing a clear would add
+            // a call the script never had. See the `AttackAbs` arm in `eval_stmts`.
+            crate::data::CAT_ABS => {
+                if let Some(call) = hitbox.to_attack_abs_call() {
+                    spawns
+                        .entry(start)
+                        .or_default()
+                        .push(ExcuteStmt::AttackAbs(call));
                 }
             }
             1 => {
@@ -13549,6 +13739,61 @@ mod live_effect_capture_tests {
             args,
             run: 1,
         }
+    }
+
+    /// `ATTACK_ABS` shares a prefix with `ATTACK` and shares none of its layout. Before this
+    /// was split out, a captured throw fell into the `starts_with("ATTACK")` branch and was
+    /// read through the 36-slot table — sixteen arguments against thirty-six, so every value
+    /// landed somewhere else and the result looked like a perfectly ordinary hitbox.
+    #[test]
+    fn a_captured_throw_is_not_read_through_the_attack_slot_table() {
+        // kirby/ThrowF's throw half, as the game pushes it.
+        let args = vec![
+            A::Int(0),   // kind (THROW)
+            A::Int(0),   // id
+            A::Num(5.0), // damage
+            A::Int(75),  // angle
+            A::Int(125), // kbg
+            A::Int(0),   // fkb
+            A::Int(40),  // bkb
+            A::Num(0.0), // hitlag
+            A::Num(1.0), // unk
+            A::Int(3),   // lr_check
+            A::Num(0.0), // unk2
+            A::Bool(true),
+            A::Hash(hash40::hash40("collision_attr_normal").0),
+            A::Int(0), // sound level
+            A::Int(0), // sound attr
+            A::Int(0), // attack region
+        ];
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("throw_f").0,
+            frame: 4.0,
+            func: "ATTACK_ABS".into(),
+            args,
+            run: 1,
+        }];
+        let hitboxes =
+            VisionaryApp::hitboxes_from_captures(&captures, &HashMap::new(), &HashMap::new());
+        let [hb] = &hitboxes[..] else {
+            panic!("expected one row, got {}", hitboxes.len());
+        };
+        assert_eq!(hb.category, crate::data::CAT_ABS);
+        // Read through ATTACK's table these would be id/part/bone, not damage/angle/knockback.
+        assert_eq!((hb.damage, hb.angle), (5.0, 75));
+        assert_eq!((hb.kb_scaling, hb.fkb, hb.kb_base), (125, 0, 40));
+        assert!(hb.abs.is_some(), "it must carry its absolute extras");
+        // The kind stays the number it arrived as — see `hitbox_from_capture_abs` for why the
+        // constant namespace makes decoding it unsound.
+        assert_eq!(hb.abs.as_ref().unwrap().kind, "0");
+        // And it must still export: a bare number needs no `*` deref.
+        let script = rebuild_script_from_hitboxes(&crate::data::AcmdScript::default(), &hitboxes);
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "throw_f");
+        assert!(
+            exported.contains("macros::ATTACK_ABS(agent, 0, 0, 5.0, 75, 125, 0, 40,"),
+            "{exported}"
+        );
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back

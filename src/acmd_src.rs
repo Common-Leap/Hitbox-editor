@@ -1163,6 +1163,7 @@ pub fn rewrite_hitboxes(
         .filter(|s| crate::acmd::ATTACK_FUNCS.contains(&s.name.as_str()))
         .collect();
     let catches: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "CATCH").collect();
+    let abs: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "ATTACK_ABS").collect();
     let winds: Vec<&MacroSite> = sites
         .iter()
         .filter(|s| crate::data::is_wind_command(&s.name))
@@ -1195,6 +1196,37 @@ pub fn rewrite_hitboxes(
                 hitbox,
                 &mut report,
             ));
+            continue;
+        }
+        // `ATTACK_ABS` shares the id space with nothing and is matched on its absolute kind:
+        // every corpus call writes id 0, and kirby/ThrowF has two in one block that differ
+        // only by kind. Matching on id here would be matching on a constant.
+        if hitbox.category == crate::data::CAT_ABS || before.category == crate::data::CAT_ABS {
+            let want = before.abs.as_ref().map(|a| a.kind.as_str()).unwrap_or("");
+            let matching: Vec<&MacroSite> = abs
+                .iter()
+                .copied()
+                .filter(|site| {
+                    site.arg(text, 1).map(|a| a.trim().trim_start_matches('*')) == Some(want)
+                })
+                .collect();
+            let [macro_site] = matching[..] else {
+                report.skipped.push(format!(
+                    "{label}: the {want} throw damage matches {} `ATTACK_ABS` calls in the \
+                     source — cannot tell which one to retune",
+                    matching.len()
+                ));
+                continue;
+            };
+            let (call_edits, missing) = attack_abs_edits(text, macro_site, before, hitbox);
+            if !missing.is_empty() {
+                report.skipped.push(format!(
+                    "{label}: the {want} throw damage changed {}, but its `ATTACK_ABS` call in \
+                     the source is too short to have those arguments",
+                    missing.join(", ")
+                ));
+            }
+            edits.extend(call_edits);
             continue;
         }
         if before.id != hitbox.id || before.part != hitbox.part {
@@ -1613,6 +1645,97 @@ fn apply_slots(
         edits.extend(edit);
     }
     (edits, missing)
+}
+
+/// Replacements for the arguments of one `ATTACK_ABS` call that the user actually changed.
+///
+/// Its own table, and the slot numbers are *not* `ATTACK`'s. The two families name many of the
+/// same properties — damage, angle, the knockback triple, hitlag, `lr_check`, the sound pair,
+/// `attack_region` — in a different order and a different count, which is exactly the shape of
+/// mistake that corrupts a call while still compiling.
+///
+/// Full layout (slot 0 is `agent`): 1 kind, 2 id, 3 damage, 4 angle, 5 kbg, 6 fkb, 7 bkb,
+/// 8 hitlag, 9 unk, 10 lr_check, 11 unk2, 12 unk3, 13 collision_attr, 14 sound level, 15 sound
+/// attr, 16 attack region. Slots 9, 11 and 12 are never written: they are invariant across the
+/// corpus, undocumented, and the editor exposes no control for them.
+fn attack_abs_edits(
+    text: &str,
+    site: &MacroSite,
+    before: &crate::data::Hitbox,
+    after: &crate::data::Hitbox,
+) -> (Vec<Replacement>, Vec<&'static str>) {
+    let konst = |slot: usize, field: &'static str, was: &str, now: &str| {
+        (
+            slot,
+            field,
+            was != now,
+            ArgValue::Text(crate::acmd::const_expr(now)),
+        )
+    };
+    let kind = |hb: &crate::data::Hitbox| {
+        hb.abs.as_ref().map(|a| a.kind.clone()).unwrap_or_default()
+    };
+    let slots: [(usize, &'static str, bool, ArgValue); 13] = [
+        konst(1, "absolute kind", &kind(before), &kind(after)),
+        (
+            2,
+            "id",
+            before.id != after.id,
+            ArgValue::Int(after.id as i64),
+        ),
+        (
+            3,
+            "damage",
+            before.damage != after.damage,
+            ArgValue::Float(after.damage),
+        ),
+        (
+            4,
+            "angle",
+            before.angle != after.angle,
+            ArgValue::Int(after.angle as i64),
+        ),
+        (
+            5,
+            "knockback scaling",
+            before.kb_scaling != after.kb_scaling,
+            ArgValue::Int(after.kb_scaling as i64),
+        ),
+        (
+            6,
+            "fixed knockback",
+            before.fkb != after.fkb,
+            ArgValue::Int(after.fkb as i64),
+        ),
+        (
+            7,
+            "base knockback",
+            before.kb_base != after.kb_base,
+            ArgValue::Int(after.kb_base as i64),
+        ),
+        (
+            8,
+            "hitlag multiplier",
+            before.hitlag_mult != after.hitlag_mult,
+            ArgValue::Float(after.hitlag_mult),
+        ),
+        konst(10, "LR check", &before.lr_check, &after.lr_check),
+        (
+            13,
+            "collision attribute",
+            before.collision_attr != after.collision_attr,
+            ArgValue::Text(format!("Hash40::new(\"{}\")", after.collision_attr)),
+        ),
+        konst(14, "sound level", &before.sound_level, &after.sound_level),
+        konst(15, "sound attribute", &before.sound_attr, &after.sound_attr),
+        konst(
+            16,
+            "attack region",
+            &before.attack_region,
+            &after.attack_region,
+        ),
+    ];
+    apply_slots(text, site, &slots)
 }
 
 /// Replacements for the arguments of one `CATCH` call that the user actually changed.
@@ -2478,6 +2601,68 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
 
     fn hurt_of(text: &str) -> (Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>) {
         crate::acmd::parse_acmd_script(text).to_hurtboxes()
+    }
+
+    /// kirby/ThrowF verbatim — two `ATTACK_ABS` sharing id 0, told apart only by kind.
+    const THROW_ABS: &str = r#"unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ATTACK_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, 0, 5.0, 75, 125, 0, 40, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_THROW);
+        macros::ATTACK_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH, 0, 3.0, 361, 100, 0, 60, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_THROW);
+    }
+}
+"#;
+
+    /// Both calls carry id 0, so the sync has to match on kind. Getting that wrong writes the
+    /// throw's damage into the catch line, which compiles and is wrong.
+    #[test]
+    fn an_absolute_hit_is_retuned_by_kind_rather_than_by_its_shared_id() {
+        let pristine = crate::acmd::parse_acmd_script(THROW_ABS).to_hitboxes();
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[1].damage = 4.5;
+
+        let (after, report) = rewrite_hitboxes(THROW_ABS, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1, "one argument span");
+        assert!(
+            after.contains("*FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH, 0, 4.5, 361,"),
+            "the catch line takes the edit:\n{after}"
+        );
+        assert!(
+            after.contains("*FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, 0, 5.0, 75,"),
+            "the throw line beside it must be untouched:\n{after}"
+        );
+    }
+
+    /// The slot order is not `ATTACK`'s. Writing through that table would land each value one
+    /// or more places off, so every editable slot is checked against its own position.
+    #[test]
+    fn every_editable_absolute_slot_lands_in_its_own_position() {
+        let pristine = crate::acmd::parse_acmd_script(THROW_ABS).to_hitboxes();
+        let mut edited = pristine.clone();
+        let hb = &mut edited[0];
+        hb.damage = 6.5;
+        hb.angle = 45;
+        hb.kb_scaling = 130;
+        hb.fkb = 7;
+        hb.kb_base = 55;
+        hb.hitlag_mult = 0.5;
+        hb.sound_level = "ATTACK_SOUND_LEVEL_L".into();
+        hb.attack_region = "ATTACK_REGION_NONE".into();
+
+        let (after, report) = rewrite_hitboxes(THROW_ABS, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains(
+                "*FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, 0, 6.5, 45, 130, 7, 55, 0.5, 1.0, \
+                 *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new(\"collision_attr_normal\"), \
+                 *ATTACK_SOUND_LEVEL_L, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_NONE"
+            ),
+            "every value in its own slot, and the three unknowns untouched:\n{after}"
+        );
+        // Re-reading the file must produce exactly what the editor had.
+        let reparsed = crate::acmd::parse_acmd_script(&after).to_hitboxes();
+        assert_eq!(reparsed, edited);
     }
 
     #[test]

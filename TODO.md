@@ -144,7 +144,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**296 green after B4**), including the two corpus oracles — run them
+- [ ] `cargo test` passes (**302 green after B1**), including the two corpus oracles — run them
       by name with `cargo test cached_script`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export` and
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
@@ -335,7 +335,7 @@ family, including one member smash-script never wrapped — read it before writi
 
 ## Hitbox families
 
-### [~] B1 — `ATTACK_ABS` (throw and swallow damage) (in progress 2026-08-04)
+### [x] B1 — `ATTACK_ABS` (throw and swallow damage) (done 2026-08-04)
 
 **The old title and premise were wrong, and this is the finding.** This entry called it
 "absolute-position hitboxes" and said positions are world-absolute rather than bone-relative,
@@ -372,6 +372,26 @@ Still true from the earlier measurement: 16 arguments, all 32 occurrences, one a
   effect list. Do not reuse `ATTACK`'s *slot indices*; the layout is different.
 - **Done when:** it round-trips the corpus oracles, shows in the hitbox list with geometry
   suppressed rather than zeroed, and syncs values back into the user's source.
+
+**Two more traps found while doing it, both about the shared `ATTACK` prefix and both live
+bugs rather than hypotheticals:**
+
+- **The capture path read `ATTACK_ABS` through `ATTACK`'s 36-slot table.**
+  `hitboxes_from_captures` bucketed on `func.starts_with("ATTACK")`, so a throw captured live
+  had sixteen arguments read against thirty-six and came back as a plausible, wrong hitbox.
+  The plugin's `is_collision_func` had the same prefix test and armed the clear-all gate for a
+  call nothing clears. **Grep for `starts_with("ATTACK")` — and any other prefix bucketing —
+  before adding a family whose name extends an existing one.**
+- **The kind cannot be decoded back from a captured number, and must not be.** `lua_const` has
+  93 `..._ATTACK_ABSOLUTE_KIND_*` constants in one namespace with heavy value collisions:
+  `FIGHTER_ATTACK_ABSOLUTE_KIND_THROW` is `0x0`, and so is
+  `FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL` and most other fighters' finals. A captured `0`
+  has no recoverable name. It is kept as the number, which `const_expr` writes back bare and
+  which still compiles. This is the `HIT_STATUS_MASK` collision from B4 again, and worse —
+  there, excluding the masks fixed it; here no table can be built at all.
+
+Verified: 302 tests, clippy clean, `build_check.sh`, plugin builds. Both corpus oracles cover
+all 32 calls. Live rules and hooks are built but not exercised against a running game.
 
 ### [ ] B2 — `ATTACK_FP` (fighter-position hitboxes)
 

@@ -79,6 +79,9 @@ pub struct Hitbox {
     /// stale the moment the user dragged one.
     #[serde(default)]
     pub catch: Option<CatchExtras>,
+    /// The `ATTACK_ABS` arguments category 3 has no editable field for — see [`AbsExtras`].
+    #[serde(default)]
+    pub abs: Option<AbsExtras>,
 }
 
 impl Default for Hitbox {
@@ -125,6 +128,7 @@ impl Default for Hitbox {
             category: 0,
             wind: None,
             catch: None,
+            abs: None,
         }
     }
 }
@@ -357,6 +361,38 @@ pub struct CatchExtras {
     pub situation: String,
 }
 
+/// Collision family id for [`Hitbox::category`]. 0/1/2 are attack, grab and wind.
+///
+/// `ATTACK_ABS` is category 3: a hit with no volume at all. It applies to an opponent already
+/// caught, so it has no bone, no size, and no offsets — the panel hides those rather than
+/// showing zeroed controls that would look like a hitbox sitting at the origin.
+pub const CAT_ABS: u8 = 3;
+
+/// The `ATTACK_ABS` arguments that are not editable properties of a [`Hitbox`].
+///
+/// Everything else in the call — damage, angle, the knockback triple, hitlag, `lr_check`,
+/// `collision_attr`, the two sound slots and `attack_region` — maps onto a field the hitbox
+/// panel already has, so those are not duplicated here. Copying them would let the copy go
+/// stale the moment the user dragged one, which is the reason [`CatchExtras`] is scoped the
+/// same way.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AbsExtras {
+    /// The absolute kind, e.g. `FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH` — what the hit applies to.
+    ///
+    /// A string rather than a decoded constant, because the slot takes *fighter-specific*
+    /// names: the corpus has `FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL` beside the two common
+    /// ones. A closed table would silently rewrite Terry's final smash into someone else's
+    /// throw, so unknown names are carried exactly as written.
+    pub kind: String,
+    /// Slots 9, 11 and 12, in order. Undocumented beyond `unk`/`unk2`/`unk3` in `macros.rs`,
+    /// and invariant at `1.0` / `0.0` / `true` across every one of the corpus's 32 calls.
+    ///
+    /// Carried verbatim rather than exposed. There is no evidence for what they do, and a
+    /// control whose meaning is a guess is worse than no control — but dropping them would
+    /// change the call, so they are kept.
+    pub unknowns: (f32, f32, bool),
+}
+
 /// A parsed `macros::CATCH` call — a grab box.
 ///
 /// `status` and `situation` have no counterpart on [`Hitbox`], so they are kept here: a grab
@@ -501,7 +537,91 @@ impl AttackCall {
             category: 0,
             wind: None,
             catch: None,
+            abs: None,
         }
+    }
+}
+
+/// A parsed `macros::ATTACK_ABS` call.
+///
+/// Its own struct rather than a variant of [`AttackCall`]: the two share field *names* but not
+/// slot indices, and this file's oldest trap is that reusing a layout across families corrupts
+/// a different call. Sixteen arguments against `ATTACK`'s thirty-six, in a different order.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AttackAbsCall {
+    pub kind: String,
+    pub id: u32,
+    pub damage: f32,
+    pub angle: i32,
+    pub kb_scaling: i32,
+    pub fkb: i32,
+    pub kb_base: i32,
+    pub hitlag_mult: f32,
+    pub lr_check: String,
+    pub collision_attr: String,
+    pub sound_level: String,
+    pub sound_attr: String,
+    pub attack_region: String,
+    /// Slots 9, 11, 12 — see [`AbsExtras::unknowns`].
+    pub unknowns: (f32, f32, bool),
+}
+
+impl AttackAbsCall {
+    /// Convert to a display Hitbox at the given frame.
+    ///
+    /// Geometry is left at zero and the bone at the empty string, both of which the panel reads
+    /// as "not applicable" for this category rather than as a value. A default `"top"` bone
+    /// would be worse: it is a real bone, so nothing downstream could tell it from one the
+    /// script chose.
+    pub fn to_hitbox(&self, active_start: u32) -> Hitbox {
+        Hitbox {
+            func: "ATTACK_ABS".into(),
+            id: self.id,
+            bone_name: String::new(),
+            damage: self.damage,
+            angle: self.angle,
+            kb_scaling: self.kb_scaling,
+            fkb: self.fkb,
+            kb_base: self.kb_base,
+            size: 0.0,
+            hitlag_mult: self.hitlag_mult,
+            lr_check: self.lr_check.clone(),
+            collision_attr: self.collision_attr.clone(),
+            sound_level: self.sound_level.clone(),
+            sound_attr: self.sound_attr.clone(),
+            attack_region: self.attack_region.clone(),
+            active_start,
+            active_end: u32::MAX,
+            category: CAT_ABS,
+            abs: Some(AbsExtras {
+                kind: self.kind.clone(),
+                unknowns: self.unknowns,
+            }),
+            ..Default::default()
+        }
+    }
+}
+
+impl Hitbox {
+    /// Rebuild the `ATTACK_ABS` call this row came from, or `None` if it is not one.
+    pub fn to_attack_abs_call(&self) -> Option<AttackAbsCall> {
+        let abs = self.abs.as_ref()?;
+        Some(AttackAbsCall {
+            kind: abs.kind.clone(),
+            id: self.id,
+            damage: self.damage,
+            angle: self.angle,
+            kb_scaling: self.kb_scaling,
+            fkb: self.fkb,
+            kb_base: self.kb_base,
+            hitlag_mult: self.hitlag_mult,
+            lr_check: self.lr_check.clone(),
+            collision_attr: self.collision_attr.clone(),
+            sound_level: self.sound_level.clone(),
+            sound_attr: self.sound_attr.clone(),
+            attack_region: self.attack_region.clone(),
+            unknowns: abs.unknowns,
+        })
     }
 }
 
@@ -581,6 +701,8 @@ pub enum ExcuteStmt {
     /// CATCH — a grab box. Its own family: `CATCH` shares no argument layout with `ATTACK`
     /// and is cleared by `GrabModule`, not `AttackModule`.
     Catch(CatchCall),
+    /// ATTACK_ABS — damage applied to an opponent already caught. No volume, no bone.
+    AttackAbs(AttackAbsCall),
     Wind(WindboxData),
     EraseWind(u32),
     Clear(u32),
@@ -898,6 +1020,30 @@ fn eval_stmts(
                                     hb.active_end = end.max(hb.active_start);
                                 }
                             }
+                        }
+                        // Identity is (id, kind), NOT id alone. Every one of the corpus's 32
+                        // calls writes id `0`, and kirby/ThrowF puts two in a single block —
+                        // one `..._THROW` and one `..._CATCH` — which are both live at once and
+                        // say what happens on two different outcomes. Matching on id would
+                        // have ended the first the instant the second was read.
+                        //
+                        // Deliberately not ended by `AttackModule::clear_all`: only 2 of the 24
+                        // scripts using this macro contain one at all, and there is no evidence
+                        // it applies. An uncleared call runs to the end of the move, which is
+                        // the same `9999` an uncleared hitbox gets — better than inventing a
+                        // frame the script never wrote.
+                        ExcuteStmt::AttackAbs(call) => {
+                            let spawn = script_frame(frame);
+                            if let Some(existing) = hitboxes.iter_mut().find(|h| {
+                                h.category == CAT_ABS
+                                    && h.id == call.id
+                                    && h.abs.as_ref().is_some_and(|a| a.kind == call.kind)
+                                    && h.active_end == u32::MAX
+                            }) {
+                                existing.active_end =
+                                    spawn.saturating_sub(1).max(existing.active_start);
+                            }
+                            hitboxes.push(call.to_hitbox(spawn));
                         }
                         ExcuteStmt::HitStatus { target, status } => {
                             let site = hurt.take_site();

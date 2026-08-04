@@ -121,6 +121,8 @@ pub unsafe fn read_args_exact(lua_state: u64, n: i32) -> Vec<LuaArg> {
 const ATTACK_ARGC: i32 = 36;
 /// CATCH (grabbox) arity: id, bone(h), size, x, y, z, x2?, y2?, z2?, status, situation.
 const CATCH_ARGC: i32 = 11;
+/// `ATTACK_ABS` takes sixteen — a different family, not a short `ATTACK`.
+const ATTACK_ABS_ARGC: i32 = 16;
 /// Max args to probe for the AREA_WIND family (all floats, variable arity 8..10).
 const WIND_ARGC_MAX: i32 = 12;
 
@@ -129,6 +131,10 @@ const WIND_ARGC_MAX: i32 = 12;
 pub const CAT_ATTACK: u8 = 0;
 pub const CAT_GRAB: u8 = 1;
 pub const CAT_WIND: u8 = 2;
+/// `ATTACK_ABS` — throw/catch damage with no volume. Its own family because the argument
+/// layout shares nothing positionally with `ATTACK`, and its rule key is the absolute kind
+/// rather than the id, which every vanilla call writes as 0.
+pub const CAT_ABS: u8 = 4;
 /// Hurtbox state (`HIT_NODE` / `HIT_NO`), which is not a collision at all — it changes how the
 /// fighter *receives* hits. It rides the same rule pipeline because the matching key is the
 /// same shape (motion + target + frame window), but it is deliberately absent from
@@ -502,7 +508,10 @@ fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> Option<
 /// Does this captured function put a collision out? Kept in step with the editor, which
 /// buckets captures the same way (`ATTACK*` / `CATCH` / `AREA_WIND*`).
 fn is_collision_func(func: &str) -> bool {
-    func.starts_with("ATTACK") && func != "ATTACK_CLEAR_ALL"
+    // `ATTACK_ABS` shares the prefix and is not a collision: it has no volume, and nothing in
+    // the vanilla corpus clears it. Arming the gate for one would make the next
+    // `AttackModule::clear_all` look like it ended something.
+    func.starts_with("ATTACK") && func != "ATTACK_CLEAR_ALL" && func != "ATTACK_ABS"
         || func == "CATCH"
         || func.starts_with("AREA_WIND") && func != "AREA_WIND_ERASE"
 }
@@ -1114,6 +1123,74 @@ wind_hook!(
     10
 );
 
+/// `ATTACK_ABS` — damage applied to an opponent already caught.
+///
+/// Recorded so a throw captured live shows its damage, and rewritable through the same
+/// `HbOverrides` the attack hook uses — but through this family's *own* slot numbers. The
+/// layout has 16 arguments to `ATTACK`'s 36 and orders them differently, so `rewrite_attack_args`
+/// is deliberately not reused.
+///
+/// The rule key is the absolute kind rather than the id: every vanilla call writes id 0, and
+/// kirby/ThrowF issues two in one block that differ only by kind.
+#[skyline::hook(replace = smash::app::sv_animcmd::ATTACK_ABS)]
+unsafe fn hook_attack_abs(lua_state: u64) {
+    let args = read_args_exact(lua_state, ATTACK_ABS_ARGC);
+    if args.len() >= ATTACK_ABS_ARGC as usize {
+        record(lua_state, "ATTACK_ABS", &args);
+        if any_rules() {
+            let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                as *mut smash::app::BattleObjectModuleAccessor;
+            if !boma.is_null() {
+                let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                let kind = match args.first() {
+                    Some(LuaArg::Int(k)) => *k as u64,
+                    Some(LuaArg::Num(k)) => *k as u64,
+                    _ => u64::MAX,
+                };
+                if let Some((suppress, overrides)) = action_for(CAT_ABS, motion, kind, frame) {
+                    if suppress {
+                        return;
+                    }
+                    if let Some(ov) = overrides {
+                        let mut vals = args.to_vec();
+                        // Slot numbers are this family's own. `unk`/`unk2`/`unk3` (8, 10, 11
+                        // zero-based) are never written — the editor exposes no control for
+                        // them and they are invariant in every vanilla call.
+                        let set_i = |i: usize, v: Option<i64>, vals: &mut Vec<LuaArg>| {
+                            if let (Some(v), true) = (v, i < vals.len()) {
+                                vals[i] = LuaArg::Int(v);
+                            }
+                        };
+                        let set_f = |i: usize, v: Option<f32>, vals: &mut Vec<LuaArg>| {
+                            if let (Some(v), true) = (v, i < vals.len()) {
+                                vals[i] = LuaArg::Num(v);
+                            }
+                        };
+                        set_f(2, ov.damage, &mut vals);
+                        set_i(3, ov.angle, &mut vals);
+                        set_i(4, ov.kbg, &mut vals);
+                        set_i(5, ov.fkb, &mut vals);
+                        set_i(6, ov.bkb, &mut vals);
+                        set_f(7, ov.hitlag, &mut vals);
+                        set_i(9, ov.lr_check, &mut vals);
+                        if let (Some(attr), true) = (ov.collision_attr, vals.len() > 12) {
+                            vals[12] = LuaArg::Hash(attr);
+                        }
+                        set_i(13, ov.sound_level, &mut vals);
+                        set_i(14, ov.sound_attr, &mut vals);
+                        set_i(15, ov.attack_region, &mut vals);
+                        if vals != args {
+                            rewrite_args(lua_state, &vals);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
 // ── Hurtbox state hooks ──────────────────────────────────────────────────────
 //
 // `HIT_NODE(bone, status)` and `HIT_NO(group, status)` share a shape but not a family: slot 0
@@ -1399,6 +1476,7 @@ pub fn install() {
         hook_wind_2nd_arg10,
         hook_erase_wind,
         hook_attack_clear_all,
+        hook_attack_abs,
         hook_hit_node,
         hook_hit_no,
         hook_col_pri,
