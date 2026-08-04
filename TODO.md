@@ -46,6 +46,14 @@ Two export paths, different rules — do not conflate them:
 - **Argument slots are per family.** An id that means one thing in `ATTACK` means something
   else in `CATCH` or `AREA_WIND`. Never reuse a slot table across families — a cross-family
   write silently corrupts a different call. Give each new family its own table.
+- **A new family whose name extends an existing one gets swallowed by prefix bucketing.**
+  Several dispatch points bucket on `func.starts_with("ATTACK")` rather than on the exact name.
+  B1 found two: the editor's `hitboxes_from_captures` read a captured `ATTACK_ABS` through
+  `ATTACK`'s 36-slot table (sixteen arguments against thirty-six — it came back as a plausible,
+  wrong hitbox), and the plugin's `is_collision_func` armed the clear-all gate for a call
+  nothing clears. The *parser* was safe only because it matches `macros::NAME(` with the paren.
+  Before adding such a family, grep for `starts_with(` on the prefix you are extending and fix
+  every hit; then add the exact-name arm **above** the prefix one.
 - **Two sources of truth for arity, and they disagree. You need both.**
   `/home/leap/.cargo/git/checkouts/smash-script-*/*/src/macros.rs` tells you what *compiles*,
   which is what an export must emit. The vanilla archive tells you what you must *parse* — and
