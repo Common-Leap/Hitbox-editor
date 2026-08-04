@@ -69,6 +69,20 @@ Two export paths, different rules — do not conflate them:
   drew correctly, and exported a project that did not build. Before adding a family, grep
   `macros.rs` for **every** member by name, and make the verifier block the ones that are not
   there. Do not assume a hooked primitive is an emittable one.
+
+  **Grep the whole prefix, not each name.** Declarations are not spelled consistently — some
+  are `fn NAME<A: ToF32>`, others `fn NAME <A: ToF32>` with a space — so a per-name
+  `fn NAME[<(]` pattern reports a wrapper missing when it exists. That false negative would
+  block an exportable macro, which is the same class of bug in the other direction. List them
+  all and compare against the list:
+
+  ```bash
+  grep -rhoE 'pub unsafe fn [A-Z_0-9]+' ~/.cargo/git/checkouts/smash-script-*/*/src/macros.rs \
+    | sed 's/pub unsafe fn //' | sort -u
+  ```
+
+  Confirmed missing so far: `AREA_WIND_2ND` (A1), `LAST_EFFECT_SET_WORK_INT` (found while
+  auditing C1).
 - **"Parsed into the IR" is not the same as "reaches the export."** The effect export is
   generated from `EffectCall`s, not from `EffectScript` statements, so a macro can have its own
   `EffectMacro` variant, parse perfectly, and still be dropped by `eval_effect_stmts` on the way
@@ -104,23 +118,31 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (248 tests green as of this file's writing), including the two
-      corpus oracles — run them by name with `cargo test cached_script`:
+- [ ] `cargo test` passes (**268 green after A3**), including the two corpus oracles — run them
+      by name with `cargo test cached_script`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export` and
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
       every script the app has ever fetched (currently 461 files under
-      `~/.cache/visionary/script-cache`, ~1000 functions), and a clean run there means the
-      emitter is a faithful inverse of the parser across real code, not just across the cases
-      someone thought to write down.
+      `~/.cache/visionary/script-cache`, ~1000 functions).
       **Both return early and pass vacuously if that cache directory is missing.** The first
       then asserts `checked > 100`, so a *thin* cache fails loudly — but an *absent* one is
-      silently green. Confirm the directory exists before trusting either.
+      silently green. Confirm the directory exists before trusting either. `ls` shows only 3
+      entries; the files are nested per fighter, so count with
+      `find ~/.cache/visionary/script-cache -type f | wc -l`.
+      **Neither oracle is a full-fidelity check, so do not read a green run as one.** The
+      effect one compares only `(spawn_func, effect_name)` pairs — A3's dropped rate passed it
+      for as long as the bug existed. The per-field comparison lives in
+      `check_effect_fidelity` / `check_hitbox_fidelity`; a new field must be added *there* or
+      nothing is checking it.
 - [ ] A round-trip test for the new family: parse a real vanilla call → emit → parse again →
       identical IR. Put the real call in the test, not a synthetic one.
 - [ ] A write-back test asserting that a value edit rewrites *only* that argument span, and
       that a structural edit lands in the skip report with a reason naming the macro.
-- [ ] The plugin builds if it was touched (`bash plugins/slight_replica/scripts/build.sh`),
-      and the deployed build stamp in `diag.txt` matches what you just built.
+- [ ] The plugin builds if it was touched: `bash plugins/slight_replica/scripts/build.sh`.
+      **That is the whole of what can be verified without a Switch or a running emulator.** The
+      script only copies the `.nro` to `target/output/`; it does not deploy, so the `diag.txt`
+      build stamp cannot be checked from a build alone. If you have a running game, check it;
+      if you do not, say so in the entry rather than implying the live surface was exercised.
 - [ ] [README.md](README.md) updated if user-visible behaviour changed. House style: plain
       imperative button labels, no ellipsis.
 
@@ -128,7 +150,14 @@ paraphrase it from memory.
 
 # Part 1 — ACMD coverage gaps
 
-Ordered so that earlier tasks unblock later ones. Within a section, top is highest value.
+Ordered so that earlier tasks unblock later ones. **Position within a section is not a
+priority ranking** — it was meant to be, but measuring the corpus after A3 showed it is not:
+C3 (69 occurrences) beats C1 (65), and B4 (45) beats B3 (23). Each entry now carries its own
+measured counts; go by those. Blocking relationships are the only thing the order still
+encodes.
+
+Counts are occurrences in the local 461-file corpus, which is what the app has fetched so far
+— a proxy for how often real scripts use a macro, not a census of the game.
 
 ## Foundations
 
@@ -273,11 +302,9 @@ call and written into another: `eval_effect_stmts` (script), `effect_calls_from_
   frame with the *same* rate collapse to one rate line, so the second spawn captures with no
   rate. Conservative — a missing rate, never a wrong one — and it only affects live capture.
 
-**For whoever takes C1 (`LAST_EFFECT_SET_COLOR`, 65 corpus occurrences — more than rate):**
-the attachment rule and its three implementations are the reusable part; copy them rather than
-re-deriving. Colour is three arguments instead of one, and `LAST_EFFECT_SET_ALPHA` (4) and
-`LAST_EFFECT_SET_WORK_INT` (1) are the same shape again — consider one `Option`-per-modifier
-block on `EffectCall` rather than a field each.
+**For whoever takes C1:** the attachment rule and its three implementations are the reusable
+part; copy them rather than re-deriving. C1 carries the measured table for the rest of the
+family, including one member smash-script never wrapped — read it before writing a slot table.
 
 ## Hitbox families
 
@@ -286,9 +313,14 @@ block on `EffectCall` rather than a field each.
 Preserved verbatim today. Positions are world-absolute rather than bone-relative, so the
 viewport gizmo and the bone dropdown do not apply as written.
 
-**Measured, not assumed:** 16 arguments, 32 occurrences in the local corpus (A2's table).
-That is less than half of `ATTACK`'s 36 — it is a genuinely different call, and none of
-`AttackCall`'s hit-property block can be reused positionally.
+**Measured, not assumed:** 16 arguments, 32 occurrences in the local corpus, and
+`macros::ATTACK_ABS` is declared. That is less than half of `ATTACK`'s 36 — it is a genuinely
+different call, and none of `AttackCall`'s hit-property block can be reused positionally.
+
+Re-measured after A3: **all 32 occurrences carry exactly 16 arguments.** One arity, so unlike
+`ATTACK`/`ATTACK_IGNORE_THROW` there is no optional-capsule shape to detect — A2's
+`capsule_slots_present` / `shift_past_absent_capsule` dance is not needed here, and copying it
+in would be complexity with nothing behind it.
 
 - **Work order:** own family, own slot table, own struct. Reuse `AttackCall`'s hit-property
   block only if the arities genuinely match — they do not, so expect a real struct.
@@ -298,13 +330,33 @@ That is less than half of `ATTACK`'s 36 — it is a genuinely different call, an
 
 ### [ ] B2 — `ATTACK_FP` (fighter-position hitboxes)
 
-Same shape as B1. Do it immediately after, while the family-splitting pattern is fresh.
+Blocked by: B1 in practice — but read this before scheduling it.
+
+**Measured after A3: `ATTACK_FP` appears ZERO times in the local corpus.** smash-script
+declares it, so it is emittable, but there is no vanilla call anywhere in the 461 cached
+scripts. That breaks two things the old "same shape as B1, do it immediately after" framing
+assumed:
+
+- The definition of done requires a round-trip test built from a **real** vanilla call. There
+  is none to build it from, so this task cannot meet that bar as written.
+- Nothing exercises it in the corpus oracles either, so a wrong slot table here would pass
+  every check in the project and only fail on a user's mod.
+
+Do not do this on the strength of "it is next in the list". Either fetch more of the archive
+first and re-measure, or take it deliberately as an unverifiable convenience for mod authors
+who write `ATTACK_FP` by hand — and say which in the entry, since the second is a real choice
+and not a default.
 
 ### [ ] B3 — Post-hoc hitbox tuning
 
-`ATK_POWER`, `ATK_LERP_RATIO`, `ATK_HIT_ABS`, `WHOLE_HIT`,
-`ATK_SET_SHIELD_SETOFF_MUL` + its `_arg3`/`_arg4`/`_arg5` variants. These modify hitboxes
-*already out*, so they are edits to an existing collision rather than new collisions.
+These modify hitboxes *already out*, so they are edits to an existing collision rather than
+new collisions.
+
+**Measured after A3** — all have `macros.rs` wrappers, so no export trap:
+`ATK_SET_SHIELD_SETOFF_MUL` 9, `ATK_HIT_ABS` 6, `WHOLE_HIT` 6, `ATK_POWER` 2,
+`ATK_LERP_RATIO` 0. Twenty-three occurrences total, which is the thinnest of the hitbox
+tasks — B4 has twice the usage for comparable work. Take that first unless something specific
+wants these.
 
 - **Work order:** model them as modifiers attached to the hitbox id they target, shown on the
   timeline at their own frame. Do not fold their values into the parent `ATTACK` — the export
@@ -314,9 +366,12 @@ Same shape as B1. Do it immediately after, while the family-splitting pattern is
 
 ### [ ] B4 — Hurtbox control
 
-`HIT_NODE`, `HIT_NO`, `HIT_RESET_ALL`, `COL_NORMAL`, `COL_PRI`. Intangibility and hurtbox
-state per bone — the thing every competitive-facing mod actually wants to tune, and currently
-invisible.
+Intangibility and hurtbox state per bone — the thing every competitive-facing mod actually
+wants to tune, and currently invisible.
+
+**Measured after A3**, and the numbers back the framing: `HIT_NODE` 30, `COL_NORMAL` 8,
+`HIT_RESET_ALL` 3, `HIT_NO` 2, `COL_PRI` 2 — 45 occurrences, the most-used hitbox task left.
+All five have `macros.rs` wrappers.
 
 - **Work order:** these are per-bone state over a frame range, not collisions. They want their
   own panel and their own timeline lane, not a row in Hitboxes.
@@ -325,8 +380,14 @@ invisible.
 
 ### [ ] B5 — `SEARCH` / detection boxes
 
-`SEARCH`, `SET_SEARCH_SIZE_EXIST`, `ENABLE_AREA`, `UNABLE_AREA`. Grab-range and detection
-volumes. Geometrically these are close to grab boxes, so the panel work is mostly reuse.
+Grab-range and detection volumes. Geometrically these are close to grab boxes, so the panel
+work is mostly reuse.
+
+**Measured after A3:** `SEARCH` 7; `SET_SEARCH_SIZE_EXIST`, `ENABLE_AREA`, and `UNABLE_AREA`
+appear **zero** times in the local corpus, though all four have `macros.rs` wrappers. So this
+is really a one-macro task with three untestable extras — there is no vanilla call to build a
+round-trip test from for those three, which the definition of done requires. Scope it to
+`SEARCH` and say so, rather than shipping three families no corpus can check.
 
 - **Trap:** new collision family → it must be added to the plugin's `is_collision_func` and
   given a category id on the wire, alongside 0 attack / 1 grab / 2 wind.
@@ -339,19 +400,40 @@ Unblocked: A3 is done and settled the attachment rule — bind to the immediatel
 recognised spawn, refuse otherwise, and implement it identically in `eval_effect_stmts`,
 `effect_calls_from_captures`, and `spawn_and_rate_sites`. Copy those three, do not re-derive.
 
-`LAST_EFFECT_SET_COLOR`, `_ALPHA`, `_SCALE_W`, `_OFFSET_TO_CAMERA_FLAT`, and
-`LAST_PARTICLE_SET_COLOR`.
+**Measured, not assumed.** Corpus occurrences, and whether smash-script declares a wrapper —
+both checked, because A1's trap is live in this family:
 
-**Measured, not assumed** (local corpus): `_COLOR` 65, `_ALPHA` 4, `_WORK_INT` 1. Colour is by
-far the most common of the family — more than rate's 27 — so it is the one that matters.
+| macro | args | corpus | `macros.rs` wrapper |
+|---|---|---|---|
+| `LAST_EFFECT_SET_COLOR` | 3 (`ToF32`) | 65 | yes |
+| `LAST_EFFECT_SET_RATE` | 1 (`ToF32`) | 27 | yes — **done, A3** |
+| `LAST_EFFECT_SET_ALPHA` | 1 (`ToF32`) | 4 | yes |
+| `LAST_PARTICLE_SET_COLOR` | 3 (`ToF32`) | 1 | yes |
+| `LAST_EFFECT_SET_WORK_INT` | — | 1 | **NO** |
+| `LAST_EFFECT_SET_SCALE_W` | 3 (`ToF32`) | 0 | yes |
+| `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` | 1 (`ToF32`) | 0 | yes |
+
+Colour is the whole task by value: 65 occurrences, more than rate's 27. `_SCALE_W` and
+`_OFFSET_TO_CAMERA_FLAT` appear **nowhere** in the local corpus — they are exportable but
+have no vanilla usage to test against, so do them last or not at all.
+
+**`LAST_EFFECT_SET_WORK_INT` is the `AREA_WIND_2ND` situation again**, verified against the
+full wrapper list: `sv_animcmd` has it, the archive uses it once, and `macros.rs` does not
+declare it. If it is modelled at all it must be parse-only, with a verifier blocker on export
+— the same shape as `WIND_MACRO_COMMANDS` / `has_macro_wrapper` in [data.rs](src/data.rs).
+Every argument in the rest of the family is generic over `ToF32`, so use `ArgValue::ToF32` and
+plain `to_string`, never `num`.
 
 - **Work order:** `EffectCall` gained one `Option` field for rate. Five more would be five more
   fields; consider a single modifier block instead. Whatever the shape, the `None` vs
   `Some(default)` distinction A3 established has to survive it: "no line" and "a line setting
   the default" are different exports.
+- **Do not forget `check_effect_fidelity`.** A new field on `EffectCall` is not verified until
+  it is compared there — the corpus oracle will not catch it. That is exactly how A3's rate
+  stayed broken.
 - **Trap:** kind-level colour/speed overrides already exist on the live wire and apply to
   *every* spawn of an effect. These are per-spawn. Read the comment above `LiveOverride`
-  ([game_link.rs:374](src/game_link.rs:374)) before wiring anything — conflating per-kind with
+  ([game_link.rs:373](src/game_link.rs:373)) before wiring anything — conflating per-kind with
   per-emitter recoloured whole effects once already. A3 hit the export half of this: a live
   speed tweak and a script rate both wanted to write a `LAST_EFFECT_SET_RATE` line. The
   override wins, exactly one line is emitted, and the verifier warns. Colour needs the same
@@ -361,7 +443,7 @@ far the most common of the family — more than rate's 27 — so it is the one t
 
 `AFTER_IMAGE4_ON` / `_arg29` / `AFTER_IMAGE_ON`. Read-only today: the trail shows on the
 timeline with its graphic and joint, and write-back explicitly refuses it
-([acmd_src.rs:785](src/acmd_src.rs:785)) because a trail has no transform.
+([acmd_src.rs:803](src/acmd_src.rs:803)) because a trail has no transform.
 
 That refusal is correct and must stay. But a trail *is* placed — by the joints it names,
 arguments 4 onward. Those are editable; the transform never will be.
@@ -373,13 +455,36 @@ arguments 4 onward. Those are editable; the transform never will be.
 
 ### [ ] C3 — Screen and body colour effects
 
-`FLASH`, `FLASH_FRM`, `BURN_COLOR`, `BURN_COLOR_FRAME`, `BURN_COLOR_NORMAL`,
-`START_INFO_FLASH_EYE`. Colour + duration; the panel work is small and mostly a colour picker.
+**Measured after A3, and this entry was misfiled as small.** It is the largest effect task in
+this section by corpus usage — 69 occurrences against C1's 65 — and every member has a
+`macros.rs` wrapper, so there is no export trap here:
+
+| macro | corpus |
+|---|---|
+| `FLASH` | 41 |
+| `BURN_COLOR` | 10 |
+| `BURN_COLOR_FRAME` | 10 |
+| `BURN_COLOR_NORMAL` | 5 |
+| `START_INFO_FLASH_EYE` | 3 |
+| `FLASH_FRM` | 0 |
+
+The panel work really is mostly a colour picker, which is what makes the ratio good. `FLASH`
+alone is worth more than all of `_ALPHA`, `_SCALE_W`, `_OFFSET_TO_CAMERA_FLAT`, and
+`LAST_PARTICLE_SET_COLOR` put together. **Consider taking this before C1**, or at least
+before C1's long tail.
+
+- **Trap:** unlike the `LAST_EFFECT_SET_*` family these name their own target, so A3's
+  bind-to-the-line-above rule does *not* apply and must not be copied here out of habit.
 
 ### [ ] C4 — Effect lifetime control
 
-`EFFECT_DETACH_KIND`, `EFFECT_DETACH_KIND_WORK`, `SET_PLAY_INHIVIT`. Detach and inhibit
-interact with the follow/off-kind lifetime the editor already models for spawns.
+Detach and inhibit interact with the follow/off-kind lifetime the editor already models for
+spawns.
+
+**Measured after A3:** `SET_PLAY_INHIVIT` 10, `EFFECT_DETACH_KIND` 0, `EFFECT_DETACH_KIND_WORK`
+0 — all three have `macros.rs` wrappers. So the detach half, which is the part carrying the
+trap below, has no vanilla usage to test against; `SET_PLAY_INHIVIT` is the only member with
+real corpus backing. Consider scoping to it alone.
 
 - **Trap:** end frames are currently derived from `EFFECT_OFF_KIND`. A detach ends a spawn's
   attachment without ending the spawn. Do not fold it into the same end-frame field.
@@ -434,7 +539,7 @@ Highest-leverage task in Part 1, and the one most likely to break things.
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks**
-([acmd_verify.rs:667](src/acmd_verify.rs:667)) — the editor does not model animation rate, and
+([acmd_verify.rs:743](src/acmd_verify.rs:743)) — the editor does not model animation rate, and
 a timing warning that guesses is worse than none. Modelling rate would re-enable those checks
 for a large slice of the corpus.
 
