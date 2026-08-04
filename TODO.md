@@ -453,7 +453,7 @@ arguments 4 onward. Those are editable; the transform never will be.
 - **Done when:** changing a trail's joints rewrites those arguments and nothing else, and
   dragging a position still reports the existing "no position arguments" skip.
 
-### [ ] C3 — Screen and body colour effects
+### [~] C3 — Screen and body colour effects (in progress 2026-08-04)
 
 **Measured after A3, and this entry was misfiled as small.** It is the largest effect task in
 this section by corpus usage — 69 occurrences against C1's 65 — and every member has a
