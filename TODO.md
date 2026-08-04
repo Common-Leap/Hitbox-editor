@@ -335,25 +335,43 @@ family, including one member smash-script never wrapped — read it before writi
 
 ## Hitbox families
 
-### [ ] B1 — `ATTACK_ABS` (absolute-position hitboxes)
+### [~] B1 — `ATTACK_ABS` (throw and swallow damage) (in progress 2026-08-04)
 
-Preserved verbatim today. Positions are world-absolute rather than bone-relative, so the
-viewport gizmo and the bone dropdown do not apply as written.
+**The old title and premise were wrong, and this is the finding.** This entry called it
+"absolute-position hitboxes" and said positions are world-absolute rather than bone-relative,
+with a definition of done of "it draws in the viewport at the right place". Read the signature:
 
-**Measured, not assumed:** 16 arguments, 32 occurrences in the local corpus, and
-`macros::ATTACK_ABS` is declared. That is less than half of `ATTACK`'s 36 — it is a genuinely
-different call, and none of `AttackCall`'s hit-property block can be reused positionally.
+```rust
+pub unsafe fn ATTACK_ABS(agent, kind: i32, id: u64, damage: f32, angle: u64, kbg: i32,
+    fkb: i32, bkb: i32, hitlag: f32, unk: f32, facing: i32, unk2: f32, unk3: bool,
+    effect: Hash40, sfx_level: i32, sfx_type: i32, _type: i32)
+```
 
-Re-measured after A3: **all 32 occurrences carry exactly 16 arguments.** One arity, so unlike
-`ATTACK`/`ATTACK_IGNORE_THROW` there is no optional-capsule shape to detect — A2's
-`capsule_slots_present` / `shift_past_absent_capsule` dance is not needed here, and copying it
-in would be complexity with nothing behind it.
+**There is no position, no size, and no bone.** It is not a spatial volume at all — it is the
+damage/knockback definition applied to an opponent who is *already* caught, and the "absolute
+kind" slot is what it applies to. Every one of the 32 corpus calls is in a throw or a Kirby
+inhale (24 files, all `kirb*`/`doll*`), and the kinds are `..._CATCH` (22) and `..._THROW`
+(15). So it cannot draw in the viewport, and the old "done when" was unreachable. The bone
+dropdown does need suppressing, but for a different reason than the entry gave.
 
-- **Work order:** own family, own slot table, own struct. Reuse `AttackCall`'s hit-property
-  block only if the arities genuinely match — they do not, so expect a real struct.
-- **Done when:** it draws in the viewport at the right place and survives the corpus oracles.
-- **Trap:** the shared-transform assumption behind the bone dropdown is wrong here. Suppress
-  the bone control rather than showing one that does nothing.
+Still true from the earlier measurement: 16 arguments, all 32 occurrences, one arity, and
+`macros::ATTACK_ABS` is declared — so no optional-shape detection is needed.
+
+- **Trap, and it is the expensive one: the kind slot takes fighter-specific constants.** The
+  corpus has `FIGHTER_DOLLY_ATTACK_ABSOLUTE_KIND_FINAL` alongside the two common ones. A
+  `ConstTable` of just `CATCH`/`THROW` would fail to round-trip Terry's final smash, so the
+  kind must be carried as written and offered as a dropdown that *accepts* unknown names
+  rather than one that replaces them.
+- **Slots 9, 11 and 12 are invariant across the whole corpus** (`1.0`, `0.0`, `true`) and are
+  undocumented in `macros.rs` beyond `unk`/`unk2`/`unk3`. Carry them verbatim; do not expose a
+  control whose meaning would be a guess. Slot 2 (`id`) is `0` in all 32.
+- **Work order:** its own struct and slot table. The hit-property block genuinely does map —
+  damage, angle, kbg, fkb, bkb, hitlag, `ATTACK_LR_CHECK_*`, `collision_attr`, sound level and
+  attr, and `ATTACK_REGION_*` are all the same fields `ATTACK` has — so it can ride the
+  existing `Hitbox` display type with geometry hidden, the way C3's colour commands ride the
+  effect list. Do not reuse `ATTACK`'s *slot indices*; the layout is different.
+- **Done when:** it round-trips the corpus oracles, shows in the hitbox list with geometry
+  suppressed rather than zeroed, and syncs values back into the user's source.
 
 ### [ ] B2 — `ATTACK_FP` (fighter-position hitboxes)
 
