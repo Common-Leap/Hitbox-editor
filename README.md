@@ -156,7 +156,7 @@ ask the emitter what it meant to write. It reads the generated code back with th
 parser the editor uses on your own scripts, and compares what comes out with the
 move on screen — every field of every collision and spawn, by name.
 
-Four things are checked. The first three stop an export rather than warn about
+Five things are checked. The first three stop an export rather than warn about
 it, because a mod that does not build, or that quietly ships numbers other than
 the ones you set, is worse than no mod:
 
@@ -174,6 +174,12 @@ the ones you set, is worse than no mod:
   by your toolchain.
 - **It is not wasteful.** A call issued twice in one block, an empty block, a
   `wait(0)`, a collision cleared before it comes out. These only inform.
+- **It does not lose anything.** An effect script is regenerated from the calls
+  Visionary understands, so a line it has no editor field for is not written out
+  at all. Every one is now named against the move it came from — the exact line,
+  and how many times it goes. This informs rather than refusing, because about a
+  quarter of the vanilla effect scripts carry such a line and blocking them would
+  swap a lossy export for no export.
 
 The timing checks are skipped for a script carrying branches of its own — an
 `if(WorkModule::is_flag(…)){`, an `FT_MOTION_RATE`. Those decide at runtime what

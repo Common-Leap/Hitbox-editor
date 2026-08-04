@@ -19,15 +19,19 @@
 //!    the game.
 //! 4. **It is not wasteful.** Empty blocks, dead statements, and calls the game will never
 //!    reach are reported so the generated file stays worth reading.
+//! 5. **It does not lose anything.** The effect export rebuilds the function out of the calls
+//!    it recognises, so a line it has no variant for is deleted rather than kept. Each one is
+//!    named against the script it came from.
 //!
 //! Anything in class 1–3 is a [`Severity::Blocker`] and fails the export outright: a mod that
 //! does not compile, or that quietly ships different numbers from the ones on screen, is worse
-//! than no mod. Class 4 is a [`Severity::Warning`] and only informs.
+//! than no mod. Classes 4 and 5 are a [`Severity::Warning`] and only inform — see
+//! [`check_dropped_lines`] for why a real loss is not allowed to fail an export.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::acmd::ModProject;
-use crate::data::{AcmdScript, AcmdStmt, EffectCall, ExcuteStmt, Hitbox};
+use crate::data::{AcmdScript, AcmdStmt, EffectCall, EffectScript, ExcuteStmt, Hitbox};
 use crate::mod_project::LiveTweak;
 
 /// How much a finding matters. Ordered so `max()` picks the worse one.
@@ -149,7 +153,12 @@ pub fn verify_export(
     for (fighter, move_name, calls) in effect_edits {
         let subject = format!("{fighter} / {move_name}");
         let emitted = crate::acmd::preview_effect_fn(calls, move_name, tweaks);
-        verify_effect_move(&subject, calls, &emitted, tweaks, &mut report);
+        // No source to hand over: a saved project stores the resolved call list and nothing
+        // else, so by the time an export runs, the lines that were dropped are already gone
+        // from the data. Naming them here needs the project to carry them, which is the same
+        // plumbing that would let the export keep them — so it lands with that half, not this
+        // one. The generated-source pane in the editor does have the script, and does check.
+        verify_effect_move(&subject, calls, &emitted, tweaks, None, &mut report);
         if !sources.iter().any(|text| text.contains(&emitted)) {
             report.blocker(
                 &subject,
@@ -173,15 +182,23 @@ pub fn verify_move(subject: &str, script: &AcmdScript, emitted: &str, report: &m
 /// `tweaks` are needed, not incidental: a live speed override deliberately replaces a spawn's
 /// own `LAST_EFFECT_SET_RATE` value in the emitted code, so without them a tweaked effect
 /// looks exactly like an export that lost the script's rate.
+/// `source` is the script the calls were parsed from, when there is one. It is the only place
+/// the lines an export deletes still exist — `calls` has already lost them and `emitted` never
+/// had them — so without it that check cannot run. Pass `None` for a move captured live, which
+/// has no source anywhere.
 pub fn verify_effect_move(
     subject: &str,
     calls: &[EffectCall],
     emitted: &str,
     tweaks: &[LiveTweak],
+    source: Option<&EffectScript>,
     report: &mut Report,
 ) {
     check_effect_fidelity(subject, calls, emitted, tweaks, report);
     check_effect_values(subject, calls, report);
+    if let Some(source) = source {
+        check_dropped_lines(subject, source, report);
+    }
     for (spawn_func, effect_name) in crate::acmd::export_spawn_downgrades(calls) {
         report.warn(
             subject,
@@ -561,6 +578,44 @@ fn check_effect_fidelity(
                 );
             }
         }
+    }
+}
+
+/// Name every line of the user's effect script that the export throws away.
+///
+/// The effect export regenerates the function from the calls it recognises, so a line it never
+/// parsed into one does not survive. That has always been true and was always silent: C3 found
+/// 69 `FLASH` / `BURN_COLOR` calls being deleted out of exported moves, and only found them by
+/// reading a diff. Modelling a family removes it from this list; until then the loss is at
+/// least said out loud.
+///
+/// A warning rather than a blocker, deliberately. Most vanilla effect scripts carry at least
+/// one line this parser has no variant for, so refusing them would turn a lossy export into no
+/// export at all — worse for every user who does not care about the dropped line, and no better
+/// for the ones who do, since the message is the same either way.
+fn check_dropped_lines(subject: &str, source: &EffectScript, report: &mut Report) {
+    // Grouped by text and kept in first-seen order: a line inside a `for` body is genuinely
+    // lost once per iteration, but saying so five times reads as five different problems.
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for line in crate::acmd::unexportable_effect_lines(source) {
+        match seen.iter_mut().find(|(text, _)| *text == line) {
+            Some((_, count)) => *count += 1,
+            None => seen.push((line, 1)),
+        }
+    }
+    for (line, count) in seen {
+        let times = if count > 1 {
+            format!(" ({count} times)")
+        } else {
+            String::new()
+        };
+        report.warn(
+            subject,
+            format!(
+                "the generated script does not include this line{times}, and nothing in it \
+                 does the same job: {line}"
+            ),
+        );
     }
 }
 
@@ -989,10 +1044,18 @@ mod tests {
                         verify_move(&label, &parsed, &emitted, &mut report);
                         checked += 1;
                     }
-                    let calls = crate::acmd::parse_effect_script(body).to_effect_calls();
+                    let effect_script = crate::acmd::parse_effect_script(body);
+                    let calls = effect_script.to_effect_calls();
                     if !calls.is_empty() {
                         let emitted = crate::acmd::preview_effect_fn(&calls, "audit", &[]);
-                        verify_effect_move(&label, &calls, &emitted, &[], &mut report);
+                        verify_effect_move(
+                            &label,
+                            &calls,
+                            &emitted,
+                            &[],
+                            Some(&effect_script),
+                            &mut report,
+                        );
                         checked += 1;
                     }
                 }
@@ -1179,6 +1242,76 @@ mod tests {
         );
     }
 
+    /// The whole point of C5: an effect script's unmodelled lines do not survive an export, and
+    /// before this nothing said which ones. `LAST_EFFECT_SET_COLOR` is the case worth pinning —
+    /// 33 occurrences in the cache, the single most-deleted line in the corpus, and one the
+    /// *emitter* writes for live colour tweaks while the parser has no variant for it, so a
+    /// script's own colour modifier is dropped on the way through.
+    #[test]
+    fn a_line_the_export_cannot_reproduce_is_named_rather_than_silently_deleted() {
+        let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+        macros::LAST_EFFECT_SET_COLOR(agent, 1, 0.5, 0);
+    }
+}
+"#;
+        let source = crate::acmd::parse_effect_script(src);
+        let calls = source.to_effect_calls();
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
+        assert!(
+            !emitted.contains("LAST_EFFECT_SET_COLOR"),
+            "the premise no longer holds — the export now keeps this line, so this test is \
+             checking nothing:\n{emitted}"
+        );
+
+        let mut report = Report::default();
+        verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        assert!(
+            messages(&report).contains("macros::LAST_EFFECT_SET_COLOR(agent, 1, 0.5, 0);"),
+            "the dropped line was not named:\n{}",
+            messages(&report)
+        );
+        // A warning, not a blocker. Roughly a quarter of the cached vanilla effect scripts lose
+        // a line this way, so refusing them would leave a user who does not care about the
+        // dropped line with no export at all.
+        assert!(!report.has_blockers(), "{}", messages(&report));
+
+        // Without the source there is nothing to compare against, and the check must stay quiet
+        // rather than guess: a move captured live has no script and has lost nothing.
+        let mut blind = Report::default();
+        verify_effect_move("test", &calls, &emitted, &[], None, &mut blind);
+        assert!(
+            !messages(&blind).contains("does not include this line"),
+            "{}",
+            messages(&blind)
+        );
+    }
+
+    /// The emitter writes its own braces and `is_excute` headers, so reporting the ones it threw
+    /// away would be one finding per block of noise burying the lines that are a real loss.
+    #[test]
+    fn punctuation_the_emitter_regenerates_is_not_reported_as_a_loss() {
+        let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+    }
+}
+"#;
+        let source = crate::acmd::parse_effect_script(src);
+        let calls = source.to_effect_calls();
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
+        let mut report = Report::default();
+        verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        assert!(
+            report.is_clean(),
+            "a script the export reproduces exactly still reported something:\n{}",
+            messages(&report)
+        );
+    }
+
     /// A live speed override deliberately replaces the spawn's own rate in the export. That is
     /// the one rate difference that is not a bug — but it is still a value the user set on an
     /// effect *kind* quietly taking over one the script chose for a single spawn, so it is
@@ -1203,7 +1336,7 @@ mod tests {
 
         let emitted = crate::acmd::preview_effect_fn(&calls, "test", &tweaks);
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &tweaks, &mut report);
+        verify_effect_move("test", &calls, &emitted, &tweaks, None, &mut report);
         assert!(!report.has_blockers(), "{}", messages(&report));
         assert!(
             messages(&report).contains("ships the live speed override"),
@@ -1213,7 +1346,7 @@ mod tests {
 
         // Without the tweak to explain it, the same divergence is an export that lost a value.
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &[], &mut report);
+        verify_effect_move("test", &calls, &emitted, &[], None, &mut report);
         assert!(report.has_blockers(), "{}", messages(&report));
         assert!(
             messages(&report).contains("different rate"),
@@ -1291,3 +1424,4 @@ mod tests {
         assert!(!toml_strings_are_closed("display_name = \"a\n"));
     }
 }
+

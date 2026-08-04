@@ -1619,6 +1619,44 @@ pub fn export_spawn_downgrades(calls: &[crate::data::EffectCall]) -> Vec<(String
         .collect()
 }
 
+/// The lines of an effect script that an export would not write back.
+///
+/// [`emit_effect_move_fn`] rebuilds the whole function out of `EffectCall`s, so a line the
+/// parser left as `Raw` — a macro with no typed variant, an `if` the editor does not model, a
+/// `sv_kinetic_energy` call — is not reproduced anywhere in the output. It is deleted, and
+/// until this existed nothing anywhere said so. Modelling a family at a time closes one hole
+/// each; this names whatever is still open.
+///
+/// Lines carrying no letters or digits are left out. The emitter regenerates every brace it
+/// needs, so a bare `}` is not a loss, and listing one per block would bury the lines that are.
+pub fn unexportable_effect_lines(script: &crate::data::EffectScript) -> Vec<String> {
+    fn keep(line: &str, out: &mut Vec<String>) {
+        let line = line.trim();
+        if line.chars().any(|c| c.is_alphanumeric()) {
+            out.push(line.to_string());
+        }
+    }
+    fn walk(stmts: &[EffectStmt], out: &mut Vec<String>) {
+        for stmt in stmts {
+            match stmt {
+                EffectStmt::Raw(line) => keep(line, out),
+                EffectStmt::Excute(macros) => {
+                    for entry in macros {
+                        if let EffectMacro::Raw(line) = entry {
+                            keep(line, out);
+                        }
+                    }
+                }
+                EffectStmt::Loop { body, .. } => walk(body, out),
+                EffectStmt::Frame(_) | EffectStmt::Wait(_) => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&script.stmts, &mut out);
+    out
+}
+
 /// Build a complete, compilable skyline-rs mod project for all the provided edits.
 ///
 /// `edits` — list of `(fighter_name, move_name, script)` tuples (all fighters combined).

@@ -93,9 +93,11 @@ Two export paths, different rules — do not conflate them:
   `cached_scripts_round_trip_through_the_emitter` only compares `(spawn_func, effect_name)`
   pairs, so it will not catch a dropped field for you.
 
-  The general form of this is **C5**: a line with no typed variant is not merely unmodelled,
-  it is *deleted* by the export. C3 found 69 more of them after A3 found 27. Assume any effect
-  macro this file does not list as done is being dropped, and check before assuming otherwise.
+  The general form of this is **C6**: a line with no typed variant is not merely unmodelled,
+  it is *deleted* by the export. C3 found 69 more of them after A3 found 27, and C5 measured
+  the rest — 24% of vanilla effect scripts lose a line. You no longer have to assume: open the
+  move in the editor and read the generated-source pane, which now names every line the export
+  will not write. C5's table lists what is still going.
 - **A macro that names no target binds to the line above it, and nowhere else.**
   `LAST_EFFECT_SET_*` modifies whatever spawned last, so there is nothing in the call to match
   on. Bind it to the immediately preceding recognised spawn and refuse otherwise — reaching
@@ -123,7 +125,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**273 green after C3**), including the two corpus oracles — run them
+- [ ] `cargo test` passes (**275 green after C5**), including the two corpus oracles — run them
       by name with `cargo test cached_script`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export` and
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
@@ -422,6 +424,13 @@ Colour is the whole task by value: 65 occurrences, more than rate's 27. `_SCALE_
 `_OFFSET_TO_CAMERA_FLAT` appear **nowhere** in the local corpus — they are exportable but
 have no vanilla usage to test against, so do them last or not at all.
 
+**C5 sharpened the colour case.** Of those 65, **33 sit in effect scripts the export
+regenerates, so they are deleted today** — the single most-deleted line in the corpus. Worse,
+`emit_effect_move_fn` already *writes* `LAST_EFFECT_SET_COLOR` for a live colour tweak while
+the parser has no variant to read one back. So a script's own colour modifier is dropped and a
+tweak's survives, and the fidelity check cannot see the difference because both sides of its
+comparison have already lost the line. C5's warning now names each one; C1 is what removes it.
+
 **`LAST_EFFECT_SET_WORK_INT` is the `AREA_WIND_2ND` situation again**, verified against the
 full wrapper list: `sv_animcmd` has it, the archive uses it once, and `macros.rs` does not
 declare it. If it is modelled at all it must be parse-only, with a verifier blocker on export
@@ -531,31 +540,69 @@ command in the game to one hash.
 - The colour picker clamps to 0..=1 but the drag fields do not, because the corpus writes
   `BURN_COLOR(agent, 2, …)` — an over-bright red a clamping editor would silently dim.
 
-### [~] C5 — Stop the effect export deleting lines it does not model
+### [x] C5 — Name the lines the effect export deletes
 
-In progress 2026-08-04, taking the **report** half only (see *Cheaper first step* below); the
-preservation half stays open afterwards.
+Done 2026-08-04. `cargo test` 275 green, both corpus oracles run for real, clippy clean,
+`build_check.sh` passes. Plugin untouched — this is verifier-only, and surfaces 1–3 and 5 are
+unchanged by design: the point is to describe what surface 4 already does, not to change it.
 
-Split out of C3, which found the general case behind its own symptom.
+Split out of C3, which found the general case behind its own symptom. Scoped down on the way
+in to the *report* half only; the preservation half is now **C6**, below.
 
-The effect export regenerates the function from `EffectCall`s, so **any line without a typed
-variant is deleted on export, silently.** C3 fixed this for 69 colour commands and A3 for 27
-rates by modelling them, but that is one family at a time and the export gets no safer for the
-next one. Still dropped today: `FLASH_SET_DIRECTION` (8, and unwrappable — see C3),
-`LAST_EFFECT_SET_WORK_INT` (1, likewise), every `sv_kinetic_energy` line, and anything a mod
-author wrote that this parser has never seen.
+The effect export regenerates the function from `EffectCall`s, so any line without a typed
+variant is deleted on export. That was true before C3, before A3, and is still true — the
+change here is that it is no longer silent. [`unexportable_effect_lines`](src/acmd.rs) walks an
+`EffectScript` for `Raw` statements and `Raw` macros, and `check_dropped_lines` in
+[acmd_verify.rs](src/acmd_verify.rs) names each one under the generated-source pane.
+
+**What the corpus actually loses.** Measured over the script cache, not estimated — 132 effect
+scripts produce calls, and **32 of them (24%) lose at least one line.** By head of line:
+
+| Count | Line | Note |
+|---|---|---|
+| 33 | `macros::LAST_EFFECT_SET_COLOR` | The biggest single loss, and C1's territory. Sharpest detail: the *emitter* writes this macro for a live colour tweak while the parser has no variant for it, so a script's own colour modifier is dropped and a tweak's is not. |
+| 62 | `if` / `if !WorkModule::is_flag` / `if get_value_float` / `else {` | Conditional effects export as unconditional. Bigger than C5 and bigger than C6 — see E2's neighbourhood, and note `has_unmodelled_flow` already gates the *timing* checks on this but nothing gates the export. |
+| 7 | `wait_loop_sync_mot` | A timing primitive with no `EffectStmt` variant. |
+| 4 | `macros::LAST_EFFECT_SET_ALPHA` | C1. |
+| 4 | `methodlib::L2CAgent::pop…` | Not a call to model; genuinely script plumbing. |
+| 3 | `EffectModule::req_screen…` | Direct module calls, no macro wrapper involved. |
+| 2 ea | `FILL_SCREEN_MODEL_COLOR`, `CANCEL_FILL_SCREEN` | Screen-wide colour, adjacent to C3 but a different family. |
+| 1 ea | `LAST_EFFECT_SET_WORK_INT`, `COL_NORMAL`, two `EffectModule` calls | `LAST_EFFECT_SET_WORK_INT` is the A1 trap again (see C1). |
+
+**Warning, not blocker — and that is the decision to revisit if it ever looks wrong.** A real
+loss of the user's code arguably belongs in classes 1–3, which refuse the export. It is a
+warning because 24% of vanilla scripts carry such a line: blocking would swap a lossy export
+for no export, which helps nobody, and the message a user acts on is identical either way.
+Reconsider once C6 lands and the residue is small.
+
+- **Known gap, deliberate:** the **Export Mod Folder** path passes `None` and does not run this
+  check. A saved project stores `effect_calls_full` — resolved `EffectCall`s and nothing else —
+  so by export time the dropped lines are already gone from the data. Making the project carry
+  them is the same plumbing C6 needs, so it lands there rather than being done twice. The
+  generated-source pane, which is where a user looks before exporting, does have the script and
+  does check.
+- **Also deliberate:** punctuation-only lines are filtered out. The emitter regenerates every
+  brace it needs, so reporting one `}` per block would bury the lines that are a loss. The
+  filter is "contains a letter or digit", which keeps `if … {` and `else {` in.
+
+### [ ] C6 — Carry unmodelled effect lines through the export
+
+The other half of C5, which named the problem without fixing it. C5's table is the measured
+target list; read it first.
 
 - **Work order:** teach `EffectScript` → export to carry unmodelled lines through in position,
   the way `EffectCall::raw_line` already carries a trail. The hard part is *where* they go: the
   export groups calls by frame and the original line's position within its block is not
   currently recorded.
-- **Cheaper first step, and worth landing on its own:** make the verifier *report* them. It
-  reads the emitted text back with the same parser, so it can compare the `Raw` statements of
-  the source against those of the export and name each one that vanished. That turns a silent
-  loss into a named one without needing to solve placement.
 - **Trap:** a preserved line may be a spawn this parser does not recognise, in which case
-  re-emitting it and *also* emitting the call it produced would double the spawn. The report
-  step has no such hazard, which is the other reason to do it first.
+  re-emitting it and *also* emitting the call it produced would double the spawn.
+- **Trap:** 62 of the dropped lines are `if` / `else` headers, and carrying those through in
+  position without carrying their closing brace produces Rust that does not compile. Either
+  handle the whole conditional as a unit or exclude flow from this task and say so.
+- **Do this alongside:** once the lines are carried in the IR, make `ModProject` carry them too
+  and pass `Some(script)` at [acmd_verify.rs:161](src/acmd_verify.rs:161), closing C5's one
+  known gap.
+- **Then reconsider** whether the C5 warning should become a blocker for whatever is left.
 
 ### [ ] C4 — Effect lifetime control
 
@@ -620,7 +667,7 @@ Highest-leverage task in Part 1, and the one most likely to break things.
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks**
-([acmd_verify.rs:818](src/acmd_verify.rs:818)) — the editor does not model animation rate, and
+([acmd_verify.rs:894](src/acmd_verify.rs:894)) — the editor does not model animation rate, and
 a timing warning that guesses is worse than none. Modelling rate would re-enable those checks
 for a large slice of the corpus.
 

@@ -1913,6 +1913,10 @@ impl VisionaryApp {
                 &self.state.effects,
                 &emitted,
                 &tweaks,
+                // Empty for a move captured live from the game, which has no script text
+                // anywhere — and correctly reports no dropped lines, because there is no
+                // original for the export to fall short of.
+                Some(&self.state.effect_script),
                 &mut report,
             );
             out.push_str(&emitted);
