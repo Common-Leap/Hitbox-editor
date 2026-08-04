@@ -531,7 +531,10 @@ command in the game to one hash.
 - The colour picker clamps to 0..=1 but the drag fields do not, because the corpus writes
   `BURN_COLOR(agent, 2, …)` — an over-bright red a clamping editor would silently dim.
 
-### [ ] C5 — Stop the effect export deleting lines it does not model
+### [~] C5 — Stop the effect export deleting lines it does not model
+
+In progress 2026-08-04, taking the **report** half only (see *Cheaper first step* below); the
+preservation half stays open afterwards.
 
 Split out of C3, which found the general case behind its own symptom.
 
