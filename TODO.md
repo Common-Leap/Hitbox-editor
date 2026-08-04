@@ -203,9 +203,9 @@ therefore the only one that builds.
 archive wrote. Count the arguments in the corpus first — the one-liner that produced the table
 above is worth rerunning per family.
 
-### [ ] A3 — `LAST_EFFECT_SET_RATE` as an editable field
+### [~] A3 — `LAST_EFFECT_SET_RATE` as an editable field
 
-Blocked by: nothing. Already parsed into the IR
+Started 2026-08-04. Blocked by: nothing. Already parsed into the IR
 ([acmd.rs:437](src/acmd.rs:437)) and re-emitted. It just has no UI, so the value round-trips
 untouched and can't be changed. Surfaces 1 and 4 are already done; this is 2, 3, 5.
 
