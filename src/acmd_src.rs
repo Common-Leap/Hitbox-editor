@@ -683,6 +683,25 @@ fn float_edit(text: &str, span: &Range<usize>, new: f32) -> Option<Replacement> 
     })
 }
 
+/// Format a number for a `ToF32` slot exactly as the emitter would, and only if it differs.
+///
+/// `f32::to_string` is both exact and shortest, so a wind argument written `16` stays `16` and
+/// only a value that genuinely needs decimals grows them. The same two-part guard as
+/// [`float_edit`]: an unchanged value writes nothing, and neither does one whose spelling the
+/// author already chose.
+fn to_f32_edit(text: &str, span: &Range<usize>, new: f32) -> Option<Replacement> {
+    let current = text[span.clone()].trim();
+    let old = current.parse::<f32>().ok()?;
+    let replacement = new.to_string();
+    if old == new || replacement == current {
+        return None;
+    }
+    Some(Replacement {
+        span: span.clone(),
+        value: replacement,
+    })
+}
+
 fn int_edit(text: &str, span: &Range<usize>, new: i64) -> Option<Replacement> {
     let current = text[span.clone()].trim();
     let old = current.parse::<i64>().ok()?;
@@ -939,6 +958,10 @@ pub fn rewrite_hitboxes(
         .filter(|s| crate::acmd::ATTACK_FUNCS.contains(&s.name.as_str()))
         .collect();
     let catches: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "CATCH").collect();
+    let winds: Vec<&MacroSite> = sites
+        .iter()
+        .filter(|s| crate::data::is_wind_command(&s.name))
+        .collect();
 
     let mut report = SyncReport::default();
     let mut edits = Vec::new();
@@ -956,13 +979,16 @@ pub fn rewrite_hitboxes(
         if before == hitbox {
             continue;
         }
-        // An `AREA_WIND*` call is a flat list of command-specific floats with no shared
-        // layout to retune against, so a wind box is reported rather than guessed at.
-        if hitbox.category == 2 || hitbox.wind.is_some() {
-            report.skipped.push(format!(
-                "{label}: wind box {} is an `AREA_WIND` call — source syncing does not retune \
-                 those",
-                before.id
+        // A wind area shares nothing with `ATTACK` but the id space, so it is matched against
+        // its own calls and retuned through its own slot table.
+        if hitbox.category == 2 || hitbox.wind.is_some() || before.wind.is_some() {
+            edits.extend(wind_box_edits(
+                text,
+                label,
+                &winds,
+                before,
+                hitbox,
+                &mut report,
             ));
             continue;
         }
@@ -1068,6 +1094,10 @@ pub fn sync_hitboxes(
 enum ArgValue {
     Float(f32),
     Int(i64),
+    /// A number for a slot that is generic over `ToF32` — every `AREA_WIND_2ND*` argument is.
+    /// Written the way the emitter writes one, `20` rather than `20.0`, so the two export paths
+    /// put the same text in the file and a whole number does not sprout a decimal point.
+    ToF32(f32),
     /// A const, a bool, a hash, or a capsule endpoint — compared and written as text.
     Text(String),
 }
@@ -1372,6 +1402,7 @@ fn apply_slots(
         let edit = match value {
             ArgValue::Float(v) => float_edit(text, span, *v),
             ArgValue::Int(v) => int_edit(text, span, *v),
+            ArgValue::ToF32(v) => to_f32_edit(text, span, *v),
             ArgValue::Text(v) => text_edit(text, span, v),
         };
         edits.extend(edit);
@@ -1447,6 +1478,151 @@ fn catch_edits(
         ),
     ];
     apply_slots(text, site, &slots)
+}
+
+/// Match one wind area to its `AREA_WIND_2ND*` call and retune the arguments that changed.
+///
+/// Wind is a family in the strongest sense. Every argument is a bare float, so unlike `ATTACK`
+/// there is no argument *shape* to recognise a layout from — the command name is the layout.
+/// The four commands share slots 0..=7 and nothing else, so a rectangular call is only ever
+/// matched against a rectangular one, and a width is never written where a radius goes.
+///
+/// Anything that is not a value change to an existing argument — a different command, a
+/// different argument count, a renumber — is pushed to `report` and nothing is written.
+fn wind_box_edits(
+    text: &str,
+    label: &str,
+    winds: &[&MacroSite],
+    before: &crate::data::Hitbox,
+    after: &crate::data::Hitbox,
+    report: &mut SyncReport,
+) -> Vec<Replacement> {
+    let (Some(was), Some(now)) = (before.wind.as_ref(), after.wind.as_ref()) else {
+        report.skipped.push(format!(
+            "{label}: wind box {} carries no `AREA_WIND` payload to retune — fetch the move again",
+            before.id
+        ));
+        return Vec::new();
+    };
+    // The command is the layout, so swapping it is a different call, not a different value.
+    if was.command != now.command || was.args.len() != now.args.len() {
+        report.skipped.push(format!(
+            "{label}: wind box {} changed from `{}` to `{}` — source syncing rewrites argument \
+             values, not the macro being called",
+            before.id, was.command, now.command
+        ));
+        return Vec::new();
+    }
+    if before.id != after.id || was.id() != now.id() {
+        report.skipped.push(format!(
+            "{label}: wind box {} was renumbered — source syncing only rewrites argument values",
+            before.id
+        ));
+        return Vec::new();
+    }
+    let matching: Vec<&MacroSite> = winds
+        .iter()
+        .copied()
+        .filter(|site| {
+            site.name == was.command
+                && site
+                    .arg(text, 1)
+                    .and_then(|a| a.trim().parse::<f32>().ok())
+                    .map(|id| id.max(0.0) as u32)
+                    == Some(was.id())
+        })
+        .collect();
+    let [site] = matching[..] else {
+        report.skipped.push(format!(
+            "{label}: wind box {} matches {} `{}` calls in the source — cannot tell which one to \
+             retune",
+            before.id,
+            matching.len(),
+            was.command
+        ));
+        return Vec::new();
+    };
+    // `agent` occupies argument 0, so the call must be exactly one longer than the payload.
+    // A shorter or longer one is a call this editor does not understand; retuning it by
+    // position would write into whatever the author actually put there.
+    if site.args.len() != was.args.len() + 1 {
+        report.skipped.push(format!(
+            "{label}: the `{}` call for wind box {} has {} arguments, not the {} that command \
+             takes — source syncing will not retune it",
+            was.command,
+            before.id,
+            site.args.len().saturating_sub(1),
+            was.args.len()
+        ));
+        return Vec::new();
+    }
+    // A wind area's start frame is the block it sits in, and is never an argument. Its end
+    // frame is the lifetime argument when the command has that slot — which this does rewrite,
+    // so an end the payload now accounts for is a value edit and not a retime. The shorter
+    // forms have no such slot and are ended by an `AreaModule::erase_wind` on another line, so
+    // there the only end that can be written is the one already there.
+    let end_moved = if now.has_lifetime() {
+        after.active_end != now.end_frame(after.active_start)
+    } else {
+        after.active_end != before.active_end
+    };
+    if before.active_start != after.active_start || end_moved {
+        report.skipped.push(format!(
+            "{label}: wind box {} was retimed — its start is the block it sits in and its end is \
+             an `erase_wind`, so source syncing cannot move it",
+            before.id
+        ));
+    }
+    let names: &[&'static str] = if now.is_radial() {
+        &[
+            "id",
+            "strength",
+            "radial falloff",
+            "speed limit",
+            "acceleration",
+            "x offset",
+            "y offset",
+            "radius",
+            "lifetime",
+        ]
+    } else {
+        &[
+            "id",
+            "strength",
+            "direction",
+            "speed limit",
+            "acceleration",
+            "x offset",
+            "y offset",
+            "width",
+            "height",
+            "lifetime",
+        ]
+    };
+    let slots: Vec<(usize, &'static str, bool, ArgValue)> = now
+        .args
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            (
+                index + 1,
+                names.get(index).copied().unwrap_or("argument"),
+                was.args.get(index) != Some(value),
+                ArgValue::ToF32(*value),
+            )
+        })
+        .collect();
+    let (edits, missing) = apply_slots(text, site, &slots);
+    if !missing.is_empty() {
+        report.skipped.push(format!(
+            "{label}: wind box {} changed {}, but its `{}` call in the source is too short to \
+             have those arguments",
+            before.id,
+            missing.join(", "),
+            was.command
+        ));
+    }
+    edits
 }
 
 /// Replace a non-numeric argument — a const, a bool, a hash, a capsule endpoint — when the
@@ -1972,12 +2148,12 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(after.contains(r#"Hash40::new("top"), 9.0, 65,"#), "{after}");
         // Hitlag is the argument straight after the z offset here. The z offset keeps its
         // own value, which is what the unshifted table used to overwrite.
-        assert!(after.contains("6.5, 2.0, 0.5, 1.0, *ATTACK_SETOFF"), "{after}");
-        // And the edit survives a read-back, which is the property that actually matters.
-        assert_eq!(
-            crate::acmd::parse_acmd_script(&after).to_hitboxes(),
-            edited
+        assert!(
+            after.contains("6.5, 2.0, 0.5, 1.0, *ATTACK_SETOFF"),
+            "{after}"
         );
+        // And the edit survives a read-back, which is the property that actually matters.
+        assert_eq!(crate::acmd::parse_acmd_script(&after).to_hitboxes(), edited);
     }
 
     /// The capsule arguments are not there to write to. An edit that lands nowhere has to be
@@ -2028,7 +2204,10 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
         assert_eq!(report.changed, 1, "{report:?}");
         assert!(report.skipped.is_empty(), "{report:?}");
-        assert!(after.contains(r#"Hash40::new("top"), 15.0, 361,"#), "{after}");
+        assert!(
+            after.contains(r#"Hash40::new("top"), 15.0, 361,"#),
+            "{after}"
+        );
         assert!(
             after.contains(r#"Hash40::new("top"), 7.0, 65,"#),
             "the throw-piercing hitbox must be untouched:\n{after}"
@@ -2047,7 +2226,10 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(after, CAPSULE_LESS);
         assert_eq!(report.changed, 0);
         assert!(
-            report.skipped.iter().any(|s| s.contains("macro being called")),
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("macro being called")),
             "{report:?}"
         );
     }
@@ -2075,15 +2257,183 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         );
 
         let mut edited = pristine.clone();
-        edited[wind].size = 99.0;
-        edited[wind].offset_x = 77.0;
+        let payload = edited[wind].wind.as_mut().expect("a wind payload");
+        // Slot 5 is the wind area's X offset. Slot 5 of the `ATTACK` beside it is the angle.
+        payload.args[5] = 77.0;
 
         let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
-        assert_eq!(after, text, "the ATTACK call must not move");
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(
+            after.contains(
+                "macros::ATTACK(agent, 0, 0, Hash40::new(\"top\"), 10.0, 361, 100, 0, 30, 4.0, \
+                 0.0, 8.0, 0.0, None"
+            ),
+            "the ATTACK call must not move:\n{after}"
+        );
+        assert!(
+            after.contains(
+                "macros::AREA_WIND_2ND_arg10(agent, 0, 1.0, 2.0, 3.0, 4.0, 77, 6.0, 7.0, 8.0, \
+                 9.0);"
+            ),
+            "{after}"
+        );
+    }
+
+    const WIND: &str = r#"unsafe extern "C" fn game_specialn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::AREA_WIND_2ND_arg10(agent, 0, 1, 80, 300, 0.8, 4, 12, 24, 16, 50);
+        macros::AREA_WIND_2ND_RAD(agent, 1, 0.5, 0.02, 1000, 1, -2, 6, 18);
+    }
+}
+"#;
+
+    /// The wind family's whole point: four commands that share slots 0..=7 and nothing else.
+    /// Slot 8 is the rectangle's height and the radial call's lifetime, so retuning one
+    /// through the other's table would change how long the area lives.
+    #[test]
+    fn a_wind_value_rewrites_only_its_own_argument() {
+        let pristine = crate::acmd::parse_acmd_script(WIND).to_hitboxes();
+        let mut edited = pristine.clone();
+        let rect = edited
+            .iter_mut()
+            .find(|h| h.wind.as_ref().is_some_and(|w| !w.is_radial()))
+            .expect("the rectangular wind");
+        let payload = rect.wind.as_mut().unwrap();
+        payload.args[1] = 2.5; // strength
+        payload.args[8] = 20.0; // height — the radial call has a lifetime here
+
+        let (after, report) = rewrite_hitboxes(WIND, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains(
+                "macros::AREA_WIND_2ND_arg10(agent, 0, 2.5, 80, 300, 0.8, 4, 12, 24, 20, 50);"
+            ),
+            "{after}"
+        );
+        assert!(
+            after.contains("macros::AREA_WIND_2ND_RAD(agent, 1, 0.5, 0.02, 1000, 1, -2, 6, 18);"),
+            "the radial call must be untouched:\n{after}"
+        );
+    }
+
+    /// Rectangular and radial are different calls, not different values — the argument they
+    /// disagree about is the shape itself. Writing one over the other is exactly the
+    /// cross-family corruption the slot tables exist to prevent.
+    #[test]
+    fn changing_a_wind_from_rectangular_to_radial_is_reported_rather_than_written() {
+        let pristine = crate::acmd::parse_acmd_script(WIND).to_hitboxes();
+        let mut edited = pristine.clone();
+        let rect = edited
+            .iter_mut()
+            .find(|h| h.wind.as_ref().is_some_and(|w| !w.is_radial()))
+            .expect("the rectangular wind");
+        let payload = rect.wind.as_mut().unwrap();
+        payload.command = "AREA_WIND_2ND_RAD_arg9".into();
+        payload.args.remove(8);
+
+        let (after, report) = rewrite_hitboxes(WIND, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, WIND);
         assert_eq!(report.changed, 0);
         assert!(
-            report.skipped.iter().any(|s| s.contains("wind box")),
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("AREA_WIND_2ND_arg10") && s.contains("AREA_WIND_2ND_RAD_arg9")),
             "{report:?}"
+        );
+    }
+
+    /// The arity is part of the command name and every argument is a bare float, so there is
+    /// no shape to fall back on: a call whose length disagrees with its name is refused rather
+    /// than retuned by position into whatever the author actually wrote there.
+    #[test]
+    fn a_wind_call_of_the_wrong_length_is_refused() {
+        let short = WIND.replace(
+            "macros::AREA_WIND_2ND_arg10(agent, 0, 1, 80, 300, 0.8, 4, 12, 24, 16, 50);",
+            "macros::AREA_WIND_2ND_arg10(agent, 0, 1, 80, 300, 0.8, 4, 12, 24, 16);",
+        );
+        let pristine = crate::acmd::parse_acmd_script(WIND).to_hitboxes();
+        let mut edited = pristine.clone();
+        edited[0].wind.as_mut().unwrap().args[1] = 2.5;
+
+        let (after, report) = rewrite_hitboxes(&short, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, short);
+        assert_eq!(report.changed, 0);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("not the 10 that")),
+            "{report:?}"
+        );
+    }
+
+    /// A wind area's end frame is its lifetime argument, so retiming it through the panel is a
+    /// value edit and must land — while moving the bar on the timeline, which the payload
+    /// cannot account for, must be reported.
+    #[test]
+    fn a_wind_lifetime_edit_is_written_but_a_timeline_retime_is_reported() {
+        let pristine = crate::acmd::parse_acmd_script(WIND).to_hitboxes();
+
+        let mut edited = pristine.clone();
+        let start = edited[0].active_start;
+        let payload = edited[0].wind.as_mut().unwrap();
+        payload.args[9] = 30.0;
+        edited[0].active_end = edited[0].wind.as_ref().unwrap().end_frame(start);
+        let (after, report) = rewrite_hitboxes(WIND, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains(
+                "macros::AREA_WIND_2ND_arg10(agent, 0, 1, 80, 300, 0.8, 4, 12, 24, 16, 30);"
+            ),
+            "{after}"
+        );
+
+        let mut dragged = pristine.clone();
+        dragged[0].active_end += 7;
+        let (after, report) = rewrite_hitboxes(WIND, "t", &pristine, &dragged).unwrap();
+        assert_eq!(after, WIND);
+        assert_eq!(report.changed, 0);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("was retimed")),
+            "{report:?}"
+        );
+    }
+
+    /// The shorter commands have no lifetime slot: the area runs until an
+    /// `AreaModule::erase_wind` on a later line, so its end frame is not this call's to
+    /// explain. Measuring it against the lifetime anyway reported a retime on every single
+    /// edit, because a command with no lifetime "ends" at [`u32::MAX`].
+    #[test]
+    fn a_wind_ended_by_erase_wind_is_still_retunable() {
+        let text = r#"unsafe extern "C" fn game_specialn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::AREA_WIND_2ND_RAD(agent, 1, 0.5, 0.02, 1000, 1, -2, 6, 18);
+    }
+    wait(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        AreaModule::erase_wind(agent.module_accessor, 1);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        assert_eq!(pristine.len(), 1, "{pristine:#?}");
+        assert_ne!(
+            pristine[0].active_end,
+            u32::MAX,
+            "the erase_wind is what ends it"
+        );
+
+        let mut edited = pristine.clone();
+        edited[0].wind.as_mut().unwrap().args[7] = 22.0; // radius
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("macros::AREA_WIND_2ND_RAD(agent, 1, 0.5, 0.02, 1000, 1, -2, 6, 22);"),
+            "{after}"
         );
     }
 

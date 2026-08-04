@@ -140,15 +140,49 @@ pub struct WindboxData {
     pub args: Vec<f32>,
 }
 
+/// Every `AREA_WIND_2ND` command and the number of arguments it takes.
+///
+/// Longest name first, because these share a prefix: a scan for `AREA_WIND_2ND` matches an
+/// `AREA_WIND_2ND_arg10` call too, and would claim it.
+///
+/// Unlike `ATTACK`, a wind argument is always a bare float, so there is no argument *shape* to
+/// read a call's layout from. The command name **is** the layout, and the arity is part of the
+/// name — which is why a call whose length disagrees with its name is refused rather than
+/// reinterpreted.
+pub const WIND_COMMANDS: [(&str, usize); 4] = [
+    ("AREA_WIND_2ND_RAD_arg9", 9),
+    ("AREA_WIND_2ND_arg10", 10),
+    ("AREA_WIND_2ND_RAD", 8),
+    ("AREA_WIND_2ND", 9),
+];
+
+/// The wind commands `smash_script::macros` actually declares.
+///
+/// `sv_animcmd` has all four and the plugin hooks all four, but smash-script never wrapped the
+/// plain rectangular `AREA_WIND_2ND` — so `macros::AREA_WIND_2ND(..)` names a function that does
+/// not exist, and an export emitting it produces a project that does not build. Parsing still
+/// accepts the command; only writing it out is refused.
+pub const WIND_MACRO_COMMANDS: [&str; 3] = [
+    "AREA_WIND_2ND_RAD",
+    "AREA_WIND_2ND_RAD_arg9",
+    "AREA_WIND_2ND_arg10",
+];
+
+pub fn is_wind_command(name: &str) -> bool {
+    WIND_COMMANDS.iter().any(|(command, _)| *command == name)
+}
+
 impl WindboxData {
     pub fn expected_arity(&self) -> Option<usize> {
-        match self.command.as_str() {
-            "AREA_WIND_2ND_RAD" => Some(8),
-            "AREA_WIND_2ND_RAD_arg9" => Some(9),
-            "AREA_WIND_2ND" => Some(9),
-            "AREA_WIND_2ND_arg10" => Some(10),
-            _ => None,
-        }
+        WIND_COMMANDS
+            .iter()
+            .find(|(command, _)| *command == self.command)
+            .map(|(_, arity)| *arity)
+    }
+
+    /// Whether this command can be written as a `macros::` call at all.
+    pub fn has_macro_wrapper(&self) -> bool {
+        WIND_MACRO_COMMANDS.contains(&self.command.as_str())
     }
 
     pub fn is_valid(&self) -> bool {
@@ -170,6 +204,18 @@ impl WindboxData {
     pub fn lifetime(&self) -> Option<u32> {
         self.has_lifetime()
             .then(|| self.args.last().copied().unwrap_or(0.0).max(0.0) as u32)
+    }
+
+    /// The last frame this area is up, given the frame it came out on.
+    ///
+    /// [`u32::MAX`] when the command carries no lifetime slot, or carries a zero one: the area
+    /// then lives until an `AreaModule::erase_wind`. This is the *only* place that derivation
+    /// lives, so the panel, the timeline, and source syncing cannot drift apart on it.
+    pub fn end_frame(&self, active_start: u32) -> u32 {
+        self.lifetime()
+            .filter(|life| *life > 0)
+            .map(|life| active_start.saturating_add(life).saturating_sub(1))
+            .unwrap_or(u32::MAX)
     }
 
     pub fn offset(&self) -> [f32; 2] {
@@ -198,11 +244,7 @@ impl WindboxData {
             let [width, height] = self.dimensions();
             width.max(height) * 0.5
         };
-        let active_end = self
-            .lifetime()
-            .filter(|life| *life > 0)
-            .map(|life| active_start.saturating_add(life).saturating_sub(1))
-            .unwrap_or(u32::MAX);
+        let active_end = self.end_frame(active_start);
         Hitbox {
             id: self.id(),
             bone_name: "top".into(),

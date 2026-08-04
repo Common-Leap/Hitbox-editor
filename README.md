@@ -168,9 +168,10 @@ the ones you set, is worse than no mod:
   attribute shipped as `0.3`, and a grab box at `-17.25` as `-17.2`, with nothing
   anywhere to say so.
 - **It will build.** A value that is not a number, a graphic name with a quote in
-  it, a wind command an argument short, two moves whose names differ only by
-  punctuation and collapse onto one function — anything that produces a
-  well-formed but broken mod is caught here rather than by your toolchain.
+  it, a wind command an argument short or one smashline never wrapped, two moves
+  whose names differ only by punctuation and collapse onto one function —
+  anything that produces a well-formed but broken mod is caught here rather than
+  by your toolchain.
 - **It is not wasteful.** A call issued twice in one block, an empty block, a
   `wait(0)`, a collision cleared before it comes out. These only inform.
 
@@ -197,14 +198,23 @@ properties says which one this is, and exports and live previews fire the one yo
 picked. Switching between them is a change of macro rather than of value, so it
 lands in an export but is reported when syncing into your own source.
 
+Wind areas are written back too. The four `AREA_WIND_2ND` commands share their
+first eight arguments and nothing else — the ninth is the rectangle's height and
+the radial call's lifetime — so each is matched and retuned only against calls of
+its own command, and a rectangular value can never land in a radial one. The
+lifetime is an argument, so dragging it moves the timeline bar with it and lands
+in the file; the shorter commands have no lifetime and run until an
+`AreaModule::erase_wind`, whose frame is a different line and so is reported
+rather than moved. Switching an area between rectangular and radial is a change
+of command, not of value, so it lands in an export and is reported on source sync.
+
 Anything that cannot be written as a value change to an existing argument is
 reported instead of guessed at: a spawn you added or removed, a graphic you
-renamed, a retimed call, one iteration of a `for` loop edited on its own, a wind
-box (`AREA_WIND` is a flat list of command-specific floats with no shared layout
-to retune against), or a sword trail's position — a trail is drawn between the
-joints it names and has no transform arguments at all. **Sync Edits Into
-Source**, in the **Mod** menu, applies the same write-back to the file directly,
-for when the source window is not open.
+renamed, a retimed call, one iteration of a `for` loop edited on its own, or a
+sword trail's position — a trail is drawn between the joints it names and has no
+transform arguments at all. **Sync Edits Into Source**, in the **Mod** menu,
+applies the same write-back to the file directly, for when the source window is
+not open.
 
 ## Projects and mod exports
 

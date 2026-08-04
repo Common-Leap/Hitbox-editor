@@ -60,7 +60,15 @@ Two export paths, different rules — do not conflate them:
   ```
 
   If a family has more than one arity, the discriminator must be the argument *shape*, not the
-  count — a length test breaks the moment a call is short for a different reason.
+  count — a length test breaks the moment a call is short for a different reason. When every
+  argument of a family is a bare number there *is* no shape, and then the command name is the
+  layout: refuse a call whose length disagrees with its name rather than reinterpreting it.
+- **The plugin can hook a primitive the export cannot write.** `sv_animcmd` has every
+  primitive; `smash_script::macros` wraps only some. A1 found `macros::AREA_WIND_2ND` missing
+  while the plugin hooked `sv_animcmd::AREA_WIND_2ND` happily — so a capture came back live,
+  drew correctly, and exported a project that did not build. Before adding a family, grep
+  `macros.rs` for **every** member by name, and make the verifier block the ones that are not
+  there. Do not assume a hooked primitive is an emittable one.
 - **Symbolic constants need both directions.** The editor holds names, the wire wants numbers.
   A new constant needs a `ConstTable` in [param_labels.rs](src/param_labels.rs) plus
   `decode_const`/`encode_const` coverage, or the live path sends `None` and the game keeps its
@@ -110,24 +118,47 @@ Ordered so that earlier tasks unblock later ones. Within a section, top is highe
 
 ## Foundations
 
-### [~] A1 — Wind write-back into the user's own source (started 2026-08-04)
+### [x] A1 — Wind write-back into the user's own source
 
-The one gap in an otherwise fully editable family. Windboxes are editable in the panel, live,
-and on export, but a wind edit to a *linked project* is refused: `AREA_WIND` is treated as a
-flat float list with no layout to retune against, so [acmd_src.rs](src/acmd_src.rs) reports it
-instead of writing it. The user drags a wind value, sees it in game, and the file never changes.
+Done 2026-08-04. All five surfaces; `cargo test` 260 green, both corpus oracles run for real
+(461 files present). The plugin was not touched — the live surface already hooked and injected
+all four commands by name.
 
-The premise is now false. `WindboxData::expected_arity`
-([data.rs:132](src/data.rs:132)) already pins each command to a fixed arity —
-`AREA_WIND_2ND_RAD` 8, `_RAD_arg9` 9, `AREA_WIND_2ND` 9, `_arg10` 10 — and the panel already
-maps slots to named fields (id, strength, falloff, area). That is a layout.
+Wind edits now reach a linked project. The entry's premise held: the four commands share slots
+0..=7, so one table indexed by argument position covers all of them, with the *names* differing
+past slot 7 (`width`/`height` vs `radius`/`lifetime`) so the skip report reads correctly. Sites
+are matched on command name **and** id, so a rectangular value can never land in a radial call.
 
-- **Work order:** give each of the four commands its own slot table, in the shape
-  `attack_edits`/`catch_edits` already use. Reuse `scan_macro_sites` for spans. Refuse
-  cross-command edits: a `_RAD` value must never be written into a rectangular call.
-- **Done when:** a wind value edit rewrites exactly that argument; a command change
-  (rect ↔ radial) or an add/delete is reported, not written.
-- **Trap:** the four commands share a prefix and nothing else. One table per command.
+**Two things this turned up that the entry did not predict:**
+
+1. **`macros::AREA_WIND_2ND` does not exist.** `sv_animcmd` has all four commands and the
+   plugin hooks all four, but smash-script only wrapped three — there is no
+   `AREA_WIND_2ND` in `macros.rs`. The emitter wrote `macros::AREA_WIND_2ND(agent, …)`
+   regardless, and **Add Wind Box → Rectangle created exactly that**, so every exported mod
+   containing an editor-added rectangular wind failed to build. Add now produces
+   `AREA_WIND_2ND_arg10` (and `_RAD_arg9` for radial, for the lifetime), and the verifier
+   blocks the wrapper-less command with a message naming the replacement. Parsing still
+   accepts it — the archive is allowed to contain it, only the export is refused.
+   *Possible follow-up:* auto-upgrade a parsed `AREA_WIND_2ND` to `_arg10` by appending the
+   lifetime the export already computes, instead of blocking. Deliberately not done — it is a
+   macro substitution, and the house rule is to refuse rather than guess.
+2. **The Lifetime slider did nothing.** Export rewrites the lifetime argument out of the
+   timeline range (`end - start + 1`), so whatever the slider set was overwritten on the way
+   out. The slider now moves `active_end` with it — but only for the commands that *have* a
+   lifetime slot. The shorter forms end at an `AreaModule::erase_wind` on another line, and
+   for those the end frame is not the call's to write. Getting this wrong reported a retime on
+   every single edit, because a command with no lifetime "ends" at `u32::MAX`.
+
+- **Landed:** `WIND_COMMANDS` / `WIND_MACRO_COMMANDS` / `is_wind_command` in
+  [data.rs](src/data.rs) (the arity table lived in two places and now lives in one),
+  `WindboxData::end_frame` as the single home of the lifetime → end-frame derivation,
+  `wind_box_edits` in [acmd_src.rs](src/acmd_src.rs), an `ArgValue::ToF32` that writes `20`
+  rather than `20.0` so both export paths put the same text in the file, and the verifier
+  blocker.
+
+**For whoever takes B3 or C1:** `ArgValue::ToF32` is the right variant for any slot generic
+over `ToF32`, which is most of the non-`ATTACK` families. `ArgValue::Float` always writes a
+decimal point, which is correct for `ATTACK`'s typed `f32` slots and wrong everywhere else.
 
 ### [x] A2 — `ATTACK_IGNORE_THROW` as a first-class hitbox
 

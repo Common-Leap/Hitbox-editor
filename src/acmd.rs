@@ -852,13 +852,7 @@ fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
 }
 
 fn parse_wind_call(line: &str) -> Option<crate::data::WindboxData> {
-    const COMMANDS: [(&str, usize); 4] = [
-        ("AREA_WIND_2ND_RAD_arg9", 9),
-        ("AREA_WIND_2ND_arg10", 10),
-        ("AREA_WIND_2ND_RAD", 8),
-        ("AREA_WIND_2ND", 9),
-    ];
-    for (command, arity) in COMMANDS {
+    for (command, arity) in crate::data::WIND_COMMANDS {
         let needle = format!("{command}(");
         let Some(start) = line.find(&needle) else {
             continue;

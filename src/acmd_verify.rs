@@ -606,6 +606,21 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
                     ),
                 );
             }
+            // `sv_animcmd` has all four wind commands and the plugin hooks all four, so one can
+            // reach the editor from a live capture or an older project — but smash-script never
+            // wrapped the plain rectangular `AREA_WIND_2ND`, and the export writes `macros::`
+            // calls. Emitting it names a function that does not exist.
+            if !wind.has_macro_wrapper() && wind.expected_arity().is_some() {
+                report.blocker(
+                    subject,
+                    format!(
+                        "`macros::{}` does not exist — smash-script has no wrapper for that \
+                         command. Use the rectangular form with a lifetime, \
+                         `AREA_WIND_2ND_arg10`, instead.",
+                        wind.command
+                    ),
+                );
+            }
             for (index, value) in wind.args.iter().enumerate() {
                 check_finite(
                     subject,
@@ -1002,6 +1017,36 @@ mod tests {
             messages(&report).contains("takes 8"),
             "{}",
             messages(&report)
+        );
+    }
+
+    /// `sv_animcmd` has `AREA_WIND_2ND` and the plugin hooks it, so one can reach the editor
+    /// from a live capture or a project saved before this check existed — but smash-script
+    /// never wrapped it, and the export writes `macros::` calls. A well-formed file naming a
+    /// function that does not exist is exactly what this check is for.
+    #[test]
+    fn a_wind_command_smash_script_never_wrapped_cannot_be_exported() {
+        let parsed = script(
+            "    if macros::is_excute(agent) {\n        macros::AREA_WIND_2ND(agent, 0, 1, 80, \
+             300, 0.8, 4, 12, 24, 16);\n    }",
+        );
+        let report = verify(&parsed);
+        assert!(report.has_blockers(), "{}", messages(&report));
+        assert!(
+            messages(&report).contains("does not exist"),
+            "{}",
+            messages(&report)
+        );
+
+        // The three commands that do have wrappers must stay exportable.
+        let fine = script(
+            "    if macros::is_excute(agent) {\n        macros::AREA_WIND_2ND_arg10(agent, 0, 1, \
+             80, 300, 0.8, 4, 12, 24, 16, 50);\n    }",
+        );
+        assert!(
+            !verify(&fine).has_blockers(),
+            "{}",
+            messages(&verify(&fine))
         );
     }
 

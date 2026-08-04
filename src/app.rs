@@ -3522,40 +3522,38 @@ impl VisionaryApp {
                         hb.kb_scaling = 0;
                         hb.kb_base = 0;
                     } else if self.add_hitbox_category == 2 {
-                        let args = if self.add_wind_radial {
-                            vec![
-                                next_id as f32,
-                                1.0,
-                                0.0,
-                                1000.0,
-                                1.0,
-                                0.0,
-                                0.0,
-                                self.add_size,
-                            ]
-                        } else {
-                            vec![
-                                next_id as f32,
-                                1.0,
-                                0.0,
-                                1000.0,
-                                1.0,
-                                0.0,
-                                0.0,
-                                self.add_size * 2.0,
-                                self.add_size * 2.0,
-                            ]
-                        };
+                        // Both forms carry a lifetime, so the area's end frame is an argument
+                        // the export and source syncing can both write. The rectangle must be
+                        // the `_arg10` form for a second reason: smash-script declares no
+                        // `macros::AREA_WIND_2ND`, so the plain one cannot be exported at all.
+                        let lifetime = active_end.saturating_sub(active_start).saturating_add(1);
+                        let mut args = vec![
+                            next_id as f32,
+                            1.0,
+                            0.0,
+                            1000.0,
+                            1.0,
+                            0.0,
+                            0.0,
+                            if self.add_wind_radial {
+                                self.add_size
+                            } else {
+                                self.add_size * 2.0
+                            },
+                        ];
+                        if !self.add_wind_radial {
+                            args.push(self.add_size * 2.0);
+                        }
+                        args.push(lifetime as f32);
                         let wind = crate::data::WindboxData {
                             command: if self.add_wind_radial {
-                                "AREA_WIND_2ND_RAD".into()
+                                "AREA_WIND_2ND_RAD_arg9".into()
                             } else {
-                                "AREA_WIND_2ND".into()
+                                "AREA_WIND_2ND_arg10".into()
                             },
                             args,
                         };
                         hb = wind.to_hitbox(active_start);
-                        hb.active_end = active_end;
                     }
                     self.state.hitboxes.push(hb);
                     self.selected_hitbox = self.state.hitboxes.len().checked_sub(1);
@@ -3764,6 +3762,16 @@ impl VisionaryApp {
                                 );
                             }
                             hb.id = wind.id();
+                            // The lifetime argument is what ends the area, so dragging it has
+                            // to move the timeline bar with it. Leaving the two to disagree
+                            // meant the export — which writes the lifetime back out of the
+                            // frame range — silently undid whatever the slider had just set.
+                            // Only when the command has that slot: the shorter forms are ended
+                            // by an `erase_wind` elsewhere in the script, and that end frame is
+                            // not this call's to overwrite.
+                            if wind.has_lifetime() {
+                                hb.active_end = wind.end_frame(hb.active_start);
+                            }
                             let [x, y] = wind.offset();
                             hb.offset_x = x;
                             hb.offset_y = y;
@@ -6083,15 +6091,13 @@ impl VisionaryApp {
                     hitbox.active_end = hitbox.active_end.min(end).max(hitbox.active_start);
                 }
             } else if line.func.starts_with("ATTACK") {
-                if let Some(hb) =
-                    Self::hitbox_from_capture(
-                        &line.func,
-                        &line.args,
-                        line.frame,
-                        bone_rev,
-                        attr_labels,
-                    )
-                {
+                if let Some(hb) = Self::hitbox_from_capture(
+                    &line.func,
+                    &line.args,
+                    line.frame,
+                    bone_rev,
+                    attr_labels,
+                ) {
                     // Same id re-captured (multi-part moves): keep the earliest frame.
                     if !hitboxes
                         .iter()
