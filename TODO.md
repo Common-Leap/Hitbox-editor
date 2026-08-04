@@ -720,26 +720,45 @@ Reconsider once C6 lands and the residue is small.
   brace it needs, so reporting one `}` per block would bury the lines that are a loss. The
   filter is "contains a letter or digit", which keeps `if … {` and `else {` in.
 
-### [ ] C6 — Carry unmodelled effect lines through the export
+### [~] C6 — Carry unmodelled effect lines through the export
 
 The other half of C5, which named the problem without fixing it. C5's table is the measured
 target list; read it first.
 
-- **Work order:** teach `EffectScript` → export to carry unmodelled lines through in position,
-  the way `EffectCall::raw_line` already carries a trail. The hard part is *where* they go: the
-  export groups calls by frame and the original line's position within its block is not
-  currently recorded.
+**The root cause, which C5 did not name.** The two exports are not built the same way.
+[`emit_move_fn`](src/acmd.rs) emits a `game_` script from `script.stmts` — it walks the
+statement tree, so anything in the tree survives whether or not the emitter understands it.
+[`emit_effect_move_fn`](src/acmd.rs) regenerates an `effect_` script from a flat `Vec<EffectCall>`
+grouped by frame, so **only what became a typed call can come out**. Every loss in C5's table
+follows from that one asymmetry. Fixing it means either making the effect export
+structure-preserving too, or teaching the flat form to carry what it cannot type.
+
+**Measured over the cache before designing** (`137` effect functions), because the shape of the
+residue decides which of those two is right:
+
+| Measurement | Result | What it rules out |
+|---|---|---|
+| Functions with a non-`is_excute` conditional | **13 of 137** | This is a narrow feature, not a pervasive one. Not worth rewriting the emitter for. |
+| Maximum conditional nesting depth | **1** | No recursion needed. A guard is a single string, not a stack. |
+| `frame()` / `wait()` inside a conditional | **1 occurrence** | Frame arithmetic does not meaningfully branch, so frame-grouping survives. Name the one exception. |
+| Statements inside a guard | **only `if is_excute { … }` and effect macros** | A guard always wraps whole `is_excute` blocks, so it can be re-emitted around one. |
+| Brace-balanced function bodies | **137 of 137** | Verbatim passthrough of a whole block is safe. |
+
+So: **keep the frame-grouped emitter and teach it to carry residue.** A full
+structure-preserving rewrite would put the editor's own strengths — add, delete, retime — at
+risk to serve 13 functions.
+
+- **Confirmed trap, now with a reason.** Do not try to bind the costume tints to their spawn.
+  There are 64 of them across 8 costumes, `EffectCall::tint` is one field, and the last one
+  would win — the export would recolour every costume to costume 7. The TODO said "those tints
+  are real on one costume only"; the field shape is *why* that matters.
+- **`else` is not `else`.** In the dumps it attaches to `if macros::is_excute(agent)`, not to
+  the outer conditional — see [kirby/CapturePulledHi.txt:6](). The decompiler mis-scopes it and
+  the result is balanced only by accident. Treat a guard header as **opaque text to reproduce**,
+  never as a construct to interpret; anything that tries to pair an `else` with its `if` will be
+  wrong on real input.
 - **Trap:** a preserved line may be a spawn this parser does not recognise, in which case
   re-emitting it and *also* emitting the call it produced would double the spawn.
-- **Trap:** 62 of the dropped lines are `if` / `else` headers, and carrying those through in
-  position without carrying their closing brace produces Rust that does not compile. Either
-  handle the whole conditional as a unit or exclude flow from this task and say so.
-- **The conditional half is now the larger half, and C1 is the evidence.** C1 modelled
-  `LAST_EFFECT_SET_COLOR` on all five surfaces and recovered *one* of 65 corpus calls, because
-  the other 64 sit inside a costume check that separates them from their spawn. Excluding flow
-  from this task therefore excludes most of its value — the residue C5 measured is mostly
-  conditionals, not unmodelled macros. Scope accordingly, and note that binding across the
-  branch is not the answer: those tints are real on one costume only.
 - **Also carry the unbound modifiers.** `to_effect_calls_reporting_losses` already returns the
   `LAST_EFFECT_SET_*` lines that bound to no spawn. Those are lines with a typed variant that
   still do not reach the export, and they need the same treatment as the untyped ones.
