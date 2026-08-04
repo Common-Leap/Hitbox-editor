@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const MANIFEST: &str = "sd:/effect_viewer/live_eff/manifest.json";
 const DIR: &str = "sd:/effect_viewer/live_eff/";
 /// Written into every diag file so on-device logs are attributable to a specific build.
-pub const BUILD_TAG: &str = "2026-08-03a-trace-optin";
+pub const BUILD_TAG: &str = "2026-08-03f-no-kill-kind-hook";
 
 /// Times [`disk_cb`] served bytes. Split by initiator so we can DECISIVELY answer the
 /// one open question of the whole cross-fighter-live effort: does the game's own resource
@@ -434,6 +434,10 @@ pub fn probe() -> String {
 /// match loads any fighter eff) and register manifest callbacks. Registration-only at
 /// boot: reparse/buffer-patch would touch game singletons that don't exist yet.
 pub fn install() {
-    crate::slight::effect_viewer::effect_reload::install_hooks();
-    reload_inner(false);
+    if !crate::slight::smash_utils::subsystem_disabled("reload") {
+        crate::slight::effect_viewer::effect_reload::install_hooks();
+    }
+    if !crate::slight::smash_utils::subsystem_disabled("liveeff") {
+        reload_inner(false);
+    }
 }

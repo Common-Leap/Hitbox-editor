@@ -192,6 +192,47 @@ Create `sd:/slight/debug/trace.txt` before starting the game to enable it, and
 delete the file to turn it back off. With the trace off, the plugin's own log is
 `sd:/slight/diag.txt`, which is buffered and written from the frame path.
 
+## Bisecting a load hang
+
+The plugin installs seven independent groups of hooks, several of them inside the
+game's resource loader. When one of them wedges a match load there is nothing to
+read afterwards: `diag.txt` is only flushed by the per-frame driver, which never
+runs if the match never starts.
+
+Naming a group in `sd:/slight/debug/off.txt` before the game starts leaves it
+uninstalled for that boot, so a hang can be narrowed down a reboot at a time
+instead of a rebuild at a time. Names are separated by anything non-alphanumeric,
+so one per line or comma-separated both work:
+
+| Name | Left uninstalled |
+| --- | --- |
+| `reload` | the effect-manager `load_effects` / `unload_effects` hooks |
+| `liveeff` | the editor's merged-eff manifest registration |
+| `effect` | the seventeen `EffectModule` request and kill hooks |
+| `acmd` | the ACMD capture and injection hooks |
+| `hitbox` | live hitbox capture and injection |
+| `agent` | the Smashline line callbacks that drive the per-frame engine |
+| `systems` | the SLight system facades and the editor's TCP server |
+
+Inside the `effect` group the parts can be named separately: `carrier` for the
+carrier-proxy redirection, `remap` for the transplant alias lookup, and `track`
+for the whole spawn-tracking body. Individual `EffectModule` hooks go by
+`req`, `req2d`, `reqfollow`, `reqonjoint`, `reqemit`, `reqcommon`,
+`reqcontinual`, `reqtime`, `reqtimefollow`, `kill`, `endkind`, `detachkind`,
+`killall`, `remove`, `removecommon` and `removetime`, with `reqs` and `kills`
+covering each family at once. `killpass` reduces the stop-kind hooks to a bare
+call through to the game, and `fanout` stops them re-issuing that call for the
+aliased kind and for the carrier.
+
+`EffectModule::kill_kind` is not in that list because it is not hooked at all.
+Hooking it deadlocks match loading for any moveset that depends on One Slot
+Effects; the reasoning is recorded where the hook used to be, in
+`effect_viewer/mod.rs`.
+
+Disabling `agent` or `systems` stops the per-frame engine, so live editing and
+the editor connection go with it. Every boot records what it actually installed
+in `sd:/slight/user/error_logs/effect_viewer_boot.txt`.
+
 ## Project layout
 
 ```text

@@ -101,7 +101,28 @@ fn carrier_proxy_logical_hash(actual_hash: u64) -> u64 {
     }
 }
 
+// Finer bisect switches inside the `effect` group, resolved once on first spawn. See the
+// README's load-hang section; these split the req path into the three things it does before
+// and after calling the game.
+static SKIP_CARRIER: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| crate::slight::smash_utils::subsystem_disabled("carrier"));
+static SKIP_REMAP: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| crate::slight::smash_utils::subsystem_disabled("remap"));
+static SKIP_TRACK: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| crate::slight::smash_utils::subsystem_disabled("track"));
+/// `killpass` reduces the stop-kind hooks to a bare `original!()` — the test for whether the
+/// hook merely being installed is the problem, as opposed to anything it does.
+static KILL_PASSTHROUGH: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| crate::slight::smash_utils::subsystem_disabled("killpass"));
+/// `fanout` keeps the hooks but stops them re-issuing the call for the aliased kind and for
+/// the carrier, so the stop reaches the game exactly once, as the caller wrote it.
+static SKIP_FANOUT: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| crate::slight::smash_utils::subsystem_disabled("fanout"));
+
 fn suppress_carrier_request(module_accessor: *mut smash::app::BattleObjectModuleAccessor) -> bool {
+    if *SKIP_CARRIER {
+        return false;
+    }
     (unsafe { crate::slight::effect_viewer::effect_reload::is_auto_carrier_boma(module_accessor) })
         && !CARRIER_PROXY_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -113,7 +134,7 @@ unsafe fn spawn_owner(
     // The ACMD path asks for the fighter to own the instance (see [`DirectSpawnGuard`]).
     // Redirecting it here would put the effect back on the skeleton-less carrier, which is the
     // thing that broke mesh emitters.
-    if DIRECT_SPAWN_ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
+    if *SKIP_CARRIER || DIRECT_SPAWN_ACTIVE.load(std::sync::atomic::Ordering::Acquire) {
         return source;
     }
     crate::slight::effect_viewer::effect_reload::auto_carrier_boma_for_kind(eff_hash)
@@ -193,6 +214,9 @@ pub fn track_spawn(
     rot: *const Vector3f,
     scale: f32,
 ) {
+    if *SKIP_TRACK {
+        return;
+    }
     let handle = if result_h != 0 {
         result_h as u32
     } else {
@@ -223,55 +247,13 @@ pub fn track_spawn(
             );
         }
     }
-    // ONE-SHOT REAL-IMPL CAPTURE. Re-firing req from a hook returns 0 even for a known-good
-    // kind (re-entrancy guard), so triangulation is dead. Instead read the fighter's live
-    // EffectModule vtable during a REAL spawn to get the concrete req-impl addresses:
-    // shim → obj=*(boma+0x140), impl FUN_0044de70 calls inner=*(obj+0x10) then
-    // inner_vt[0x190] and inner_vt[0x50]. Those two are the actual resolve/instantiate the
-    // gate lives in — decompile them offline, no more device rounds to find the gate.
-    static IMPL_CAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !IMPL_CAP.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        use std::io::Write;
-        unsafe {
-            let text = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as usize;
-            let obj = *((module_accessor as usize + 0x140) as *const usize);
-            let obj_vt = if obj != 0 { *(obj as *const usize) } else { 0 };
-            let inner = if obj != 0 {
-                *((obj + 0x10) as *const usize)
-            } else {
-                0
-            };
-            let inner_vt = if inner != 0 {
-                *(inner as *const usize)
-            } else {
-                0
-            };
-            let f190 = if inner_vt != 0 {
-                *((inner_vt + 0x190) as *const usize)
-            } else {
-                0
-            };
-            let f50 = if inner_vt != 0 {
-                *((inner_vt + 0x50) as *const usize)
-            } else {
-                0
-            };
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("sd:/effect_viewer_os_req.txt")
-            {
-                let _ = writeln!(
-                    f,
-                    "IMPL_CAP obj={obj:#x} obj_vt=+{:#x} inner={inner:#x} inner_vt=+{:#x} f190=+{:#x} f50=+{:#x}",
-                    obj_vt.wrapping_sub(text),
-                    inner_vt.wrapping_sub(text),
-                    f190.wrapping_sub(text),
-                    f50.wrapping_sub(text),
-                );
-            }
-        }
-    }
+    // The one-shot REAL-IMPL capture that used to run here is gone. It walked
+    // obj=*(boma+0x140) → inner=*(obj+0x10) → *inner to recover the req-impl addresses, but
+    // `inner` is the constant 0x3 — a flag, not a pointer — in every capture it ever wrote,
+    // so the third read dereferenced address 0x3 and the addresses it logged were noise. It
+    // only ever looked harmless because this emulator runs with `cpuopt_ignore_memory_aborts`
+    // and hands back junk instead of faulting. `hook_req_impl` reads the same object properly,
+    // from the game's own call, and is what the addresses in AUDIT.md came from.
 
     let mod_addr = module_accessor as u64;
     let (category, fighter_kind, status_kind) = unsafe {
@@ -482,6 +464,9 @@ fn remap_eff(
     module_accessor: *mut smash::app::BattleObjectModuleAccessor,
     eff_hash: phx::Hash40,
 ) -> phx::Hash40 {
+    if *SKIP_REMAP {
+        return eff_hash;
+    }
     let out = alias_and_remap(eff_hash, unsafe { costume_of_boma(module_accessor) });
     // Log only when the input is a known merged `_os` kind, so we can see whether remap_eff
     // is even reached for the refused spawn and what it decided.
@@ -803,6 +788,9 @@ macro_rules! stop_kind_hook {
             eff_hash: phx::Hash40,
             arg3: i32,
         ) -> u64 {
+            if *KILL_PASSTHROUGH {
+                return original!()(module_accessor, eff_hash, arg3);
+            }
             let costume = unsafe { costume_of_boma(module_accessor) };
             let requested =
                 match crate::slight::effect_viewer::effect_reload::coload_remap(eff_hash.hash) {
@@ -814,19 +802,21 @@ macro_rules! stop_kind_hook {
 
             let r = original!()(module_accessor, requested, arg3);
             handle_kill_hash(module_accessor, requested.hash);
-            if aliased.hash != requested.hash {
-                original!()(module_accessor, aliased, arg3);
-                handle_kill_hash(module_accessor, aliased.hash);
-            }
-            if let Some(carrier) =
-                unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() }
-                    .filter(|c| *c != module_accessor)
-            {
-                original!()(carrier, requested, arg3);
-                handle_kill_hash(carrier, requested.hash);
+            if !*SKIP_FANOUT {
                 if aliased.hash != requested.hash {
-                    original!()(carrier, aliased, arg3);
-                    handle_kill_hash(carrier, aliased.hash);
+                    original!()(module_accessor, aliased, arg3);
+                    handle_kill_hash(module_accessor, aliased.hash);
+                }
+                if let Some(carrier) =
+                    unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() }
+                        .filter(|c| *c != module_accessor)
+                {
+                    original!()(carrier, requested, arg3);
+                    handle_kill_hash(carrier, requested.hash);
+                    if aliased.hash != requested.hash {
+                        original!()(carrier, aliased, arg3);
+                        handle_kill_hash(carrier, aliased.hash);
+                    }
                 }
             }
             r
@@ -837,53 +827,26 @@ macro_rules! stop_kind_hook {
 stop_kind_hook!(hook_end_kind, EffectModule::end_kind, "end_kind");
 stop_kind_hook!(hook_detach_kind, EffectModule::detach_kind, "detach_kind");
 
-/// Stopping an effect has to reach it wherever it actually is.
-///
-/// Two things move under our feet here. The KIND may have been aliased at spawn
-/// (`kirby_dash` → `vsnedit_kirby_dash`), and the OWNER may be either the fighter (the normal
-/// case now) or the carrier (the fallback for kinds the fighter cannot serve). A stop issued
-/// against one combination silently misses the other.
-///
-/// So issue it against every combination. Killing a kind an object does not have is a no-op, so
-/// the extra calls cost a lookup and cannot remove anything they should not.
-#[skyline::hook(replace = EffectModule::kill_kind)]
-fn hook_kill_kind(
-    module_accessor: *mut smash::app::BattleObjectModuleAccessor,
-    eff_hash: phx::Hash40,
-    a3: bool,
-    a4: bool,
-) -> u64 {
-    let costume = unsafe { costume_of_boma(module_accessor) };
-    // Deliberately NOT `remap_eff`: that now aliases, and the whole point here is to stop both
-    // the kind as requested AND the kind it may have been aliased to at spawn.
-    let requested = match crate::slight::effect_viewer::effect_reload::coload_remap(eff_hash.hash) {
-        Some(real) => phx::Hash40 { hash: real },
-        None => eff_hash,
-    };
-    let aliased = alias_and_remap(eff_hash, costume);
-    let carrier = unsafe { crate::slight::effect_viewer::effect_reload::auto_carrier_boma() };
-
-    // The requested kind on the requesting object is the vanilla behaviour, and its result is
-    // what the caller gets back.
-    let r = original!()(module_accessor, requested, a3, a4);
-    handle_kill_hash(module_accessor, requested.hash);
-
-    let also = |boma: *mut smash::app::BattleObjectModuleAccessor, kind: phx::Hash40| {
-        original!()(boma, kind, a3, a4);
-        handle_kill_hash(boma, kind.hash);
-    };
-    if aliased.hash != requested.hash {
-        also(module_accessor, aliased);
-    }
-    if let Some(carrier) = carrier.filter(|c| *c != module_accessor) {
-        also(carrier, requested);
-        if aliased.hash != requested.hash {
-            also(carrier, aliased);
-        }
-    }
-    trace_stop("kill_kind", requested, aliased, a3 as i32);
-    r
-}
+// `EffectModule::kill_kind` is deliberately NOT hooked.
+//
+// One Slot Effects — a dependency of essentially every modern one-slot moveset — installs an
+// `A64InlineHook` on the game's `kill_effect`. Placing a skyline `replace` hook on `kill_kind`
+// alongside it wedges the match load: the fighter never finishes loading, the game sits there
+// with no crash and no log, and pulling the plugin is the only cure. That is Visionary issue #3
+// ("some movesets not loading"), and it explains its shape exactly — one-slot movesets fail,
+// plain c00 replacements do not.
+//
+// Established by bisection on a real failing moveset, one boot at a time: the hook freezes the
+// load with its body reduced to a bare `original!()`, and it freezes whether this plugin loads
+// before or after One Slot Effects, so it is the patch itself and not the code or the ordering.
+// Every other EffectModule hook, including `end_kind` and `detach_kind`, was verified installed
+// and harmless in the same session.
+//
+// The cost is small and was already known here: ACMD's `EFFECT_OFF_KIND` stops effects through
+// `end_kind` / `detach_kind`, not through this, which is why aliasing only `kill_kind` once
+// changed nothing (see `stop_kind_hook`). What is lost is the alias and carrier correction on
+// direct `kill_kind` calls; the tracker still drops those entries a frame later, when
+// `reconcile` sees `is_exist_effect` go false.
 
 #[skyline::hook(replace = EffectModule::kill_all)]
 fn hook_kill_all(
@@ -953,27 +916,52 @@ fn hook_remove_time(
 
 pub fn install_hooks() {
     let _ = std::fs::write("sd:/effect_viewer_carrier_spawn.txt", "");
-    skyline::install_hook!(hook_req);
-    skyline::install_hook!(hook_req_2d);
-    skyline::install_hook!(hook_req_follow);
-    skyline::install_hook!(hook_req_on_joint);
-    skyline::install_hook!(hook_req_emit);
-    skyline::install_hook!(hook_req_common);
-    skyline::install_hook!(hook_req_continual);
-    skyline::install_hook!(hook_req_time);
-    skyline::install_hook!(hook_req_time_follow);
-    skyline::install_hook!(hook_kill);
-    skyline::install_hook!(hook_kill_kind);
-    skyline::install_hook!(hook_end_kind);
-    skyline::install_hook!(hook_detach_kind);
-    skyline::install_hook!(hook_kill_all);
-    skyline::install_hook!(hook_remove);
-    skyline::install_hook!(hook_remove_common);
-    skyline::install_hook!(hook_remove_time);
-    skyline::println!("[SLight] EffectModule hooks installed (Jorge 13 used + extras for parity)");
-    acmd_hooks::install();
-    crate::slight::hitbox_viewer::install();
+    if crate::slight::smash_utils::subsystem_disabled("effect") {
+        skyline::println!("[SLight] EffectModule hooks SKIPPED (sd:/slight/debug/off.txt)");
+    } else {
+        install_effect_module_hooks();
+    }
+    if !crate::slight::smash_utils::subsystem_disabled("acmd") {
+        acmd_hooks::install();
+    }
+    if !crate::slight::smash_utils::subsystem_disabled("hitbox") {
+        crate::slight::hitbox_viewer::install();
+    }
     // Register live-eff providers BEFORE the arc filesystem mounts, so reserved
     // sizes for editor-merged eff files are honored from this boot on.
     live_eff::install();
+}
+
+fn install_effect_module_hooks() {
+    // Every hook here can be left out on its own by name, or a whole family with `reqs` /
+    // `kills`. These share the game functions One Slot Effects inline-hooks, so which of them
+    // is present is a thing worth being able to change without a rebuild — see the README.
+    macro_rules! install {
+        ($hook:ident, $name:literal, $family:literal) => {
+            if crate::slight::smash_utils::subsystem_disabled($name)
+                || crate::slight::smash_utils::subsystem_disabled($family)
+            {
+                skyline::println!(concat!("[SLight] EffectModule::", $name, " hook SKIPPED"));
+            } else {
+                skyline::install_hook!($hook);
+            }
+        };
+    }
+    install!(hook_req, "req", "reqs");
+    install!(hook_req_2d, "req2d", "reqs");
+    install!(hook_req_follow, "reqfollow", "reqs");
+    install!(hook_req_on_joint, "reqonjoint", "reqs");
+    install!(hook_req_emit, "reqemit", "reqs");
+    install!(hook_req_common, "reqcommon", "reqs");
+    install!(hook_req_continual, "reqcontinual", "reqs");
+    install!(hook_req_time, "reqtime", "reqs");
+    install!(hook_req_time_follow, "reqtimefollow", "reqs");
+    install!(hook_kill, "kill", "kills");
+    install!(hook_end_kind, "endkind", "kills");
+    install!(hook_detach_kind, "detachkind", "kills");
+    install!(hook_kill_all, "killall", "kills");
+    install!(hook_remove, "remove", "kills");
+    install!(hook_remove_common, "removecommon", "kills");
+    install!(hook_remove_time, "removetime", "kills");
+    skyline::println!("[SLight] EffectModule hooks installed (Jorge 13 used + extras for parity)");
 }

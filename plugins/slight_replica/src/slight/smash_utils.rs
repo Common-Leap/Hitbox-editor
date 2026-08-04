@@ -11,6 +11,8 @@ pub const DEBUG_ACTIVATE: &str = "sd:/slight/debug/activate.txt";
 pub const DEBUG_DEACTIVATE: &str = "sd:/slight/debug/deactivate.txt";
 /// Opt-in for the effect-loader research trace — see [`trace_enabled`].
 pub const DEBUG_TRACE: &str = "sd:/slight/debug/trace.txt";
+/// Whitespace/comma-separated subsystem names to leave uninstalled — see [`subsystem_disabled`].
+pub const DEBUG_OFF: &str = "sd:/slight/debug/off.txt";
 
 pub fn ensure_slight_dirs() {
     let _ = std::fs::create_dir_all(DEBUG_LOGGERS);
@@ -20,6 +22,46 @@ pub fn ensure_slight_dirs() {
     // Seed the cached flag so boot-time callers see the same answer they always did, before
     // the per-match poll tick has run for the first time.
     refresh_debug_logging();
+    load_disabled_subsystems();
+}
+
+/// Subsystems named in [`DEBUG_OFF`] at boot. Read once, before anything installs.
+static DISABLED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Read [`DEBUG_OFF`] once. Splitting on any non-alphanumeric run means a file written as
+/// `acmd, hitbox` or one name per line both work — the user is editing this by hand on a
+/// device, so the format has to be forgiving.
+fn load_disabled_subsystems() {
+    let names: Vec<String> = std::fs::read_to_string(DEBUG_OFF)
+        .unwrap_or_default()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let _ = DISABLED.set(names);
+}
+
+/// True when the user asked for this subsystem to stay uninstalled by naming it in
+/// [`DEBUG_OFF`] before boot.
+///
+/// This exists to bisect a hang. The plugin installs seven independent groups of hooks into
+/// the game, several of them inside the resource loader, and when one of them wedges a match
+/// load there is no output to work from — the diag buffer only flushes from the per-frame
+/// driver, which never runs. Rebuilding and redeploying to test each group costs minutes per
+/// attempt; naming it in a file costs a reboot. Recognised names are listed in the plugin
+/// README.
+pub fn subsystem_disabled(name: &str) -> bool {
+    DISABLED
+        .get()
+        .is_some_and(|d| d.iter().any(|n| n == name))
+}
+
+/// The subsystems left uninstalled this boot, for the boot log.
+pub fn disabled_subsystems() -> String {
+    match DISABLED.get() {
+        Some(d) if !d.is_empty() => d.join(","),
+        _ => "none".to_string(),
+    }
 }
 
 pub fn rpm_listen_port() -> u16 {
