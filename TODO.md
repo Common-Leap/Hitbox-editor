@@ -383,7 +383,7 @@ wants these.
 - **Trap:** the `_argN` suffixes are different arities of the same idea, exactly like the wind
   family. One table each.
 
-### [ ] B4 — Hurtbox control
+### [~] B4 — Hurtbox control (in progress 2026-08-04)
 
 Intangibility and hurtbox state per bone — the thing every competitive-facing mod actually
 wants to tune, and currently invisible.
