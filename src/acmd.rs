@@ -212,6 +212,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 continue;
             }
         }
+        if let Some(stmt) = parse_hurtbox_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         // GrabModule and AttackModule clear different things, so they are different
         // statements. Matching `clear_all` alone re-emitted a grab clear as an attack clear.
         if line.contains("GrabModule::clear_all") {
@@ -966,6 +970,65 @@ fn parse_erase_wind(line: &str) -> Option<u32> {
         .ok()
 }
 
+/// Parse one hurtbox-state or body-collision line, or `None` if this is not one.
+///
+/// Every member has exactly one arity in the vanilla archive — `HIT_NODE` 30 calls of
+/// `(bone, status)`, `HIT_NO` 2 of `(group, status)`, `COL_PRI` 2 of `(pri)`, and `COL_NORMAL`
+/// and `HIT_RESET_ALL` 8 and 3 of `()` — and each is declared with that same arity in
+/// `smash-script`'s `macros.rs`. There is no shape to discriminate on, so per this file's own
+/// rule the command name *is* the layout: a call whose argument count disagrees with its name
+/// falls through to `Raw` rather than being reinterpreted.
+fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
+    // `HIT_NODE` before `HIT_NO`: the shorter name is a prefix of the longer one, so testing
+    // it first would read every `HIT_NODE` as a `HIT_NO` with an unparseable group.
+    let args = |name: &str| -> Option<Vec<String>> {
+        let needle = format!("macros::{name}(");
+        let start = line.find(&needle)? + needle.len();
+        let end = line[start..].rfind(')')? + start;
+        let tokens = tokenize_args(&line[start..end]);
+        // Drop the leading `agent`. A call written without one is not a form this parser has
+        // ever seen and is left alone rather than guessed at.
+        Some(tokens.get(1..)?.to_vec())
+    };
+
+    if line.contains("macros::HIT_NODE(") {
+        let a = args("HIT_NODE")?;
+        let [bone, status] = a.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::HitStatus {
+            target: crate::data::HurtTarget::Bone(extract_hash40_string(bone)?),
+            status: strip_deref(status),
+        });
+    }
+    if line.contains("macros::HIT_NO(") {
+        let a = args("HIT_NO")?;
+        let [group, status] = a.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::HitStatus {
+            target: crate::data::HurtTarget::Group(group.trim().parse::<i64>().ok()?),
+            status: strip_deref(status),
+        });
+    }
+    if line.contains("macros::COL_PRI(") {
+        let a = args("COL_PRI")?;
+        let [pri] = a.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::ColPri(pri.trim().parse::<i64>().ok()?));
+    }
+    // The two no-argument members. `args` returning an empty slice is the whole check: a
+    // `COL_NORMAL` that somehow carries arguments is not this call.
+    if line.contains("macros::COL_NORMAL(") && args("COL_NORMAL")?.is_empty() {
+        return Some(ExcuteStmt::ColNormal);
+    }
+    if line.contains("macros::HIT_RESET_ALL(") && args("HIT_RESET_ALL")?.is_empty() {
+        return Some(ExcuteStmt::HitResetAll);
+    }
+    None
+}
+
 fn parse_attack_clear(line: &str) -> Option<u32> {
     let start = line.find("AttackModule::clear(")? + "AttackModule::clear(".len();
     let end = line[start..].find(')')? + start;
@@ -979,6 +1042,21 @@ fn parse_attack_clear(line: &str) -> Option<u32> {
 /// Strip leading `*` dereference from constant names like `*ATTACK_SETOFF_KIND_ON`.
 fn strip_deref(s: &str) -> String {
     s.trim_start_matches('*').to_string()
+}
+
+/// Write a hit status back the way the scripts write it.
+///
+/// A symbolic name needs the `*` deref it was parsed without; a bare number must not get one,
+/// since `*2` does not compile. Deciding on the *text* rather than on whether the name is in
+/// [`HIT_STATUS`](crate::param_labels::HIT_STATUS) is deliberate — a script using a constant
+/// this build has never heard of still exports as the constant it wrote.
+fn emit_status(status: &str) -> String {
+    let s = status.trim();
+    if s.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+        s.to_string()
+    } else {
+        format!("*{s}")
+    }
 }
 
 /// Parse `Some(3.0)` → `Some(3.0)`, `None` → `None`.
@@ -1207,6 +1285,27 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::ClearAll => {
                 format!("{indent}AttackModule::clear_all(agent.module_accessor);")
             }
+            // A status is re-emitted with the `*` the scripts write, because it is a lua const
+            // deref rather than a Rust path. `emit_status` puts it back only where the parse
+            // stripped one, so a call written with a bare number stays a bare number.
+            crate::data::ExcuteStmt::HitStatus { target, status } => match target {
+                crate::data::HurtTarget::Bone(bone) => format!(
+                    "{indent}macros::HIT_NODE(agent, Hash40::new(\"{}\"), {});",
+                    bone.to_ascii_lowercase(),
+                    emit_status(status)
+                ),
+                crate::data::HurtTarget::Group(group) => format!(
+                    "{indent}macros::HIT_NO(agent, {group}, {});",
+                    emit_status(status)
+                ),
+            },
+            crate::data::ExcuteStmt::HitResetAll => {
+                format!("{indent}macros::HIT_RESET_ALL(agent);")
+            }
+            crate::data::ExcuteStmt::ColPri(pri) => {
+                format!("{indent}macros::COL_PRI(agent, {pri});")
+            }
+            crate::data::ExcuteStmt::ColNormal => format!("{indent}macros::COL_NORMAL(agent);"),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -2151,6 +2250,151 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             (1, 1),
             "the jab hitbox is out on frame 1"
         );
+    }
+
+    /// dolly/SpecialAirHiCommand, verbatim and trimmed to the hurtbox lines — the knee and leg
+    /// intangibility on Terry's up special, which is the canonical use of this family.
+    const HURT_INTANGIBLE: &str = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);
+        macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_XLU);
+    }
+    frame(agent.lua_state_agent, 20.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_NORMAL);
+        macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_NORMAL);
+    }
+}
+"#;
+
+    /// A hurtbox state is two independent lines in the script and one span on screen. Getting
+    /// the join wrong is the whole difference between "the knee is intangible frames 9-19" and
+    /// a pair of rows a modder has to diff by eye.
+    #[test]
+    fn a_hurtbox_state_spans_from_its_call_to_the_one_that_takes_it_back() {
+        let (states, _) = parse_acmd_script(HURT_INTANGIBLE).to_hurtboxes();
+        let knee: Vec<_> = states
+            .iter()
+            .filter(|s| s.target == crate::data::HurtTarget::Bone("kneer".into()))
+            .collect();
+        let [xlu, normal] = &knee[..] else {
+            panic!("expected two states for kneer, got {}", knee.len());
+        };
+        assert_eq!(xlu.status, "HIT_STATUS_XLU");
+        assert_eq!(
+            (xlu.active_start, xlu.active_end),
+            (9, 19),
+            "intangible from its own frame until the frame before it is taken back"
+        );
+        // The closing call is a span too, and runs to the end of the move: nothing takes it
+        // back, and inventing an end for it would claim the bone stops being normal.
+        assert_eq!(normal.status, "HIT_STATUS_NORMAL");
+        assert_eq!((normal.active_start, normal.active_end), (20, 9999));
+    }
+
+    /// The round-trip the definition of done asks for: real vanilla text in, export, parse the
+    /// export, and the same spans come back. `*HIT_STATUS_XLU` in particular has to survive as
+    /// a symbol — writing the `2` it stands for compiles and stops matching the archive.
+    #[test]
+    fn the_hurtbox_family_round_trips_through_the_emitter() {
+        let script = parse_acmd_script(HURT_INTANGIBLE);
+        let exported = export_acmd_source(&script, "dolly", "special_air_hi_command");
+        assert!(
+            exported.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
+            "{exported}"
+        );
+        assert_eq!(
+            parse_acmd_script(&exported).to_hurtboxes(),
+            script.to_hurtboxes(),
+            "the export must resolve to the same spans as the source"
+        );
+    }
+
+    /// The other three members, which carry no bone: two that reset and one that takes a
+    /// number. `HIT_NO`'s group must not be read as a bone hash, and `COL_PRI` must not be
+    /// ended by `HIT_RESET_ALL` — they are different resets of different things.
+    #[test]
+    fn the_argument_less_members_and_the_numbered_ones_keep_their_own_families() {
+        let source = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NO(agent, 8, *HIT_STATUS_OFF);
+        macros::COL_PRI(agent, 200);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::HIT_RESET_ALL(agent);
+    }
+    frame(agent.lua_state_agent, 16.0);
+    if macros::is_excute(agent) {
+        macros::COL_NORMAL(agent);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let (states, pris) = script.to_hurtboxes();
+        let [group] = &states[..] else {
+            panic!("expected one hurtbox state, got {}", states.len());
+        };
+        assert_eq!(group.target, crate::data::HurtTarget::Group(8));
+        assert_eq!(group.status, "HIT_STATUS_OFF");
+        assert_eq!(
+            (group.active_start, group.active_end),
+            (4, 11),
+            "HIT_RESET_ALL ends it"
+        );
+
+        let [pri] = &pris[..] else {
+            panic!("expected one priority span, got {}", pris.len());
+        };
+        assert_eq!(pri.pri, 200);
+        assert_eq!(
+            (pri.active_start, pri.active_end),
+            (4, 15),
+            "COL_NORMAL ends the priority, and HIT_RESET_ALL at frame 12 does not"
+        );
+
+        let exported = export_acmd_source(&script, "kirby", "guard_off");
+        for line in [
+            "macros::HIT_NO(agent, 8, *HIT_STATUS_OFF);",
+            "macros::COL_PRI(agent, 200);",
+            "macros::HIT_RESET_ALL(agent);",
+            "macros::COL_NORMAL(agent);",
+        ] {
+            assert!(exported.contains(line), "missing {line} in {exported}");
+        }
+    }
+
+    /// A call whose argument count disagrees with its name is not a variant to interpret.
+    /// Every member has exactly one arity in the corpus and one in `macros.rs`, so a mismatch
+    /// means this parser is looking at something it does not understand — and `Raw` is how a
+    /// line survives an export unread.
+    #[test]
+    fn a_hurtbox_call_of_the_wrong_arity_is_left_alone_rather_than_padded() {
+        for line in [
+            "macros::HIT_NODE(agent, Hash40::new(\"legr\"));",
+            "macros::COL_PRI(agent);",
+            "macros::HIT_RESET_ALL(agent, 3);",
+        ] {
+            let source = format!(
+                "unsafe extern \"C\" fn game_test(agent: &mut L2CAgentBase) {{\n    \
+                 if macros::is_excute(agent) {{\n        {line}\n    }}\n}}\n"
+            );
+            let script = parse_acmd_script(&source);
+            let (states, pris) = script.to_hurtboxes();
+            assert!(
+                states.is_empty() && pris.is_empty(),
+                "{line} should not have parsed into a span"
+            );
+            // …and it must still come back out, which is what `Raw` buys.
+            assert!(
+                export_acmd_source(&script, "kirby", "attack_11").contains(line),
+                "{line} was dropped by the export"
+            );
+        }
     }
 
     /// kirby/ThrowHi, verbatim — the only `ATTACK_IGNORE_THROW` in the vanilla corpus, and

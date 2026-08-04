@@ -505,6 +505,72 @@ impl AttackCall {
     }
 }
 
+/// What a hurtbox-state call is aimed at.
+///
+/// `HIT_NODE` names a bone and `HIT_NO` a numbered group. They take the same *shape* —
+/// target then status — but they are not the same family and a bone hash must never be
+/// written into a group slot, so the two are distinguished here rather than flattened into
+/// one string that the write-back would have to guess the type of.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HurtTarget {
+    /// `HIT_NODE(agent, Hash40::new("legr"), …)` — one named bone.
+    Bone(String),
+    /// `HIT_NO(agent, 8, …)` — one numbered hurtbox group.
+    Group(i64),
+}
+
+impl HurtTarget {
+    /// The macro that writes this target. Each target type has exactly one.
+    pub fn macro_name(&self) -> &'static str {
+        match self {
+            HurtTarget::Bone(_) => "HIT_NODE",
+            HurtTarget::Group(_) => "HIT_NO",
+        }
+    }
+
+    /// How the target reads in the panel and the timeline lane label.
+    pub fn label(&self) -> String {
+        match self {
+            HurtTarget::Bone(bone) => bone.clone(),
+            HurtTarget::Group(n) => format!("group {n}"),
+        }
+    }
+}
+
+/// One resolved stretch of non-default hurtbox state, for the panel and the timeline.
+///
+/// Produced by [`AcmdScript::to_hurtboxes`]. A row is one call plus the frame at which a later
+/// call took it back, which is why this is not simply the parsed statement: the script says
+/// "leg becomes intangible" and "leg becomes normal" as two independent lines, and what a
+/// modder wants to see is the span between them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HurtboxState {
+    pub target: HurtTarget,
+    /// Symbolic `HIT_STATUS_*` name, or a bare number if this build does not know the name.
+    pub status: String,
+    pub active_start: u32,
+    pub active_end: u32,
+    /// Which hurtbox statement in the script this span came from — see [`site`](Self::site).
+    pub site: usize,
+}
+
+/// One resolved stretch of non-default body-collision priority (`COL_PRI` … `COL_NORMAL`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ColPriState {
+    pub pri: i64,
+    pub active_start: u32,
+    pub active_end: u32,
+    pub site: usize,
+}
+
+/// Ordinal of a hurtbox statement among all hurtbox statements, in source order.
+///
+/// The panel edits values in the script itself rather than rebuilding these calls from a
+/// separate list the way collisions are rebuilt, so a span needs to say which statement it came
+/// from. A statement inside a `for` produces one span per iteration and every one of them
+/// carries the same site — editing any is editing the one line, which is what the source says.
+pub type HurtSite = usize;
+
 /// One statement inside an is_excute block.
 // AttackCall is intentionally inline: ATTACK statements dominate these short-lived syntax
 // trees, so boxing every normal statement would add allocations to optimize the rare Raw case.
@@ -521,6 +587,24 @@ pub enum ExcuteStmt {
     ClearAll,
     /// GrabModule::clear_all — ends every open grab box, and only grab boxes.
     GrabClearAll,
+    /// `HIT_NODE` / `HIT_NO` — set one bone's or one group's hurtbox state.
+    ///
+    /// Not a collision: this changes how the fighter *receives* hits, so it neither appears in
+    /// [`AcmdScript::to_hitboxes`] nor is ended by an `AttackModule::clear_all`. It is ended by
+    /// a later call on the same target, or by [`HitResetAll`](Self::HitResetAll).
+    HitStatus {
+        target: HurtTarget,
+        /// Kept as written — symbolic where the script wrote a symbol. Storing the number
+        /// instead would export `*HIT_STATUS_XLU` as `2`, which compiles but stops matching
+        /// the vanilla text this parser is calibrated against.
+        status: String,
+    },
+    /// `HIT_RESET_ALL` — return every bone and group to its default state at once.
+    HitResetAll,
+    /// `COL_PRI` — body-collision priority (pushbox precedence), not a hurtbox state.
+    ColPri(i64),
+    /// `COL_NORMAL` — restore default body collision, ending an open `COL_PRI`.
+    ColNormal,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -546,7 +630,8 @@ impl AcmdScript {
     /// Flatten the script into display hitboxes with computed frame ranges.
     pub fn to_hitboxes(&self) -> Vec<Hitbox> {
         let mut hitboxes: Vec<Hitbox> = Vec::new();
-        eval_stmts(&self.stmts, 0.0, &mut hitboxes);
+        let mut hurt = HurtboxAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
         for hb in hitboxes.iter_mut() {
             if hb.active_end == u32::MAX {
                 hb.active_end = 9999;
@@ -554,9 +639,180 @@ impl AcmdScript {
         }
         hitboxes
     }
+
+    /// Flatten the script into hurtbox-state and collision-priority spans.
+    ///
+    /// Resolved by the same walk as [`to_hitboxes`](Self::to_hitboxes) rather than a second one
+    /// beside it: `frame` / `wait` arithmetic and `for` unrolling decide where these spans start
+    /// just as much as where a hitbox does, and two implementations of that would drift.
+    pub fn to_hurtboxes(&self) -> (Vec<HurtboxState>, Vec<ColPriState>) {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut hurt = HurtboxAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
+        // An unterminated span runs to the end of the move, the same `9999` sentinel an
+        // uncleared hitbox gets. Scripts routinely set a state and never take it back — the
+        // engine resets on the status change — so this is the common case, not an error.
+        for state in hurt.states.iter_mut() {
+            if state.active_end == u32::MAX {
+                state.active_end = 9999;
+            }
+        }
+        for pri in hurt.pris.iter_mut() {
+            if pri.active_end == u32::MAX {
+                pri.active_end = 9999;
+            }
+        }
+        (hurt.states, hurt.pris)
+    }
 }
 
-fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) -> f32 {
+impl AcmdScript {
+    /// The hurtbox statement a span's [`site`](HurtboxState::site) refers to.
+    ///
+    /// Pre-order over the source with each `for` body entered exactly once, which is the
+    /// definition [`HurtboxAccum::next_site`] is written to reproduce. Editing through this is
+    /// what makes a panel change reach the export: these statements are carried through the
+    /// script rather than rebuilt from a list, so the script *is* the model.
+    pub fn hurt_stmt_mut(&mut self, site: HurtSite) -> Option<&mut ExcuteStmt> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: HurtSite,
+            seen: &mut usize,
+        ) -> Option<&'a mut ExcuteStmt> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for s in inner.iter_mut().filter(|s| is_hurt_stmt(s)) {
+                            if *seen == site {
+                                return Some(s);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+}
+
+/// Open hurtbox spans, accumulated across one walk of a script.
+#[derive(Default)]
+struct HurtboxAccum {
+    states: Vec<HurtboxState>,
+    pris: Vec<ColPriState>,
+    /// Site to hand to the next hurtbox statement encountered.
+    ///
+    /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
+    /// every iteration of a looped `HIT_NODE` is the same line in the file, so all of them must
+    /// come back with the same site or an edit would land on whichever iteration was clicked.
+    next_site: usize,
+}
+
+/// Hurtbox statements in a subtree, counted in source order.
+///
+/// Used to step [`HurtboxAccum::next_site`] over a `for` body whose count is zero, so that a
+/// statement *after* an empty loop still gets the ordinal a plain pre-order walk of the source
+/// would give it. Without this the two definitions of "site" diverge exactly when a loop runs
+/// no iterations, and the editor would resolve a site to the wrong line.
+fn count_hurt_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_hurt_stmt(s)).count(),
+            AcmdStmt::Loop { body, .. } => count_hurt_stmts(body),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Does this statement consume a hurtbox site?
+///
+/// `HIT_RESET_ALL` and `COL_NORMAL` take one even though they have no editable argument, so
+/// that a site stays the ordinal of the statement rather than of the *editable* statement —
+/// the second is a rule that changes meaning the moment a field is added.
+fn is_hurt_stmt(stmt: &ExcuteStmt) -> bool {
+    matches!(
+        stmt,
+        ExcuteStmt::HitStatus { .. }
+            | ExcuteStmt::HitResetAll
+            | ExcuteStmt::ColPri(_)
+            | ExcuteStmt::ColNormal
+    )
+}
+
+impl HurtboxAccum {
+    fn take_site(&mut self) -> usize {
+        let site = self.next_site;
+        self.next_site += 1;
+        site
+    }
+
+    /// End every open span on `target` at `frame - 1`, then open a new one.
+    ///
+    /// `.max(active_start)` for the reason the id-scoped hitbox clear does it: a state set and
+    /// replaced on the very next frame held for that one frame, not for none.
+    fn set_status(&mut self, target: &HurtTarget, status: &str, frame: u32, site: usize) {
+        let end = frame.saturating_sub(1);
+        for open in self
+            .states
+            .iter_mut()
+            .filter(|s| &s.target == target && s.active_end == u32::MAX)
+        {
+            open.active_end = end.max(open.active_start);
+        }
+        self.states.push(HurtboxState {
+            target: target.clone(),
+            status: status.to_string(),
+            active_start: frame,
+            active_end: u32::MAX,
+            site,
+        });
+    }
+
+    /// `HIT_RESET_ALL` — close every open hurtbox span, whatever its target.
+    ///
+    /// Deliberately does not touch [`pris`](Self::pris): resetting hit *status* is not the same
+    /// call as restoring body collision, and folding them would invent an end frame the script
+    /// never wrote.
+    fn reset_all(&mut self, frame: u32) {
+        let end = frame.saturating_sub(1);
+        for open in self.states.iter_mut().filter(|s| s.active_end == u32::MAX) {
+            open.active_end = end.max(open.active_start);
+        }
+    }
+
+    fn set_pri(&mut self, pri: i64, frame: u32, site: usize) {
+        self.close_pri(frame);
+        self.pris.push(ColPriState {
+            pri,
+            active_start: frame,
+            active_end: u32::MAX,
+            site,
+        });
+    }
+
+    fn close_pri(&mut self, frame: u32) {
+        let end = frame.saturating_sub(1);
+        for open in self.pris.iter_mut().filter(|p| p.active_end == u32::MAX) {
+            open.active_end = end.max(open.active_start);
+        }
+    }
+}
+
+fn eval_stmts(
+    stmts: &[AcmdStmt],
+    start_frame: f32,
+    hitboxes: &mut Vec<Hitbox>,
+    hurt: &mut HurtboxAccum,
+) -> f32 {
     let mut frame = start_frame;
     for stmt in stmts {
         match stmt {
@@ -643,14 +899,35 @@ fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) 
                                 }
                             }
                         }
+                        ExcuteStmt::HitStatus { target, status } => {
+                            let site = hurt.take_site();
+                            hurt.set_status(target, status, script_frame(frame), site);
+                        }
+                        ExcuteStmt::HitResetAll => {
+                            hurt.take_site();
+                            hurt.reset_all(script_frame(frame));
+                        }
+                        ExcuteStmt::ColPri(pri) => {
+                            let site = hurt.take_site();
+                            hurt.set_pri(*pri, script_frame(frame), site);
+                        }
+                        ExcuteStmt::ColNormal => {
+                            hurt.take_site();
+                            hurt.close_pri(script_frame(frame));
+                        }
                         ExcuteStmt::Raw(_) => {}
                     }
                 }
             }
             AcmdStmt::Loop { count, body } => {
+                // Rewind the site cursor for every iteration so all of them agree, then step it
+                // over the body once regardless of how many iterations actually ran.
+                let site_at_entry = hurt.next_site;
                 for _ in 0..*count {
-                    frame = eval_stmts(body, frame, hitboxes);
+                    hurt.next_site = site_at_entry;
+                    frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
+                hurt.next_site = site_at_entry + count_hurt_stmts(body);
             }
         }
     }

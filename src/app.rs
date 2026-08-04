@@ -11983,9 +11983,30 @@ fn rebuild_script_from_hitboxes(
                 AcmdStmt::Frame(value) => frame = *value,
                 AcmdStmt::Wait(value) => frame += *value,
                 AcmdStmt::Excute(inner) => {
+                    // Exhaustive rather than `matches!(.., Raw(_))`, so adding a statement kind
+                    // is a compile error here instead of a silent deletion. B4 walked into that:
+                    // `HIT_NODE` parsed into its own variant, stopped being `Raw`, and every
+                    // hurtbox line in the move vanished the moment a hitbox was dragged.
                     let retained: Vec<_> = inner
                         .iter()
-                        .filter(|stmt| matches!(stmt, ExcuteStmt::Raw(_)))
+                        .filter(|stmt| match stmt {
+                            // Collisions are rebuilt from the edited list below; keeping the
+                            // source's own as well would double every hitbox.
+                            ExcuteStmt::Attack(_)
+                            | ExcuteStmt::Catch(_)
+                            | ExcuteStmt::Wind(_)
+                            | ExcuteStmt::EraseWind(_)
+                            | ExcuteStmt::Clear(_)
+                            | ExcuteStmt::ClearAll
+                            | ExcuteStmt::GrabClearAll => false,
+                            // Hurtbox state is not a collision and is not rebuilt, so it has to
+                            // survive this pass to reach the export at all.
+                            ExcuteStmt::HitStatus { .. }
+                            | ExcuteStmt::HitResetAll
+                            | ExcuteStmt::ColPri(_)
+                            | ExcuteStmt::ColNormal
+                            | ExcuteStmt::Raw(_) => true,
+                        })
                         .cloned()
                         .collect();
                     if !retained.is_empty() {
@@ -13978,6 +13999,53 @@ mod live_effect_capture_tests {
             AcmdStmt::Excute(inner)
                 if inner.iter().any(|stmt| matches!(stmt, ExcuteStmt::Raw(line) if line.contains("WorkModule::on_flag")))
         )));
+    }
+
+    /// Dragging a hitbox must not delete the move's intangibility.
+    ///
+    /// `rebuild_script_from_hitboxes` throws away the source's collision statements and merges
+    /// a fresh schedule into what is left, and "what is left" used to mean `ExcuteStmt::Raw`
+    /// alone. That was correct only because every non-collision line *was* `Raw`. The moment
+    /// B4 gave `HIT_NODE` its own variant, every hurtbox line in the move stopped being
+    /// retained — a silent deletion, triggered by an edit to something unrelated.
+    #[test]
+    fn rebuilding_from_the_hitbox_list_keeps_the_moves_hurtbox_lines() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt, HurtTarget};
+        let hitbox = Hitbox {
+            id: 0,
+            active_start: 3,
+            active_end: 4,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::HitStatus {
+                        target: HurtTarget::Bone("kneer".into()),
+                        status: "HIT_STATUS_XLU".into(),
+                    },
+                    ExcuteStmt::ColPri(200),
+                    ExcuteStmt::Attack(hitbox.to_attack_call()),
+                ]),
+                AcmdStmt::Frame(8.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::HitResetAll, ExcuteStmt::ColNormal]),
+            ],
+        };
+
+        // Retime the hitbox — an edit that has nothing to do with the hurtboxes.
+        let moved = Hitbox {
+            active_start: 5,
+            active_end: 6,
+            ..hitbox
+        };
+        let rebuilt = rebuild_script_from_hitboxes(&original, &[moved]);
+        let (states, pris) = rebuilt.to_hurtboxes();
+
+        assert_eq!(states.len(), 1, "the knee state survived the rebuild");
+        assert_eq!((states[0].active_start, states[0].active_end), (3, 7));
+        assert_eq!(pris.len(), 1, "so did the collision priority");
+        assert_eq!((pris[0].pri, pris[0].active_end), (200, 7));
     }
 
     #[test]

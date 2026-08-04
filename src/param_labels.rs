@@ -218,6 +218,25 @@ pub const PART_MASK: ConstTable = &[
     ("COLLISION_PART_MASK_ALL", 0x1f),
 ];
 
+/// `HIT_STATUS_*` — how a bone or hurtbox group receives hits.
+///
+/// Exactly the four real states, and deliberately not every constant whose name starts with
+/// `HIT_STATUS_`. `lua_const.rs` also defines a `HIT_STATUS_MASK_*` family in the same
+/// namespace, and those overlap this one numerically — `HIT_STATUS_MASK_NORMAL` is `0x1`, the
+/// same value as `HIT_STATUS_INVINCIBLE`. Since [`const_name`] resolves a value to the *first*
+/// matching entry, including the masks would make the reverse direction ambiguous and a live
+/// capture of an invincible bone could come back labelled as a mask. The masks are a different
+/// argument to different functions, so they belong in their own table if they are ever needed.
+///
+/// `HIT_STATUS_TERM` (`0x4`) is the enum's count, not a state, and is left out for the same
+/// reason: nothing can legitimately be set to it.
+pub const HIT_STATUS: ConstTable = &[
+    ("HIT_STATUS_NORMAL", 0x0),
+    ("HIT_STATUS_INVINCIBLE", 0x1),
+    ("HIT_STATUS_XLU", 0x2),
+    ("HIT_STATUS_OFF", 0x3),
+];
+
 /// `ATTACK_SOUND_LEVEL_*` — hit SFX loudness tier.
 pub const SOUND_LEVEL: ConstTable = &[
     ("ATTACK_SOUND_LEVEL_S", 0x0),
