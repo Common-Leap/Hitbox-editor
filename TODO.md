@@ -401,7 +401,12 @@ round-trip test from for those three, which the definition of done requires. Sco
 
 ## Effects
 
-### [ ] C1 — The remaining `LAST_EFFECT_SET_*` modifiers
+### [~] C1 — The remaining `LAST_EFFECT_SET_*` modifiers
+
+**In progress 2026-08-04.** Scoped on the way in to `LAST_EFFECT_SET_COLOR` (65) and
+`LAST_EFFECT_SET_ALPHA` (4) — the two members with real corpus backing left after A3 took rate.
+Re-measured before starting: both arities are uniform (`(agent, r, g, b)` and `(agent, a)`,
+every single call), and both are declared in `macros.rs`. The other three stay open below.
 
 Unblocked: A3 is done and settled the attachment rule — bind to the immediately preceding
 recognised spawn, refuse otherwise, and implement it identically in `eval_effect_stmts`,
