@@ -46,8 +46,21 @@ Two export paths, different rules — do not conflate them:
 - **Argument slots are per family.** An id that means one thing in `ATTACK` means something
   else in `CATCH` or `AREA_WIND`. Never reuse a slot table across families — a cross-family
   write silently corrupts a different call. Give each new family its own table.
-- **Verify your macro arities against the real source**, not against the vanilla Lua corpus:
-  `/home/leap/.cargo/git/checkouts/smash-script-*/*/src/macros.rs`. The Lua dumps disagree.
+- **Two sources of truth for arity, and they disagree. You need both.**
+  `/home/leap/.cargo/git/checkouts/smash-script-*/*/src/macros.rs` tells you what *compiles*,
+  which is what an export must emit. The vanilla archive tells you what you must *parse* — and
+  it omits optional arguments that smash-script declares. A2 found `ATTACK_IGNORE_THROW`
+  written with 33 arguments against a 36-parameter signature. Count the corpus per family
+  before writing a slot table:
+
+  ```bash
+  # counts | arity, excluding the leading `agent` — matches the tables in this file
+  grep -rho 'macros::YOUR_MACRO([^;]*' ~/.cache/visionary/script-cache/ | \
+    awk -F',' '{print NF-1}' | sort | uniq -c
+  ```
+
+  If a family has more than one arity, the discriminator must be the argument *shape*, not the
+  count — a length test breaks the moment a call is short for a different reason.
 - **Symbolic constants need both directions.** The editor holds names, the wire wants numbers.
   A new constant needs a `ConstTable` in [param_labels.rs](src/param_labels.rs) plus
   `decode_const`/`encode_const` coverage, or the live path sends `None` and the game keeps its
@@ -116,25 +129,48 @@ maps slots to named fields (id, strength, falloff, area). That is a layout.
   (rect ↔ radial) or an add/delete is reported, not written.
 - **Trap:** the four commands share a prefix and nothing else. One table per command.
 
-### [~] A2 — `ATTACK_IGNORE_THROW` as a first-class hitbox
+### [x] A2 — `ATTACK_IGNORE_THROW` as a first-class hitbox
 
-Started 2026-08-03. Blocked by: nothing.
-**Cheapest real win in the file — do this one first to learn the pipeline.**
+Done 2026-08-03. All five surfaces; `cargo test` 254 green, plugin builds.
 
-The plugin already hooks and captures it
-([hitbox_viewer/mod.rs:915](plugins/slight_replica/src/slight/hitbox_viewer/mod.rs:915)) and
-`is_collision_func` already admits it. The desktop side doesn't: `parse_excute_block`
-([acmd.rs:181](src/acmd.rs:181)) matches the literal string `macros::ATTACK(`, so
-`ATTACK_IGNORE_THROW` falls through to `Raw`. A live capture shows the hitbox; the parsed
-script doesn't. Same move, two answers.
+**It was not the cheap task this entry predicted, and the entry's premise was wrong.** Kept
+here in full because the reason is a fact about the corpus that the next family task needs.
 
-- **Work order:** confirm the arity against `macros.rs` — if it is `ATTACK`'s layout, carry a
-  `func` field on `AttackCall` and emit under the original name rather than forking the struct.
-  Everything downstream then works unchanged.
-- **Done when:** a vanilla script using it (several throws do) round-trips, and the live and
-  parsed views of that move agree hitbox for hitbox.
-- **Trap:** do not let the new match arm start swallowing `ATTACK_ABS`/`ATTACK_FP`. Match on
-  the full `name(` including the paren, the way the existing code does.
+The plan said: confirm the arity, and if it matches `ATTACK`, just carry the name. smash-script
+declares both with the same 36 parameters, so that check passes. **The archive does not agree
+with smash-script.** Measured across the local corpus:
+
+| macro | arguments | occurrences |
+|---|---|---|
+| `ATTACK` | 36 | 386 |
+| `ATTACK_IGNORE_THROW` | **33** | 1 |
+| `ATTACK_ABS` | 16 | 32 |
+| `CATCH` | 8 or 11 | 6 + 6 |
+
+The archive writes `ATTACK_IGNORE_THROW` with the `x2`/`y2`/`z2` capsule options simply left
+out. Read against `ATTACK`'s table it parses, and parses *wrong*: hitlag lands in the capsule,
+`*ATTACK_LR_CHECK_POS` in hitlag, every property after that off by three. It would have
+silently corrupted kirby/ThrowHi — the one real usage — and looked fine doing it.
+
+So the capsule triple is now detected from the **arguments** (all three spelled `None`/`Some(..)`),
+not from the macro name or the argument count, and everything past the transform shifts when it
+is absent. Both the parser (`capsule_slots_present`) and the write-back slot table
+(`shift_past_absent_capsule`) do this; they are separate code paths and both were wrong.
+
+Exports always write the long form, since that is the signature smash-script declares and
+therefore the only one that builds.
+
+- **Landed:** `func` on `AttackCall`/`Hitbox` (serde-defaulted, so old projects load), family
+  match in `parse_excute_block`, name in `emit_attack`, name-scoped site matching in
+  `rewrite_hitboxes`, `func` carried off the live capture, `inject_command` on the wire, plugin
+  dispatch in the inject arm, and a **Macro** dropdown in the hitbox properties.
+- **Left alone deliberately:** the live *override* path needed no change — the plugin hooks
+  both macros through the same `attack_hook!` and rules are keyed by category, id, and frame.
+  Only *injection* (added or retimed hitboxes) had to learn the name.
+
+**For whoever takes B1/B2:** do not trust a signature in `macros.rs` to tell you what the
+archive wrote. Count the arguments in the corpus first — the one-liner that produced the table
+above is worth rerunning per family.
 
 ### [ ] A3 — `LAST_EFFECT_SET_RATE` as an editable field
 
@@ -155,8 +191,12 @@ untouched and can't be changed. Surfaces 1 and 4 are already done; this is 2, 3,
 Preserved verbatim today. Positions are world-absolute rather than bone-relative, so the
 viewport gizmo and the bone dropdown do not apply as written.
 
+**Measured, not assumed:** 16 arguments, 32 occurrences in the local corpus (A2's table).
+That is less than half of `ATTACK`'s 36 — it is a genuinely different call, and none of
+`AttackCall`'s hit-property block can be reused positionally.
+
 - **Work order:** own family, own slot table, own struct. Reuse `AttackCall`'s hit-property
-  block only if the arities genuinely match — verify against `macros.rs`, do not assume.
+  block only if the arities genuinely match — they do not, so expect a real struct.
 - **Done when:** it draws in the viewport at the right place and survives the corpus oracles.
 - **Trap:** the shared-transform assumption behind the bone dropdown is wrong here. Suppress
   the bone control rather than showing one that does nothing.

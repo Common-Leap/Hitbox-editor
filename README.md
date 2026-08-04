@@ -190,6 +190,13 @@ script shows up on the timeline and can be retuned like any other collision. The
 status kind and situation mask are not editable properties, and your own values
 for them are carried through untouched.
 
+A hitbox keeps the macro it was written as. `ATTACK` and `ATTACK_IGNORE_THROW`
+carry the same arguments but are not the same call — the second one still hits a
+fighter who is already being thrown — so the **Macro** dropdown in the hitbox
+properties says which one this is, and exports and live previews fire the one you
+picked. Switching between them is a change of macro rather than of value, so it
+lands in an export but is reported when syncing into your own source.
+
 Anything that cannot be written as a value change to an existing argument is
 reported instead of guessed at: a spawn you added or removed, a graphic you
 renamed, a retimed call, one iteration of a `for` loop edited on its own, a wind

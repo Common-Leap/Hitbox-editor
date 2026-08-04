@@ -3692,6 +3692,25 @@ impl VisionaryApp {
 
                     // ── Attack-only combat fields ────────────────────────
                     if hb.category == 0 {
+                        ui.horizontal(|ui| {
+                            ui.label("Macro:");
+                            egui::ComboBox::from_id_salt("edit_attack_func")
+                                .selected_text(&hb.func)
+                                .show_ui(ui, |ui| {
+                                    for name in crate::acmd::ATTACK_FUNCS {
+                                        ui.selectable_value(
+                                            &mut hb.func,
+                                            (*name).to_string(),
+                                            *name,
+                                        );
+                                    }
+                                });
+                        })
+                        .response
+                        .on_hover_text(
+                            "ATTACK_IGNORE_THROW still hits a fighter who is already being \
+                             thrown. Everything else about the two is identical.",
+                        );
                         wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
                         angle_picker(ui, &mut hb.angle);
                         wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
@@ -5797,7 +5816,12 @@ impl VisionaryApp {
     /// same symbolic names the property dropdowns offer, so a fetched hitbox shows its live
     /// value as the selected entry. A number with no known name is kept verbatim (and the
     /// dropdown offers it) rather than being dropped.
+    /// `func` is the captured macro name, carried so an `ATTACK_IGNORE_THROW` hit does not
+    /// come back from the game as a plain `ATTACK` and export as one. The lua stack always
+    /// holds the full 36 arguments — the macro pushes nils for the absent capsule options —
+    /// so unlike the source parser this path needs no shift.
     fn hitbox_from_capture(
+        func: &str,
         args: &[crate::game_link::LuaArgWire],
         frame: f32,
         bone_rev: &HashMap<u64, String>,
@@ -5833,6 +5857,7 @@ impl VisionaryApp {
         };
         let start = Self::motion_to_script_frame(frame);
         Some(crate::data::Hitbox {
+            func: func.to_string(),
             id: i64_at(0)? as u32,
             part: i64_at(1).unwrap_or(0) as u32,
             bone_name,
@@ -6059,7 +6084,13 @@ impl VisionaryApp {
                 }
             } else if line.func.starts_with("ATTACK") {
                 if let Some(hb) =
-                    Self::hitbox_from_capture(&line.args, line.frame, bone_rev, attr_labels)
+                    Self::hitbox_from_capture(
+                        &line.func,
+                        &line.args,
+                        line.frame,
+                        bone_rev,
+                        attr_labels,
+                    )
                 {
                     // Same id re-captured (multi-part moves): keep the earliest frame.
                     if !hitboxes
@@ -6313,14 +6344,12 @@ impl VisionaryApp {
                 continue;
             }
             // Build the inject arg vector for this collision family.
-            let (args, command) = match h.category {
-                1 => (Self::build_catch_args(h, donor_for(1, h.id)), None),
-                2 => (
-                    Self::build_wind_args(h),
-                    h.wind.as_ref().map(|wind| wind.command.clone()),
-                ),
-                _ => (Self::build_attack_args(h, donor_for(0, h.id)), None),
+            let args = match h.category {
+                1 => Self::build_catch_args(h, donor_for(1, h.id)),
+                2 => Self::build_wind_args(h),
+                _ => Self::build_attack_args(h, donor_for(0, h.id)),
             };
+            let command = Self::inject_command(h);
             match args {
                 Some(args) => {
                     rules.push(crate::game_link::HitboxRuleWire {
@@ -6480,20 +6509,12 @@ impl VisionaryApp {
                 if current_used[index] {
                     continue;
                 }
-                let (args, command) = match edited.category {
-                    1 => (
-                        Self::build_catch_args(edited, donor_for(1, edited.id)),
-                        None,
-                    ),
-                    2 => (
-                        Self::build_wind_args(edited),
-                        edited.wind.as_ref().map(|wind| wind.command.clone()),
-                    ),
-                    _ => (
-                        Self::build_attack_args(edited, donor_for(0, edited.id)),
-                        None,
-                    ),
+                let args = match edited.category {
+                    1 => Self::build_catch_args(edited, donor_for(1, edited.id)),
+                    2 => Self::build_wind_args(edited),
+                    _ => Self::build_attack_args(edited, donor_for(0, edited.id)),
                 };
+                let command = Self::inject_command(edited);
                 if let Some(args) = args {
                     rules.push(crate::game_link::HitboxRuleWire {
                         motion,
@@ -6756,6 +6777,21 @@ impl VisionaryApp {
                 .map(crate::game_link::LuaArgWire::Num)
                 .collect()
         })
+    }
+
+    /// The exact sv_animcmd function an injected collision must be fired through.
+    ///
+    /// Wind areas name their own command; an attack names its family member so an added or
+    /// retimed `ATTACK_IGNORE_THROW` is replayed as one rather than as a plain `ATTACK`.
+    /// Grabs have only `CATCH` and say nothing. A plugin predating this dispatch ignores the
+    /// field and fires `ATTACK`, which is what it did before and is right for every hitbox
+    /// that is not one of the rare throw-piercing ones.
+    fn inject_command(h: &crate::data::Hitbox) -> Option<String> {
+        match h.category {
+            1 => None,
+            2 => h.wind.as_ref().map(|wind| wind.command.clone()),
+            _ => Some(h.func.clone()),
+        }
     }
 
     fn collision_end_injection(
@@ -13005,6 +13041,7 @@ mod live_effect_capture_tests {
         args[27] = A::Bool(true);
         args[31] = A::Int(1);
         let hb = VisionaryApp::hitbox_from_capture(
+            "ATTACK",
             &args,
             0.0,
             &HashMap::from([(bone, "top".into())]),

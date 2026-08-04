@@ -1215,7 +1215,16 @@ pub unsafe fn inject_tick(lua_state: u64) {
                         }
                         _ => smash::app::sv_animcmd::AREA_WIND_2ND_arg10(agent.lua_state_agent),
                     },
-                    _ => smash::app::sv_animcmd::ATTACK(agent.lua_state_agent),
+                    // The ATTACK family shares one argument layout, so the stack built
+                    // above is right for either member and only the function to fire
+                    // differs. An editor that names none of them means plain ATTACK —
+                    // which is what this arm did before the family was modelled.
+                    _ => match inj.command.as_deref() {
+                        Some("ATTACK_IGNORE_THROW") => {
+                            smash::app::sv_animcmd::ATTACK_IGNORE_THROW(agent.lua_state_agent)
+                        }
+                        _ => smash::app::sv_animcmd::ATTACK(agent.lua_state_agent),
+                    },
                 }
             }
             agent.clear_lua_stack();

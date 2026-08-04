@@ -934,7 +934,10 @@ pub fn rewrite_hitboxes(
     // single candidate set meant a hitbox matched by id alone and had another family's values
     // written straight into it.
     let sites = scan_macro_sites(text, 0..text.len());
-    let attacks: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "ATTACK").collect();
+    let attacks: Vec<&MacroSite> = sites
+        .iter()
+        .filter(|s| crate::acmd::ATTACK_FUNCS.contains(&s.name.as_str()))
+        .collect();
     let catches: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "CATCH").collect();
 
     let mut report = SyncReport::default();
@@ -971,6 +974,17 @@ pub fn rewrite_hitboxes(
             ));
             continue;
         }
+        // Swapping the family member is a different macro, not a different value. Rewriting
+        // the call name in place would also have to add or drop the capsule triple, which is
+        // structure — so it is reported, and the export path is where that swap can land.
+        if before.func != hitbox.func {
+            report.skipped.push(format!(
+                "{label}: hitbox {} changed from `{}` to `{}` — source syncing rewrites \
+                 argument values, not the macro being called",
+                before.id, before.func, hitbox.func
+            ));
+            continue;
+        }
         // `CATCH` takes no `part`, so a grab box is keyed on its id alone.
         let is_grab = hitbox.category == 1;
         let matching: Vec<&MacroSite> = if is_grab {
@@ -986,7 +1000,11 @@ pub fn rewrite_hitboxes(
                 .iter()
                 .copied()
                 .filter(|site| {
-                    site.arg(text, 1).and_then(|a| a.trim().parse::<u32>().ok()) == Some(before.id)
+                    // Family members share the id space but are not the same call, so an
+                    // `ATTACK` hitbox never retunes an `ATTACK_IGNORE_THROW` beside it.
+                    site.name == before.func
+                        && site.arg(text, 1).and_then(|a| a.trim().parse::<u32>().ok())
+                            == Some(before.id)
                         && site.arg(text, 2).and_then(|a| a.trim().parse::<u32>().ok())
                             == Some(before.part)
                 })
@@ -1294,7 +1312,40 @@ fn attack_edits(
         ),
     ];
 
-    apply_slots(text, site, &slots)
+    apply_slots(text, site, &shift_past_absent_capsule(text, site, slots))
+}
+
+/// Re-aim an `ATTACK` slot table at a call written without the optional capsule triple.
+///
+/// The archive writes `ATTACK_IGNORE_THROW` with 33 arguments where `ATTACK` has 36; every
+/// slot past the transform then sits three earlier. Without this, retuning such a call wrote
+/// the hitlag multiplier into `z`, the setoff kind into hitlag, and so on down the line —
+/// well-formed source, silently the wrong move.
+///
+/// The three capsule slots are aimed past the end of the call instead of being dropped, so a
+/// capsule edit on a call that has nowhere to put one is *reported* by `apply_slots` rather
+/// than discarded.
+fn shift_past_absent_capsule<const N: usize>(
+    text: &str,
+    site: &MacroSite,
+    slots: [(usize, &'static str, bool, ArgValue); N],
+) -> Vec<(usize, &'static str, bool, ArgValue)> {
+    let optionish = |index: usize| {
+        site.arg(text, index)
+            .map(|a| a.trim())
+            .is_some_and(|a| a == "None" || a.starts_with("Some("))
+    };
+    if site.args.len() >= 16 && (13..16).all(optionish) {
+        return slots.into_iter().collect();
+    }
+    slots
+        .into_iter()
+        .map(|(slot, field, changed, value)| match slot {
+            13..=15 => (usize::MAX, field, changed, value),
+            16.. => (slot - 3, field, changed, value),
+            _ => (slot, field, changed, value),
+        })
+        .collect()
 }
 
 /// Write each changed slot, and name any whose argument the call does not have.
@@ -1891,6 +1942,114 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(report.skipped[0].contains("retimed"), "{report:?}");
         // The retime is refused, but the damage it was bundled with still lands.
         assert!(after.contains("12.0, 361"), "{after}");
+    }
+
+    /// kirby/ThrowHi's `ATTACK_IGNORE_THROW`, which the archive writes without the capsule
+    /// options every `ATTACK` carries. The slot table has to follow the call it is aimed at.
+    const CAPSULE_LESS: &str = r#"unsafe extern "C" fn game_throwhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK_IGNORE_THROW(agent, 0, 0, Hash40::new("top"), 7.0, 65, 95, 0, 85, 9.5, 0.0, 6.5, 2.0, 1.0, 1.0, *ATTACK_SETOFF_KIND_OFF, *ATTACK_LR_CHECK_POS, false, 0, 0.0, 0, false, false, false, false, true, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_M, *COLLISION_SOUND_ATTR_KICK, *ATTACK_REGION_BODY);
+    }
+}
+"#;
+
+    /// Retuning a call written without the capsule triple must count slots from the call,
+    /// not from the macro's full signature. Off by three, the hitlag multiplier is written
+    /// into the z offset and the setoff kind into hitlag — well-formed source, wrong move.
+    #[test]
+    fn a_capsule_less_call_is_retuned_through_its_own_shifted_slots() {
+        let pristine = crate::acmd::parse_acmd_script(CAPSULE_LESS).to_hitboxes();
+        assert_eq!(pristine.len(), 1);
+        let mut edited = pristine.clone();
+        edited[0].damage = 9.0;
+        edited[0].hitlag_mult = 0.5;
+
+        let (after, report) = rewrite_hitboxes(CAPSULE_LESS, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        // Damage is ahead of the optional arguments and cannot shift.
+        assert!(after.contains(r#"Hash40::new("top"), 9.0, 65,"#), "{after}");
+        // Hitlag is the argument straight after the z offset here. The z offset keeps its
+        // own value, which is what the unshifted table used to overwrite.
+        assert!(after.contains("6.5, 2.0, 0.5, 1.0, *ATTACK_SETOFF"), "{after}");
+        // And the edit survives a read-back, which is the property that actually matters.
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_hitboxes(),
+            edited
+        );
+    }
+
+    /// The capsule arguments are not there to write to. An edit that lands nowhere has to be
+    /// named, not dropped — and must not fall through onto whatever argument sits at 13.
+    #[test]
+    fn a_capsule_edit_on_a_call_without_one_is_reported() {
+        let pristine = crate::acmd::parse_acmd_script(CAPSULE_LESS).to_hitboxes();
+        let mut edited = pristine.clone();
+        edited[0].capsule_end = Some([1.0, 2.0, 3.0]);
+
+        let (after, report) = rewrite_hitboxes(CAPSULE_LESS, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, CAPSULE_LESS, "nothing may be written");
+        assert_eq!(report.changed, 0);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("too short")),
+            "{report:?}"
+        );
+    }
+
+    /// The two `ATTACK`-family macros share the id space. Matching on id and part alone made
+    /// a hitbox ambiguous between them — or worse, retuned the wrong one.
+    #[test]
+    fn an_attack_edit_never_lands_in_the_ignore_throw_call_beside_it() {
+        let text = r#"unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK(agent, 0, 0, Hash40::new("top"), 10.0, 361, 100, 0, 30, 4.0, 0.0, 8.0, 0.0, None, None, None, 1.0, 1.0, 0, 1, false, 0, 0.0, 0, false, false, true, true, false, 0, 0, 0, false, Hash40::new("collision_attr_normal"), 0, 0, 0);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK_IGNORE_THROW(agent, 0, 0, Hash40::new("top"), 7.0, 65, 95, 0, 85, 9.5, 0.0, 6.5, 2.0, 1.0, 1.0, *ATTACK_SETOFF_KIND_OFF, *ATTACK_LR_CHECK_POS, false, 0, 0.0, 0, false, false, false, false, true, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_M, *COLLISION_SOUND_ATTR_KICK, *ATTACK_REGION_BODY);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        assert_eq!(pristine.len(), 2);
+        assert_eq!(
+            (pristine[0].id, pristine[1].id),
+            (0, 0),
+            "the ids really do collide"
+        );
+        assert_eq!(pristine[0].func, "ATTACK");
+        assert_eq!(pristine[1].func, "ATTACK_IGNORE_THROW");
+
+        let mut edited = pristine.clone();
+        edited[0].damage = 15.0;
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(r#"Hash40::new("top"), 15.0, 361,"#), "{after}");
+        assert!(
+            after.contains(r#"Hash40::new("top"), 7.0, 65,"#),
+            "the throw-piercing hitbox must be untouched:\n{after}"
+        );
+    }
+
+    /// Swapping which family member a hitbox is is a different macro, not a different
+    /// value — the call would also have to gain or lose the capsule triple.
+    #[test]
+    fn changing_the_attack_macro_is_reported_rather_than_written() {
+        let pristine = crate::acmd::parse_acmd_script(CAPSULE_LESS).to_hitboxes();
+        let mut edited = pristine.clone();
+        edited[0].func = "ATTACK".into();
+
+        let (after, report) = rewrite_hitboxes(CAPSULE_LESS, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, CAPSULE_LESS);
+        assert_eq!(report.changed, 0);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("macro being called")),
+            "{report:?}"
+        );
     }
 
     /// A wind box and an attack hitbox can carry the same id, and matching on id alone sent

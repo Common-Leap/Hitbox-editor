@@ -179,7 +179,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
         if line.is_empty() {
             continue;
         }
-        if line.contains("macros::ATTACK(") {
+        if ATTACK_FUNCS
+            .iter()
+            .any(|name| line.contains(&format!("macros::{name}(")))
+        {
             if let Some(call) = parse_attack_call(line) {
                 stmts.push(ExcuteStmt::Attack(call));
                 continue;
@@ -643,9 +646,34 @@ fn parse_wait_call(line: &str) -> Option<f32> {
     None
 }
 
+/// The `ATTACK`-family macros the editor models, longest name first.
+///
+/// They share one argument layout, which is why they share one parser, one slot table, and
+/// one live wire shape. Nothing else in ACMD may be added here on the strength of a similar
+/// name — `ATTACK_ABS` is 16 arguments, not 36, and belongs to its own family.
+pub const ATTACK_FUNCS: &[&str] = &["ATTACK_IGNORE_THROW", "ATTACK"];
+
+/// Whether an `ATTACK`-family call carries the optional capsule triple at slots 13-15.
+///
+/// Decided by shape, not by length: `x2`/`y2`/`z2` are `Option<f32>` in smash-script, so a
+/// call that has them spells all three as `None` or `Some(..)`. Anything else at slot 13 —
+/// a bare `1.0` hitlag multiplier, in the case this was written for — means the triple was
+/// left out and the rest of the call sits three slots earlier.
+fn capsule_slots_present(t: &[String]) -> bool {
+    let optionish = |s: &String| {
+        let s = s.trim();
+        s == "None" || s.starts_with("Some(")
+    };
+    t.len() >= 16 && t[13..16].iter().all(optionish)
+}
+
 fn parse_attack_call(line: &str) -> Option<AttackCall> {
-    let start = line.find("macros::ATTACK(")?;
-    let inner = &line[start + "macros::ATTACK(".len()..];
+    // Longest name first: `macros::ATTACK(` cannot match `macros::ATTACK_IGNORE_THROW(`
+    // because of the paren, but ordering it this way keeps that from being load-bearing.
+    let (func, start) = ATTACK_FUNCS
+        .iter()
+        .find_map(|name| Some((*name, line.find(&format!("macros::{name}("))?)))?;
+    let inner = &line[start + "macros::".len() + func.len() + 1..];
     let end = inner.rfind(')')?;
     let inner = &inner[..end];
     let t = tokenize_args(inner);
@@ -663,6 +691,15 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     // [29]=situation_mask [30]=category_mask [31]=part_mask
     // [32]=no_finish_camera [33]=collision_attr [34]=sound_level
     // [35]=sound_attr [36]=attack_region
+    //
+    // Slots 13-15 are OPTIONAL IN THE SOURCE TEXT. The vanilla archive writes every
+    // `ATTACK` with them (all 386 in the local corpus are 36 arguments) but writes
+    // `ATTACK_IGNORE_THROW` without them (33 arguments), even though smash-script declares
+    // both with the same 36 parameters. Reading the shorter form against the full table put
+    // hitlag in the capsule, `*ATTACK_LR_CHECK_POS` in hitlag, and shifted every property
+    // after it by three. So the capsule triple is detected from the ARGUMENTS rather than
+    // from the macro name, and everything past the transform shifts when it is absent.
+    let shift = if capsule_slots_present(&t) { 0 } else { 3 };
 
     let id: u32 = t[1].trim().parse().ok()?;
     let part: u32 = t[2].trim().parse().ok()?;
@@ -681,7 +718,7 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     let offset_y: f32 = t[11].trim().parse().ok()?;
     let offset_z: f32 = t[12].trim().parse().ok()?;
 
-    let capsule_end = if t.len() >= 16 {
+    let capsule_end = if shift == 0 {
         match (
             parse_option_f32(t[13].trim()),
             parse_option_f32(t[14].trim()),
@@ -694,7 +731,13 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
         None
     };
 
-    let get = |i: usize| t.get(i).map(|s| s.trim()).unwrap_or("");
+    // Slots up to the transform are fixed; past it, a call without the capsule triple has
+    // everything three earlier.
+    let get = |i: usize| {
+        t.get(if i >= 16 { i - shift } else { i })
+            .map(|s| s.trim())
+            .unwrap_or("")
+    };
 
     let hitlag_mult: f32 = get(16).parse().unwrap_or(1.0);
     let sdi_mult: f32 = get(17).parse().unwrap_or(1.0);
@@ -722,6 +765,7 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     let attack_region = pl::decode_const(pl::ATTACK_REGION, get(36));
 
     Some(AttackCall {
+        func: func.to_string(),
         id,
         part,
         bone_name,
@@ -988,13 +1032,17 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
     } else {
         format!("Hash40::new(\"{}\")", call.collision_attr)
     };
+    // Always written with the capsule triple, even for a call parsed from the shorter
+    // archive form: smash-script declares `x2`/`y2`/`z2` on every member of the family, so
+    // the long form is the one that builds. Re-parsing it yields the same hitbox.
     format!(
-        "{indent}macros::ATTACK(agent, {id}, {part}, {bone}, {dmg}, {angle}, {kbs}, {fkb}, {kbb}, \
+        "{indent}macros::{func}(agent, {id}, {part}, {bone}, {dmg}, {angle}, {kbs}, {fkb}, {kbb}, \
 {size}, {ox}, {oy}, {oz}, {capsule}, \
 {hitlag}, {sdi}, {setoff}, {lr}, {clang}, {add_atk}, {hb_attr}, {goa}, \
 {mtk}, {shield}, {reflect}, {absorb}, {landing}, \
 {sit}, {cat}, {part_mask}, {no_cam}, {col_attr}, {snd_lvl}, {snd_attr}, {region});",
         indent = indent,
+        func = call.func,
         id = call.id,
         part = call.part,
         bone = bone,
@@ -1925,6 +1973,77 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// kirby/ThrowHi, verbatim — the only `ATTACK_IGNORE_THROW` in the vanilla corpus, and
+    /// the reason the capsule triple is detected rather than assumed.
+    ///
+    /// The archive writes this macro with 33 arguments where every `ATTACK` has 36: the
+    /// `x2`/`y2`/`z2` options are simply absent. Read against `ATTACK`'s table it parses,
+    /// and parses WRONG — hitlag lands in the capsule, `*ATTACK_LR_CHECK_POS` in hitlag,
+    /// and every property after that is off by three. Nothing about it looks broken.
+    const IGNORE_THROW: &str = r#"macros::ATTACK_IGNORE_THROW(agent, 0, 0, Hash40::new("top"), 7.0, 65, 95, 0, 85, 9.5, 0.0, 6.5, 2.0, 1.0, 1.0, *ATTACK_SETOFF_KIND_OFF, *ATTACK_LR_CHECK_POS, false, 0, 0.0, 0, false, false, false, false, true, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_M, *COLLISION_SOUND_ATTR_KICK, *ATTACK_REGION_BODY);"#;
+
+    #[test]
+    fn a_capsule_less_attack_call_reads_every_slot_after_the_transform() {
+        let source = format!(
+            "unsafe extern \"C\" fn game_test(agent: &mut L2CAgentBase) {{\n    \
+             frame(agent.lua_state_agent, 12.0);\n    if macros::is_excute(agent) {{\n        \
+             {IGNORE_THROW}\n    }}\n}}\n"
+        );
+        let hitboxes = parse_acmd_script(&source).to_hitboxes();
+        let [hb] = &hitboxes[..] else {
+            panic!("expected one hitbox, got {}", hitboxes.len());
+        };
+
+        assert_eq!(hb.func, "ATTACK_IGNORE_THROW");
+        assert_eq!(hb.capsule_end, None, "this call has no capsule triple");
+        // The transform is ahead of the optional arguments and cannot shift.
+        assert_eq!((hb.damage, hb.angle, hb.size), (7.0, 65, 9.5));
+        assert_eq!((hb.offset_x, hb.offset_y, hb.offset_z), (0.0, 6.5, 2.0));
+        // Everything below here is what the shift used to corrupt.
+        assert_eq!(hb.hitlag_mult, 1.0, "hitlag must not read the capsule slot");
+        assert_eq!(hb.sdi_mult, 1.0);
+        assert_eq!(hb.setoff_kind, "ATTACK_SETOFF_KIND_OFF");
+        assert_eq!(hb.lr_check, "ATTACK_LR_CHECK_POS");
+        assert!(!hb.is_clang);
+        assert_eq!(hb.hitbox_attr, 0.0);
+        assert!(hb.is_landing_attack);
+        assert_eq!(hb.situation_mask, "COLLISION_SITUATION_MASK_GA");
+        assert_eq!(hb.collision_attr, "collision_attr_normal");
+        assert_eq!(hb.sound_level, "ATTACK_SOUND_LEVEL_M");
+        assert_eq!(hb.sound_attr, "COLLISION_SOUND_ATTR_KICK");
+        assert_eq!(hb.attack_region, "ATTACK_REGION_BODY");
+    }
+
+    /// An export must name the family member it read. Emitting one as the other builds fine
+    /// and silently changes whether the hitbox reaches a fighter already being thrown.
+    #[test]
+    fn an_attack_family_call_is_exported_under_its_own_macro() {
+        let source = format!(
+            "unsafe extern \"C\" fn game_test(agent: &mut L2CAgentBase) {{\n    \
+             frame(agent.lua_state_agent, 12.0);\n    if macros::is_excute(agent) {{\n        \
+             {IGNORE_THROW}\n    }}\n}}\n"
+        );
+        let parsed = parse_acmd_script(&source);
+        let emitted = preview_game_fn(&parsed, "throwhi");
+        assert!(
+            emitted.contains("macros::ATTACK_IGNORE_THROW(agent, 0, 0,"),
+            "the export dropped the family member:\n{emitted}"
+        );
+        // Written back out in the long form, because that is the one smash-script declares
+        // and therefore the only one that builds.
+        assert!(
+            emitted.contains("2.0, None, None, None, 1.0, 1.0,"),
+            "the export must supply the capsule options the source omitted:\n{emitted}"
+        );
+        // The long form re-reads as the same hitbox: the shift is a source-text detail, not
+        // a property of the move.
+        assert_eq!(
+            parse_acmd_script(&emitted).to_hitboxes(),
+            parsed.to_hitboxes(),
+            "a capsule-less call must survive a round trip through the emitter"
+        );
+    }
+
     #[test]
     fn wind_commands_round_trip_with_exact_shapes_and_independent_erases() {
         let source = r#"
@@ -2100,6 +2219,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
 
     fn sample_edits() -> SampleEdits {
         let atk = crate::data::AttackCall {
+            func: "ATTACK".into(),
             id: 0,
             part: 0,
             bone_name: "Top".into(),

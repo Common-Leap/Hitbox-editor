@@ -2,11 +2,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// The `ATTACK`-family macro assumed when nothing says otherwise — the overwhelming majority
+/// of collisions, and what every project written before [`Hitbox::func`] existed contains.
+pub fn default_attack_func() -> String {
+    "ATTACK".to_string()
+}
+
 /// A single hitbox — used for display, timeline, and viewport rendering.
 /// `active_start`/`active_end` are computed from the script structure.
 /// When `capsule_end` is `Some`, the hitbox is a capsule; otherwise a sphere.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Hitbox {
+    /// The `ATTACK`-family macro this row came from, and the one an export writes it back
+    /// under. Only meaningful for category 0; grabs and wind areas leave it at the default.
+    /// See [`AttackCall::func`].
+    #[serde(default = "default_attack_func")]
+    pub func: String,
     pub id: u32,
     pub part: u32,
     pub bone_name: String,
@@ -73,6 +84,7 @@ pub struct Hitbox {
 impl Default for Hitbox {
     fn default() -> Self {
         Self {
+            func: default_attack_func(),
             id: 0,
             part: 0,
             bone_name: "top".to_string(),
@@ -243,6 +255,7 @@ impl Hitbox {
     /// Back-convert to an ATTACK call (script synthesis for capture-sourced moves).
     pub fn to_attack_call(&self) -> AttackCall {
         AttackCall {
+            func: self.func.clone(),
             id: self.id,
             part: self.part,
             bone_name: self.bone_name.clone(),
@@ -352,6 +365,14 @@ impl CatchCall {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttackCall {
+    /// Which `ATTACK`-family macro this call is — `ATTACK` or `ATTACK_IGNORE_THROW`.
+    ///
+    /// They share every argument this struct names, but they are not interchangeable: an
+    /// `ATTACK_IGNORE_THROW` hitbox passes through a fighter already being thrown. Emitting
+    /// one as the other silently changes what the move does, so the name is carried rather
+    /// than assumed. Projects written before this field default to `ATTACK`.
+    #[serde(default = "default_attack_func")]
+    pub func: String,
     // ── Positional / shape ────────────────────────────────────────────────
     pub id: u32,
     pub part: u32,
@@ -397,6 +418,7 @@ impl AttackCall {
     /// Convert to a display Hitbox at the given frame.
     pub fn to_hitbox(&self, active_start: u32) -> Hitbox {
         Hitbox {
+            func: self.func.clone(),
             id: self.id,
             part: self.part,
             bone_name: self.bone_name.clone(),
