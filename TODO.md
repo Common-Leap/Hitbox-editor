@@ -110,7 +110,7 @@ Ordered so that earlier tasks unblock later ones. Within a section, top is highe
 
 ## Foundations
 
-### [ ] A1 — Wind write-back into the user's own source
+### [~] A1 — Wind write-back into the user's own source (started 2026-08-04)
 
 The one gap in an otherwise fully editable family. Windboxes are editable in the panel, live,
 and on export, but a wind edit to a *linked project* is refused: `AREA_WIND` is treated as a
