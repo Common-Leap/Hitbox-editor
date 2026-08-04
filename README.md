@@ -224,6 +224,22 @@ source, while changing an existing rate is written straight into the file. A
 rate that does not sit directly beneath a spawn Visionary recognises is left
 alone rather than attached to whichever spawn came before it.
 
+**Tint** and **Opacity** are the `LAST_EFFECT_SET_COLOR` and
+`LAST_EFFECT_SET_ALPHA` lines, and behave the same way: a colour picker and a
+drag beside their own checkboxes, belonging to one spawn rather than to an
+effect kind. The drag fields are not clamped to the picker's range, because the
+vanilla scripts write colours brighter than white. If a live colour multiplier is
+set on the same effect, that multiplier is what ships and the report says so —
+rather than both being written and the second quietly winning, which is what
+happened before.
+
+These lines are also why a move can preview right and export wrong. Because they
+name no effect, one sitting behind an `if` is separated from the spawn it
+modifies, and Visionary will not guess which spawn that was. Nearly every vanilla
+use is of exactly that kind — a costume check wrapped around a recolour — so
+those are listed under the generated code as lines the export drops, not attached
+to whichever spawn happens to be nearest.
+
 `FLASH` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour

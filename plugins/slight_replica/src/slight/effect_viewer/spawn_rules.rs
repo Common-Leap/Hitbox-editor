@@ -52,6 +52,15 @@ pub struct SpawnRule {
     /// afterwards and would otherwise win — is rewritten to match.
     #[serde(default)]
     pub rate: Option<f32>,
+    /// Per-spawn tint and opacity — the live forms of `LAST_EFFECT_SET_COLOR` and
+    /// `LAST_EFFECT_SET_ALPHA`, handled exactly the way `rate` above is.
+    ///
+    /// Not the same thing as `color` below, which is a whole-fighter tint keyed on a command
+    /// name. These two scope to one spawn of one effect kind, like everything else above them.
+    #[serde(default)]
+    pub tint: Option<[f32; 3]>,
+    #[serde(default)]
+    pub alpha: Option<f32>,
     /// Live values for a colour command — `FLASH`, `BURN_COLOR`, and the rest of the family.
     ///
     /// These name no effect kind, so for such a rule `eff_hash` is hash40 of the lowercased
@@ -153,6 +162,27 @@ pub fn rate_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<f32> {
         .iter()
         .find(|r| !r.suppress && r.rate.is_some() && r.matches(eff_hash, motion, motion_frame))
         .and_then(|r| r.rate)
+}
+
+/// Per-spawn tint and opacity for the FIRST non-suppress rule matching this spawn.
+///
+/// One lookup for both, unlike the rate above, because both are applied at the same moment to
+/// the same handle — but each half stays optional, so recolouring a spawn does not also assert
+/// an opacity the editor never set.
+pub fn tint_for(
+    eff_hash: u64,
+    motion: u64,
+    motion_frame: f32,
+) -> Option<(Option<[f32; 3]>, Option<f32>)> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| {
+            !r.suppress
+                && (r.tint.is_some() || r.alpha.is_some())
+                && r.matches(eff_hash, motion, motion_frame)
+        })
+        .map(|r| (r.tint, r.alpha))
 }
 
 /// Live colour and interpolation length for the FIRST non-suppress rule matching this colour

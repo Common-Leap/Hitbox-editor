@@ -98,6 +98,17 @@ Two export paths, different rules — do not conflate them:
   the rest — 24% of vanilla effect scripts lose a line. You no longer have to assume: open the
   move in the editor and read the generated-source pane, which now names every line the export
   will not write. C5's table lists what is still going.
+
+  **The sharp edge: modelling a macro can make its loss quieter instead of fixing it.** C1
+  gave `LAST_EFFECT_SET_COLOR` a typed variant, and 32 corpus lines promptly *stopped* being
+  reported as dropped — they no longer parsed as `Raw`, so the dropped-line check could not see
+  them, and they were still discarded on the way to `EffectCall` because they bind to no spawn.
+  Net effect of modelling: one line recovered, thirty-two silenced. The guard is
+  `EffectScript::to_effect_calls_reporting_losses`, which returns whatever the walk threw away;
+  **anything that resolves a macro into a call must report what it could not resolve there**, or
+  it repeats this. A test asserting the *premise* of a loss — C5's
+  `a_line_the_export_cannot_reproduce_is_named_rather_than_silently_deleted` fails loudly if its
+  example line becomes exportable — is what caught it.
 - **A macro that names no target binds to the line above it, and nowhere else.**
   `LAST_EFFECT_SET_*` modifies whatever spawned last, so there is nothing in the call to match
   on. Bind it to the immediately preceding recognised spawn and refuse otherwise — reaching
@@ -125,7 +136,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**275 green after C5**), including the two corpus oracles — run them
+- [ ] `cargo test` passes (**282 green after C1**), including the two corpus oracles — run them
       by name with `cargo test cached_script`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export` and
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
@@ -280,7 +291,8 @@ all — the rate is a field *on* the call, so it moves and disappears with it.
 
 The same rule is implemented three times and the three must agree, or a value is read off one
 call and written into another: `eval_effect_stmts` (script), `effect_calls_from_captures`
-(live capture), and `spawn_and_rate_sites` (write-back).
+(live capture), and `spawn_and_modifier_sites` (write-back, renamed from
+`spawn_and_rate_sites` by C1 when tint and opacity joined the rate).
 
 **Also fixed on the way:**
 
@@ -401,62 +413,103 @@ round-trip test from for those three, which the definition of done requires. Sco
 
 ## Effects
 
-### [~] C1 — The remaining `LAST_EFFECT_SET_*` modifiers
+### [x] C1 — `LAST_EFFECT_SET_COLOR` and `LAST_EFFECT_SET_ALPHA`
 
-**In progress 2026-08-04.** Scoped on the way in to `LAST_EFFECT_SET_COLOR` (65) and
-`LAST_EFFECT_SET_ALPHA` (4) — the two members with real corpus backing left after A3 took rate.
-Re-measured before starting: both arities are uniform (`(agent, r, g, b)` and `(agent, a)`,
-every single call), and both are declared in `macros.rs`. The other three stay open below.
+Done 2026-08-04. All five surfaces; `cargo test` 282 green, both corpus oracles run for real
+(461 files present), clippy clean, `build_check.sh` passes. The plugin was touched and builds;
+the `diag.txt` stamp could not be checked, because `scripts/build.sh` only writes to
+`target/output/` and deploying needs a running game.
 
-Unblocked: A3 is done and settled the attachment rule — bind to the immediately preceding
-recognised spawn, refuse otherwise, and implement it identically in `eval_effect_stmts`,
-`effect_calls_from_captures`, and `spawn_and_rate_sites`. Copy those three, do not re-derive.
+Scoped on the way in to the two members with real corpus backing left after A3 took rate. Both
+arities are uniform — `(agent, r, g, b)` 65 times and `(agent, a)` 4 times, no exceptions — and
+both are declared in `macros.rs`. The remaining three are **C7**, below.
 
-**Measured, not assumed.** Corpus occurrences, and whether smash-script declares a wrapper —
-both checked, because A1's trap is live in this family:
+**The premise was wrong about where the value is, and that is the finding.** The entry said 33
+of the 65 colour calls were being deleted by exports and that C1 would recover them. Modelling
+the macro recovers **one**. Measured after the fact over the whole cache: `tint` binds on 1 call,
+`alpha` on 4, and **64 of the 65 colour lines bind to nothing.** They look like this, and this
+shape is nearly the whole corpus:
+
+```rust
+if macros::is_excute(agent) {
+    macros::EFFECT_FOLLOW_ALPHA(agent, Hash40::new("dolly_roll_l_color1"), ...);
+}
+if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){
+    if macros::is_excute(agent) {
+        macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);
+    }
+}
+```
+
+A costume check between the spawn and its recolour. At runtime the tint does apply — the game's
+"last effect" outlives the block — but it applies **on one costume**, so binding it would export
+a costume-specific colour as an unconditional one. Refusing is correct, and the fix is not a
+looser anchor. It is **C6**: carry the conditional through. Do not "fix" this by reaching further
+back; A3 settled that rule and it is still right.
+
+**The near-miss worth knowing about, because the next family will hit it too.** Modelling a
+macro moved 32 lines *out* of C5's dropped-line report without moving them into the export: they
+stopped parsing as `Raw`, so `unexportable_effect_lines` no longer saw them, and they were
+discarded on the way to `EffectCall` with nothing anywhere saying so. Modelling a macro made the
+loss quieter. `EffectScript::to_effect_calls_reporting_losses` now returns the modifiers that
+bound to nothing, from the same walk that resolves the calls, so there is one implementation of
+the anchor rule and no way to drop a line without naming it. `check_dropped_lines` reports both
+kinds together. **Any future `LAST_EFFECT_SET_*` must return its unbound lines there** or it will
+repeat this exactly.
+
+**What did land, and is worth having regardless of the corpus count:**
+
+- **The tweak-versus-script conflict is resolved.** `emit_effect_move_fn` was already writing
+  `LAST_EFFECT_SET_COLOR` for a live colour multiplier while the parser had no variant to read
+  one back — so a script's own tint was deleted and a tweak's survived, invisibly, because both
+  sides of `check_effect_fidelity`'s comparison had already lost the line. Now the two reconcile
+  the way A3 made rate reconcile: the override wins, exactly one line is written, and the
+  verifier warns that it replaced the script's.
+- **Panel, live, and write-back** are coherent for both macros. The plugin hooks
+  `LAST_EFFECT_SET_COLOR` / `_ALPHA` for capture and override (33 hooks now, was 31), the wire
+  carries `tint` / `alpha` as `Option` + `skip_serializing_if`, and `spawn_and_rate_sites` became
+  `spawn_and_modifier_sites` — one scan for all three, sharing `modifier_edits`.
+- **A modifier no longer ends the run for the modifier after it.** A tint followed by a rate is
+  two lines about one spawn; the parser, the capture reconstruction, and the write-back scanner
+  were each changed to agree on that, and `MODIFIER_COMMANDS` in
+  [acmd_src.rs](src/acmd_src.rs) is the list to extend when a fourth arrives.
+
+**Deliberate non-goals:**
+
+- The tweak's fourth colour component is still ignored on export. It is the live form's alpha,
+  which no panel exposes and which `live_tweak_from_override` does not test for identity, so
+  emitting it would ship an opacity the user never set. Surfacing it is a live-override task,
+  not this one.
+- `num` for the tint and alpha slots, not the bare `to_string` the rate uses. Every one of the 65
+  colour calls in the archive is written with a decimal point while its rates are whole numbers;
+  matching each macro's own spelling is what keeps a re-exported vanilla script textually
+  identical to its source.
+
+### [ ] C7 — The last four `LAST_EFFECT_SET_*` members
+
+What C1 left. Corpus counts and wrapper status, all verified against the full `macros.rs`
+declaration list:
 
 | macro | args | corpus | `macros.rs` wrapper |
 |---|---|---|---|
-| `LAST_EFFECT_SET_COLOR` | 3 (`ToF32`) | 65 | yes |
-| `LAST_EFFECT_SET_RATE` | 1 (`ToF32`) | 27 | yes — **done, A3** |
-| `LAST_EFFECT_SET_ALPHA` | 1 (`ToF32`) | 4 | yes |
 | `LAST_PARTICLE_SET_COLOR` | 3 (`ToF32`) | 1 | yes |
 | `LAST_EFFECT_SET_WORK_INT` | — | 1 | **NO** |
 | `LAST_EFFECT_SET_SCALE_W` | 3 (`ToF32`) | 0 | yes |
 | `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` | 1 (`ToF32`) | 0 | yes |
 
-Colour is the whole task by value: 65 occurrences, more than rate's 27. `_SCALE_W` and
-`_OFFSET_TO_CAMERA_FLAT` appear **nowhere** in the local corpus — they are exportable but
-have no vanilla usage to test against, so do them last or not at all.
+**This is a low-value entry and should probably stay open forever.** Two of the four appear
+nowhere in the corpus, and the other two appear once each. C1's result is the argument against
+doing it: modelling a whole family recovered five real calls. Take it only if a user asks for
+one of these by name.
 
-**C5 sharpened the colour case.** Of those 65, **33 sit in effect scripts the export
-regenerates, so they are deleted today** — the single most-deleted line in the corpus. Worse,
-`emit_effect_move_fn` already *writes* `LAST_EFFECT_SET_COLOR` for a live colour tweak while
-the parser has no variant to read one back. So a script's own colour modifier is dropped and a
-tweak's survives, and the fidelity check cannot see the difference because both sides of its
-comparison have already lost the line. C5's warning now names each one; C1 is what removes it.
-
-**`LAST_EFFECT_SET_WORK_INT` is the `AREA_WIND_2ND` situation again**, verified against the
-full wrapper list: `sv_animcmd` has it, the archive uses it once, and `macros.rs` does not
-declare it. If it is modelled at all it must be parse-only, with a verifier blocker on export
-— the same shape as `WIND_MACRO_COMMANDS` / `has_macro_wrapper` in [data.rs](src/data.rs).
-Every argument in the rest of the family is generic over `ToF32`, so use `ArgValue::ToF32` and
-plain `to_string`, never `num`.
-
-- **Work order:** `EffectCall` gained one `Option` field for rate. Five more would be five more
-  fields; consider a single modifier block instead. Whatever the shape, the `None` vs
-  `Some(default)` distinction A3 established has to survive it: "no line" and "a line setting
-  the default" are different exports.
-- **Do not forget `check_effect_fidelity`.** A new field on `EffectCall` is not verified until
-  it is compared there — the corpus oracle will not catch it. That is exactly how A3's rate
-  stayed broken.
-- **Trap:** kind-level colour/speed overrides already exist on the live wire and apply to
-  *every* spawn of an effect. These are per-spawn. Read the comment above `LiveOverride`
-  ([game_link.rs:399](src/game_link.rs:399)) before wiring anything — conflating per-kind with
-  per-emitter recoloured whole effects once already. A3 hit the export half of this: a live
-  speed tweak and a script rate both wanted to write a `LAST_EFFECT_SET_RATE` line. The
-  override wins, exactly one line is emitted, and the verifier warns. Colour needs the same
-  reconciliation, and `emit_effect_move_fn` already has the shape to copy.
+- `LAST_PARTICLE_SET_COLOR` targets the last *particle*, not the last effect. It is not a fourth
+  member of C1's family and must not share its anchor — check what the game binds it to before
+  modelling it at all.
+- **`LAST_EFFECT_SET_WORK_INT` is the `AREA_WIND_2ND` situation again**: `sv_animcmd` has it, the
+  archive uses it once, and `macros.rs` does not declare it. If it is modelled it must be
+  parse-only, with a verifier blocker on export — the same shape as `WIND_MACRO_COMMANDS` /
+  `has_macro_wrapper` in [data.rs](src/data.rs).
+- Whatever is added, return its unbound lines from `to_effect_calls_reporting_losses`. See C1.
 
 ### [ ] C2 — Sword trail joints
 
@@ -565,14 +618,14 @@ scripts produce calls, and **32 of them (24%) lose at least one line.** By head 
 
 | Count | Line | Note |
 |---|---|---|
-| 33 | `macros::LAST_EFFECT_SET_COLOR` | The biggest single loss, and C1's territory. Sharpest detail: the *emitter* writes this macro for a live colour tweak while the parser has no variant for it, so a script's own colour modifier is dropped and a tweak's is not. |
+| 33 | `macros::LAST_EFFECT_SET_COLOR` | The biggest single loss. **C1 modelled it and this barely moved:** all but one of these are cut off from their spawn by a costume `if`, so they now bind to nothing and are reported as unbound rather than as unparsed. Still deleted, still named, now C6's. |
 | 62 | `if` / `if !WorkModule::is_flag` / `if get_value_float` / `else {` | Conditional effects export as unconditional. Bigger than C5 and bigger than C6 — see E2's neighbourhood, and note `has_unmodelled_flow` already gates the *timing* checks on this but nothing gates the export. |
 | 7 | `wait_loop_sync_mot` | A timing primitive with no `EffectStmt` variant. |
-| 4 | `macros::LAST_EFFECT_SET_ALPHA` | C1. |
+| 4 | `macros::LAST_EFFECT_SET_ALPHA` | **Fixed by C1** — all four bind and survive an export. |
 | 4 | `methodlib::L2CAgent::pop…` | Not a call to model; genuinely script plumbing. |
 | 3 | `EffectModule::req_screen…` | Direct module calls, no macro wrapper involved. |
 | 2 ea | `FILL_SCREEN_MODEL_COLOR`, `CANCEL_FILL_SCREEN` | Screen-wide colour, adjacent to C3 but a different family. |
-| 1 ea | `LAST_EFFECT_SET_WORK_INT`, `COL_NORMAL`, two `EffectModule` calls | `LAST_EFFECT_SET_WORK_INT` is the A1 trap again (see C1). |
+| 1 ea | `LAST_EFFECT_SET_WORK_INT`, `COL_NORMAL`, two `EffectModule` calls | `LAST_EFFECT_SET_WORK_INT` is the A1 trap again (see C7). |
 
 **Warning, not blocker — and that is the decision to revisit if it ever looks wrong.** A real
 loss of the user's code arguably belongs in classes 1–3, which refuse the export. It is a
@@ -604,6 +657,15 @@ target list; read it first.
 - **Trap:** 62 of the dropped lines are `if` / `else` headers, and carrying those through in
   position without carrying their closing brace produces Rust that does not compile. Either
   handle the whole conditional as a unit or exclude flow from this task and say so.
+- **The conditional half is now the larger half, and C1 is the evidence.** C1 modelled
+  `LAST_EFFECT_SET_COLOR` on all five surfaces and recovered *one* of 65 corpus calls, because
+  the other 64 sit inside a costume check that separates them from their spawn. Excluding flow
+  from this task therefore excludes most of its value — the residue C5 measured is mostly
+  conditionals, not unmodelled macros. Scope accordingly, and note that binding across the
+  branch is not the answer: those tints are real on one costume only.
+- **Also carry the unbound modifiers.** `to_effect_calls_reporting_losses` already returns the
+  `LAST_EFFECT_SET_*` lines that bound to no spawn. Those are lines with a typed variant that
+  still do not reach the export, and they need the same treatment as the untyped ones.
 - **Do this alongside:** once the lines are carried in the IR, make `ModProject` carry them too
   and pass `Some(script)` at [acmd_verify.rs:161](src/acmd_verify.rs:161), closing C5's one
   known gap.
@@ -672,7 +734,7 @@ Highest-leverage task in Part 1, and the one most likely to break things.
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks**
-([acmd_verify.rs:894](src/acmd_verify.rs:894)) — the editor does not model animation rate, and
+([acmd_verify.rs:941](src/acmd_verify.rs:941)) — the editor does not model animation rate, and
 a timing warning that guesses is worse than none. Modelling rate would re-enable those checks
 for a large slice of the corpus.
 

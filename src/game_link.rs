@@ -111,6 +111,16 @@ pub struct SpawnRuleWire {
     /// rate line if there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate: Option<f32>,
+    /// Per-spawn tint and opacity — the live counterparts of `LAST_EFFECT_SET_COLOR` and
+    /// `LAST_EFFECT_SET_ALPHA`, applied and rewritten exactly the way `rate` is.
+    ///
+    /// Not to be confused with `color` below, which is a whole-fighter `FLASH` / `BURN_COLOR`
+    /// payload keyed on a command name rather than an effect kind. These two are scoped to one
+    /// spawn of one effect, like everything else above them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tint: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<f32>,
     /// Live values for a colour command. For such a rule `eff_hash` is hash40 of the
     /// lowercased command name — `burn_color`, not an effect kind — because these macros name
     /// no effect at all; see `SpawnRule::color` in the plugin for why that field is reused.

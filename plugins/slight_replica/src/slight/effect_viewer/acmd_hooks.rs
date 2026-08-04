@@ -772,37 +772,75 @@ unsafe fn log_req_vtable_once(boma: *mut smash::app::BattleObjectModuleAccessor)
     );
 }
 
-// ── Per-spawn playback rate ───────────────────────────────────────────────────
+// ── Per-spawn LAST_EFFECT_SET_* modifiers ─────────────────────────────────────
 //
-// `LAST_EFFECT_SET_RATE` takes no effect kind: it modifies whatever spawned last. So a rule
-// that retunes one spawn's rate cannot be matched at the rate line itself — there is nothing
-// there to match on. The spawn hook, which does know the kind, leaves the wanted rate here for
-// the two places that need it: the handle it applies to right after the spawn, and the
-// script's own rate line, which runs afterwards and would otherwise overwrite it.
+// None of these three takes an effect kind: they modify whatever spawned last. So a rule that
+// retunes one spawn cannot be matched at the modifier line itself — there is nothing there to
+// match on. The spawn hook, which does know the kind, leaves the wanted values here for the two
+// places that need them: the handle it applies to right after the spawn, and the script's own
+// modifier line, which runs afterwards and would otherwise overwrite them.
 //
-// `f32::to_bits` never produces `NONE`, which is a quiet NaN payload no real rate can be.
-const NO_RATE: u32 = u32::MAX;
-static PENDING_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(NO_RATE);
+// `f32::to_bits` never produces `NO_VALUE`, which is a quiet NaN payload no real value can be.
+const NO_VALUE: u32 = u32::MAX;
 
-fn set_pending_rate(rate: Option<f32>) {
-    PENDING_RATE.store(
-        rate.map(f32::to_bits).unwrap_or(NO_RATE),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-}
+/// One `Option<f32>` a hook can hand to a later hook on the same thread of execution.
+struct PendingValue(std::sync::atomic::AtomicU32);
 
-fn pending_rate() -> Option<f32> {
-    match PENDING_RATE.load(std::sync::atomic::Ordering::Relaxed) {
-        NO_RATE => None,
-        bits => Some(f32::from_bits(bits)),
+impl PendingValue {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU32::new(NO_VALUE))
+    }
+
+    fn set(&self, value: Option<f32>) {
+        self.0.store(
+            value.map(f32::to_bits).unwrap_or(NO_VALUE),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn get(&self) -> Option<f32> {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            NO_VALUE => None,
+            bits => Some(f32::from_bits(bits)),
+        }
     }
 }
 
-/// The editor's per-spawn rate, applied to the handle the spawn just produced.
+static PENDING_RATE: PendingValue = PendingValue::new();
+static PENDING_ALPHA: PendingValue = PendingValue::new();
+// Three slots rather than one, so a partially-stored tint can never be read: each component is
+// set and read on its own, and `pending_tint` only reports a colour when all three are present.
+static PENDING_TINT: [PendingValue; 3] =
+    [PendingValue::new(), PendingValue::new(), PendingValue::new()];
+
+fn set_pending_rate(rate: Option<f32>) {
+    PENDING_RATE.set(rate);
+}
+
+fn pending_rate() -> Option<f32> {
+    PENDING_RATE.get()
+}
+
+fn set_pending_tint(tint: Option<[f32; 3]>, alpha: Option<f32>) {
+    for (slot, component) in PENDING_TINT.iter().enumerate() {
+        component.set(tint.map(|rgb| rgb[slot]));
+    }
+    PENDING_ALPHA.set(alpha);
+}
+
+fn pending_tint() -> Option<[f32; 3]> {
+    Some([
+        PENDING_TINT[0].get()?,
+        PENDING_TINT[1].get()?,
+        PENDING_TINT[2].get()?,
+    ])
+}
+
+/// The editor's per-spawn modifiers, applied to the handle the spawn just produced.
 ///
 /// Called with the handle from before the spawn so a kind that created nothing is not credited
 /// with someone else's effect — `get_last_handle` keeps returning the previous one.
-unsafe fn apply_pending_rate(
+unsafe fn apply_pending_modifiers(
     boma: *mut smash::app::BattleObjectModuleAccessor,
     h_before: u32,
     h_after: u32,
@@ -812,6 +850,35 @@ unsafe fn apply_pending_rate(
     }
     if let Some(rate) = pending_rate() {
         smash::app::lua_bind::EffectModule::set_rate(boma, h_after, rate);
+    }
+    if let Some([r, g, b]) = pending_tint() {
+        smash::app::lua_bind::EffectModule::set_rgb(boma, h_after, r, g, b);
+    }
+    if let Some(alpha) = PENDING_ALPHA.get() {
+        smash::app::lua_bind::EffectModule::set_alpha(boma, h_after, alpha);
+    }
+}
+
+/// Overwrite the arguments of a `LAST_EFFECT_SET_*` call with the editor's own values.
+///
+/// Rewriting the arguments beats calling the `EffectModule` setter after the original: the
+/// original runs last either way, so anything applied before it would simply be overwritten by
+/// the script's own value. The pending values are left in place rather than cleared, because a
+/// second line of the same kind still names the same spawn and must be overridden too.
+unsafe fn override_modifier_args(lua_state: u64, values: &[f32]) {
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    let mut vals = read_all_args(&mut agent, 4);
+    // A call with fewer arguments than the override wants is not this signature, so it is left
+    // exactly as the script wrote it rather than half-rewritten.
+    if vals.len() < values.len() {
+        return;
+    }
+    for (slot, value) in values.iter().enumerate() {
+        vals[slot] = L2CValue::new_num(*value);
+    }
+    agent.clear_lua_stack();
+    for v in vals.iter_mut() {
+        agent.push_lua_stack(v);
     }
 }
 
@@ -825,20 +892,34 @@ unsafe fn hook_last_effect_set_rate(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
     crate::slight::hitbox_viewer::record(lua_state, "LAST_EFFECT_SET_RATE", &typed);
 
-    // Rewrite the argument rather than calling `set_rate` after the original: the original
-    // runs last either way, so anything applied before it would simply be overwritten by the
-    // script's own value. Left in place rather than cleared, because a second rate line still
-    // names the same spawn and must be overridden too.
     if let Some(rate) = pending_rate() {
-        let mut agent = smash::lib::L2CAgent::new(lua_state);
-        let mut vals = read_all_args(&mut agent, 4);
-        if !vals.is_empty() {
-            vals[0] = L2CValue::new_num(rate);
-            agent.clear_lua_stack();
-            for v in vals.iter_mut() {
-                agent.push_lua_stack(v);
-            }
-        }
+        override_modifier_args(lua_state, &[rate]);
+    }
+
+    original!()(lua_state);
+}
+
+/// `LAST_EFFECT_SET_COLOR` — recorded and overridden on the same terms as the rate above.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_COLOR)]
+unsafe fn hook_last_effect_set_color(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 3);
+    crate::slight::hitbox_viewer::record(lua_state, "LAST_EFFECT_SET_COLOR", &typed);
+
+    if let Some(rgb) = pending_tint() {
+        override_modifier_args(lua_state, &rgb);
+    }
+
+    original!()(lua_state);
+}
+
+/// `LAST_EFFECT_SET_ALPHA` — recorded and overridden on the same terms as the rate above.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_ALPHA)]
+unsafe fn hook_last_effect_set_alpha(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(lua_state, "LAST_EFFECT_SET_ALPHA", &typed);
+
+    if let Some(alpha) = PENDING_ALPHA.get() {
+        override_modifier_args(lua_state, &[alpha]);
     }
 
     original!()(lua_state);
@@ -857,10 +938,10 @@ unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_befor
     // across original!() is the reliable signal (a bare non-zero handle can be stale).
     let h_after = smash::app::lua_bind::EffectModule::get_last_handle(boma) as u32;
     record_spawn(args.eff_hash, h_before, h_after);
-    // Before the script's own rate line runs, so a spawn the script never retunes still gets
-    // the editor's rate. When there IS a rate line, it runs after this and would win — which
-    // is why `hook_last_effect_set_rate` rewrites its argument as well.
-    apply_pending_rate(boma, h_before, h_after);
+    // Before the script's own modifier lines run, so a spawn the script never retunes still
+    // gets the editor's values. When there IS such a line, it runs after this and would win —
+    // which is why each `hook_last_effect_set_*` rewrites its arguments as well.
+    apply_pending_modifiers(boma, h_before, h_after);
     super::track_spawn(
         boma,
         0,
@@ -909,10 +990,12 @@ macro_rules! effect_hook {
                         &typed,
                     );
                 }
-                // Cleared for every spawn, before any rule is consulted. A rate left over from
-                // the previous spawn would be applied to this one and to whatever rate line
-                // follows it, which is the exact misattribution `LAST_EFFECT_SET_RATE` invites.
+                // Cleared for every spawn, before any rule is consulted. A modifier left over
+                // from the previous spawn would be applied to this one and to whatever modifier
+                // line follows it, which is the exact misattribution the `LAST_EFFECT_SET_*`
+                // family invites.
                 set_pending_rate(None);
+                set_pending_tint(None, None);
                 // Eff-editor spawn rules: suppression + PER-SPAWN transform, both scoped to
                 // (motion, frame window) so editing one spawn doesn't affect the others.
                 let mut scoped_transform = false;
@@ -965,12 +1048,19 @@ macro_rules! effect_hook {
                         scoped_transform = true;
                     }
                     // Looked up separately from the transform: a spawn can be retuned without
-                    // being moved, so this must not sit inside the branch above.
+                    // being moved, so these must not sit inside the branch above.
                     set_pending_rate(crate::slight::effect_viewer::spawn_rules::rate_for(
                         args.eff_hash,
                         motion,
                         frame,
                     ));
+                    let (tint, alpha) = crate::slight::effect_viewer::spawn_rules::tint_for(
+                        args.eff_hash,
+                        motion,
+                        frame,
+                    )
+                    .unwrap_or((None, None));
+                    set_pending_tint(tint, alpha);
                 }
                 // Global kind pin (color/speed multipliers, or legacy global pos/rot) —
                 // only when no per-spawn transform already rewrote the args.
@@ -1608,6 +1698,8 @@ pub fn install() {
         hook_down_eff,
         hook_effect_off_kind,
         hook_last_effect_set_rate,
+        hook_last_effect_set_color,
+        hook_last_effect_set_alpha,
         hook_flash,
         hook_flash_frm,
         hook_burn_color,
@@ -1615,6 +1707,6 @@ pub fn install() {
         hook_burn_color_normal,
         hook_start_info_flash_eye,
     );
-    skyline::println!("[SLight] ACMD effect hooks installed (31 spawn/stop/colour variants)");
+    skyline::println!("[SLight] ACMD effect hooks installed (33 spawn/stop/colour variants)");
     crate::slight::diag::note("ACMD hooks installed");
 }

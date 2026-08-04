@@ -1303,6 +1303,14 @@ pub enum EffectMacro {
     EffectOffKind { effect_name: String },
     /// LAST_EFFECT_SET_RATE — modifies the rate of the last spawned effect.
     LastEffectSetRate { rate: f32 },
+    /// LAST_EFFECT_SET_COLOR — retints the last spawned effect.
+    ///
+    /// Three arguments in every one of the corpus's 65 calls, and no alpha among them: opacity
+    /// is [`LastEffectSetAlpha`](Self::LastEffectSetAlpha), a separate line and a separate
+    /// decision. Keeping them apart is what lets a script that sets only one export only one.
+    LastEffectSetColor { rgb: [f32; 3] },
+    /// LAST_EFFECT_SET_ALPHA — sets the opacity of the last spawned effect.
+    LastEffectSetAlpha { alpha: f32 },
     /// FLASH / BURN_COLOR and their relatives — see [`ColorCall`].
     Color { command: String, color: ColorCall },
     /// Any unrecognised line, preserved verbatim.
@@ -1441,6 +1449,22 @@ pub struct EffectCall {
     /// rate along instead of leaving the line behind to land on someone else's effect.
     #[serde(default)]
     pub rate: Option<f32>,
+    /// Tint from a `LAST_EFFECT_SET_COLOR` line following this spawn, as red, green, blue.
+    ///
+    /// Bound to the spawn for the same reason [`rate`](Self::rate) is, and with the same
+    /// `None` vs `Some(default)` rule: no line at all is not the same export as a line setting
+    /// white. Distinct from [`color`](Self::color), which is the payload of a `FLASH` /
+    /// `BURN_COLOR` command — that one tints the *fighter*, this one tints one spawned effect.
+    #[serde(default)]
+    pub tint: Option<[f32; 3]>,
+    /// Opacity from a `LAST_EFFECT_SET_ALPHA` line following this spawn.
+    ///
+    /// Its own field rather than a fourth component of [`tint`](Self::tint), because the two
+    /// are separate macros: a script that sets colour and not alpha must export exactly that,
+    /// and folding them together would make every recolour also write an opacity the script
+    /// never asked for.
+    #[serde(default)]
+    pub alpha: Option<f32>,
     /// Set when this entry is a colour command rather than a spawn — `FLASH`, `BURN_COLOR`,
     /// and the rest of [`COLOR_COMMANDS`], with `spawn_func` naming which one.
     ///
@@ -1485,9 +1509,26 @@ pub enum EffectCallOp {
 impl EffectScript {
     /// Flatten the script into resolved `EffectCall`s with computed frame ranges.
     pub fn to_effect_calls(&self) -> Vec<EffectCall> {
+        self.to_effect_calls_reporting_losses().0
+    }
+
+    /// The resolved calls, plus every `LAST_EFFECT_SET_*` line that bound to no spawn.
+    ///
+    /// The second half exists because a modifier this parser understands but cannot attach is
+    /// *worse* than one it never understood: an unrecognised line is reported as dropped by
+    /// [`crate::acmd::unexportable_effect_lines`], while a recognised one that binds to nothing
+    /// is simply discarded here and would leave no trace anywhere. That is the trap C1 walked
+    /// into — modelling `LAST_EFFECT_SET_COLOR` moved 32 of the corpus's 65 calls out of the
+    /// dropped-line report without moving them into the export, because they sit inside
+    /// costume-gated `if` blocks that separate them from their spawn.
+    ///
+    /// Returned from the same walk that resolves the calls, rather than computed beside it, so
+    /// there is exactly one implementation of the rule deciding what a modifier binds to.
+    pub fn to_effect_calls_reporting_losses(&self) -> (Vec<EffectCall>, Vec<String>) {
         let mut calls: Vec<EffectCall> = Vec::new();
-        eval_effect_stmts(&self.stmts, 0.0, &mut calls);
-        calls
+        let mut unbound: Vec<String> = Vec::new();
+        eval_effect_stmts(&self.stmts, 0.0, &mut calls, &mut unbound);
+        (calls, unbound)
     }
 }
 
@@ -1511,7 +1552,12 @@ pub(crate) fn script_to_motion_frame(frame: u32) -> f32 {
     frame.saturating_sub(1) as f32
 }
 
-fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<EffectCall>) -> f32 {
+fn eval_effect_stmts(
+    stmts: &[EffectStmt],
+    start_frame: f32,
+    calls: &mut Vec<EffectCall>,
+    unbound: &mut Vec<String>,
+) -> f32 {
     let mut frame = start_frame;
     for stmt in stmts {
         match stmt {
@@ -1564,6 +1610,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 extra_args: Some(extra_args.clone()),
                                 raw_line: None,
                                 rate: None,
+                                tint: None,
+                                alpha: None,
                                 color: None,
                             });
                             anchor = Some(calls.len() - 1);
@@ -1598,6 +1646,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
                                 rate: None,
+                                tint: None,
+                                alpha: None,
                                 color: None,
                             });
                             // Deliberately NOT an anchor. A trail produces an `EffectCall` for
@@ -1618,11 +1668,28 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                         }
                         EffectMacro::LastEffectSetRate { rate } => {
                             // `anchor` is left in place: two rate lines in a row both name the
-                            // same spawn, and the later one wins, exactly as in game.
-                            if let Some(index) = anchor {
-                                calls[index].rate = Some(*rate);
+                            // same spawn, and the later one wins, exactly as in game. The same
+                            // is true across modifiers — a colour line after a rate line still
+                            // names the spawn above both — which is why none of these three
+                            // arms clears it.
+                            match anchor {
+                                Some(index) => calls[index].rate = Some(*rate),
+                                None => unbound
+                                    .push(format!("macros::LAST_EFFECT_SET_RATE(agent, {rate});")),
                             }
                         }
+                        EffectMacro::LastEffectSetColor { rgb } => match anchor {
+                            Some(index) => calls[index].tint = Some(*rgb),
+                            None => unbound.push(format!(
+                                "macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});",
+                                rgb[0], rgb[1], rgb[2]
+                            )),
+                        },
+                        EffectMacro::LastEffectSetAlpha { alpha } => match anchor {
+                            Some(index) => calls[index].alpha = Some(*alpha),
+                            None => unbound
+                                .push(format!("macros::LAST_EFFECT_SET_ALPHA(agent, {alpha});")),
+                        },
                         EffectMacro::Color { command, color } => {
                             calls.push(EffectCall {
                                 effect_name: String::new(),
@@ -1643,6 +1710,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 extra_args: None,
                                 raw_line: None,
                                 rate: None,
+                                tint: None,
+                                alpha: None,
                                 color: Some(color.clone()),
                             });
                             // Not a spawn, so not a rate anchor — a `LAST_EFFECT_SET_RATE`
@@ -1656,7 +1725,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
             }
             EffectStmt::Loop { count, body } => {
                 for _ in 0..*count {
-                    frame = eval_effect_stmts(body, frame, calls);
+                    frame = eval_effect_stmts(body, frame, calls, unbound);
                 }
             }
         }

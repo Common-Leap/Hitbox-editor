@@ -3991,6 +3991,8 @@ impl VisionaryApp {
                     extra_args: None,
                     raw_line: None,
                     rate: None,
+                    tint: None,
+                    alpha: None,
                     color: Some(crate::data::ColorCall {
                         transition: None,
                         rgba: Some([1.0, 1.0, 1.0, 0.5]),
@@ -4034,6 +4036,8 @@ impl VisionaryApp {
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
                     rate: None,
+                    tint: None,
+                    alpha: None,
                     // This button adds a spawn. Colour commands are added by their own button
                     // below, because the two share a list but nothing else.
                     color: None,
@@ -4516,6 +4520,109 @@ impl VisionaryApp {
                                 });
                                 match pristine.as_ref().map(|p| p.rate) {
                                     Some(Some(rate)) => orig(ui, format!("orig {rate:.2}")),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+
+                                // Tint and opacity — the `LAST_EFFECT_SET_COLOR` and
+                                // `LAST_EFFECT_SET_ALPHA` lines beneath this spawn. Same
+                                // reasoning as the rate above, and the same checkbox rule: off
+                                // writes no line, which is not the same as writing white.
+                                //
+                                // Two rows rather than one RGBA row, because they are two
+                                // macros. A script that recolours without setting an opacity is
+                                // common — 65 colour calls against 4 alpha ones — and folding
+                                // them together would make every recolour write an opacity line
+                                // the script never had.
+                                ui.label("Tint");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.tint.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Recolour this one spawn. Off writes no \
+                                             LAST_EFFECT_SET_COLOR line at all.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.tint = on.then_some([1.0, 1.0, 1.0]);
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(tint) = ec.tint.as_mut() {
+                                        // Unclamped drags beside a clamped picker, for the same
+                                        // reason the FLASH row above does it: the corpus writes
+                                        // `LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5)`, whose
+                                        // green and blue a 0..=1 picker would silently dim.
+                                        let mut picked = tint.map(|v| v.clamp(0.0, 1.0));
+                                        if ui.color_edit_button_rgb(&mut picked).changed() {
+                                            *tint = picked;
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                        for v in tint.iter_mut() {
+                                            if ui.add(egui::DragValue::new(v).speed(0.01)).changed()
+                                            {
+                                                changed = true;
+                                                respawn_needed = true;
+                                            }
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.tint) {
+                                    Some(Some(was)) => orig(
+                                        ui,
+                                        format!("orig [{:.3} {:.3} {:.3}]", was[0], was[1], was[2]),
+                                    ),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+
+                                ui.label("Opacity");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.alpha.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Fade this one spawn. Off writes no \
+                                             LAST_EFFECT_SET_ALPHA line at all.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.alpha = on.then_some(1.0);
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(alpha) = ec.alpha.as_mut() {
+                                        if ui
+                                            .add(egui::DragValue::new(alpha).speed(0.01))
+                                            .changed()
+                                        {
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.alpha) {
+                                    Some(Some(was)) => orig(ui, format!("orig {was:.3}")),
                                     Some(None) => orig(ui, "orig none".to_string()),
                                     None => {
                                         ui.label("");
@@ -6341,10 +6448,12 @@ impl VisionaryApp {
                     .collect::<Option<Vec<_>>>()
             }),
             raw_line: None,
-            // A spawn call carries no rate of its own — it arrives as the separate
-            // `LAST_EFFECT_SET_RATE` capture line that follows, and is attached in
+            // A spawn call carries none of the three modifiers of its own — each arrives as its
+            // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
             rate: None,
+            tint: None,
+            alpha: None,
             // `effect_capture_layout` above only matches spawn families, so nothing that
             // reaches here is a colour command; those are built by `color_call_from_capture`.
             color: None,
@@ -6398,6 +6507,8 @@ impl VisionaryApp {
             extra_args: None,
             raw_line: None,
             rate: None,
+            tint: None,
+            alpha: None,
             color: Some(crate::data::ColorCall { transition, rgba }),
         })
     }
@@ -6543,11 +6654,12 @@ impl VisionaryApp {
                 anchor = pushed.then(|| effects.len() - 1);
                 continue;
             }
-            // `LAST_EFFECT_SET_RATE` names no effect kind: it modifies whatever spawned last,
-            // so it binds to the capture line above it exactly as the parser binds it to the
-            // macro above it in a script. The sort is stable and both lines share a frame, so
-            // the spawn is still the previous entry here. `anchor` survives, because a second
-            // rate line targets the same spawn and the later one wins.
+            // The `LAST_EFFECT_SET_*` modifiers name no effect kind: they modify whatever
+            // spawned last, so each binds to the capture line above it exactly as the parser
+            // binds it to the macro above it in a script. The sort is stable and the lines share
+            // a frame, so the spawn is still the previous entry here. `anchor` survives all
+            // three, because a second modifier line targets the same spawn and the later one
+            // wins — and a tint followed by a rate is two lines about one spawn.
             if line.func == "LAST_EFFECT_SET_RATE" {
                 if let (Some(rate), Some(index)) =
                     (line.args.first().and_then(|arg| arg.as_f32()), anchor)
@@ -6556,9 +6668,26 @@ impl VisionaryApp {
                 }
                 continue;
             }
+            if line.func == "LAST_EFFECT_SET_COLOR" {
+                let component = |slot: usize| line.args.get(slot).and_then(|arg| arg.as_f32());
+                if let (Some(r), Some(g), Some(b), Some(index)) =
+                    (component(0), component(1), component(2), anchor)
+                {
+                    effects[index].tint = Some([r, g, b]);
+                }
+                continue;
+            }
+            if line.func == "LAST_EFFECT_SET_ALPHA" {
+                if let (Some(alpha), Some(index)) =
+                    (line.args.first().and_then(|arg| arg.as_f32()), anchor)
+                {
+                    effects[index].alpha = Some(alpha);
+                }
+                continue;
+            }
             // A colour command produces an entry in this list but is not a spawn, so it ends a
-            // rate's binding rather than becoming its anchor — the same rule the script parser
-            // applies to the `FLASH` line above a `LAST_EFFECT_SET_RATE`.
+            // modifier's binding rather than becoming its anchor — the same rule the script
+            // parser applies to the `FLASH` line above a `LAST_EFFECT_SET_RATE`.
             if crate::data::is_color_command(&line.func) {
                 if let Some(color) =
                     Self::color_call_from_capture(&line.func, &line.args, line.frame)
@@ -9696,6 +9825,8 @@ impl VisionaryApp {
                                 rot: None,
                                 scale: None,
                                 rate: None,
+                                tint: None,
+                                alpha: None,
                                 color: None,
                                 transition: None,
                                 inject: None,
@@ -9710,6 +9841,8 @@ impl VisionaryApp {
                                 rot: None,
                                 scale: None,
                                 rate: None,
+                                tint: None,
+                                alpha: None,
                                 color: None,
                                 transition: None,
                                 inject: Some(inject),
@@ -9863,6 +9996,8 @@ impl VisionaryApp {
                     rot: None,
                     scale: None,
                     rate: None,
+                    tint: None,
+                    alpha: None,
                     color: None,
                     transition: None,
                     inject: None,
@@ -9884,6 +10019,8 @@ impl VisionaryApp {
                     rot: None,
                     scale: None,
                     rate: None,
+                    tint: None,
+                    alpha: None,
                     color: None,
                     transition: None,
                     inject: Some(Self::build_effect_stop_inject(ec)),
@@ -9916,6 +10053,8 @@ impl VisionaryApp {
                         rot: None,
                         scale: None,
                         rate: None,
+                        tint: None,
+                        alpha: None,
                         color: None,
                         transition: None,
                         inject: None,
@@ -9934,7 +10073,11 @@ impl VisionaryApp {
                         // alone — the script's `LAST_EFFECT_SET_RATE` line is a separate call
                         // and is not in it. So a retimed or swapped spawn with any rate at
                         // all has to be told its rate, not just one whose rate was edited.
+                        // Tint and opacity are separate lines for the same reason and are sent
+                        // on the same unconditional terms.
                         rate: ec.rate,
+                        tint: ec.tint,
+                        alpha: ec.alpha,
                         color: None,
                         transition: None,
                         inject: Some(inject),
@@ -9948,15 +10091,23 @@ impl VisionaryApp {
             let moved = pristine
                 .map(|p| p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale)
                 .unwrap_or(true);
-            // The rate rides along on the same rule, and is sent on its own terms: a spawn
-            // whose rate changed but which has not been moved still needs a rule, and one
-            // that moved but kept its rate must not claim to set one. Sending the rate
-            // unconditionally would override the script's own `LAST_EFFECT_SET_RATE` with a
-            // copy of itself, which is harmless until the user edits the script text.
+            // The three `LAST_EFFECT_SET_*` modifiers ride along on the same rule, and each is
+            // sent on its own terms: a spawn whose rate changed but which has not been moved
+            // still needs a rule, and one that moved but kept its rate must not claim to set
+            // one. Sending a modifier unconditionally would override the script's own line
+            // with a copy of itself, which is harmless until the user edits the script text.
+            // They are tested separately rather than as one "any modifier changed" flag,
+            // because recolouring a spawn must not also restate a rate the user never touched.
             let retuned = pristine
                 .map(|p| p.rate != ec.rate)
                 .unwrap_or(ec.rate.is_some());
-            if moved || retuned {
+            let retinted = pristine
+                .map(|p| p.tint != ec.tint)
+                .unwrap_or(ec.tint.is_some());
+            let refaded = pristine
+                .map(|p| p.alpha != ec.alpha)
+                .unwrap_or(ec.alpha.is_some());
+            if moved || retuned || retinted || refaded {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
@@ -9967,6 +10118,8 @@ impl VisionaryApp {
                     rot: moved.then_some(ec.rotation),
                     scale: moved.then_some(ec.scale),
                     rate: retuned.then_some(ec.rate).flatten(),
+                    tint: retinted.then_some(ec.tint).flatten(),
+                    alpha: refaded.then_some(ec.alpha).flatten(),
                     color: None,
                     transition: None,
                     inject: None,
@@ -10077,6 +10230,8 @@ impl VisionaryApp {
             rot: None,
             scale: None,
             rate: None,
+            tint: None,
+            alpha: None,
             color: None,
             transition: None,
             inject: None,

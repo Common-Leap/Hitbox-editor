@@ -448,6 +448,36 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // Tint and opacity for the last spawned effect. Both arities are uniform across the
+        // whole corpus — 65 `(agent, r, g, b)` and 4 `(agent, a)` — so a call of the wrong
+        // length is not a variant to interpret but a line this parser does not understand, and
+        // falls through to `Raw` rather than being padded into shape. A component that will not
+        // parse does the same: these arguments are the entire content of the call, so defaulting
+        // one means recolouring an effect the script never recoloured.
+        if line.contains("macros::LAST_EFFECT_SET_COLOR(") {
+            if let Some(t) = try_extract("macros::LAST_EFFECT_SET_COLOR(") {
+                if t.len() > 3 {
+                    let component = |i: usize| t[i].trim().parse::<f32>().ok();
+                    if let (Some(r), Some(g), Some(b)) = (component(1), component(2), component(3))
+                    {
+                        macros.push(EffectMacro::LastEffectSetColor { rgb: [r, g, b] });
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if line.contains("macros::LAST_EFFECT_SET_ALPHA(") {
+            if let Some(t) = try_extract("macros::LAST_EFFECT_SET_ALPHA(") {
+                if t.len() > 1 {
+                    if let Ok(alpha) = t[1].trim().parse::<f32>() {
+                        macros.push(EffectMacro::LastEffectSetAlpha { alpha });
+                        continue;
+                    }
+                }
+            }
+        }
+
         // FLASH / BURN_COLOR and friends: not spawns, but they belong to the effect timeline
         // and the export regenerates that timeline from scratch, so a line left unmodelled
         // here is a line the export drops.
@@ -553,6 +583,8 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::AFTER_IMAGE_ON")
             || line.contains("macros::AFTER_IMAGE_OFF(")
             || line.contains("macros::LAST_EFFECT_SET_RATE(")
+            || line.contains("macros::LAST_EFFECT_SET_COLOR(")
+            || line.contains("macros::LAST_EFFECT_SET_ALPHA(")
             || color_macro_layout(line).is_some();
         if is_effect_macro {
             let effect_macros = parse_excute_block_effects(&[line]);
@@ -1521,12 +1553,38 @@ fn emit_effect_move_fn(
         for call in starts {
             out.push_str(&emit_spawn_call(call, "        "));
             let tweak = tweaks.get(&tweak_hash(&call.effect_name));
-            if let Some([r, g, b, _a]) = tweak.and_then(|tw| tw.color) {
+            // One tint line, never two, on exactly the terms the rate below uses: a live colour
+            // multiplier is a deliberate replacement of this kind's tint, so it wins over the
+            // spawn's own `LAST_EFFECT_SET_COLOR`. Before this the script's line was not in
+            // `EffectCall` at all, so there was nothing to reconcile with — the export wrote the
+            // tweak's tint and silently deleted the script's, which is the loss C5 measured at
+            // 33 occurrences and the reason this is the biggest single item in the family.
+            //
+            // The tweak's fourth component is deliberately ignored. It is the live form's alpha,
+            // which no panel exposes and `live_tweak_from_override` does not test for identity,
+            // so emitting it would ship an opacity the user never set.
+            let tint = tweak
+                .and_then(|tw| tw.color)
+                .map(|[r, g, b, _a]| [r, g, b])
+                .or(call.tint);
+            if let Some([r, g, b]) = tint {
+                // `num`, not the bare `to_string` the rate uses, because every one of the 65
+                // colour calls in the archive is written with a decimal point while its rates
+                // are whole numbers. Matching each macro's own spelling is what keeps a
+                // re-exported vanilla script textually identical to the one it came from.
                 out.push_str(&format!(
                     "        macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
                     num(r),
                     num(g),
                     num(b)
+                ));
+            }
+            if let Some(alpha) = call.alpha {
+                // No tweak counterpart to reconcile with: the live override has no opacity
+                // control, so a spawn's alpha can only ever come from its own script line.
+                out.push_str(&format!(
+                    "        macros::LAST_EFFECT_SET_ALPHA(agent, {});\n",
+                    num(alpha)
                 ));
             }
             // One rate line, never two. A live speed tweak is a deliberate override of this
@@ -2406,6 +2464,8 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 ),
                 raw_line: None,
                 rate: None,
+                tint: None,
+                alpha: None,
                 color: None,
             },
             crate::data::EffectCall {
@@ -2423,6 +2483,8 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 extra_args: Some(vec!["true".into()]),
                 raw_line: None,
                 rate: None,
+                tint: None,
+                alpha: None,
                 color: None,
             },
         ];
@@ -2778,6 +2840,134 @@ unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// Kirby's up air, verbatim, and Kirby's jab, verbatim — the two vanilla shapes for the
+    /// colour and opacity modifiers. Both were deleted by every export before C1: the emitter
+    /// rebuilds the function from `EffectCall`s, and neither line was in one.
+    ///
+    /// The green and blue here are over one, which is why the panel's drag fields are not
+    /// clamped to the colour picker's range.
+    #[test]
+    fn a_tint_and_an_opacity_bind_to_the_spawn_above_and_survive_an_export() {
+        let src = r#"
+unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("kirby_attack_arc"), Hash40::new("kirby_attack_arc"), Hash40::new("top"), -3, 7, 0, 0, 90, 90, 1, true, *EF_FLIP_YZ);
+        macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5);
+        macros::EFFECT(agent, Hash40::new("sys_attack_impact"), Hash40::new("top"), 13, 6, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 360, false);
+        macros::LAST_EFFECT_SET_ALPHA(agent, 0.7);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].tint, Some([0.25, 1.3, 2.5]));
+        // Each modifier lands on its own spawn and nowhere else. Sharing one field, or reaching
+        // past the second spawn, would put the arc's colour on the impact or vice versa.
+        assert_eq!(calls[0].alpha, None);
+        assert_eq!(calls[1].tint, None);
+        assert_eq!(calls[1].alpha, Some(0.7));
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "attackairhi", &Default::default());
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5);"),
+            "the script's own tint must be written back out:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_ALPHA(agent, 0.7);"),
+            "the script's own opacity must be written back out:\n{emitted}"
+        );
+        let round_tripped = parse_effect_script(&emitted).to_effect_calls();
+        assert_eq!(
+            round_tripped.iter().map(|c| c.tint).collect::<Vec<_>>(),
+            vec![Some([0.25, 1.3, 2.5]), None]
+        );
+        assert_eq!(
+            round_tripped.iter().map(|c| c.alpha).collect::<Vec<_>>(),
+            vec![None, Some(0.7)]
+        );
+    }
+
+    /// Dolly's up special, verbatim: the shape 64 of the corpus's 65 colour calls are in, and
+    /// the reason modelling this macro recovered almost none of them.
+    ///
+    /// The tint is real at runtime — the game's "last effect" survives the block boundary — but
+    /// it only runs on one costume. Binding it would export a costume-specific colour as an
+    /// unconditional one. So it binds to nothing, and the point of this test is that refusing
+    /// it is not the same as forgetting it: the line comes back from
+    /// `to_effect_calls_reporting_losses` so the export report can still name it.
+    #[test]
+    fn a_tint_cut_off_from_its_spawn_by_a_branch_is_refused_but_not_forgotten() {
+        let src = r#"
+unsafe extern "C" fn effect_specialhicommand(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_ALPHA(agent, Hash40::new("dolly_roll_l_color1"), Hash40::new("throw"), 0, 2.5, 0, 0, 0, 0, 1, true, 0.8);
+    }
+    if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){
+        if macros::is_excute(agent) {
+            macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);
+        }
+    }
+}
+"#;
+        let (calls, unbound) = parse_effect_script(src).to_effect_calls_reporting_losses();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].tint, None,
+            "a costume-gated tint must not be exported onto every costume"
+        );
+        assert_eq!(
+            unbound,
+            vec!["macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"],
+            "refusing to bind the line must not make it vanish from the export report"
+        );
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialhicommand", &Default::default());
+        assert!(
+            !emitted.contains("LAST_EFFECT_SET_COLOR"),
+            "a tint that could not be attached must not be invented onto a spawn:\n{emitted}"
+        );
+    }
+
+    /// A live colour multiplier and a script tint both want the same line. The override wins,
+    /// exactly one line is written, and the script's value is not silently added underneath it.
+    ///
+    /// Before C1 this could not be got wrong, because the script's tint was not in `EffectCall`
+    /// at all — the export wrote the tweak's colour and deleted the script's without a word.
+    #[test]
+    fn a_live_colour_override_replaces_the_scripts_tint_rather_than_stacking_with_it() {
+        let src = r#"
+unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("kirby_attack_arc"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+        macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls[0].tint, Some([0.25, 1.3, 2.5]));
+        let tweaks = std::collections::HashMap::from([(
+            tweak_hash("kirby_attack_arc"),
+            crate::mod_project::LiveTweak {
+                effect_name: "kirby_attack_arc".into(),
+                color: Some([1.0, 0.0, 0.0, 1.0]),
+                speed: None,
+            },
+        )]);
+        let (_, emitted) = emit_effect_move_fn(&calls, "attackairhi", &tweaks);
+        assert_eq!(
+            emitted.matches("LAST_EFFECT_SET_COLOR").count(),
+            1,
+            "exactly one tint line, or the export says two different things:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_COLOR(agent, 1.0, 0.0, 0.0);"),
+            "the live override is the one that must survive:\n{emitted}"
+        );
+    }
+
     /// The rate macro names no effect, so binding it to anything but the spawn directly above
     /// it is a guess. A line this parser does not model could itself be a spawn, and then the
     /// rate would be written onto an effect it was never meant to touch.
@@ -3095,6 +3285,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             extra_args: None,
             raw_line: None,
             rate: None,
+            tint: None,
+            alpha: None,
             color: None,
         };
         let (_, emitted) = emit_effect_move_fn(&[call], "test", &Default::default());

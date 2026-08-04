@@ -536,6 +536,10 @@ fn check_effect_fidelity(
             // `(spawn_func, effect_name)` alone and a colour command has no effect name at
             // all — every one of them would pair up and compare equal without this line.
             color,
+            // Opacity has no live override to legitimately replace it, unlike the tint and
+            // rate below, so any difference at all is the export losing or inventing a
+            // `LAST_EFFECT_SET_ALPHA` line.
+            alpha,
         );
         for difference in out {
             report.blocker(
@@ -545,6 +549,40 @@ fn check_effect_fidelity(
                     want.effect_name, want.active_start
                 ),
             );
+        }
+
+        // Tint is checked apart from the fields above for the same reason the rate below is:
+        // a live colour multiplier is meant to replace the spawn's authored tint. Said out
+        // loud either way — the user set a multiplier on an effect kind and it quietly took
+        // over a colour the script had chosen, which is worth knowing before shipping.
+        if got.tint != want.tint {
+            let override_tint = tweaks
+                .iter()
+                .find(|tweak| tweak.effect_name.eq_ignore_ascii_case(&want.effect_name))
+                .and_then(|tweak| tweak.color)
+                .map(|[r, g, b, _a]| [r, g, b]);
+            if override_tint == got.tint {
+                report.warn(
+                    subject,
+                    format!(
+                        "spawn {} on frame {} ships the live colour override instead of the \
+                         tint its script sets ({})",
+                        want.effect_name,
+                        want.active_start,
+                        want.tint
+                            .map(|[r, g, b]| format!("{r}, {g}, {b}"))
+                            .unwrap_or("none".into()),
+                    ),
+                );
+            } else {
+                report.blocker(
+                    subject,
+                    format!(
+                        "spawn {} on frame {} exported a different tint",
+                        want.effect_name, want.active_start
+                    ),
+                );
+            }
         }
 
         // Rate is checked apart from the fields above because one difference is legitimate:
@@ -594,10 +632,19 @@ fn check_effect_fidelity(
 /// export at all — worse for every user who does not care about the dropped line, and no better
 /// for the ones who do, since the message is the same either way.
 fn check_dropped_lines(subject: &str, source: &EffectScript, report: &mut Report) {
+    // Two ways to lose a line, and they must be reported together or modelling a macro would
+    // *shrink* this report without shrinking the loss. The first is a line with no typed
+    // variant. The second is a `LAST_EFFECT_SET_*` that parses perfectly and then binds to no
+    // spawn — 32 of the corpus's 65 colour calls sit inside costume-gated `if` blocks that cut
+    // them off from the spawn above, and before this they moved out of the first list and into
+    // silence. See `EffectScript::to_effect_calls_reporting_losses`.
+    let mut lost = crate::acmd::unexportable_effect_lines(source);
+    lost.extend(source.to_effect_calls_reporting_losses().1);
+
     // Grouped by text and kept in first-seen order: a line inside a `for` body is genuinely
     // lost once per iteration, but saying so five times reads as five different problems.
     let mut seen: Vec<(String, usize)> = Vec::new();
-    for line in crate::acmd::unexportable_effect_lines(source) {
+    for line in lost {
         match seen.iter_mut().find(|(text, _)| *text == line) {
             Some((_, count)) => *count += 1,
             None => seen.push((line, 1)),
@@ -1243,17 +1290,20 @@ mod tests {
     }
 
     /// The whole point of C5: an effect script's unmodelled lines do not survive an export, and
-    /// before this nothing said which ones. `LAST_EFFECT_SET_COLOR` is the case worth pinning —
-    /// 33 occurrences in the cache, the single most-deleted line in the corpus, and one the
-    /// *emitter* writes for live colour tweaks while the parser has no variant for it, so a
-    /// script's own colour modifier is dropped on the way through.
+    /// before this nothing said which ones. `FILL_SCREEN_MODEL_COLOR` is a real corpus line with
+    /// no typed variant, and its `CANCEL_FILL_SCREEN` partner makes the pair worth pinning — a
+    /// move exported today loses a full-screen tint and the call that ends it.
+    ///
+    /// This test was written against `LAST_EFFECT_SET_COLOR` and had to be moved off it when C1
+    /// modelled that macro — which is exactly what the premise assertion below is for. Move it
+    /// again rather than deleting it when this line is modelled too.
     #[test]
     fn a_line_the_export_cannot_reproduce_is_named_rather_than_silently_deleted() {
         let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 5.0);
     if macros::is_excute(agent) {
         macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
-        macros::LAST_EFFECT_SET_COLOR(agent, 1, 0.5, 0);
+        macros::FILL_SCREEN_MODEL_COLOR(agent, 1, 0.5, 0, 0.7);
     }
 }
 "#;
@@ -1261,7 +1311,7 @@ mod tests {
         let calls = source.to_effect_calls();
         let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
         assert!(
-            !emitted.contains("LAST_EFFECT_SET_COLOR"),
+            !emitted.contains("FILL_SCREEN_MODEL_COLOR"),
             "the premise no longer holds — the export now keeps this line, so this test is \
              checking nothing:\n{emitted}"
         );
@@ -1269,7 +1319,7 @@ mod tests {
         let mut report = Report::default();
         verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
         assert!(
-            messages(&report).contains("macros::LAST_EFFECT_SET_COLOR(agent, 1, 0.5, 0);"),
+            messages(&report).contains("macros::FILL_SCREEN_MODEL_COLOR(agent, 1, 0.5, 0, 0.7);"),
             "the dropped line was not named:\n{}",
             messages(&report)
         );
@@ -1287,6 +1337,44 @@ mod tests {
             "{}",
             messages(&blind)
         );
+    }
+
+    /// Modelling a macro must not quietly *shrink* this report.
+    ///
+    /// C1 nearly did exactly that. Before it, a `LAST_EFFECT_SET_COLOR` parsed as `Raw` and was
+    /// named here as a dropped line. After it, the same line parses into a typed variant — and
+    /// when it sits inside a costume-gated `if`, as 64 of the corpus's 65 do, it binds to no
+    /// spawn and is discarded on the way to `EffectCall`. It is still deleted from the export;
+    /// it had simply stopped being mentioned, which is worse than either state alone.
+    #[test]
+    fn a_modelled_modifier_that_binds_to_no_spawn_is_still_named_as_a_loss() {
+        // Dolly's up special, verbatim — the branch cuts the tint off from its spawn.
+        let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_ALPHA(agent, Hash40::new("dolly_roll_l_color1"), Hash40::new("throw"), 0, 2.5, 0, 0, 0, 0, 1, true, 0.8);
+    }
+    if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){
+        if macros::is_excute(agent) {
+            macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);
+        }
+    }
+}
+"#;
+        let source = crate::acmd::parse_effect_script(src);
+        let calls = source.to_effect_calls();
+        assert_eq!(calls[0].tint, None, "the premise: the tint binds to nothing");
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
+        assert!(!emitted.contains("LAST_EFFECT_SET_COLOR"), "{emitted}");
+
+        let mut report = Report::default();
+        verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        assert!(
+            messages(&report).contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"),
+            "a modelled-but-unattached modifier is still a deleted line:\n{}",
+            messages(&report)
+        );
+        assert!(!report.has_blockers(), "{}", messages(&report));
     }
 
     /// The emitter writes its own braces and `is_excute` headers, so reporting the ones it threw

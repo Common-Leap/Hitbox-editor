@@ -737,7 +737,7 @@ pub fn rewrite_effect_calls(
     edited: &[crate::data::EffectCall],
 ) -> Result<(String, SyncReport)> {
     let ordinals = crate::acmd::parse_effect_script(text).call_macro_ordinals();
-    let (sites, rate_sites) = spawn_and_rate_sites(text);
+    let (sites, modifier_sites) = spawn_and_modifier_sites(text);
 
     let mut report = SyncReport::default();
     if ordinals.len() != pristine.len() {
@@ -827,38 +827,44 @@ pub fn rewrite_effect_calls(
         }
         edits.extend(transform_edits(text, macro_site, target));
 
-        // The rate lives on its own line, so turning one on or off is a call added or
-        // removed — structural, and reported. Only retuning an existing one is a value edit.
-        let was = pristine[differs[0]].rate;
-        if was != target.rate {
-            match (
-                was,
-                target.rate,
-                rate_sites.get(ordinal).and_then(Option::as_ref),
-            ) {
-                (Some(_), Some(now), Some(rate_site)) => {
-                    if let Some(span) = rate_site.args.get(1) {
-                        edits.extend(to_f32_edit(text, span, now));
-                    }
-                }
-                (None, Some(_), _) => report.skipped.push(format!(
-                    "{label}: `{}` gained a rate — that is a new LAST_EFFECT_SET_RATE line, \
-                     which source syncing does not add",
-                    macro_site.name
-                )),
-                (Some(_), None, _) => report.skipped.push(format!(
-                    "{label}: `{}` lost its rate — source syncing does not delete the \
-                     LAST_EFFECT_SET_RATE line that sets it",
-                    macro_site.name
-                )),
-                (Some(_), Some(_), None) => report.skipped.push(format!(
-                    "{label}: `{}` has a rate in the editor but no LAST_EFFECT_SET_RATE \
-                     directly beneath it in the source — reload the move from source",
-                    macro_site.name
-                )),
-                (None, None, _) => {}
-            }
-        }
+        let was = &pristine[differs[0]];
+        let sites = modifier_sites.get(ordinal);
+        modifier_edits(
+            text,
+            label,
+            "rate",
+            "LAST_EFFECT_SET_RATE",
+            macro_site,
+            was.rate.map(|v| vec![v]),
+            target.rate.map(|v| vec![v]),
+            sites.and_then(|s| s.rate.as_ref()),
+            &mut edits,
+            &mut report,
+        );
+        modifier_edits(
+            text,
+            label,
+            "tint",
+            "LAST_EFFECT_SET_COLOR",
+            macro_site,
+            was.tint.map(|v| v.to_vec()),
+            target.tint.map(|v| v.to_vec()),
+            sites.and_then(|s| s.tint.as_ref()),
+            &mut edits,
+            &mut report,
+        );
+        modifier_edits(
+            text,
+            label,
+            "opacity",
+            "LAST_EFFECT_SET_ALPHA",
+            macro_site,
+            was.alpha.map(|v| vec![v]),
+            target.alpha.map(|v| vec![v]),
+            sites.and_then(|s| s.alpha.as_ref()),
+            &mut edits,
+            &mut report,
+        );
     }
 
     report.changed = edits.len();
@@ -914,43 +920,125 @@ fn sync_script(
     Ok(report)
 }
 
-/// The spawn calls in `text`, in ordinal order, each paired with its `LAST_EFFECT_SET_RATE`
-/// line if it has one.
+/// Write one `LAST_EFFECT_SET_*` modifier back, or say why it could not be.
 ///
-/// The rate macro names no effect, so the only thing tying it to a spawn is that it comes
-/// directly after one — the same rule `eval_effect_stmts` uses to fill `EffectCall::rate`,
-/// and the two must agree or a value would be read off one call and written into another.
-/// Anything at all between them, including a macro this scanner does not recognise, breaks
-/// the pairing rather than reaching further back for a spawn to claim.
-fn spawn_and_rate_sites(text: &str) -> (Vec<MacroSite>, Vec<Option<MacroSite>>) {
+/// Each of these lives on its own line, so turning one on or off is a call added or removed —
+/// structural, and reported. Only retuning an existing one is a value edit. The three differ
+/// solely in how many arguments they carry, which is why they share this: a rate is a
+/// one-component modifier and a tint a three-component one, and every rule around them is the
+/// same. `noun` names the property in the user's terms and `command` names the line to look for.
+#[allow(clippy::too_many_arguments)]
+fn modifier_edits(
+    text: &str,
+    label: &str,
+    noun: &str,
+    command: &str,
+    macro_site: &MacroSite,
+    was: Option<Vec<f32>>,
+    now: Option<Vec<f32>>,
+    site: Option<&MacroSite>,
+    edits: &mut Vec<Replacement>,
+    report: &mut SyncReport,
+) {
+    if was == now {
+        return;
+    }
+    match (was, now, site) {
+        (Some(_), Some(values), Some(site)) => {
+            // Argument 0 is `agent`, so the components start at 1 and are in source order —
+            // the one layout the whole family shares.
+            for (offset, value) in values.iter().enumerate() {
+                if let Some(span) = site.args.get(offset + 1) {
+                    edits.extend(to_f32_edit(text, span, *value));
+                }
+            }
+        }
+        (None, Some(_), _) => report.skipped.push(format!(
+            "{label}: `{}` gained a {noun} — that is a new {command} line, which source \
+             syncing does not add",
+            macro_site.name
+        )),
+        (Some(_), None, _) => report.skipped.push(format!(
+            "{label}: `{}` lost its {noun} — source syncing does not delete the {command} \
+             line that sets it",
+            macro_site.name
+        )),
+        (Some(_), Some(_), None) => report.skipped.push(format!(
+            "{label}: `{}` has a {noun} in the editor but no {command} directly beneath it \
+             in the source — reload the move from source",
+            macro_site.name
+        )),
+        (None, None, _) => {}
+    }
+}
+
+/// The `LAST_EFFECT_SET_*` lines a spawn can carry, in the spelling `scan_macro_sites` reports.
+///
+/// Only these three break nothing when they sit between a spawn and a later modifier of its
+/// own; every other macro ends the run. Adding a member of the family to
+/// [`crate::data::EffectCall`] means adding it here too, or its line will end the run and the
+/// modifier after it will be reported as unfindable.
+const MODIFIER_COMMANDS: &[&str] = &[
+    "LAST_EFFECT_SET_RATE",
+    "LAST_EFFECT_SET_COLOR",
+    "LAST_EFFECT_SET_ALPHA",
+];
+
+/// The `LAST_EFFECT_SET_*` lines belonging to one spawn, each present only if the source has it.
+#[derive(Default)]
+struct ModifierSites {
+    rate: Option<MacroSite>,
+    tint: Option<MacroSite>,
+    alpha: Option<MacroSite>,
+}
+
+/// The spawn calls in `text`, in ordinal order, each paired with its `LAST_EFFECT_SET_*` lines.
+///
+/// These macros name no effect, so the only thing tying one to a spawn is that it comes
+/// directly after it — the same rule `eval_effect_stmts` uses to fill `EffectCall::rate`,
+/// `tint`, and `alpha`, and the two must agree or a value would be read off one call and
+/// written into another. Anything else between them, including a macro this scanner does not
+/// recognise, breaks the pairing rather than reaching further back for a spawn to claim.
+///
+/// A modifier does *not* break the run for the modifiers after it: a script that writes a tint
+/// and then a rate has both of them naming the spawn above the pair, and `eval_effect_stmts`
+/// reads them that way too.
+fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) {
     let mut spawns: Vec<MacroSite> = Vec::new();
-    let mut rates: Vec<Option<MacroSite>> = Vec::new();
+    let mut modifiers: Vec<ModifierSites> = Vec::new();
     let mut adjacent = false;
     for site in scan_macro_sites(text, 0..text.len()) {
         if is_spawn_macro(&site.name) {
-            // A trail is a spawn for ordinal purposes but never anchors a rate, matching the
-            // parser — see the `AfterImage` arm of `eval_effect_stmts`. A colour command is
+            // A trail is a spawn for ordinal purposes but never anchors a modifier, matching
+            // the parser — see the `AfterImage` arm of `eval_effect_stmts`. A colour command is
             // counted for the same reason and anchors nothing for the same reason: both
             // produce an `EffectCall`, so both consume an ordinal, and neither is what
-            // `LAST_EFFECT_SET_RATE` would find at runtime.
+            // `LAST_EFFECT_SET_*` would find at runtime.
             adjacent = !is_trail_macro(&site.name) && !crate::data::is_color_command(&site.name);
             spawns.push(site);
-            rates.push(None);
+            modifiers.push(ModifierSites::default());
             continue;
         }
-        if site.name == "LAST_EFFECT_SET_RATE" {
-            if adjacent {
-                if let Some(slot) = rates.last_mut() {
-                    // A second rate line overwrites the first, because in game the later call
-                    // wins and that is the value the parser will have read.
-                    *slot = Some(site);
-                }
-            }
+        if !MODIFIER_COMMANDS.contains(&site.name.as_str()) {
+            adjacent = false;
             continue;
         }
-        adjacent = false;
+        if !adjacent {
+            continue;
+        }
+        let Some(entry) = modifiers.last_mut() else {
+            continue;
+        };
+        // A second line of the same kind overwrites the first, because in game the later call
+        // wins and that is the value the parser will have read.
+        let slot = match site.name.as_str() {
+            "LAST_EFFECT_SET_COLOR" => &mut entry.tint,
+            "LAST_EFFECT_SET_ALPHA" => &mut entry.alpha,
+            _ => &mut entry.rate,
+        };
+        *slot = Some(site);
     }
-    (spawns, rates)
+    (spawns, modifiers)
 }
 
 /// Whether a scanned macro name is one `call_macro_ordinals` counts.
@@ -977,13 +1065,16 @@ fn is_trail_macro(name: &str) -> bool {
 /// Everything a value rewrite CAN change about a call — the test for whether every iteration
 /// of a loop body agrees, since they all come off one line of source.
 ///
-/// `rate` counts: it is written back from its own line, but that line is inside the loop body
-/// too, so per-iteration rates are no more expressible than per-iteration positions.
+/// The `LAST_EFFECT_SET_*` modifiers count: each is written back from its own line, but that
+/// line is inside the loop body too, so a per-iteration rate, tint, or opacity is no more
+/// expressible than a per-iteration position.
 fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
     a.offset == b.offset
         && a.rotation == b.rotation
         && a.scale == b.scale
         && a.rate == b.rate
+        && a.tint == b.tint
+        && a.alpha == b.alpha
         && a.color == b.color
 }
 
@@ -2187,6 +2278,109 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         );
         assert!(
             report.skipped.iter().any(|s| s.contains("gained a rate")),
+            "{report:?}"
+        );
+    }
+
+    /// Two spawns, each with a different mix of the three modifiers, and a rate written *after*
+    /// a tint on the same spawn — the case that decides whether a modifier line ends the run for
+    /// the modifiers after it. It must not: both lines name the spawn above the pair.
+    const MODIFIERS: &str = r#"unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("kirby_attack_arc"), Hash40::new("kirby_attack_arc"), Hash40::new("top"), -3, 7, 0, 0, 90, 90, 1, true, *EF_FLIP_YZ);
+        macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5);
+        macros::LAST_EFFECT_SET_RATE(agent, 2);
+        macros::EFFECT(agent, Hash40::new("sys_attack_impact"), Hash40::new("top"), 13, 6, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 360, false);
+        macros::LAST_EFFECT_SET_ALPHA(agent, 0.7);
+    }
+}
+"#;
+
+    #[test]
+    fn a_tint_edit_rewrites_only_its_own_spawns_colour_line() {
+        let pristine = crate::acmd::parse_effect_script(MODIFIERS).to_effect_calls();
+        assert_eq!(pristine.len(), 2);
+        // The rate below the tint still found its spawn, which is the whole point of the
+        // fixture: a modifier does not break the run for the modifier after it.
+        assert_eq!(pristine[0].tint, Some([0.25, 1.3, 2.5]));
+        assert_eq!(pristine[0].rate, Some(2.0));
+        assert_eq!(pristine[1].alpha, Some(0.7));
+
+        let mut edited = pristine.clone();
+        edited[0].tint = Some([0.25, 0.5, 2.5]);
+        let (after, report) = rewrite_effect_calls(MODIFIERS, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        // One component moved, so one argument span is rewritten — not the whole line, and not
+        // the two components that did not change.
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 0.5, 2.5);"),
+            "only the green component may move:\n{after}"
+        );
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_RATE(agent, 2);")
+                && after.contains("macros::LAST_EFFECT_SET_ALPHA(agent, 0.7);"),
+            "recolouring one spawn must not disturb any other modifier:\n{after}"
+        );
+    }
+
+    #[test]
+    fn an_opacity_edit_rewrites_only_its_own_spawns_alpha_line() {
+        let pristine = crate::acmd::parse_effect_script(MODIFIERS).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[1].alpha = Some(0.3);
+        let (after, report) = rewrite_effect_calls(MODIFIERS, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_ALPHA(agent, 0.3);"),
+            "{after}"
+        );
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5);"),
+            "the other spawn's tint must be untouched:\n{after}"
+        );
+    }
+
+    /// Each modifier lives on a line of its own, so switching one on or off adds or deletes a
+    /// call. Structural, and named rather than guessed at — the same rule the rate follows, and
+    /// the reason all three share `modifier_edits`.
+    #[test]
+    fn turning_a_tint_or_opacity_on_or_off_is_reported_rather_than_written() {
+        let pristine = crate::acmd::parse_effect_script(MODIFIERS).to_effect_calls();
+
+        let mut removed = pristine.clone();
+        removed[0].tint = None;
+        let (after, report) = rewrite_effect_calls(MODIFIERS, "t", &pristine, &removed).unwrap();
+        assert_eq!(after, MODIFIERS, "the user's line must still be there");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("lost its tint") && s.contains("LAST_EFFECT_SET_COLOR")),
+            "{report:?}"
+        );
+
+        // The second spawn has no colour line at all, so there is nowhere for one to be written.
+        let mut added = pristine.clone();
+        added[1].tint = Some([1.0, 0.0, 0.0]);
+        let (after, report) = rewrite_effect_calls(MODIFIERS, "t", &pristine, &added).unwrap();
+        assert_eq!(after, MODIFIERS, "nothing may be inserted into the script");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("gained a tint")),
+            "{report:?}"
+        );
+
+        let mut faded = pristine.clone();
+        faded[1].alpha = None;
+        let (after, report) = rewrite_effect_calls(MODIFIERS, "t", &pristine, &faded).unwrap();
+        assert_eq!(after, MODIFIERS);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("lost its opacity") && s.contains("LAST_EFFECT_SET_ALPHA")),
             "{report:?}"
         );
     }
