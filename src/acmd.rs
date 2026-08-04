@@ -1050,7 +1050,7 @@ fn strip_deref(s: &str) -> String {
 /// since `*2` does not compile. Deciding on the *text* rather than on whether the name is in
 /// [`HIT_STATUS`](crate::param_labels::HIT_STATUS) is deliberate — a script using a constant
 /// this build has never heard of still exports as the constant it wrote.
-fn emit_status(status: &str) -> String {
+pub fn emit_status(status: &str) -> String {
     let s = status.trim();
     if s.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
         s.to_string()

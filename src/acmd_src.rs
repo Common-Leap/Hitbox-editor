@@ -1839,6 +1839,166 @@ fn text_edit(text: &str, span: &Range<usize>, new: &str) -> Option<Replacement> 
     })
 }
 
+// ── Hurtbox state write-back ─────────────────────────────────────────────────
+
+/// The hurtbox commands, with the argument count each one has after `agent`.
+///
+/// The arity is carried here because it is part of *identifying* the call, not just of reading
+/// it: the parser refuses a member written with the wrong number of arguments and leaves it as
+/// a raw line, so a scanner that counted it anyway would number every site after it one too
+/// high and retune the wrong call.
+const HURT_COMMANDS: &[(&str, usize)] = &[
+    ("HIT_NODE", 2),
+    ("HIT_NO", 2),
+    ("HIT_RESET_ALL", 0),
+    ("COL_PRI", 1),
+    ("COL_NORMAL", 0),
+];
+
+/// The hurtbox calls in `text`, in document order — index `n` is site `n`.
+///
+/// This is the write-back's half of the correspondence [`crate::data::HurtSite`] defines. It
+/// holds because a pre-order walk of the parsed script visits `is_excute` blocks, and the
+/// statements inside them, in the order they appear in the file.
+fn hurt_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            HURT_COMMANDS
+                .iter()
+                .any(|(name, arity)| site.name == *name && site.args.len() == arity + 1)
+        })
+        .collect()
+}
+
+/// Rewrite edited hurtbox state and collision priority into the user's own source.
+///
+/// Value edits only, as everywhere on this path. The frame a state starts on is the block it
+/// sits in rather than an argument, so a retime is reported; so is a change of target, since
+/// `HIT_NODE` and `HIT_NO` are different macros taking different argument types and swapping
+/// them is structure rather than value.
+pub fn rewrite_hurtboxes(
+    text: &str,
+    label: &str,
+    pristine: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
+    edited: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
+) -> Result<(String, SyncReport)> {
+    use crate::data::HurtTarget;
+
+    let sites = hurt_sites(text);
+    let mut report = SyncReport::default();
+    let mut edits = Vec::new();
+
+    // Look the site up rather than pairing by position: a span list can be longer than the
+    // statement list, because one looped call produces one span per iteration.
+    let site_for = |site: usize, report: &mut SyncReport| -> Option<&MacroSite> {
+        let found = sites.get(site);
+        if found.is_none() {
+            report.skipped.push(format!(
+                "{label}: a hurtbox state has no matching call in the source — it was added in \
+                 the editor, and source syncing only retunes existing calls"
+            ));
+        }
+        found
+    };
+
+    for (before, now) in pristine.0.iter().zip(edited.0.iter()) {
+        if before == now {
+            continue;
+        }
+        let Some(site) = site_for(now.site, &mut report) else {
+            continue;
+        };
+        if before.active_start != now.active_start {
+            report.skipped.push(format!(
+                "{label}: the `{}` on {} was retimed — its frame is the block it sits in, not an \
+                 argument, so source syncing cannot move it",
+                site.name,
+                before.target.label()
+            ));
+        }
+        // Retuning across a target change would write a bone hash into a group slot, which is
+        // the cross-family corruption this codebase keeps finding the hard way.
+        if std::mem::discriminant(&before.target) != std::mem::discriminant(&now.target) {
+            report.skipped.push(format!(
+                "{label}: {} became {} — that is a change from `{}` to `{}`, not a change of \
+                 argument value",
+                before.target.label(),
+                now.target.label(),
+                before.target.macro_name(),
+                now.target.macro_name()
+            ));
+            continue;
+        }
+        match (&before.target, &now.target) {
+            (HurtTarget::Bone(was), HurtTarget::Bone(is)) if was != is => {
+                if let Some(span) = site.args.get(1) {
+                    edits.extend(text_edit(
+                        text,
+                        span,
+                        &format!("Hash40::new(\"{}\")", is.to_ascii_lowercase()),
+                    ));
+                }
+            }
+            (HurtTarget::Group(was), HurtTarget::Group(is)) if was != is => {
+                if let Some(span) = site.args.get(1) {
+                    edits.extend(int_edit(text, span, *is));
+                }
+            }
+            _ => {}
+        }
+        if before.status != now.status {
+            if let Some(span) = site.args.get(2) {
+                edits.extend(text_edit(text, span, &crate::acmd::emit_status(&now.status)));
+            }
+        }
+    }
+
+    for (before, now) in pristine.1.iter().zip(edited.1.iter()) {
+        if before == now {
+            continue;
+        }
+        let Some(site) = site_for(now.site, &mut report) else {
+            continue;
+        };
+        if before.active_start != now.active_start {
+            report.skipped.push(format!(
+                "{label}: a `COL_PRI` was retimed — its frame is the block it sits in, not an \
+                 argument, so source syncing cannot move it"
+            ));
+        }
+        if before.pri != now.pri {
+            if let Some(span) = site.args.get(1) {
+                edits.extend(int_edit(text, span, now.pri));
+            }
+        }
+    }
+
+    if pristine.0.len() != edited.0.len() || pristine.1.len() != edited.1.len() {
+        report.skipped.push(format!(
+            "{label}: hurtbox states were added or removed — source syncing only retunes \
+             existing calls, so use an export to land that"
+        ));
+    }
+
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited hurtbox state for one move back into the project source on disk.
+pub fn sync_hurtboxes(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
+    edited: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_hurtboxes(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2296,6 +2456,118 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
     }
 }
 "#;
+
+    /// dolly/SpecialAirHiCommand's hurtbox lines, plus the `COL_PRI` pair, in one function.
+    /// Two bones set and taken back means four `HIT_NODE` calls sharing two argument shapes —
+    /// which is what makes writing to the wrong site visible instead of coincidentally right.
+    const HURTBOXES: &str = r#"unsafe extern "C" fn game_specialairhicommand(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);
+        macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_XLU);
+        macros::COL_PRI(agent, 200);
+    }
+    frame(agent.lua_state_agent, 20.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_NORMAL);
+        macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_NORMAL);
+        macros::COL_NORMAL(agent);
+    }
+}
+"#;
+
+    fn hurt_of(text: &str) -> (Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>) {
+        crate::acmd::parse_acmd_script(text).to_hurtboxes()
+    }
+
+    #[test]
+    fn a_status_edit_rewrites_only_that_ones_argument() {
+        let pristine = hurt_of(HURTBOXES);
+        assert_eq!(pristine.0.len(), 4, "two bones, set and taken back");
+
+        // Make the knee fully invincible rather than intangible, on its opening call only.
+        let mut edited = pristine.clone();
+        edited.0[0].status = "HIT_STATUS_INVINCIBLE".into();
+        let (after, report) = rewrite_hurtboxes(HURTBOXES, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1, "one argument span, not one line");
+        assert!(
+            after.contains(
+                r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_INVINCIBLE);"#
+            ),
+            "{after}"
+        );
+        // The three calls that did not change must be byte-identical, including the one that
+        // shares this bone and the one that shares this status.
+        for line in [
+            r#"macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_XLU);"#,
+            r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_NORMAL);"#,
+            r#"macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_NORMAL);"#,
+        ] {
+            assert!(after.contains(line), "{line} was disturbed:\n{after}");
+        }
+    }
+
+    #[test]
+    fn a_bone_rename_and_a_priority_edit_land_in_their_own_calls() {
+        let pristine = hurt_of(HURTBOXES);
+        let mut edited = pristine.clone();
+        edited.0[1].target = crate::data::HurtTarget::Bone("legr".into());
+        edited.1[0].pri = 150;
+        let (after, report) = rewrite_hurtboxes(HURTBOXES, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 2);
+        assert!(
+            after.contains(r#"macros::HIT_NODE(agent, Hash40::new("legr"), *HIT_STATUS_XLU);"#),
+            "{after}"
+        );
+        assert!(after.contains("macros::COL_PRI(agent, 150);"), "{after}");
+        // `COL_PRI` is the third hurtbox call in the file but the first priority span. Pairing
+        // those two lists by position rather than by site would have written 150 into a
+        // `HIT_NODE`.
+        assert!(
+            after.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
+            "the priority edit must not have landed in a bone call:\n{after}"
+        );
+    }
+
+    /// `HIT_NODE` and `HIT_NO` take a hash and an integer in the same slot. Retuning across
+    /// that boundary would write a `Hash40::new(…)` where the macro wants a number — a call
+    /// that does not compile — so it is reported instead.
+    #[test]
+    fn changing_a_bone_into_a_numbered_group_is_reported_rather_than_written() {
+        let pristine = hurt_of(HURTBOXES);
+        let mut edited = pristine.clone();
+        edited.0[0].target = crate::data::HurtTarget::Group(8);
+        let (after, report) = rewrite_hurtboxes(HURTBOXES, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, HURTBOXES, "nothing may be written");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("HIT_NODE") && s.contains("HIT_NO")),
+            "the report must name both macros: {report:?}"
+        );
+    }
+
+    /// A state's frame is the `frame(...)` block it sits in, not an argument of the call, so
+    /// moving one has to be reported the way a retimed hitbox is.
+    #[test]
+    fn retiming_a_hurtbox_state_is_reported_and_its_other_edits_still_land() {
+        let pristine = hurt_of(HURTBOXES);
+        let mut edited = pristine.clone();
+        edited.0[0].active_start = 4;
+        edited.0[0].status = "HIT_STATUS_OFF".into();
+        let (after, report) = rewrite_hurtboxes(HURTBOXES, "t", &pristine, &edited).unwrap();
+        assert!(
+            report.skipped.iter().any(|s| s.contains("retimed")),
+            "{report:?}"
+        );
+        assert!(
+            after.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_OFF);"#),
+            "the value edit is still worth writing:\n{after}"
+        );
+    }
 
     #[test]
     fn a_tint_edit_rewrites_only_its_own_spawns_colour_line() {
