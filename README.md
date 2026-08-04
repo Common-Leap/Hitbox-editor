@@ -218,6 +218,20 @@ source, while changing an existing rate is written straight into the file. A
 rate that does not sit directly beneath a spawn Visionary recognises is left
 alone rather than attached to whichever spawn came before it.
 
+`FLASH` and the `BURN_COLOR` family tint the fighter's model or the screen
+flash. They sit in the effect list beside the spawns, but they are not spawns:
+there is no graphic, joint, or position, so those fields are hidden and a colour
+picker takes their place. **Add colour command** creates one. The vanilla scripts
+almost always use them in pairs — one call that snaps to a colour, and a `_FRAME`
+one directly after that fades the blend in or out over a number of frames — and
+both halves are editable. Changing values writes them into your source; switching
+which command a call is changes how many arguments it takes, so that lands in an
+export and is reported when syncing.
+
+Before this they were dropped: the effect export regenerates the whole function
+from the calls it knows about, so every exported move lost its colouring without
+saying so.
+
 Anything that cannot be written as a value change to an existing argument is
 reported instead of guessed at: a spawn you added or removed, a graphic you
 renamed, a retimed call, one iteration of a `for` loop edited on its own, or a

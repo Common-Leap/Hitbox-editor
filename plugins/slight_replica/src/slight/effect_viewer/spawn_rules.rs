@@ -52,6 +52,18 @@ pub struct SpawnRule {
     /// afterwards and would otherwise win — is rewritten to match.
     #[serde(default)]
     pub rate: Option<f32>,
+    /// Live values for a colour command — `FLASH`, `BURN_COLOR`, and the rest of the family.
+    ///
+    /// These name no effect kind, so for such a rule `eff_hash` is hash40 of the lowercased
+    /// COMMAND name instead. Nothing collides: an effect kind is a graphic name like
+    /// `sys_atk_smoke`, and no graphic is called `burn_color`. Reusing the field is what lets
+    /// the whole matcher above — motion, frame window, suppress — apply to these unchanged.
+    #[serde(default)]
+    pub color: Option<[f32; 4]>,
+    /// Frames the `_FRM` / `_FRAME` forms interpolate over. Separate from `color` because
+    /// either can be edited without the other.
+    #[serde(default)]
+    pub transition: Option<f32>,
 }
 
 impl SpawnRule {
@@ -141,6 +153,27 @@ pub fn rate_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<f32> {
         .iter()
         .find(|r| !r.suppress && r.rate.is_some() && r.matches(eff_hash, motion, motion_frame))
         .and_then(|r| r.rate)
+}
+
+/// Live colour and interpolation length for the FIRST non-suppress rule matching this colour
+/// command, where `cmd_hash` is hash40 of the lowercased command name.
+///
+/// Returns `None` when no rule applies, so the script's own arguments are left alone; the two
+/// halves are separately optional so retiming a ramp does not have to restate its colour.
+pub fn color_for(
+    cmd_hash: u64,
+    motion: u64,
+    motion_frame: f32,
+) -> Option<(Option<[f32; 4]>, Option<f32>)> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| {
+            !r.suppress
+                && (r.color.is_some() || r.transition.is_some())
+                && r.matches(cmd_hash, motion, motion_frame)
+        })
+        .map(|r| (r.color, r.transition))
 }
 
 // ── Effect kind aliases (live transplant parity) ─────────────────────────────

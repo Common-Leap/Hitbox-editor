@@ -111,6 +111,15 @@ pub struct SpawnRuleWire {
     /// rate line if there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate: Option<f32>,
+    /// Live values for a colour command. For such a rule `eff_hash` is hash40 of the
+    /// lowercased command name — `burn_color`, not an effect kind — because these macros name
+    /// no effect at all; see `SpawnRule::color` in the plugin for why that field is reused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 4]>,
+    /// Frames a `_FRM` / `_FRAME` command interpolates over. Sent apart from `color` so
+    /// retiming a ramp does not have to restate its colour, and vice versa.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition: Option<f32>,
     /// Live retime: re-fire a captured spawn at a new frame (paired with a suppress rule at
     /// the pristine frame). Omitted for plain transform/suppress rules.
     #[serde(skip_serializing_if = "Option::is_none")]

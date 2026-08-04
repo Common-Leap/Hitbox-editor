@@ -643,6 +643,11 @@ fn call_sig(c: &crate::data::EffectCall) -> (u64, u64, u64, u32, u64) {
 }
 
 fn effect_call_display_name(call: &crate::data::EffectCall) -> String {
+    // A colour command has no graphic, so the command itself is its name. Falling through to
+    // the spawn branches would label every one of them with an empty string.
+    if call.color.is_some() {
+        return call.spawn_func.clone();
+    }
     match call
         .effect_name_alt
         .as_deref()
@@ -3954,6 +3959,58 @@ impl VisionaryApp {
                     });
             }
 
+            // Two buttons rather than one with a picker: a spawn and a colour command share
+            // the list and nothing else, so which one is being added decides every field.
+            let add_color = ui
+                .small_button("＋ Add colour command")
+                .on_hover_text(
+                    "Tint the fighter's model or the screen flash on this frame. A colour \
+                     command has no graphic, joint, or position.",
+                )
+                .clicked();
+            if add_color {
+                let call = crate::data::EffectCall {
+                    effect_name: String::new(),
+                    effect_name_alt: None,
+                    // The most-used member of the family by a wide margin, and the one whose
+                    // arguments are the plainest: a colour and how strongly to mix it in.
+                    spawn_func: "FLASH".into(),
+                    bone_name: String::new(),
+                    offset: [0.0; 3],
+                    rotation: [0.0; 3],
+                    scale: 1.0,
+                    follows_bone: false,
+                    active_start: current,
+                    // A colour command is one instant event, with no closing call to end it.
+                    active_end: current,
+                    disabled: false,
+                    extra_args: None,
+                    raw_line: None,
+                    rate: None,
+                    color: Some(crate::data::ColorCall {
+                        transition: None,
+                        rgba: Some([1.0, 1.0, 1.0, 0.5]),
+                    }),
+                };
+                self.state.effects.push(call.clone());
+                let idx = self.state.effects.len() - 1;
+                if let Some(mv) = self.current_move_key() {
+                    self.state
+                        .effect_call_edits
+                        .entry(mv.clone())
+                        .or_default()
+                        .push(crate::data::EffectCallEdit {
+                            index: idx,
+                            op: crate::data::EffectCallOp::Add(call),
+                            pristine: None,
+                        });
+                    self.state
+                        .effect_call_full
+                        .insert(mv, self.state.effects.clone());
+                }
+                self.state.selected_effect_call = Some(idx);
+            }
+
             if ui.small_button("＋ Add effect call").clicked() {
                 let call = crate::data::EffectCall {
                     effect_name: "sys_hit_elec".into(),
@@ -4026,6 +4083,10 @@ impl VisionaryApp {
                     // rotation, or scale arguments at all. Offering those fields let the user
                     // drag values that no export and no write-back could ever put anywhere.
                     let is_trail = ec.raw_line.is_some();
+                    // A colour command tints the model or the screen. It has no graphic, joint,
+                    // or transform, so the rows above the colour are suppressed rather than
+                    // shown holding the empty strings and zeroes it stores for them.
+                    let is_color = ec.color.is_some();
                     let orig = |ui: &mut Ui, txt: String| {
                         ui.label(egui::RichText::new(txt).small().color(egui::Color32::GRAY));
                     };
@@ -4033,76 +4094,124 @@ impl VisionaryApp {
                         .num_columns(3)
                         .striped(true)
                         .show(ui, |ui| {
-                            ui.label("Effect");
-                            ui.horizontal(|ui| {
-                                changed |= ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut ec.effect_name)
-                                            .desired_width(120.0),
-                                    )
-                                    .changed();
-                                if ui
-                                    .small_button("▾")
-                                    .on_hover_text("Pick from live kinds + every eff")
-                                    .clicked()
-                                {
-                                    toggle_pick = true;
-                                }
-                            });
-                            if let Some(p) = &pristine {
-                                orig(ui, format!("orig {}", p.effect_name));
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("added")
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-                            }
-                            ui.end_row();
-
-                            if let Some(effect_name_alt) = ec.effect_name_alt.as_mut() {
-                                ui.label("Flip effect");
-                                changed |= ui
-                                    .add(
-                                        egui::TextEdit::singleline(effect_name_alt)
-                                            .desired_width(140.0),
-                                    )
-                                    .on_hover_text(
-                                        "Alternate graphic selected by the ACMD flip command",
-                                    )
-                                    .changed();
+                            if !is_color {
+                                ui.label("Effect");
+                                ui.horizontal(|ui| {
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut ec.effect_name)
+                                                .desired_width(120.0),
+                                        )
+                                        .changed();
+                                    if ui
+                                        .small_button("▾")
+                                        .on_hover_text("Pick from live kinds + every eff")
+                                        .clicked()
+                                    {
+                                        toggle_pick = true;
+                                    }
+                                });
                                 if let Some(p) = &pristine {
-                                    orig(
-                                        ui,
-                                        format!(
-                                            "orig {}",
-                                            p.effect_name_alt.as_deref().unwrap_or("none")
-                                        ),
-                                    );
+                                    orig(ui, format!("orig {}", p.effect_name));
                                 } else {
-                                    ui.label("");
+                                    ui.label(
+                                        egui::RichText::new("added")
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    );
                                 }
                                 ui.end_row();
+
+                                if let Some(effect_name_alt) = ec.effect_name_alt.as_mut() {
+                                    ui.label("Flip effect");
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(effect_name_alt)
+                                                .desired_width(140.0),
+                                        )
+                                        .on_hover_text(
+                                            "Alternate graphic selected by the ACMD flip command",
+                                        )
+                                        .changed();
+                                    if let Some(p) = &pristine {
+                                        orig(
+                                            ui,
+                                            format!(
+                                                "orig {}",
+                                                p.effect_name_alt.as_deref().unwrap_or("none")
+                                            ),
+                                        );
+                                    } else {
+                                        ui.label("");
+                                    }
+                                    ui.end_row();
+                                }
                             }
 
-                            ui.label("Spawn command");
+                            ui.label(if is_color { "Command" } else { "Spawn command" });
+                            // Owned, because the colour arm below writes the picked command back
+                            // into the very field this reads.
                             let spawn_command = if ec.spawn_func.is_empty() {
                                 if ec.follows_bone {
-                                    "EFFECT_FOLLOW (legacy)"
+                                    "EFFECT_FOLLOW (legacy)".to_string()
                                 } else {
-                                    "EFFECT (legacy)"
+                                    "EFFECT (legacy)".to_string()
                                 }
                             } else {
-                                &ec.spawn_func
+                                ec.spawn_func.clone()
                             };
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(spawn_command).monospace())
-                                    .on_hover_text(
-                                        "The exact ACMD function this spawn came from. Its \
-                                         alpha, attribute, contact, random, flip, and no-stop \
-                                         arguments are preserved both when the spawn is \
-                                         replayed live and when the mod is exported.",
-                                    );
+                                // The colour commands differ in which arguments they take, so
+                                // picking one is a change of command rather than of value —
+                                // exports write the one shown here, and syncing into your own
+                                // source reports it instead of rewriting the call.
+                                if is_color {
+                                    let mut command = ec.spawn_func.clone();
+                                    egui::ComboBox::from_id_salt("effect_color_command")
+                                        .selected_text(&command)
+                                        .width(190.0)
+                                        .show_ui(ui, |ui| {
+                                            for (name, _, _) in crate::data::COLOR_COMMANDS {
+                                                ui.selectable_value(
+                                                    &mut command,
+                                                    (*name).to_string(),
+                                                    *name,
+                                                );
+                                            }
+                                        });
+                                    if command != ec.spawn_func {
+                                        // Bring the payload to the shape the new command's
+                                        // signature takes. Keeping a colour that the command
+                                        // has no slots for would export a call the compiler
+                                        // rejects, which `check_color_values` would then have
+                                        // to block on rather than the user simply not hitting.
+                                        let (transition, rgba) =
+                                            crate::data::color_command_layout(&command)
+                                                .unwrap_or((false, false));
+                                        let held =
+                                            ec.color.clone().unwrap_or(crate::data::ColorCall {
+                                                transition: None,
+                                                rgba: None,
+                                            });
+                                        ec.color = Some(crate::data::ColorCall {
+                                            transition: transition
+                                                .then(|| held.transition.unwrap_or(1.0)),
+                                            rgba: rgba
+                                                .then(|| held.rgba.unwrap_or([1.0, 1.0, 1.0, 1.0])),
+                                        });
+                                        ec.spawn_func = command;
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                } else {
+                                    ui.label(egui::RichText::new(spawn_command).monospace())
+                                        .on_hover_text(
+                                            "The exact ACMD function this spawn came from. Its \
+                                             alpha, attribute, contact, random, flip, and no-stop \
+                                             arguments are preserved both when the spawn is \
+                                             replayed live and when the mod is exported.",
+                                        );
+                                }
                                 // A flipped spawn carries a second graphic that has no field of
                                 // its own. Show it, so renaming the first one is not mistaken
                                 // for renaming the effect on both sides of the flip.
@@ -4135,42 +4244,163 @@ impl VisionaryApp {
                             }
                             ui.end_row();
 
-                            ui.label("Bone");
-                            if bone_names.is_empty() {
-                                changed |= ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut ec.bone_name)
-                                            .desired_width(140.0),
-                                    )
-                                    .changed();
-                            } else {
-                                egui::ComboBox::from_id_salt("effect_bone_select")
-                                    .selected_text(&ec.bone_name)
-                                    .width(140.0)
-                                    .show_ui(ui, |ui| {
-                                        for name in &bone_names {
-                                            if ui
-                                                .selectable_value(
-                                                    &mut ec.bone_name,
-                                                    name.clone(),
-                                                    name,
-                                                )
-                                                .clicked()
+                            if !is_color {
+                                ui.label("Bone");
+                                if bone_names.is_empty() {
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut ec.bone_name)
+                                                .desired_width(140.0),
+                                        )
+                                        .changed();
+                                } else {
+                                    egui::ComboBox::from_id_salt("effect_bone_select")
+                                        .selected_text(&ec.bone_name)
+                                        .width(140.0)
+                                        .show_ui(ui, |ui| {
+                                            for name in &bone_names {
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut ec.bone_name,
+                                                        name.clone(),
+                                                        name,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    changed = true;
+                                                    respawn_needed = true;
+                                                }
+                                            }
+                                        });
+                                }
+                                if let Some(p) = &pristine {
+                                    orig(ui, format!("orig {}", p.bone_name));
+                                } else {
+                                    ui.label("");
+                                }
+                                ui.end_row();
+                            }
+
+                            if let Some(color) = ec.color.clone() {
+                                let mut color = color;
+                                if let Some(rgba) = color.rgba.as_mut() {
+                                    ui.label("Colour");
+                                    ui.horizontal(|ui| {
+                                        // Unclamped, and deliberately so: the corpus writes
+                                        // `BURN_COLOR(agent, 2, …)`, an over-bright red that a
+                                        // 0..=1 picker would silently dim to 1. The picker
+                                        // handles the ordinary case and the drags handle the
+                                        // rest, so neither costs the other anything.
+                                        let mut picked = [
+                                            rgba[0].clamp(0.0, 1.0),
+                                            rgba[1].clamp(0.0, 1.0),
+                                            rgba[2].clamp(0.0, 1.0),
+                                        ];
+                                        if ui.color_edit_button_rgb(&mut picked).changed() {
+                                            rgba[0] = picked[0];
+                                            rgba[1] = picked[1];
+                                            rgba[2] = picked[2];
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                        for v in rgba[..3].iter_mut() {
+                                            if ui.add(egui::DragValue::new(v).speed(0.01)).changed()
                                             {
                                                 changed = true;
                                                 respawn_needed = true;
                                             }
                                         }
                                     });
-                            }
-                            if let Some(p) = &pristine {
-                                orig(ui, format!("orig {}", p.bone_name));
-                            } else {
-                                ui.label("");
-                            }
-                            ui.end_row();
+                                    match pristine.as_ref().and_then(|p| p.color.as_ref()) {
+                                        Some(crate::data::ColorCall {
+                                            rgba: Some(was), ..
+                                        }) => orig(
+                                            ui,
+                                            format!(
+                                                "orig [{:.3} {:.3} {:.3}]",
+                                                was[0], was[1], was[2]
+                                            ),
+                                        ),
+                                        _ => {
+                                            ui.label("");
+                                        }
+                                    }
+                                    ui.end_row();
 
-                            if is_trail {
+                                    ui.label("Blend");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut rgba[3]).speed(0.01))
+                                        .on_hover_text(
+                                            "How strongly the colour is mixed in. The vanilla \
+                                             scripts ramp this from 0 and back to 0 rather than \
+                                             changing the colour itself.",
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    match pristine.as_ref().and_then(|p| p.color.as_ref()) {
+                                        Some(crate::data::ColorCall {
+                                            rgba: Some(was), ..
+                                        }) => orig(ui, format!("orig {:.3}", was[3])),
+                                        _ => {
+                                            ui.label("");
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                                if let Some(frames) = color.transition.as_mut() {
+                                    ui.label("Over");
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add(egui::DragValue::new(frames).speed(0.5))
+                                            .on_hover_text(
+                                                "Frames to reach the colour above. The command \
+                                                 schedules the interpolation and returns — there \
+                                                 is no second call to end it, so this does not \
+                                                 give the entry a length on the timeline.",
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                        ui.label(
+                                            egui::RichText::new("frames")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    });
+                                    match pristine.as_ref().and_then(|p| p.color.as_ref()) {
+                                        Some(crate::data::ColorCall {
+                                            transition: Some(was),
+                                            ..
+                                        }) => orig(ui, format!("orig {was:.1}")),
+                                        _ => {
+                                            ui.label("");
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                                if color.rgba.is_none() && color.transition.is_none() {
+                                    ui.label("Arguments");
+                                    ui.label(
+                                        egui::RichText::new("none")
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    )
+                                    .on_hover_text(
+                                        "This command takes no arguments — it resets the colour \
+                                         set by the ones that do.",
+                                    );
+                                    ui.label("");
+                                    ui.end_row();
+                                }
+                                if Some(&color) != ec.color.as_ref() {
+                                    ec.color = Some(color);
+                                }
+                            } else if is_trail {
                                 ui.label("Transform");
                                 ui.label(
                                     egui::RichText::new("set by its joints")
@@ -9462,6 +9692,8 @@ impl VisionaryApp {
                                 rot: None,
                                 scale: None,
                                 rate: None,
+                                color: None,
+                                transition: None,
                                 inject: None,
                             });
                             store.push(crate::game_link::SpawnRuleWire {
@@ -9474,6 +9706,8 @@ impl VisionaryApp {
                                 rot: None,
                                 scale: None,
                                 rate: None,
+                                color: None,
+                                transition: None,
                                 inject: Some(inject),
                             });
                         }
@@ -9605,6 +9839,15 @@ impl VisionaryApp {
                 .map(|p| effect_name_hash(&p.effect_name))
                 .unwrap_or(hash);
             let window = Self::rule_frame_window(spawn_frame);
+            // A colour command names no effect, so none of the spawn machinery below applies
+            // to it — and `effect_name_hash("")` would key every one of them to the same
+            // meaningless hash. It gets one rule, keyed on its command instead.
+            if ec.color.is_some() {
+                if let Some(rule) = Self::build_color_rule(ec, pristine, motion, window) {
+                    rules.push(rule);
+                }
+                continue;
+            }
             if ec.disabled {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: orig_hash,
@@ -9616,6 +9859,8 @@ impl VisionaryApp {
                     rot: None,
                     scale: None,
                     rate: None,
+                    color: None,
+                    transition: None,
                     inject: None,
                 });
                 continue;
@@ -9635,6 +9880,8 @@ impl VisionaryApp {
                     rot: None,
                     scale: None,
                     rate: None,
+                    color: None,
+                    transition: None,
                     inject: Some(Self::build_effect_stop_inject(ec)),
                 });
             }
@@ -9665,6 +9912,8 @@ impl VisionaryApp {
                         rot: None,
                         scale: None,
                         rate: None,
+                        color: None,
+                        transition: None,
                         inject: None,
                     });
                     rules.push(crate::game_link::SpawnRuleWire {
@@ -9682,6 +9931,8 @@ impl VisionaryApp {
                         // and is not in it. So a retimed or swapped spawn with any rate at
                         // all has to be told its rate, not just one whose rate was edited.
                         rate: ec.rate,
+                        color: None,
+                        transition: None,
                         inject: Some(inject),
                     });
                     continue;
@@ -9712,6 +9963,8 @@ impl VisionaryApp {
                     rot: moved.then_some(ec.rotation),
                     scale: moved.then_some(ec.scale),
                     rate: retuned.then_some(ec.rate).flatten(),
+                    color: None,
+                    transition: None,
                     inject: None,
                 });
             }
@@ -9792,6 +10045,58 @@ impl VisionaryApp {
                 ec.spawn_func.clone()
             },
             args,
+        })
+    }
+
+    /// The one live rule a colour command needs, or `None` if it is unchanged.
+    ///
+    /// Keyed on hash40 of the lowercased command name rather than an effect kind, matching the
+    /// plugin's `color_for`. Retiming and switching commands are both left to the export: the
+    /// live path can rewrite a command's arguments where the script already calls it, but it
+    /// has nothing to inject a call the script never makes — and unlike a spawn there is no
+    /// captured argument list to replay one from.
+    fn build_color_rule(
+        ec: &crate::data::EffectCall,
+        pristine: Option<&crate::data::EffectCall>,
+        motion: Option<u64>,
+        window: (Option<f32>, Option<f32>),
+    ) -> Option<crate::game_link::SpawnRuleWire> {
+        let command = pristine.map(|p| &p.spawn_func).unwrap_or(&ec.spawn_func);
+        let eff_hash = hash40::hash40(&command.to_lowercase()).0;
+        let base = crate::game_link::SpawnRuleWire {
+            eff_hash,
+            suppress: false,
+            motion,
+            frame_start: window.0,
+            frame_end: window.1,
+            pos: None,
+            rot: None,
+            scale: None,
+            rate: None,
+            color: None,
+            transition: None,
+            inject: None,
+        };
+        if ec.disabled {
+            return Some(crate::game_link::SpawnRuleWire {
+                suppress: true,
+                ..base
+            });
+        }
+        // Only what the user actually changed is sent, so an untouched command keeps the
+        // script's own arguments — the same rule the transform and rate paths follow.
+        let was = pristine.and_then(|p| p.color.as_ref());
+        let now = ec.color.as_ref()?;
+        let color = (was.map(|w| w.rgba) != Some(now.rgba))
+            .then_some(now.rgba)
+            .flatten();
+        let transition = (was.map(|w| w.transition) != Some(now.transition))
+            .then_some(now.transition)
+            .flatten();
+        (color.is_some() || transition.is_some()).then_some(crate::game_link::SpawnRuleWire {
+            color,
+            transition,
+            ..base
         })
     }
 
@@ -12830,6 +13135,86 @@ mod live_effect_capture_tests {
             calls[1].rate,
             Some(1.5),
             "the orphaned 0.25 must not have overwritten this"
+        );
+    }
+
+    /// A move captured live used to come back without its screen or body colouring at all —
+    /// the plugin never recorded those lines and the editor had nowhere to put them. Kirby's
+    /// dash attack again, as the plugin now reports it.
+    #[test]
+    fn captured_colour_commands_come_back_and_do_not_anchor_a_rate() {
+        let dash = hash40::hash40("kirby_dash").0;
+        let color = |frame: f32, func: &str, args: Vec<A>| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_dash").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        };
+        let captures = vec![
+            spawn("EFFECT_FOLLOW_NO_STOP", 8.0, dash),
+            color(
+                8.0,
+                "BURN_COLOR",
+                vec![A::Num(2.0), A::Num(0.059), A::Num(0.008), A::Num(0.0)],
+            ),
+            color(
+                8.0,
+                "BURN_COLOR_FRAME",
+                vec![
+                    A::Num(4.0),
+                    A::Num(2.0),
+                    A::Num(0.059),
+                    A::Num(0.008),
+                    A::Num(0.9),
+                ],
+            ),
+            // Nothing in the game stops the last-effect rate from reaching back past these two
+            // lines, but the editor refuses to guess that it did — the same rule the script
+            // parser follows, and the two must agree or a captured move and its own source
+            // would disagree about which spawn a rate belongs to.
+            color(8.0, "LAST_EFFECT_SET_RATE", vec![A::Num(0.5)]),
+            color(41.0, "BURN_COLOR_NORMAL", vec![]),
+        ];
+
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([(dash, "kirby_dash".into())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].effect_name, "kirby_dash");
+        assert_eq!(calls[0].rate, None, "the rate sits under a colour command");
+        assert_eq!(
+            calls[1..]
+                .iter()
+                .map(|call| (call.spawn_func.as_str(), call.color.clone().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "BURN_COLOR",
+                    crate::data::ColorCall {
+                        transition: None,
+                        rgba: Some([2.0, 0.059, 0.008, 0.0]),
+                    }
+                ),
+                (
+                    "BURN_COLOR_FRAME",
+                    crate::data::ColorCall {
+                        transition: Some(4.0),
+                        rgba: Some([2.0, 0.059, 0.008, 0.9]),
+                    }
+                ),
+                (
+                    "BURN_COLOR_NORMAL",
+                    crate::data::ColorCall {
+                        transition: None,
+                        rgba: None,
+                    }
+                ),
+            ],
+            "a capture drops `agent`, so every slot shifts down by one — reading the length as \
+             the red channel is what getting that wrong looks like"
         );
     }
 

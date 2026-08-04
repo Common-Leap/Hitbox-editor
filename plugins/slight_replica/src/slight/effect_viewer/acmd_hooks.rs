@@ -1293,6 +1293,128 @@ effect_hook!(
 );
 effect_hook!(hook_down_eff, smash::app::sv_animcmd::DOWN_EFFECT, false);
 
+// ── Model and screen colour ──────────────────────────────────────────────────
+//
+// `FLASH` and the `BURN_COLOR` family tint the fighter's model or the screen flash. They are
+// not spawns — there is no graphic, joint, or handle — but they belong to the move's effect
+// timeline, and before this the editor could neither see them in a live capture nor preview a
+// change to one.
+//
+// They name no effect kind either, so a rule for one is keyed on hash40 of the lowercased
+// command name; see the note on `SpawnRule::color`. Everything else is the same shape as the
+// spawn hooks: record the script's own arguments first, then rewrite the Lua stack before
+// `original!()` runs, so the game does the work with the editor's values rather than having
+// them applied on top afterwards.
+
+/// One colour command's hook.
+///
+/// `$slot_base` is where the four colour components start on the Lua stack, which is 1 for the
+/// `_FRM` / `_FRAME` forms — the interpolation length comes first — and 0 for the rest. Getting
+/// it wrong writes the length into the red channel, which is why it is stated per command here
+/// rather than derived from the argument count.
+macro_rules! color_hook {
+    ($hook_name:ident, $target:path, $command:literal, $lower:literal, $slot_base:expr, $argc:expr) => {
+        #[skyline::hook(replace = $target)]
+        unsafe fn $hook_name(lua_state: u64) {
+            let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, $argc);
+            crate::slight::hitbox_viewer::record(lua_state, $command, &typed);
+
+            let cmd_hash = smash::hash40($lower);
+            if crate::slight::effect_viewer::spawn_rules::any_for(cmd_hash) {
+                let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                    as *mut smash::app::BattleObjectModuleAccessor;
+                let (motion, frame) = if boma.is_null() {
+                    (0u64, -1.0f32)
+                } else {
+                    (
+                        smash::app::lua_bind::MotionModule::motion_kind(boma),
+                        smash::app::lua_bind::MotionModule::frame(boma),
+                    )
+                };
+                // A disabled colour command skips original entirely, so the tint never
+                // happens — the same meaning suppression has for a spawn.
+                if crate::slight::effect_viewer::spawn_rules::suppressed(cmd_hash, motion, frame) {
+                    return;
+                }
+                if let Some((color, transition)) =
+                    crate::slight::effect_viewer::spawn_rules::color_for(cmd_hash, motion, frame)
+                {
+                    let mut agent = smash::lib::L2CAgent::new(lua_state);
+                    let mut vals = read_all_args(&mut agent, $argc);
+                    let mut wrote = false;
+                    if let Some(frames) = transition.filter(|_| $slot_base == 1) {
+                        if let Some(slot) = vals.get_mut(0) {
+                            *slot = L2CValue::new_num(frames);
+                            wrote = true;
+                        }
+                    }
+                    if let Some(rgba) = color {
+                        for (offset, component) in rgba.iter().enumerate() {
+                            if let Some(slot) = vals.get_mut($slot_base + offset) {
+                                *slot = L2CValue::new_num(*component);
+                                wrote = true;
+                            }
+                        }
+                    }
+                    // Only touch the stack if something was actually replaced: clearing and
+                    // repushing an unchanged argument list is work the game does not need, and
+                    // a short read would otherwise drop arguments the script did pass.
+                    if wrote {
+                        agent.clear_lua_stack();
+                        for v in vals.iter_mut() {
+                            agent.push_lua_stack(v);
+                        }
+                    }
+                }
+            }
+
+            original!()(lua_state);
+        }
+    };
+}
+
+color_hook!(hook_flash, smash::app::sv_animcmd::FLASH, "FLASH", "flash", 0, 4);
+color_hook!(
+    hook_flash_frm,
+    smash::app::sv_animcmd::FLASH_FRM,
+    "FLASH_FRM",
+    "flash_frm",
+    1,
+    5
+);
+color_hook!(
+    hook_burn_color,
+    smash::app::sv_animcmd::BURN_COLOR,
+    "BURN_COLOR",
+    "burn_color",
+    0,
+    4
+);
+color_hook!(
+    hook_burn_color_frame,
+    smash::app::sv_animcmd::BURN_COLOR_FRAME,
+    "BURN_COLOR_FRAME",
+    "burn_color_frame",
+    1,
+    5
+);
+color_hook!(
+    hook_burn_color_normal,
+    smash::app::sv_animcmd::BURN_COLOR_NORMAL,
+    "BURN_COLOR_NORMAL",
+    "burn_color_normal",
+    0,
+    0
+);
+color_hook!(
+    hook_start_info_flash_eye,
+    smash::app::sv_animcmd::START_INFO_FLASH_EYE,
+    "START_INFO_FLASH_EYE",
+    "start_info_flash_eye",
+    0,
+    0
+);
+
 /// EFFECT_OFF_KIND is both timeline data and a lifetime command. Capture its pristine typed
 /// arguments, preserve the game's original call, then bridge the stop to concrete carrier-owned
 /// follow handles.
@@ -1486,7 +1608,13 @@ pub fn install() {
         hook_down_eff,
         hook_effect_off_kind,
         hook_last_effect_set_rate,
+        hook_flash,
+        hook_flash_frm,
+        hook_burn_color,
+        hook_burn_color_frame,
+        hook_burn_color_normal,
+        hook_start_info_flash_eye,
     );
-    skyline::println!("[SLight] ACMD effect hooks installed (25 spawn/stop variants)");
+    skyline::println!("[SLight] ACMD effect hooks installed (31 spawn/stop/colour variants)");
     crate::slight::diag::note("ACMD hooks installed");
 }

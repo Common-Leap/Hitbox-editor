@@ -82,7 +82,8 @@ Two export paths, different rules — do not conflate them:
   ```
 
   Confirmed missing so far: `AREA_WIND_2ND` (A1), `LAST_EFFECT_SET_WORK_INT` (found while
-  auditing C1).
+  auditing C1), `FLASH_SET_DIRECTION` (C3 — 8 corpus uses, so corpus frequency is no guide to
+  whether a wrapper exists; check every member every time).
 - **"Parsed into the IR" is not the same as "reaches the export."** The effect export is
   generated from `EffectCall`s, not from `EffectScript` statements, so a macro can have its own
   `EffectMacro` variant, parse perfectly, and still be dropped by `eval_effect_stmts` on the way
@@ -91,6 +92,10 @@ Two export paths, different rules — do not conflate them:
   covered, follow the value all the way to the emitted text; and note that
   `cached_scripts_round_trip_through_the_emitter` only compares `(spawn_func, effect_name)`
   pairs, so it will not catch a dropped field for you.
+
+  The general form of this is **C5**: a line with no typed variant is not merely unmodelled,
+  it is *deleted* by the export. C3 found 69 more of them after A3 found 27. Assume any effect
+  macro this file does not list as done is being dropped, and check before assuming otherwise.
 - **A macro that names no target binds to the line above it, and nowhere else.**
   `LAST_EFFECT_SET_*` modifies whatever spawned last, so there is nothing in the call to match
   on. Bind it to the immediately preceding recognised spawn and refuse otherwise — reaching
@@ -118,7 +123,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**268 green after A3**), including the two corpus oracles — run them
+- [ ] `cargo test` passes (**273 green after C3**), including the two corpus oracles — run them
       by name with `cargo test cached_script`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export` and
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
@@ -152,9 +157,9 @@ paraphrase it from memory.
 
 Ordered so that earlier tasks unblock later ones. **Position within a section is not a
 priority ranking** — it was meant to be, but measuring the corpus after A3 showed it is not:
-C3 (69 occurrences) beats C1 (65), and B4 (45) beats B3 (23). Each entry now carries its own
-measured counts; go by those. Blocking relationships are the only thing the order still
-encodes.
+C3 (69 occurrences) beat C1 (65) and was taken first, and B4 (45) beats B3 (23). Each entry
+carries its own measured counts; go by those. Blocking relationships are the only thing the
+order still encodes.
 
 Counts are occurrences in the local 461-file corpus, which is what the app has fetched so far
 — a proxy for how often real scripts use a macro, not a census of the game.
@@ -453,28 +458,101 @@ arguments 4 onward. Those are editable; the transform never will be.
 - **Done when:** changing a trail's joints rewrites those arguments and nothing else, and
   dragging a position still reports the existing "no position arguments" skip.
 
-### [~] C3 — Screen and body colour effects (in progress 2026-08-04)
+### [x] C3 — Screen and body colour effects
 
-**Measured after A3, and this entry was misfiled as small.** It is the largest effect task in
-this section by corpus usage — 69 occurrences against C1's 65 — and every member has a
-`macros.rs` wrapper, so there is no export trap here:
+Done 2026-08-04. All five surfaces; `cargo test` 273 green, both corpus oracles run for real
+(461 files present). The plugin was touched and builds; the `diag.txt` stamp could not be
+checked, because `scripts/build.sh` only writes to `target/output/` and deploying needs a
+running game.
 
-| macro | corpus |
-|---|---|
-| `FLASH` | 41 |
-| `BURN_COLOR` | 10 |
-| `BURN_COLOR_FRAME` | 10 |
-| `BURN_COLOR_NORMAL` | 5 |
-| `START_INFO_FLASH_EYE` | 3 |
-| `FLASH_FRM` | 0 |
+**The premise held — 69 occurrences, all six wrapped, the panel really is mostly a colour
+picker — but the entry described the wrong problem.** This was filed as coverage: a family the
+editor could not edit. It was worse than that. The effect export regenerates the whole function
+from `EffectCall`s, and these parsed as `Raw`, so **every export silently deleted them**. A
+mod built from kirby/AttackDash shipped with the burn colouring gone and nothing anywhere said
+so. Same shape as A3's dropped rate, four times the usage, and the entry did not predict it
+because it was reasoning about the panel.
 
-The panel work really is mostly a colour picker, which is what makes the ratio good. `FLASH`
-alone is worth more than all of `_ALPHA`, `_SCALE_W`, `_OFFSET_TO_CAMERA_FLAT`, and
-`LAST_PARTICLE_SET_COLOR` put together. **Consider taking this before C1**, or at least
-before C1's long tail.
+**The measured argument layout, which is uniform across the family and was not obvious:**
 
-- **Trap:** unlike the `LAST_EFFECT_SET_*` family these name their own target, so A3's
-  bind-to-the-line-above rule does *not* apply and must not be copied here out of habit.
+| macro | args | corpus | shape |
+|---|---|---|---|
+| `FLASH` | 4 | 41 | r, g, b, a |
+| `BURN_COLOR` | 4 | 10 | r, g, b, blend |
+| `BURN_COLOR_FRAME` | 5 | 10 | **frames**, then the same four |
+| `BURN_COLOR_NORMAL` | 0 | 5 | reset |
+| `START_INFO_FLASH_EYE` | 0 | 3 | — |
+| `FLASH_FRM` | 5 | 0 | **frames**, then the same four |
+
+One layout for all six: the interpolation length comes first where there is one, and the four
+colour components follow. That is measured, not assumed — the corpus pairs
+`BURN_COLOR(agent, 2, 0.059, 0.008, 0)` with
+`BURN_COLOR_FRAME(agent, 4, 2, 0.059, 0.008, 0.9)` on the very next line, which is the same
+four values with a length pushed in front. So `color_slots` is one function rather than six
+tables, and B1's warning about per-family slot tables does not bite here.
+
+**`FLASH_SET_DIRECTION` is a third instance of the A1 trap, and is deliberately not modelled.**
+`sv_animcmd` has it, the corpus calls it 8 times (dolly `SpecialHiCommand` and
+`SpecialAirHiCommand`), and `macros.rs` does **not** wrap it. Modelling it would mean either
+emitting a macro that does not exist or blocking the export of two Terry moves that export
+today. It stays an unmodelled line — which means it is still dropped on export, exactly as it
+is now. See C5.
+
+**How they are carried, and why:** a colour command is an `EffectCall` with `color: Some(..)`
+and the command in `spawn_func`, sharing the effect list rather than getting one of its own.
+Everything that list already does — reordering, disabling, undo, project save, write-back
+ordinals, export grouping by frame — is what these need too, and a parallel list would be a
+second copy of all of it to keep in step. The cost is that the spawn fields are meaningless on
+such an entry, so every site that reads one checks `color` first. The sites that had to learn
+this: `emit_spawn_call`, `export_spawn_downgrades`, `check_effect_values`,
+`effect_call_display_name`, `is_spawn_macro`, `transform_matches`, the properties panel, and
+`push_effect_rules` — where `effect_name_hash("")` would otherwise have keyed every colour
+command in the game to one hash.
+
+**Also landed:**
+
+- **Live.** The plugin hooks all six: it records them, so a captured move comes back with its
+  colouring, and rewrites their arguments when a rule retunes one. These name no effect kind,
+  so a rule keys `eff_hash` on hash40 of the lowercased *command* name — no graphic is called
+  `burn_color` — which reuses the whole motion/frame/suppress matcher unchanged. `color` and
+  `transition` are `Option` + `skip_serializing_if`, so older plugin builds ignore them.
+- **A command dropdown**, the same shape as A2's. Switching changes how many arguments the call
+  takes, so the payload is reshaped to the new signature on the spot rather than left for
+  `check_color_values` to block on.
+- `check_color_values` refuses a payload whose shape disagrees with its command — that is a
+  call the signature does not accept, so it is a blocker by the same rule as a wind command an
+  argument short.
+
+**Known gaps, deliberately left:**
+
+- The live path can retune a command the script already calls; it cannot inject one the script
+  never makes, and cannot move one to a different frame. Unlike a spawn there is no captured
+  argument list to replay. Adding and retiming reach the export, not the preview.
+- The colour picker clamps to 0..=1 but the drag fields do not, because the corpus writes
+  `BURN_COLOR(agent, 2, …)` — an over-bright red a clamping editor would silently dim.
+
+### [ ] C5 — Stop the effect export deleting lines it does not model
+
+Split out of C3, which found the general case behind its own symptom.
+
+The effect export regenerates the function from `EffectCall`s, so **any line without a typed
+variant is deleted on export, silently.** C3 fixed this for 69 colour commands and A3 for 27
+rates by modelling them, but that is one family at a time and the export gets no safer for the
+next one. Still dropped today: `FLASH_SET_DIRECTION` (8, and unwrappable — see C3),
+`LAST_EFFECT_SET_WORK_INT` (1, likewise), every `sv_kinetic_energy` line, and anything a mod
+author wrote that this parser has never seen.
+
+- **Work order:** teach `EffectScript` → export to carry unmodelled lines through in position,
+  the way `EffectCall::raw_line` already carries a trail. The hard part is *where* they go: the
+  export groups calls by frame and the original line's position within its block is not
+  currently recorded.
+- **Cheaper first step, and worth landing on its own:** make the verifier *report* them. It
+  reads the emitted text back with the same parser, so it can compare the `Raw` statements of
+  the source against those of the export and name each one that vanished. That turns a silent
+  loss into a named one without needing to solve placement.
+- **Trap:** a preserved line may be a spawn this parser does not recognise, in which case
+  re-emitting it and *also* emitting the call it produced would double the spawn. The report
+  step has no such hazard, which is the other reason to do it first.
 
 ### [ ] C4 — Effect lifetime control
 
