@@ -129,6 +129,16 @@ const WIND_ARGC_MAX: i32 = 12;
 pub const CAT_ATTACK: u8 = 0;
 pub const CAT_GRAB: u8 = 1;
 pub const CAT_WIND: u8 = 2;
+/// Hurtbox state (`HIT_NODE` / `HIT_NO`), which is not a collision at all — it changes how the
+/// fighter *receives* hits. It rides the same rule pipeline because the matching key is the
+/// same shape (motion + target + frame window), but it is deliberately absent from
+/// [`is_collision_func`]: that gate exists to note when something is out to be cleared, and a
+/// hurtbox state is never ended by `AttackModule::clear_all`.
+///
+/// The rule's `hitbox_id` carries the bone hash for `HIT_NODE` and the group number for
+/// `HIT_NO`, which cannot collide: a hash40 of a real bone name never lands in the low integers
+/// the group form uses.
+pub const CAT_HURT: u8 = 3;
 
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
@@ -636,6 +646,14 @@ pub struct HbOverrides {
     pub sound_level: Option<i64>,
     pub sound_attr: Option<i64>,
     pub attack_region: Option<i64>,
+    // ── Hurtbox state (CAT_HURT only) ────────────────────────────────────────
+    /// `HIT_STATUS_*` as a raw lua number, for `HIT_NODE` / `HIT_NO`.
+    pub hit_status: Option<i64>,
+    /// The bone hash or group number to retarget to. Rewriting this is what lets the editor
+    /// preview "make the knee intangible instead of the shin" without a rebuild.
+    pub hit_target: Option<LuaArg>,
+    /// `COL_PRI`'s priority number.
+    pub col_pri: Option<i64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -1096,6 +1114,130 @@ wind_hook!(
     10
 );
 
+// ── Hurtbox state hooks ──────────────────────────────────────────────────────
+//
+// `HIT_NODE(bone, status)` and `HIT_NO(group, status)` share a shape but not a family: slot 0
+// is a hash in one and an integer in the other. They are hooked separately for that reason,
+// and a rule's target is pushed back as the typed value it arrived as rather than coerced.
+
+/// Push a whole argument vector back onto the lua stack, replacing what the script wrote.
+unsafe fn rewrite_args(lua_state: u64, args: &[LuaArg]) {
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    for arg in args {
+        let mut value = arg.to_l2c();
+        agent.push_lua_stack(&mut value);
+    }
+}
+
+/// Capture one hurtbox call and apply any rule matching it, returning `true` to suppress.
+///
+/// `target_key` is what the rule matches on — the bone hash or the group number — so a move
+/// that makes four bones intangible can have one of them changed without touching the rest.
+unsafe fn hurt_action(lua_state: u64, func: &'static str, args: &[LuaArg], target_key: u64) -> bool {
+    record(lua_state, func, args);
+    if !any_rules() {
+        return false;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return false;
+    }
+    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let Some((suppress, overrides)) = action_for(CAT_HURT, motion, target_key, frame) else {
+        return false;
+    };
+    if suppress {
+        return true;
+    }
+    let Some(ov) = overrides else {
+        return false;
+    };
+    let mut vals = args.to_vec();
+    // Slot 0 is the target and slot 1 the status for both `HIT_NODE` and `HIT_NO`; `COL_PRI`
+    // has only slot 0. Each override is applied only where that slot exists, so a rule meant
+    // for one macro can never lengthen a call of another.
+    if let Some(target) = ov.hit_target.clone() {
+        if !vals.is_empty() {
+            vals[0] = target;
+        }
+    }
+    if let Some(status) = ov.hit_status {
+        if vals.len() > 1 {
+            vals[1] = LuaArg::Int(status);
+        }
+    }
+    if let Some(pri) = ov.col_pri {
+        if !vals.is_empty() {
+            vals[0] = LuaArg::Int(pri);
+        }
+    }
+    if vals != args {
+        rewrite_args(lua_state, &vals);
+    }
+    false
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::HIT_NODE)]
+unsafe fn hook_hit_node(lua_state: u64) {
+    let args = read_args_exact(lua_state, 2);
+    if args.len() >= 2 {
+        let bone = match args.first() {
+            Some(LuaArg::Hash(h)) => *h,
+            _ => u64::MAX,
+        };
+        if hurt_action(lua_state, "HIT_NODE", &args, bone) {
+            return;
+        }
+    }
+    original!()(lua_state)
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::HIT_NO)]
+unsafe fn hook_hit_no(lua_state: u64) {
+    let args = read_args_exact(lua_state, 2);
+    if args.len() >= 2 {
+        let group = match args.first() {
+            Some(LuaArg::Int(n)) => *n as u64,
+            Some(LuaArg::Num(n)) => *n as u64,
+            _ => u64::MAX,
+        };
+        if hurt_action(lua_state, "HIT_NO", &args, group) {
+            return;
+        }
+    }
+    original!()(lua_state)
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::COL_PRI)]
+unsafe fn hook_col_pri(lua_state: u64) {
+    let args = read_args_exact(lua_state, 1);
+    if !args.is_empty() {
+        // `COL_PRI` is per fighter rather than per target, so every rule for it shares one
+        // key. `u64::MAX` is used because it is not a value any bone hash or group takes.
+        if hurt_action(lua_state, "COL_PRI", &args, u64::MAX) {
+            return;
+        }
+    }
+    original!()(lua_state)
+}
+
+/// The two argument-less members. Recorded so the editor can see where a move gives its
+/// hurtboxes back — without them a captured state would run to the end of the timeline.
+#[skyline::hook(replace = smash::app::sv_animcmd::HIT_RESET_ALL)]
+unsafe fn hook_hit_reset_all(lua_state: u64) {
+    record(lua_state, "HIT_RESET_ALL", &[]);
+    original!()(lua_state)
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::COL_NORMAL)]
+unsafe fn hook_col_normal(lua_state: u64) {
+    record(lua_state, "COL_NORMAL", &[]);
+    original!()(lua_state)
+}
+
 // ── Injection (per-frame, from the smashline line callback) ──────────────────
 
 /// (boid, exact injection fingerprint) → motion/frame it last fired at. Editing a payload gives
@@ -1256,7 +1398,14 @@ pub fn install() {
         hook_wind_2nd_rad_arg9,
         hook_wind_2nd_arg10,
         hook_erase_wind,
-        hook_attack_clear_all
+        hook_attack_clear_all,
+        hook_hit_node,
+        hook_hit_no,
+        hook_col_pri,
+        hook_hit_reset_all,
+        hook_col_normal
     );
-    skyline::println!("[SLight] ACMD ATTACK/CATCH/WIND/CLEAR hooks installed (capture + rules)");
+    skyline::println!(
+        "[SLight] ACMD ATTACK/CATCH/WIND/CLEAR/HURT hooks installed (capture + rules)"
+    );
 }

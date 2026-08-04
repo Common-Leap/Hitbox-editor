@@ -153,6 +153,12 @@ fn const_combo(
     enum_combo(ui, value, id, label, &names);
 }
 
+/// `HIT_STATUS_XLU` → `XLU`. The prefix is on every entry and carries no information in a
+/// dropdown that only ever offers hit statuses.
+fn hit_status_short(name: &str) -> &str {
+    name.strip_prefix("HIT_STATUS_").unwrap_or(name)
+}
+
 fn setoff_combo(ui: &mut egui::Ui, v: &mut String, id: &str) {
     const_combo(ui, v, id, "Setoff Kind:", crate::param_labels::SETOFF_KIND);
 }
@@ -1650,7 +1656,7 @@ impl VisionaryApp {
         self.state.current_frame = FIRST_GAME_FRAME;
         self.state.total_frames = move_entry.frame_count;
         self.state.hitboxes.clear();
-        self.state.script = crate::data::AcmdScript::default();
+        self.state.set_script(crate::data::AcmdScript::default());
         self.state.effect_script = crate::data::EffectScript::default();
         self.state.effects = Vec::new();
         self.acmd_error = None;
@@ -2023,7 +2029,7 @@ impl VisionaryApp {
                 self.normalize_hitbox_bones(&mut hitboxes);
                 self.state.hitboxes_pristine = hitboxes.clone();
                 self.state.hitboxes = hitboxes;
-                self.state.script = script;
+                self.state.set_script(script);
                 None
             }
         } else {
@@ -2144,6 +2150,22 @@ impl VisionaryApp {
                 &move_name,
                 &self.state.hitboxes_pristine,
                 &self.state.hitboxes,
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            // Hurtboxes live in the same `game_` function as the hitboxes, but are matched by
+            // their own sites and retuned through their own slots, so they get their own pass.
+            match crate::acmd_src::sync_hurtboxes(
+                index,
+                &fighter,
+                &move_name,
+                &self.state.hurtboxes_pristine,
+                &self.state.script.to_hurtboxes(),
             ) {
                 Ok(report) => {
                     changed += report.changed;
@@ -2346,7 +2368,7 @@ impl VisionaryApp {
                     self.state.hitboxes_pristine = hitboxes.clone();
                     self.state.acmd_source = source_label.into();
                     self.state.hitboxes = hitboxes;
-                    self.state.script = script;
+                    self.state.set_script(script);
 
                     // Store effect data — pristine first, then re-apply this move's edits.
                     self.state.effects = effect_script.to_effect_calls();
@@ -3871,7 +3893,133 @@ impl VisionaryApp {
                     );
                 }
             }
+
+            self.draw_hurtbox_section(ui);
         });
+    }
+
+    /// Intangibility and body-collision priority, below the collision list.
+    ///
+    /// Its own section rather than rows in the hitbox list, because these are not collisions:
+    /// they change how the fighter *receives* hits, they are per bone rather than per box, and
+    /// nothing about damage, knockback, or geometry applies to them.
+    ///
+    /// Edits go straight into `state.script`. Hurtbox statements are carried through the script
+    /// rather than rebuilt from a list the way collisions are, so the script is the model here
+    /// and there is no second copy to keep in step.
+    fn draw_hurtbox_section(&mut self, ui: &mut Ui) {
+        use crate::data::{ExcuteStmt, HurtTarget};
+
+        let (states, pris) = self.state.script.to_hurtboxes();
+        if states.is_empty() && pris.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Hurtboxes");
+            ui.colored_label(egui::Color32::from_rgb(255, 200, 90), "Intangibility");
+        })
+        .response
+        .on_hover_text(
+            "HIT_NODE / HIT_NO set how one bone or hurtbox group receives hits. A state runs \
+             from its own call until another call takes it back, or until HIT_RESET_ALL.",
+        );
+
+        let bone_names = self.bone_names.clone();
+        // Collected before the loop so an edit can be applied after it, without holding a
+        // mutable borrow of the script across the immutable span list it came from.
+        let mut edit: Option<(usize, ExcuteStmt)> = None;
+
+        for state in &states {
+            let active = state.active_start <= self.state.current_frame
+                && self.state.current_frame <= state.active_end;
+            ui.horizontal(|ui| {
+                // The default state is what a bone is *supposed* to be, so it is drawn quietly:
+                // in a move that toggles four bones on and off, the eight rows are half noise.
+                let color = if state.status == "HIT_STATUS_NORMAL" {
+                    egui::Color32::from_gray(140)
+                } else if active {
+                    egui::Color32::from_rgb(255, 200, 90)
+                } else {
+                    egui::Color32::from_rgb(170, 140, 70)
+                };
+                ui.colored_label(color, if active { "◆" } else { "◇" });
+                ui.label(format!(
+                    "{} [{}-{}]",
+                    state.target.label(),
+                    state.active_start,
+                    state.active_end
+                ));
+
+                let mut status = state.status.clone();
+                let mut target = state.target.clone();
+                let mut changed = false;
+
+                egui::ComboBox::from_id_salt(("hurt_status", state.site))
+                    .selected_text(hit_status_short(&status))
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for (name, _) in crate::param_labels::HIT_STATUS {
+                            changed |= ui
+                                .selectable_value(&mut status, (*name).into(), hit_status_short(name))
+                                .changed();
+                        }
+                    });
+
+                match &mut target {
+                    HurtTarget::Bone(bone) => {
+                        if bone_names.is_empty() {
+                            changed |= ui.text_edit_singleline(bone).changed();
+                        } else {
+                            egui::ComboBox::from_id_salt(("hurt_bone", state.site))
+                                .selected_text(bone.clone())
+                                .width(90.0)
+                                .show_ui(ui, |ui| {
+                                    for name in &bone_names {
+                                        changed |= ui
+                                            .selectable_value(bone, name.clone(), name)
+                                            .changed();
+                                    }
+                                });
+                        }
+                    }
+                    HurtTarget::Group(group) => {
+                        changed |= ui.add(egui::DragValue::new(group)).changed();
+                    }
+                }
+
+                if changed {
+                    edit = Some((state.site, ExcuteStmt::HitStatus { target, status }));
+                }
+            });
+        }
+
+        for pri in &pris {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(150, 200, 255), "▮");
+                ui.label(format!(
+                    "collision priority [{}-{}]",
+                    pri.active_start, pri.active_end
+                ));
+                let mut value = pri.pri;
+                if ui.add(egui::DragValue::new(&mut value)).changed() {
+                    edit = Some((pri.site, ExcuteStmt::ColPri(value)));
+                }
+            })
+            .response
+            .on_hover_text(
+                "COL_PRI sets which fighter's pushbox wins when two overlap. Ended by \
+                 COL_NORMAL, not by HIT_RESET_ALL.",
+            );
+        }
+
+        if let Some((site, replacement)) = edit {
+            if let Some(stmt) = self.state.script.hurt_stmt_mut(site) {
+                *stmt = replacement;
+                self.push_hurtbox_rules();
+            }
+        }
     }
 
     fn draw_effects_panel(&mut self, ui: &mut Ui) {
@@ -5018,7 +5166,7 @@ impl VisionaryApp {
         if self.state.hitboxes_pristine.is_empty() && !record.hitboxes_pristine.is_empty() {
             self.state.hitboxes_pristine = record.hitboxes_pristine;
         }
-        self.state.script = record.script;
+        self.state.set_script(record.script);
         self.state.hitboxes = record.hitboxes;
         true
     }
@@ -6130,6 +6278,16 @@ impl VisionaryApp {
             self.state.hitboxes_pristine = hitboxes.clone();
             self.state.hitboxes = hitboxes;
         }
+        // Only when there is no script to lose. A fetched script already holds these lines
+        // along with everything else in the move, and replacing it with a hurtbox-only one
+        // would drop every raw line the export carries verbatim. An empty script is the case
+        // this is for: a move captured live has no file anywhere.
+        if self.state.script.stmts.is_empty() {
+            let hurt = Self::hurtbox_script_from_captures(&captures, &bone_rev);
+            if !hurt.stmts.is_empty() {
+                self.state.set_script(hurt);
+            }
+        }
         if !effects.is_empty() {
             self.state.effects_pristine = effects.clone();
             self.state.effects = effects;
@@ -6615,6 +6773,81 @@ impl VisionaryApp {
         hitboxes
     }
 
+    /// Rebuild a script's hurtbox statements from a live capture.
+    ///
+    /// These are not resolved into spans here the way hitboxes are, because a span is derived
+    /// state: the panel, the export and the source sync all read `state.script`, so a capture
+    /// has to land as *statements* or it would show on screen and reach nothing else.
+    ///
+    /// Frames come back as motion frames and are converted the same way every other capture is.
+    fn hurtbox_script_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+        bone_rev: &HashMap<u64, String>,
+    ) -> crate::data::AcmdScript {
+        use crate::data::{AcmdStmt, ExcuteStmt, HurtTarget};
+        let mut by_frame: std::collections::BTreeMap<u32, Vec<ExcuteStmt>> = Default::default();
+        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
+
+        /// One captured line as a statement, or `None` if it is not one this family models.
+        fn stmt_of(
+            line: &crate::game_link::CaptureLine,
+            bone_rev: &HashMap<u64, String>,
+        ) -> Option<ExcuteStmt> {
+            // An unknown number is kept as the number. Substituting a name this build does not
+            // have would be inventing one, and the emitter writes a bare number back without a
+            // `*` so it still compiles.
+            let status = || -> Option<String> {
+                let raw = line.args.get(1)?.as_i64()?;
+                Some(
+                    crate::param_labels::const_name(crate::param_labels::HIT_STATUS, raw)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| raw.to_string()),
+                )
+            };
+            match line.func.as_str() {
+                "HIT_NODE" => Some(ExcuteStmt::HitStatus {
+                    // A bone whose name this dump does not know cannot be written back as a
+                    // `Hash40::new("…")`, so the call is dropped rather than exported against
+                    // the wrong bone.
+                    target: HurtTarget::Bone(
+                        bone_rev.get(&line.args.first()?.as_hash()?)?.clone(),
+                    ),
+                    status: status()?,
+                }),
+                "HIT_NO" => Some(ExcuteStmt::HitStatus {
+                    target: HurtTarget::Group(line.args.first()?.as_i64()?),
+                    status: status()?,
+                }),
+                "COL_PRI" => Some(ExcuteStmt::ColPri(line.args.first()?.as_i64()?)),
+                "HIT_RESET_ALL" => Some(ExcuteStmt::HitResetAll),
+                "COL_NORMAL" => Some(ExcuteStmt::ColNormal),
+                _ => None,
+            }
+        }
+
+        for (_, line) in ordered {
+            if let Some(stmt) = stmt_of(line, bone_rev) {
+                by_frame
+                    .entry(Self::motion_to_script_frame(line.frame))
+                    .or_default()
+                    .push(stmt);
+            }
+        }
+
+        crate::data::AcmdScript {
+            stmts: by_frame
+                .into_iter()
+                .flat_map(|(frame, stmts)| {
+                    [
+                        AcmdStmt::Frame(frame as f32),
+                        AcmdStmt::Excute(stmts),
+                    ]
+                })
+                .collect(),
+        }
+    }
+
     /// Reconstruct effect timeline spans from the locked playback's spawn and stop events.
     /// Every distinct spawn from that one execution is retained; time ordering and kill-kind
     /// semantics are then applied to the complete snapshot.
@@ -6923,6 +7156,117 @@ impl VisionaryApp {
         }
     }
 
+    /// Send the hurtbox states the editor has changed to the running game.
+    ///
+    /// Diffed against `hurtboxes_pristine` by site rather than by position, for the same reason
+    /// the source sync is: one looped `HIT_NODE` resolves to one span per iteration, so the two
+    /// lists need not be the same length.
+    ///
+    /// These share the hitbox rule store under their own key. The plugin takes one full list per
+    /// send, so keeping them in the same store is what stops a hurtbox edit from wiping the
+    /// move's hitbox rules on its way out.
+    fn push_hurtbox_rules(&mut self) {
+        use crate::data::HurtTarget;
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let (was_states, was_pris) = self.state.hurtboxes_pristine.clone();
+        let (states, pris) = self.state.script.to_hurtboxes();
+        let mut rules: Vec<crate::game_link::HitboxRuleWire> = Vec::new();
+
+        let rule = |target_key: u64,
+                    frame: u32,
+                    overrides: crate::game_link::HbOverridesWire| {
+            let (frame_start, frame_end) = Self::rule_frame_window(frame);
+            crate::game_link::HitboxRuleWire {
+                motion,
+                category: 3,
+                hitbox_id: Some(target_key),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(overrides),
+                inject: None,
+            }
+        };
+
+        for now in &states {
+            let Some(was) = was_states.iter().find(|s| s.site == now.site) else {
+                // No baseline for this site means the span list changed shape under us. The
+                // export path can add a call; this one cannot, so it says nothing rather than
+                // guessing at a rule that would fire on the wrong line.
+                continue;
+            };
+            if was == now {
+                continue;
+            }
+            // The rule has to match the call the GAME makes, which is still the pristine
+            // target — matching on the edited one would never fire.
+            let key = match &was.target {
+                HurtTarget::Bone(bone) => effect_name_hash(bone),
+                HurtTarget::Group(n) => *n as u64,
+            };
+            let hit_target = (was.target != now.target).then(|| match &now.target {
+                HurtTarget::Bone(bone) => {
+                    crate::game_link::LuaArgWire::Hash(effect_name_hash(bone))
+                }
+                HurtTarget::Group(n) => crate::game_link::LuaArgWire::Int(*n),
+            });
+            rules.push(rule(
+                key,
+                was.active_start,
+                crate::game_link::HbOverridesWire {
+                    hit_status: (was.status != now.status)
+                        .then(|| {
+                            crate::param_labels::encode_const(
+                                crate::param_labels::HIT_STATUS,
+                                &now.status,
+                            )
+                        })
+                        .flatten(),
+                    hit_target,
+                    ..Default::default()
+                },
+            ));
+        }
+
+        for now in &pris {
+            let Some(was) = was_pris.iter().find(|p| p.site == now.site) else {
+                continue;
+            };
+            if was.pri == now.pri {
+                continue;
+            }
+            // Every `COL_PRI` shares one key, matching the plugin: the call is per fighter,
+            // not per target, so there is nothing else to tell two of them apart but the frame.
+            rules.push(rule(
+                u64::MAX,
+                was.active_start,
+                crate::game_link::HbOverridesWire {
+                    col_pri: Some(now.pri),
+                    ..Default::default()
+                },
+            ));
+        }
+
+        let key = format!("{mv_key}#hurt");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+    }
+
     /// Rebuild live hitbox rules for every move in a loaded project, not just the move currently
     /// open in the UI. Projects written before `hitboxes_pristine` was added cannot safely
     /// derive suppress/retime rules; those moves are counted so the load status can tell the
@@ -7152,6 +7496,11 @@ impl VisionaryApp {
             sound_level: attr(&h.sound_level, &p.sound_level, pl::SOUND_LEVEL),
             sound_attr: attr(&h.sound_attr, &p.sound_attr, pl::SOUND_ATTR),
             attack_region: attr(&h.attack_region, &p.attack_region, pl::ATTACK_REGION),
+            // Hurtbox state is not a property of a collision, so a hitbox override never
+            // carries one. `push_hurtbox_rules` builds those separately.
+            hit_status: None,
+            hit_target: None,
+            col_pri: None,
         }
     }
 
@@ -13158,6 +13507,72 @@ mod live_effect_capture_tests {
             args,
             run: 1,
         }
+    }
+
+    /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
+    /// as statements rather than as spans — the panel, the export, and the source sync all read
+    /// the script, and spans alone would show on screen and reach none of them.
+    #[test]
+    fn a_captured_hurtbox_line_comes_back_as_an_editable_statement() {
+        let bone = hash40::hash40("kneer").0;
+        let line = |func: &str, frame: f32, args: Vec<A>| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("special_air_hi").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        };
+        let captures = vec![
+            line("HIT_NODE", 9.0, vec![A::Hash(bone), A::Int(2)]),
+            line("COL_PRI", 9.0, vec![A::Int(200)]),
+            line("HIT_RESET_ALL", 20.0, vec![]),
+            line("COL_NORMAL", 20.0, vec![]),
+        ];
+        let bone_rev: HashMap<u64, String> = [(bone, "kneer".to_string())].into_iter().collect();
+
+        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let (states, pris) = script.to_hurtboxes();
+
+        let [state] = &states[..] else {
+            panic!("expected one state, got {states:?}");
+        };
+        assert_eq!(state.target, crate::data::HurtTarget::Bone("kneer".into()));
+        // The captured `2` has to come back as the name, or an export would write a bare number
+        // where every vanilla script writes `*HIT_STATUS_XLU`.
+        assert_eq!(state.status, "HIT_STATUS_XLU");
+        // Motion frames, converted: the plugin sees 9.0 and 20.0, which are script frames 10
+        // and 21, so the state is out from 10 until the frame before the reset.
+        assert_eq!(
+            (state.active_start, state.active_end),
+            (10, 20),
+            "HIT_RESET_ALL ends it, at capture frames converted to script frames"
+        );
+        assert_eq!((pris[0].pri, pris[0].active_end), (200, 20));
+
+        // And it must survive an export, which is what "editable" has to mean here.
+        let exported = crate::acmd::export_acmd_source(&script, "dolly", "special_air_hi");
+        assert!(
+            exported
+                .contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
+            "{exported}"
+        );
+    }
+
+    /// A bone this dump cannot name would export as the wrong bone or as a raw hash, so the
+    /// call is dropped instead. Silence beats a call that says something false.
+    #[test]
+    fn a_captured_bone_with_no_known_name_is_dropped_rather_than_guessed() {
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("special_air_hi").0,
+            frame: 9.0,
+            func: "HIT_NODE".into(),
+            args: vec![A::Hash(0xdead_beef), A::Int(2)],
+            run: 1,
+        }];
+        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &HashMap::new());
+        assert!(script.to_hurtboxes().0.is_empty());
     }
 
     fn attack_capture(id: i64, frame: f32, bone: u64) -> CaptureLine {

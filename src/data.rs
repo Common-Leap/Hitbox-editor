@@ -1086,6 +1086,12 @@ pub struct AppState {
     pub effects_pristine: Vec<EffectCall>,
     /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
     pub hitboxes_pristine: Vec<Hitbox>,
+    /// Hurtbox spans as loaded, for source syncing to diff against.
+    ///
+    /// Unlike hitboxes there is no edited copy beside this one: hurtbox statements are carried
+    /// through [`script`](Self::script) rather than rebuilt from a list, so the script itself is
+    /// the edited model and the current spans are always `script.to_hurtboxes()`.
+    pub hurtboxes_pristine: (Vec<HurtboxState>, Vec<ColPriState>),
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// User edits to effect calls, keyed by "fighter/move" (indices into pristine order).
@@ -1128,6 +1134,7 @@ impl Default for AppState {
             effects: Vec::new(),
             effects_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
+            hurtboxes_pristine: (Vec::new(), Vec::new()),
             acmd_source: String::new(),
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
@@ -1135,6 +1142,18 @@ impl Default for AppState {
             show_all_effect_calls: false,
             show_effects_panel: false,
         }
+    }
+}
+
+impl AppState {
+    /// Install a freshly loaded script and re-baseline the hurtbox spans it resolves to.
+    ///
+    /// A method rather than two assignments at each of the four call sites, so the baseline
+    /// cannot drift out of step with the script it is the baseline *of* — which would make
+    /// source syncing diff a move's hurtboxes against a different move's.
+    pub fn set_script(&mut self, script: AcmdScript) {
+        self.hurtboxes_pristine = script.to_hurtboxes();
+        self.script = script;
     }
 }
 

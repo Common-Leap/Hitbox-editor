@@ -11,8 +11,8 @@
 //! 1. **It is Rust.** Every generated `.rs` file is parsed with `syn`. Raw script lines and
 //!    recorded macro tails are spliced into the output verbatim, so this is not a formality.
 //! 2. **It says what the user said.** Each emitted function is re-parsed by the editor's own
-//!    parser and the resulting hitboxes and effect calls are compared field by field with the
-//!    ones the user edited. A single rounded decimal is a finding.
+//!    parser and the resulting hitboxes, hurtbox states, and effect calls are compared field by
+//!    field with the ones the user edited. A single rounded decimal is a finding.
 //! 3. **It will compile and run.** Values that produce a well-formed but broken call — a
 //!    non-finite float, a graphic name with a quote in it, a wind command with the wrong
 //!    number of arguments — are caught here rather than by the user's toolchain, or worse, by
@@ -173,6 +173,7 @@ pub fn verify_export(
 /// Verify one move's hitbox script on its own, for the editor's generated-source preview.
 pub fn verify_move(subject: &str, script: &AcmdScript, emitted: &str, report: &mut Report) {
     check_hitbox_fidelity(subject, script, emitted, report);
+    check_hurtbox_fidelity(subject, script, emitted, report);
     check_script_values(subject, script, report);
     check_script_shape(subject, script, report);
 }
@@ -408,6 +409,63 @@ fn check_hitbox_fidelity(subject: &str, script: &AcmdScript, emitted: &str, repo
                     want.active_start
                 ),
             );
+        }
+    }
+}
+
+/// Read the export back and check its hurtbox spans against the move on screen.
+///
+/// A blocker rather than a warning throughout, matching the collision check above and for the
+/// same reason: intangibility decides whether a move trades or loses, so shipping a mod whose
+/// knee is normal when the editor showed it intangible is worse than shipping no mod.
+fn check_hurtbox_fidelity(subject: &str, script: &AcmdScript, emitted: &str, report: &mut Report) {
+    let (want_states, want_pris) = script.to_hurtboxes();
+    let (got_states, got_pris) = crate::acmd::parse_acmd_script(emitted).to_hurtboxes();
+
+    if want_states.len() != got_states.len() {
+        report.blocker(
+            subject,
+            format!(
+                "the export has {} hurtbox state(s) but {} were specified",
+                got_states.len(),
+                want_states.len()
+            ),
+        );
+    } else {
+        for (want, got) in want_states.iter().zip(&got_states) {
+            if want != got {
+                report.blocker(
+                    subject,
+                    format!(
+                        "the hurtbox state on {} at frame {} exported as {got:?}, not {want:?}",
+                        want.target.label(),
+                        want.active_start
+                    ),
+                );
+            }
+        }
+    }
+
+    if want_pris.len() != got_pris.len() {
+        report.blocker(
+            subject,
+            format!(
+                "the export has {} collision-priority span(s) but {} were specified",
+                got_pris.len(),
+                want_pris.len()
+            ),
+        );
+    } else {
+        for (want, got) in want_pris.iter().zip(&got_pris) {
+            if want != got {
+                report.blocker(
+                    subject,
+                    format!(
+                        "the collision priority at frame {} exported as {got:?}, not {want:?}",
+                        want.active_start
+                    ),
+                );
+            }
         }
     }
 }
@@ -1202,6 +1260,48 @@ mod tests {
         let report = verify_export(&project, &edits, &[], &[]);
         assert!(
             messages(&report).contains("missing from the exported project"),
+            "{}",
+            messages(&report)
+        );
+    }
+
+    /// The whole point of reading the export back rather than trusting the emitter. An
+    /// intangible knee that ships as a normal one is a move that loses every trade it used to
+    /// win, and nothing about the generated file would look wrong.
+    #[test]
+    fn an_export_that_changes_a_hurtbox_status_is_refused() {
+        let parsed = script(
+            "    frame(agent.lua_state_agent, 9.0);\n    if macros::is_excute(agent) {\n        \
+             macros::HIT_NODE(agent, Hash40::new(\"kneer\"), *HIT_STATUS_XLU);\n    }",
+        );
+        assert!(verify(&parsed).is_clean(), "{}", messages(&verify(&parsed)));
+
+        // Emit it, then corrupt exactly the status — the shape of a slot-table mistake.
+        let emitted = preview_game_fn(&parsed, "test")
+            .replace("*HIT_STATUS_XLU", "*HIT_STATUS_NORMAL");
+        let mut report = Report::default();
+        verify_move("test", &parsed, &emitted, &mut report);
+        assert!(
+            messages(&report).contains("hurtbox state on kneer"),
+            "{}",
+            messages(&report)
+        );
+    }
+
+    /// A dropped hurtbox line has to fail too, not just a changed one — that is the failure
+    /// mode `rebuild_script_from_hitboxes` actually had.
+    #[test]
+    fn an_export_that_drops_a_hurtbox_line_is_refused() {
+        let parsed = script(
+            "    frame(agent.lua_state_agent, 9.0);\n    if macros::is_excute(agent) {\n        \
+             macros::COL_PRI(agent, 200);\n    }",
+        );
+        let emitted =
+            preview_game_fn(&parsed, "test").replace("macros::COL_PRI(agent, 200);", "");
+        let mut report = Report::default();
+        verify_move("test", &parsed, &emitted, &mut report);
+        assert!(
+            messages(&report).contains("collision-priority span"),
             "{}",
             messages(&report)
         );

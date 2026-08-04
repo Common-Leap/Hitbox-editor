@@ -352,6 +352,17 @@ pub struct HbOverridesWire {
     pub sound_attr: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attack_region: Option<i64>,
+    // ── Hurtbox state (category 3 only) ──────────────────────────────────────
+    //
+    // Skipped when absent like everything above, which is what keeps a plugin build predating
+    // this family working: it deserialises the rule, finds no field it knows, and applies
+    // nothing rather than failing the whole message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_status: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_target: Option<LuaArgWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_pri: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
