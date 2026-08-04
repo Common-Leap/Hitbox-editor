@@ -109,6 +109,14 @@ Two export paths, different rules — do not conflate them:
   it repeats this. A test asserting the *premise* of a loss — C5's
   `a_line_the_export_cannot_reproduce_is_named_rather_than_silently_deleted` fails loudly if its
   example line becomes exportable — is what caught it.
+  **The other edge of the same knife: giving a macro a variant can delete it somewhere else.**
+  Code that keeps "everything we do not handle" by testing for `ExcuteStmt::Raw` is really
+  testing "everything without a variant", and those stop being the same set the moment you add
+  one. B4 hit this in `rebuild_script_from_hitboxes`, where dragging a hitbox silently deleted
+  every `HIT_NODE` in the move. **Before modelling any macro, grep for filters on `Raw` — and
+  on variant lists generally — and make them exhaustive `match`es first**, so the compiler
+  forces a decision instead of defaulting to a deletion. Both halves of this trap have now cost
+  real time; assume the next family has a third.
 - **A macro that names no target binds to the line above it, and nowhere else.**
   `LAST_EFFECT_SET_*` modifies whatever spawned last, so there is nothing in the call to match
   on. Bind it to the immediately preceding recognised spawn and refuse otherwise — reaching
@@ -136,7 +144,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**282 green after C1**), including the two corpus oracles — run them
+- [ ] `cargo test` passes (**296 green after B4**), including the two corpus oracles — run them
       by name with `cargo test cached_script`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export` and
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
@@ -383,19 +391,42 @@ wants these.
 - **Trap:** the `_argN` suffixes are different arities of the same idea, exactly like the wind
   family. One table each.
 
-### [~] B4 — Hurtbox control (in progress 2026-08-04)
+### [x] B4 — Hurtbox control (done 2026-08-04)
 
-Intangibility and hurtbox state per bone — the thing every competitive-facing mod actually
-wants to tune, and currently invisible.
+Intangibility and hurtbox state per bone. All five members land on all five surfaces:
+`HIT_NODE` 30, `COL_NORMAL` 8, `HIT_RESET_ALL` 3, `HIT_NO` 2, `COL_PRI` 2 — 45 occurrences.
+Every one has a `macros.rs` wrapper at the arity the corpus writes, so no A1-style trap.
 
-**Measured after A3**, and the numbers back the framing: `HIT_NODE` 30, `COL_NORMAL` 8,
-`HIT_RESET_ALL` 3, `HIT_NO` 2, `COL_PRI` 2 — 45 occurrences, the most-used hitbox task left.
-All five have `macros.rs` wrappers.
+Both entry traps turned out cheaper than written. The `ConstTable` already existed with both
+directions ([param_labels.rs](src/param_labels.rs)), and the panel/lane split was a clean
+addition rather than a restructure. The real cost was somewhere the entry did not look.
 
-- **Work order:** these are per-bone state over a frame range, not collisions. They want their
-  own panel and their own timeline lane, not a row in Hitboxes.
-- **Trap:** `HIT_NODE` takes a bone and a state constant. That constant needs a `ConstTable`
-  with both directions before the live path can carry it.
+- **The trap that actually cost time, and it is C1's again in a new place.**
+  `rebuild_script_from_hitboxes` retained only `ExcuteStmt::Raw` from the source, which was
+  correct *only* because every non-collision line was `Raw`. Giving `HIT_NODE` its own variant
+  therefore deleted every hurtbox line in a move the moment an unrelated hitbox was dragged.
+  The filter is now an exhaustive `match` so the next variant is a compile error instead of a
+  silent deletion. **Generalise this: before modelling any macro, grep for every place that
+  filters on `Raw` or on a variant list, and make it exhaustive first.**
+- **`HIT_STATUS_MASK_*` collides with `HIT_STATUS_*` numerically.** `MASK_NORMAL` is `0x1` and
+  so is `INVINCIBLE`. `const_name` returns the first match, so a table built by prefix would
+  label a live capture of an invincible bone as a mask. The table is exactly the four real
+  states; `TERM` and the masks are excluded and the doc comment says why.
+- **Design, and it differs from collisions on purpose:** hurtbox statements are *carried
+  through* `state.script` rather than rebuilt from an edited list. The script is the model, so
+  there is no second copy to drift, and `HurtboxState::site` is the ordinal that ties a
+  resolved span back to the statement it came from. `hurt_stmt_mut` and `HurtboxAccum` are
+  written to reproduce the same pre-order walk — including stepping the cursor over a `for`
+  body whose count is zero, which is the one case where the two definitions could diverge.
+- **Out of scope, deliberately:** the panel edits existing calls only. There is no "add a
+  hurtbox state" button, and moving one to a different frame is not offered. Both are
+  structure, which the export path can express and the source sync cannot; adding them means
+  deciding where a new call goes in a block, which is the same open question as C6. A retime
+  or a target-family swap made some other way is *reported*, not guessed.
+- Verified: 296 tests, clippy clean, `build_check.sh`, plugin builds (2318336 bytes). The
+  corpus oracle now runs `check_hurtbox_fidelity` over all 461 cached scripts, so every vanilla
+  hurtbox call is known to re-export identically. The live surface is built but not exercised
+  against a running game — that needs a deploy, which is not available here.
 
 ### [ ] B5 — `SEARCH` / detection boxes
 

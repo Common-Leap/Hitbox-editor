@@ -240,6 +240,21 @@ use is of exactly that kind — a costume check wrapped around a recolour — so
 those are listed under the generated code as lines the export drops, not attached
 to whichever spawn happens to be nearest.
 
+Intangibility is the **Hurtboxes** section under the collision list. `HIT_NODE`
+and `HIT_NO` set how one bone or one numbered hurtbox group receives hits, and
+the game holds that setting until something takes it back — so a state is shown
+as the span between the call that sets it and the call that restores it, rather
+than as two unrelated lines you have to pair up by eye. `HIT_RESET_ALL` ends
+every one of them at once. Changing a status or a bone is a value edit and is
+written into your source; adding or removing a call, or moving one to a
+different frame, is structure and so lands in an export and is reported when
+syncing.
+
+`COL_PRI` sits in the same section. It is body-collision priority — which
+fighter's pushbox wins when two overlap — and is ended by `COL_NORMAL`, not by
+`HIT_RESET_ALL`. They are separate resets of separate things, so one is never
+used to close the other.
+
 `FLASH` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour

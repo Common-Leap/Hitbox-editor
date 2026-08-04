@@ -60,15 +60,16 @@ fn timeline_frame_at_fraction(fraction: f32, total: u32) -> u32 {
 
 const TIMELINE_ROW_HEIGHT: f32 = 12.0;
 
-fn timeline_content_height(hitboxes: usize, effects: usize) -> f32 {
+/// Height of one row in the compact bands below the hitbox rows.
+fn timeline_thin_row() -> f32 {
+    (TIMELINE_ROW_HEIGHT * 0.45).max(3.0)
+}
+
+fn timeline_content_height(hitboxes: usize, effects: usize, hurtboxes: usize) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
-    let effect_height = (TIMELINE_ROW_HEIGHT * 0.45).max(3.0);
-    let effect_band = if effects == 0 {
-        0.0
-    } else {
-        4.0 + effects as f32 * effect_height
-    };
-    (24.0 + hitbox_band + effect_band).max(24.0)
+    let thin = timeline_thin_row();
+    let band = |rows: usize| if rows == 0 { 0.0 } else { 4.0 + rows as f32 * thin };
+    (24.0 + hitbox_band + band(effects) + band(hurtboxes)).max(24.0)
 }
 
 fn timeline_frame_extent(
@@ -10652,7 +10653,14 @@ impl VisionaryApp {
         let bar_height = (row_height - 2.0).max(3.0);
         let effect_height = (row_height * 0.45).max(3.0);
         let hb_band = self.state.hitboxes.len() as f32 * row_height;
-        let timeline_height = timeline_content_height(self.state.hitboxes.len(), n_fx);
+        // Only the non-default states get a row, matching what the band actually draws.
+        let (hurt_states, _) = self.state.script.to_hurtboxes();
+        let hurt_states: Vec<_> = hurt_states
+            .into_iter()
+            .filter(|s| s.status != "HIT_STATUS_NORMAL")
+            .collect();
+        let timeline_height =
+            timeline_content_height(self.state.hitboxes.len(), n_fx, hurt_states.len());
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
 
@@ -10797,6 +10805,40 @@ impl VisionaryApp {
                         egui::StrokeKind::Outside,
                     );
                 }
+            }
+
+            // Hurtbox states — their own band below the effects, because they are neither a
+            // collision nor a spawn. Only the non-default ones are drawn: a move that toggles
+            // four bones writes eight calls, and the four that say "back to normal" describe
+            // the absence of the thing this lane exists to show.
+            let hurt_band_top = fx_band_top
+                + if n_fx == 0 {
+                    0.0
+                } else {
+                    n_fx as f32 * effect_height + 2.0
+                };
+            for (row, state) in hurt_states
+                .iter()
+                .filter(|s| s.status != "HIT_STATUS_NORMAL")
+                .enumerate()
+            {
+                let y_top = hurt_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(state.active_start.min(total));
+                let end_x = frame_end_to_x(state.active_end.min(total))
+                    .max(start_x + 3.0)
+                    .min(rect.right());
+                // Fully gone reads as more than partly gone, so `OFF` is the strongest colour.
+                let base = match state.status.as_str() {
+                    "HIT_STATUS_OFF" => egui::Color32::from_rgb(255, 90, 90),
+                    "HIT_STATUS_INVINCIBLE" => egui::Color32::from_rgb(120, 220, 255),
+                    _ => egui::Color32::from_rgb(255, 200, 90),
+                };
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 190),
+                );
             }
 
             // Playhead
@@ -14619,10 +14661,28 @@ mod live_effect_capture_tests {
         );
     }
 
+    /// The hurtbox band has to add its own height. Drawing rows the layout did not reserve
+    /// puts them under the next widget, where they are invisible and look like a lost lane.
+    #[test]
+    fn the_hurtbox_band_reserves_room_for_its_own_rows() {
+        let none = timeline_content_height(2, 0, 0);
+        let three = timeline_content_height(2, 0, 3);
+        assert!(
+            three > none,
+            "a hurtbox band must grow the timeline: {none} vs {three}"
+        );
+        // Same shape as the effect band beside it — 4px of padding, then one thin row each.
+        let band = 4.0 + 3.0 * timeline_thin_row();
+        assert!((three - none - band).abs() < 0.01, "{three} vs {none}");
+        // And the two bands stack rather than sharing space.
+        let both = timeline_content_height(2, 3, 3);
+        assert!((both - none - 2.0 * band).abs() < 0.01, "{both} vs {none}");
+    }
+
     #[test]
     fn dense_timeline_rows_scale_without_changing_frame_space() {
-        assert_eq!(timeline_content_height(0, 0), 24.0);
-        assert_eq!(timeline_content_height(40, 0), 504.0);
+        assert_eq!(timeline_content_height(0, 0, 0), 24.0);
+        assert_eq!(timeline_content_height(40, 0, 0), 504.0);
         assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
 
         let dense_capture: Vec<Hitbox> = (0..40)
@@ -14647,7 +14707,7 @@ mod live_effect_capture_tests {
         let _ = context.run_ui(input, |ui| {
             let output = timeline_scroll_area(120.0).show(ui, |ui| {
                 ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), timeline_content_height(40, 0)),
+                    egui::vec2(ui.available_width(), timeline_content_height(40, 0, 0)),
                     egui::Sense::hover(),
                 );
             });
