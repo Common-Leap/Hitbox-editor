@@ -185,6 +185,12 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 continue;
             }
         }
+        if line.contains("macros::CATCH(") {
+            if let Some(call) = parse_catch_call(line) {
+                stmts.push(ExcuteStmt::Catch(call));
+                continue;
+            }
+        }
         if line.contains("AREA_WIND_2ND") {
             if let Some(call) = parse_wind_call(line) {
                 stmts.push(ExcuteStmt::Wind(call));
@@ -202,6 +208,12 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 stmts.push(ExcuteStmt::Clear(id));
                 continue;
             }
+        }
+        // GrabModule and AttackModule clear different things, so they are different
+        // statements. Matching `clear_all` alone re-emitted a grab clear as an attack clear.
+        if line.contains("GrabModule::clear_all") {
+            stmts.push(ExcuteStmt::GrabClearAll);
+            continue;
         }
         if line.contains("clear_all") {
             stmts.push(ExcuteStmt::ClearAll);
@@ -335,10 +347,10 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             Some(tokenize_args(&after[..end]))
         };
 
-        // All of these dumped macro families begin with the same editable spawn payload:
-        // agent, graphic[, flipped graphic], joint, position xyz, rotation xyz, scale.
-        // Their remaining alpha/attribute/random/contact arguments do not alter the timeline
-        // transform. Parse the broad family before the older individual cases below.
+        // All of these spawn families begin with the same editable payload: agent,
+        // graphic[, flipped graphic], joint, position xyz, rotation xyz, scale. Their
+        // remaining alpha/attribute/random/contact arguments do not alter the timeline
+        // transform, so they ride along as text in `extra_args` for the export to replay.
         if let Some((name, flip, follows_bone)) = effect_spawn_macro_layout(line) {
             let prefix = format!("macros::{name}(");
             if let Some(t) = try_extract(&prefix) {
@@ -362,191 +374,16 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                         spawn_func: name.to_string(),
                         bone_name,
                         offset: [num(3 + off, 0.0), num(4 + off, 0.0), num(5 + off, 0.0)],
-                        rotation: [num(6 + off, 0.0), num(7 + off, 0.0), num(8 + off, 0.0)],
+                        // The three rotation slots run zr, yr, xr — reversed from the
+                        // [x, y, z] the rest of the editor uses. This used to read them left
+                        // to right, silently swapping the X and Z angles of every script
+                        // loaded from source and disagreeing with the live-capture and
+                        // live-pin paths (app.rs) and the plugin (acmd_hooks.rs parse_args)
+                        // about the very same call.
+                        rotation: [num(8 + off, 0.0), num(7 + off, 0.0), num(6 + off, 0.0)],
                         scale: num(9 + off, 1.0),
                         follows_bone,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if line.contains("macros::EFFECT_FOLLOW_FLIP(") {
-            if let Some(t) = try_extract("macros::EFFECT_FOLLOW_FLIP(") {
-                // args[1]=effect_hash, args[2]=effect_hash2 (ignore), args[3]=bone_hash
-                // args[4]=x, args[5]=y, args[6]=z, args[7]=rot_x, args[8]=rot_y, args[9]=rot_z, args[10]=scale
-                if t.len() > 10 {
-                    let effect_name =
-                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name =
-                        extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
-                    let x = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let y = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let z = t[6].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_x = t[7].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_y = t[8].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_z = t[9].trim().parse::<f32>().unwrap_or(0.0);
-                    let scale = t[10].trim().parse::<f32>().unwrap_or(1.0);
-                    macros.push(EffectMacro::Effect {
-                        effect_name,
-                        effect_name_alt: Some(
-                            extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string()),
-                        ),
-                        spawn_func: "EFFECT_FOLLOW_FLIP".into(),
-                        bone_name,
-                        offset: [x, y, z],
-                        rotation: [rot_x, rot_y, rot_z],
-                        scale,
-                        follows_bone: true,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if line.contains("macros::EFFECT_FLIP(") {
-            if let Some(t) = try_extract("macros::EFFECT_FLIP(") {
-                if t.len() > 10 {
-                    let effect_name =
-                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name =
-                        extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string());
-                    let x = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let y = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let z = t[6].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_x = t[7].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_y = t[8].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_z = t[9].trim().parse::<f32>().unwrap_or(0.0);
-                    let scale = t[10].trim().parse::<f32>().unwrap_or(1.0);
-                    macros.push(EffectMacro::Effect {
-                        effect_name,
-                        effect_name_alt: Some(
-                            extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string()),
-                        ),
-                        spawn_func: "EFFECT_FLIP".into(),
-                        bone_name,
-                        offset: [x, y, z],
-                        rotation: [rot_x, rot_y, rot_z],
-                        scale,
-                        follows_bone: false,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if line.contains("macros::EFFECT_FOLLOW(") {
-            if let Some(t) = try_extract("macros::EFFECT_FOLLOW(") {
-                // args[1]=effect_hash, args[2]=bone_hash, args[3]=x, args[4]=y, args[5]=z
-                // args[6]=rot_x, args[7]=rot_y, args[8]=rot_z, args[9]=scale
-                if t.len() > 9 {
-                    let effect_name =
-                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name =
-                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
-                    let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
-                    macros.push(EffectMacro::Effect {
-                        effect_name,
-                        effect_name_alt: None,
-                        spawn_func: "EFFECT_FOLLOW".into(),
-                        bone_name,
-                        offset: [x, y, z],
-                        rotation: [rot_x, rot_y, rot_z],
-                        scale,
-                        follows_bone: true,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if line.contains("macros::EFFECT(") {
-            if let Some(t) = try_extract("macros::EFFECT(") {
-                if t.len() > 9 {
-                    let effect_name =
-                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name =
-                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
-                    let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
-                    macros.push(EffectMacro::Effect {
-                        effect_name,
-                        effect_name_alt: None,
-                        spawn_func: "EFFECT".into(),
-                        bone_name,
-                        offset: [x, y, z],
-                        rotation: [rot_x, rot_y, rot_z],
-                        scale,
-                        follows_bone: false,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if line.contains("macros::FOOT_EFFECT(") {
-            if let Some(t) = try_extract("macros::FOOT_EFFECT(") {
-                if t.len() > 9 {
-                    let effect_name =
-                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name =
-                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
-                    let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
-                    macros.push(EffectMacro::Effect {
-                        effect_name,
-                        effect_name_alt: None,
-                        spawn_func: "FOOT_EFFECT".into(),
-                        bone_name,
-                        offset: [x, y, z],
-                        rotation: [rot_x, rot_y, rot_z],
-                        scale,
-                        follows_bone: false,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if line.contains("macros::LANDING_EFFECT(") {
-            if let Some(t) = try_extract("macros::LANDING_EFFECT(") {
-                if t.len() > 9 {
-                    let effect_name =
-                        extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    let bone_name =
-                        extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string());
-                    let x = t[3].trim().parse::<f32>().unwrap_or(0.0);
-                    let y = t[4].trim().parse::<f32>().unwrap_or(0.0);
-                    let z = t[5].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_x = t[6].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_y = t[7].trim().parse::<f32>().unwrap_or(0.0);
-                    let rot_z = t[8].trim().parse::<f32>().unwrap_or(0.0);
-                    let scale = t[9].trim().parse::<f32>().unwrap_or(1.0);
-                    macros.push(EffectMacro::Effect {
-                        effect_name,
-                        effect_name_alt: None,
-                        spawn_func: "LANDING_EFFECT".into(),
-                        bone_name,
-                        offset: [x, y, z],
-                        rotation: [rot_x, rot_y, rot_z],
-                        scale,
-                        follows_bone: false,
+                        extra_args: t[10 + off..].to_vec(),
                     });
                     continue;
                 }
@@ -585,6 +422,7 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                     macros.push(EffectMacro::AfterImage {
                         effect_name,
                         bone_name,
+                        raw: line.to_string(),
                     });
                     continue;
                 }
@@ -921,6 +759,54 @@ fn parse_attack_call(line: &str) -> Option<AttackCall> {
     })
 }
 
+/// Parse `macros::CATCH(agent, id, bone, size, x, y, z, x2, y2, z2, status, situation)`.
+///
+/// `CATCH` is a fixed-arity function — the capsule endpoints are `Option<f32>`, so a
+/// spherical grab spells them `None` rather than omitting them. (The vanilla script dumps
+/// show a shorter form, but those are Lua; the smashline macro has one signature.)
+fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
+    let start = line.find("macros::CATCH(")?;
+    let inner = &line[start + "macros::CATCH(".len()..];
+    let end = inner.rfind(')')?;
+    let t = tokenize_args(&inner[..end]);
+    if t.len() < 7 {
+        return None;
+    }
+
+    // [0]=agent [1]=id [2]=bone [3]=size [4]=x [5]=y [6]=z
+    // [7]=x2 [8]=y2 [9]=z2 [10]=status [11]=situation
+    let num = |i: usize, default: f32| {
+        t.get(i)
+            .and_then(|value| value.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+    let capsule_end = match (
+        t.get(7).and_then(|v| parse_option_f32(v.trim())),
+        t.get(8).and_then(|v| parse_option_f32(v.trim())),
+        t.get(9).and_then(|v| parse_option_f32(v.trim())),
+    ) {
+        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+        _ => None,
+    };
+    let konst = |i: usize, default: &str| {
+        t.get(i)
+            .map(|v| strip_deref(v.trim()))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    Some(crate::data::CatchCall {
+        id: t[1].trim().parse().ok()?,
+        bone_name: extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string()),
+        size: num(3, 1.0),
+        offset_x: num(4, 0.0),
+        offset_y: num(5, 0.0),
+        offset_z: num(6, 0.0),
+        capsule_end,
+        status: konst(10, crate::data::CATCH_DEFAULT_STATUS),
+        situation: konst(11, crate::data::CATCH_DEFAULT_SITUATION),
+    })
+}
+
 fn parse_wind_call(line: &str) -> Option<crate::data::WindboxData> {
     const COMMANDS: [(&str, usize); 4] = [
         ("AREA_WIND_2ND_RAD_arg9", 9),
@@ -1044,7 +930,10 @@ pub struct ModProject {
 /// Emit a single `macros::ATTACK(...)` call as a source line.
 /// A lua-const expression: named consts emit as `*NAME`, but live-captured hitboxes store
 /// the RAW numeric value ("3") — emit those bare (a `*3` would not compile).
-fn const_expr(s: &str) -> String {
+/// Spell a hitbox property the way an `ATTACK` argument spells it: a lua const gets its
+/// leading `*`, a value that is already a number stays one. Shared with the source
+/// write-back so both routes put the identical text in that slot.
+pub fn const_expr(s: &str) -> String {
     let t = s.trim();
     if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
         t.to_string()
@@ -1053,12 +942,44 @@ fn const_expr(s: &str) -> String {
     }
 }
 
+/// Render a float the way an ACMD argument has to be spelled.
+///
+/// Two requirements pull against each other here. The value must survive the round trip
+/// exactly: the old `{:.1}` turned a vanilla `0.35` hitbox attribute into `0.3`, and a grab
+/// box sitting at `-17.25` into `-17.2`, so exporting a move quietly changed it. And it must
+/// stay a *float* literal, because several of these arguments are declared `f32` rather than
+/// generic over `ToF32` — a bare `6` is a type error in a slot where `6.0` compiles.
+///
+/// So: the shortest text that reads back as the same `f32`, with a decimal point put back on
+/// when the shortest form does not have one. A value that is not a number at all is spelled
+/// as the constant rather than as `NaN`, which is not Rust; the verifier refuses the export
+/// either way, and this keeps that one problem from also looking like a syntax error.
+pub(crate) fn num(value: f32) -> String {
+    if value.is_nan() {
+        return "f32::NAN".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "f32::INFINITY"
+        } else {
+            "f32::NEG_INFINITY"
+        }
+        .to_string();
+    }
+    let text = value.to_string();
+    if text.contains('.') {
+        text
+    } else {
+        format!("{text}.0")
+    }
+}
+
 fn emit_attack(call: &AttackCall, indent: &str) -> String {
     // Skeleton files expose display-case names such as `FootR`, while ACMD hashes the
     // lowercase resource name (`footr`). Live injection follows the same contract.
     let bone = format!("Hash40::new(\"{}\")", call.bone_name.to_ascii_lowercase());
     let capsule = match call.capsule_end {
-        Some([x, y, z]) => format!("Some({:.1}), Some({:.1}), Some({:.1})", x, y, z),
+        Some([x, y, z]) => format!("Some({}), Some({}), Some({})", num(x), num(y), num(z)),
         None => "None, None, None".to_string(),
     };
     // Live-captured hitboxes carry the collision attr as a raw hash — emit it as such.
@@ -1068,32 +989,32 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
         format!("Hash40::new(\"{}\")", call.collision_attr)
     };
     format!(
-        "{indent}macros::ATTACK(agent, {id}, {part}, {bone}, {dmg:.1}, {angle}, {kbs}, {fkb}, {kbb}, \
-{size:.1}, {ox:.1}, {oy:.1}, {oz:.1}, {capsule}, \
-{hitlag:.1}, {sdi:.1}, {setoff}, {lr}, {clang}, {add_atk}, {hb_attr:.1}, {goa}, \
+        "{indent}macros::ATTACK(agent, {id}, {part}, {bone}, {dmg}, {angle}, {kbs}, {fkb}, {kbb}, \
+{size}, {ox}, {oy}, {oz}, {capsule}, \
+{hitlag}, {sdi}, {setoff}, {lr}, {clang}, {add_atk}, {hb_attr}, {goa}, \
 {mtk}, {shield}, {reflect}, {absorb}, {landing}, \
 {sit}, {cat}, {part_mask}, {no_cam}, {col_attr}, {snd_lvl}, {snd_attr}, {region});",
         indent = indent,
         id = call.id,
         part = call.part,
         bone = bone,
-        dmg = call.damage,
+        dmg = num(call.damage),
         angle = call.angle,
         kbs = call.kb_scaling,
         fkb = call.fkb,
         kbb = call.kb_base,
-        size = call.size,
-        ox = call.offset_x,
-        oy = call.offset_y,
-        oz = call.offset_z,
+        size = num(call.size),
+        ox = num(call.offset_x),
+        oy = num(call.offset_y),
+        oz = num(call.offset_z),
         capsule = capsule,
-        hitlag = call.hitlag_mult,
-        sdi = call.sdi_mult,
+        hitlag = num(call.hitlag_mult),
+        sdi = num(call.sdi_mult),
         setoff = const_expr(&call.setoff_kind),
         lr = const_expr(&call.lr_check),
         clang = call.is_clang,
         add_atk = call.is_add_attack,
-        hb_attr = call.hitbox_attr,
+        hb_attr = num(call.hitbox_attr),
         goa = call.ground_or_air,
         mtk = call.is_mtk,
         shield = call.is_shield_disable,
@@ -1111,14 +1032,47 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
     )
 }
 
+/// Emit the `macros::CATCH` call for a grab box.
+///
+/// `CATCH` is a fixed-arity function whose capsule endpoints are `Option<f32>`, so a
+/// spherical grab spells them `None` exactly the way `ATTACK` does. Grabs used to be
+/// exported through [`emit_attack`], which wrote a zero-damage attack hitbox in place of the
+/// user's grab box and stopped the move grabbing at all.
+fn emit_catch(call: &crate::data::CatchCall, indent: &str) -> String {
+    let bone = format!("Hash40::new(\"{}\")", call.bone_name.to_ascii_lowercase());
+    let capsule = match call.capsule_end {
+        Some([x, y, z]) => format!("Some({}), Some({}), Some({})", num(x), num(y), num(z)),
+        None => "None, None, None".to_string(),
+    };
+    format!(
+        "{indent}macros::CATCH(agent, {id}, {bone}, {size}, {x}, {y}, {z}, \
+{capsule}, {status}, {situation});",
+        id = call.id,
+        size = num(call.size),
+        x = num(call.offset_x),
+        y = num(call.offset_y),
+        z = num(call.offset_z),
+        status = const_expr(&call.status),
+        situation = const_expr(&call.situation),
+    )
+}
+
 fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<String> {
     stmts
         .iter()
         .map(|s| match s {
             crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
+            crate::data::ExcuteStmt::Catch(call) => emit_catch(call, indent),
+            crate::data::ExcuteStmt::GrabClearAll => {
+                format!("{indent}GrabModule::clear_all(agent.module_accessor);")
+            }
             crate::data::ExcuteStmt::Wind(wind) => format!(
                 "{indent}macros::{}(agent, {});",
                 wind.command,
+                // Deliberately not `num`: a wind payload is kept verbatim rather than
+                // recomposed from editable fields, and `f32::to_string` is already both exact
+                // and shortest, so an untouched wind command replays byte for byte. Every
+                // argument slot is generic over `ToF32`, so a whole number needs no `.0`.
                 wind.args
                     .iter()
                     .map(|value| value.to_string())
@@ -1143,11 +1097,12 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
     let mut lines = Vec::new();
     for stmt in stmts {
         match stmt {
-            crate::data::AcmdStmt::Frame(f) => {
-                lines.push(format!("{indent}frame(agent.lua_state_agent, {f:.1});"))
-            }
+            crate::data::AcmdStmt::Frame(f) => lines.push(format!(
+                "{indent}frame(agent.lua_state_agent, {});",
+                num(*f)
+            )),
             crate::data::AcmdStmt::Wait(w) => {
-                lines.push(format!("{indent}wait(agent.lua_state_agent, {w:.1});"))
+                lines.push(format!("{indent}wait(agent.lua_state_agent, {});", num(*w)))
             }
             crate::data::AcmdStmt::WaitLoopClear => {
                 lines.push(format!("{indent}wait_loop_clear(agent.lua_state_agent);"))
@@ -1166,6 +1121,19 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+/// The ACMD script name for a move: `attack_air_n` + `game` → `game_attackairn`.
+///
+/// This is the game's own naming, so it doubles as the key an existing smashline project
+/// registers its scripts under — see `acmd_src`.
+pub fn acmd_script_name(prefix: &str, move_name: &str) -> String {
+    script_function_name(prefix, move_name)
+}
+
+/// Whether `name` is one of the effect spawn macros this module knows how to read.
+pub fn is_effect_spawn_macro(name: &str) -> bool {
+    effect_spawn_macro_layout(&format!("macros::{name}(")).is_some_and(|(m, _, _)| m == name)
 }
 
 /// Emit one `unsafe extern "C" fn` for a single move and return
@@ -1237,6 +1205,148 @@ fn tweak_hash(name: &str) -> u64 {
     hash40::hash40(&n.to_lowercase()).0
 }
 
+/// Render one graphic/joint argument.
+///
+/// A parsed name is usually the string inside a `Hash40::new("…")`, but the dumped scripts
+/// also pass consts, locals, and raw hashes in these slots. Those come back out of the
+/// parser as the expression text, and wrapping them in `Hash40::new("…")` again would emit
+/// a graphic literally named `LOCAL_VARIABLE` — so pass anything expression-shaped through.
+fn hash_arg(name: &str) -> String {
+    let name = name.trim();
+    if let Some(hex) = name.strip_prefix("0x") {
+        if u64::from_str_radix(hex, 16).is_ok() {
+            return format!("Hash40::new_raw({name})");
+        }
+    }
+    if name.starts_with('*') || name.contains("::") || name.contains('(') || name.contains('"') {
+        return name.to_string();
+    }
+    format!("Hash40::new(\"{name}\")")
+}
+
+/// Emit the spawn call for one effect, reproducing the macro the script actually used.
+///
+/// This used to collapse every spawn to `EFFECT` or `EFFECT_FOLLOW` based on `follows_bone`
+/// alone, so exporting a move that used `EFFECT_FOLLOW_FLIP` (or any of the ~20 other
+/// families) silently swapped it for a different macro with different behaviour and dropped
+/// its second graphic.
+///
+/// `spawn_func` names the macro and `extra_args` holds its tail verbatim, so the original
+/// comes back out intact. A call whose tail is unknown — one the user added from scratch, or
+/// one loaded from a project saved before `extra_args` existed — cannot be reissued under its
+/// own name without inventing arguments for a signature this code does not know, so it falls
+/// back to the plain pair. That is the old, compilable behaviour. A tail that is known to be
+/// *empty* is a different thing entirely and is reissued as-is.
+fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
+    // Trail macros take textures and trail parameters, not a transform — there is nothing
+    // to rebuild them from, so the source line rides along verbatim apart from the two
+    // arguments the editor does expose.
+    if let Some(raw) = &call.raw_line {
+        return format!("{indent}{}\n", retarget_trail_line(raw, call));
+    }
+
+    // Skeleton files expose display-case joint names; ACMD hashes the lowercase one.
+    let bone = hash_arg(&call.bone_name.to_ascii_lowercase());
+    let graphic = hash_arg(&call.effect_name);
+    let [x, y, z] = call.offset;
+    // The macros take rotation as zr, yr, xr, not in [x, y, z] order.
+    let [rx, ry, rz] = call.rotation;
+    let transform = format!(
+        "{}, {}, {}, {}, {}, {}, {}",
+        num(x),
+        num(y),
+        num(z),
+        num(rz),
+        num(ry),
+        num(rx),
+        num(call.scale)
+    );
+
+    let tail = call
+        .extra_args
+        .as_ref()
+        .filter(|_| !call.spawn_func.is_empty());
+    let Some(tail) = tail else {
+        // The fallback pair takes ONE graphic, so a flipped call's second one is dropped
+        // here rather than shifting every following argument by a slot.
+        return if call.follows_bone {
+            format!("{indent}macros::EFFECT_FOLLOW(agent, {graphic}, {bone}, {transform}, true);\n")
+        } else {
+            // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
+            format!(
+                "{indent}macros::EFFECT(agent, {graphic}, {bone}, {transform}, 0, 0, 0, 0, 0, 0, false);\n"
+            )
+        };
+    };
+
+    let graphics = match &call.effect_name_alt {
+        Some(alt) => format!("{graphic}, {}", hash_arg(alt)),
+        None => graphic,
+    };
+    let mut args = format!("agent, {graphics}, {bone}, {transform}");
+    for extra in tail {
+        args.push_str(", ");
+        args.push_str(extra);
+    }
+    format!("{indent}macros::{}({args});\n", call.spawn_func)
+}
+
+/// Argument slots of an AFTER_IMAGE trail that the editor surfaces as editable fields: the
+/// first texture stands in for the effect name, and argument 4 is the joint. Matches what
+/// `parse_excute_block_effects` reads back out of the same call.
+const TRAIL_GRAPHIC_SLOT: usize = 1;
+const TRAIL_JOINT_SLOT: usize = 4;
+
+/// Re-render the two trail arguments the panels let the user change.
+///
+/// The rest of a trail call is textures and per-frame trail parameters that no editor field
+/// maps to, so it rides along untouched — but the graphic and joint ARE editable, and
+/// replaying the line unconditionally dropped those edits with nothing to say so. Only slots
+/// whose value actually differs are spliced, so an untouched trail comes back byte-identical
+/// and a round trip through the emitter still reproduces the original line exactly.
+fn retarget_trail_line(raw: &str, call: &crate::data::EffectCall) -> String {
+    let Some(site) = crate::acmd_src::scan_macro_sites(raw, 0..raw.len())
+        .into_iter()
+        .find(|site| site.name.starts_with("AFTER_IMAGE"))
+    else {
+        return raw.to_string();
+    };
+
+    let mut out = raw.to_string();
+    // Descending, so an earlier splice cannot shift a later slot's span out from under it.
+    for (slot, wanted) in [
+        (TRAIL_JOINT_SLOT, call.bone_name.to_ascii_lowercase()),
+        (TRAIL_GRAPHIC_SLOT, call.effect_name.clone()),
+    ] {
+        let Some(span) = site.args.get(slot) else {
+            continue;
+        };
+        let current = raw[span.clone()].trim();
+        // Compare against what the PARSER would read from this slot, not the raw text, so
+        // `Hash40::new("x")` and a bare `x` are not mistaken for a rename of each other.
+        let parsed = extract_hash40_string(current).unwrap_or_else(|| current.to_string());
+        if parsed.eq_ignore_ascii_case(&wanted) {
+            continue;
+        }
+        out.replace_range(span.clone(), &hash_arg(&wanted));
+    }
+    out
+}
+
+/// Emit the call that ends `call`'s active window.
+///
+/// A trail is closed by `AFTER_IMAGE_OFF`, not by killing an effect kind — the name a trail
+/// carries is a texture, and `EFFECT_OFF_KIND` on it terminates nothing.
+fn emit_spawn_stop(call: &crate::data::EffectCall, indent: &str) -> String {
+    if call.spawn_func == "AFTER_IMAGE_ON" {
+        return format!("{indent}macros::AFTER_IMAGE_OFF(agent);\n");
+    }
+    format!(
+        "{indent}macros::EFFECT_OFF_KIND(agent, {}, false, true);\n",
+        hash_arg(&call.effect_name)
+    )
+}
+
 /// Generate a smashline `effect_*` ACMD function that replays the (edited) effect-call
 /// list: calls grouped by spawn frame, disabled calls omitted. `tweaks` (keyed by effect
 /// hash) adds LAST_EFFECT_SET_COLOR / LAST_EFFECT_SET_RATE lines after matching spawns so
@@ -1274,46 +1384,35 @@ fn emit_effect_move_fn(
         out.push_str(&format!("    frame(agent.lua_state_agent, {frame}.0);\n"));
         out.push_str("    if macros::is_excute(agent) {\n");
 
+        // Dedupe on the emitted line: `EFFECT_OFF_KIND` kills every live instance of a
+        // kind at once, and `AFTER_IMAGE_OFF` takes no name to key on at all.
         let mut emitted_stops = std::collections::HashSet::new();
         for call in stops
             .iter()
             .copied()
             .filter(|call| call.active_start < frame)
         {
-            if emitted_stops.insert(call.effect_name.as_str()) {
-                out.push_str(&format!(
-                    "        macros::EFFECT_OFF_KIND(agent, Hash40::new(\"{}\"), false, true);\n",
-                    call.effect_name
-                ));
+            let stop = emit_spawn_stop(call, "        ");
+            if emitted_stops.insert(stop.clone()) {
+                out.push_str(&stop);
             }
         }
 
         for call in starts {
-            let (r0, r1, r2) = (call.rotation[0], call.rotation[1], call.rotation[2]);
-            let bone_name = call.bone_name.to_ascii_lowercase();
-            if call.follows_bone {
-                out.push_str(&format!(
-                    "        macros::EFFECT_FOLLOW(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, true);\n",
-                    call.effect_name, bone_name,
-                    call.offset[0], call.offset[1], call.offset[2], r0, r1, r2, call.scale
-                ));
-            } else {
-                // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
-                out.push_str(&format!(
-                    "        macros::EFFECT(agent, Hash40::new(\"{}\"), Hash40::new(\"{}\"), {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, 0, 0, 0, 0, 0, 0, false);\n",
-                    call.effect_name, bone_name,
-                    call.offset[0], call.offset[1], call.offset[2], r0, r1, r2, call.scale
-                ));
-            }
+            out.push_str(&emit_spawn_call(call, "        "));
             if let Some(tw) = tweaks.get(&tweak_hash(&call.effect_name)) {
                 if let Some([r, g, b, _a]) = tw.color {
                     out.push_str(&format!(
-                        "        macros::LAST_EFFECT_SET_COLOR(agent, {r:.4}, {g:.4}, {b:.4});\n"
+                        "        macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
+                        num(r),
+                        num(g),
+                        num(b)
                     ));
                 }
                 if let Some(rate) = tw.speed {
                     out.push_str(&format!(
-                        "        macros::LAST_EFFECT_SET_RATE(agent, {rate:.4});\n"
+                        "        macros::LAST_EFFECT_SET_RATE(agent, {});\n",
+                        num(rate)
                     ));
                 }
             }
@@ -1324,17 +1423,68 @@ fn emit_effect_move_fn(
             .copied()
             .filter(|call| call.active_start >= frame)
         {
-            if emitted_stops.insert(call.effect_name.as_str()) {
-                out.push_str(&format!(
-                    "        macros::EFFECT_OFF_KIND(agent, Hash40::new(\"{}\"), false, true);\n",
-                    call.effect_name
-                ));
+            let stop = emit_spawn_stop(call, "        ");
+            if emitted_stops.insert(stop.clone()) {
+                out.push_str(&stop);
             }
         }
         out.push_str("    }\n");
     }
     out.push_str("}\n");
     (fn_name, out)
+}
+
+// ── Export preview ────────────────────────────────────────────────────────────
+
+/// The exact `game_*` function an export would write for this move.
+///
+/// Calls the same emitter [`build_mod_project_full`] does, so what the preview shows and
+/// what lands in `acmd_source/` cannot drift apart.
+pub fn preview_game_fn(script: &crate::data::AcmdScript, move_name: &str) -> String {
+    emit_move_fn(script, move_name).1
+}
+
+/// The exact lines an export would write inside one `is_excute` block.
+///
+/// Only the verifier needs this: comparing what the emitter *produces* is the one way to tell
+/// two statements apart that differ in the editor but collapse to the same call in the file.
+pub fn preview_excute_stmts(stmts: &[crate::data::ExcuteStmt]) -> Vec<String> {
+    emit_excute_stmts(stmts, "")
+}
+
+/// The exact `effect_*` function an export would write for this move.
+pub fn preview_effect_fn(
+    calls: &[crate::data::EffectCall],
+    move_name: &str,
+    live_tweaks: &[crate::mod_project::LiveTweak],
+) -> String {
+    let tweaks = live_tweaks
+        .iter()
+        .map(|t| (tweak_hash(&t.effect_name), t.clone()))
+        .collect();
+    emit_effect_move_fn(calls, move_name, &tweaks).1
+}
+
+/// Spawns that an export cannot reissue under the macro their script used.
+///
+/// Returns `(spawn function, effect name)` for each. This is the one way a generated script
+/// still departs from the original, and it is a data problem rather than a code one: the
+/// call's trailing arguments were never recorded, so there is no way to spell its signature.
+/// Reloading the move from a script or a live capture fills them in.
+pub fn export_spawn_downgrades(calls: &[crate::data::EffectCall]) -> Vec<(String, String)> {
+    calls
+        .iter()
+        .filter(|call| {
+            !call.disabled
+                && call.raw_line.is_none()
+                && !call.spawn_func.is_empty()
+                && call.extra_args.is_none()
+                // The fallback emits exactly these two, so they are not a downgrade.
+                && call.spawn_func != "EFFECT"
+                && call.spawn_func != "EFFECT_FOLLOW"
+        })
+        .map(|call| (call.spawn_func.clone(), call.effect_name.clone()))
+        .collect()
 }
 
 /// Build a complete, compilable skyline-rs mod project for all the provided edits.
@@ -1750,6 +1900,31 @@ pub fn export_acmd_source(
 mod tests {
     use super::*;
 
+    /// `AttackModule::clear_all` used to end a hitbox the frame *before* it started when the
+    /// script had no `frame()` call ahead of it, so the timeline and the viewport drew nothing
+    /// at all for kirby's jab. The id-scoped clear already clamped; this one did not.
+    #[test]
+    fn a_collision_cleared_on_the_next_frame_is_out_for_that_frame() {
+        // kirby/Attack100Sub: a hitbox with no `frame()` before it, cleared one frame later.
+        let source = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ATTACK(agent, 0, 0, Hash40::new("top"), 0.2, 361, 35, 0, 7, 5.5, 0.0, 5.5, 15.0, None, None, None, 0.5, 0.4, *ATTACK_SETOFF_KIND_OFF, *ATTACK_LR_CHECK_F, false, 0, 0.0, 0, false, false, false, false, true, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false, Hash40::new("collision_attr_rush"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_PUNCH, *ATTACK_REGION_PUNCH);
+    }
+    wait(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        AttackModule::clear_all(agent.module_accessor);
+    }
+}
+"#;
+        let hitboxes = parse_acmd_script(source).to_hitboxes();
+        assert_eq!(
+            (hitboxes[0].active_start, hitboxes[0].active_end),
+            (1, 1),
+            "the jab hitbox is out on frame 1"
+        );
+    }
+
     #[test]
     fn wind_commands_round_trip_with_exact_shapes_and_independent_erases() {
         let source = r#"
@@ -1803,6 +1978,86 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("AreaModule::erase_wind(agent.module_accessor, 4);"));
     }
 
+    /// `macros::CATCH` was never parsed, so a grab box in a script — including one Visionary
+    /// had just exported — was invisible to the editor and could not be edited at all.
+    #[test]
+    fn catch_calls_round_trip_through_the_editor() {
+        let src = r#"unsafe extern "C" fn game_catch(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        macros::CATCH(agent, 0, Hash40::new("top"), 5.5, 0.0, 6.4, 10.2, Some(1.0), Some(2.0), Some(3.0), *FIGHTER_STATUS_KIND_SWALLOWED, *COLLISION_SITUATION_MASK_A);
+    }
+    frame(agent.lua_state_agent, 13.0);
+    if macros::is_excute(agent) {
+        GrabModule::clear_all(agent.module_accessor);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let boxes = script.to_hitboxes();
+        assert_eq!(boxes.len(), 1, "{boxes:#?}");
+        let grab = &boxes[0];
+        assert_eq!(grab.category, 1, "a CATCH is a grab box, not an attack");
+        assert_eq!((grab.active_start, grab.active_end), (8, 12));
+        assert_eq!(grab.size, 5.5);
+        assert_eq!(grab.capsule_end, Some([1.0, 2.0, 3.0]));
+        // Grabs deal no damage — the attack-only fields must not inherit ATTACK's defaults.
+        assert_eq!(grab.damage, 0.0);
+
+        // The author's own status and situation survive, rather than being replaced by the
+        // stand-ins used for a grab that never came from a script.
+        let exported = preview_game_fn(&script, "catch");
+        assert!(
+            exported.contains("*FIGHTER_STATUS_KIND_SWALLOWED"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("*COLLISION_SITUATION_MASK_A"),
+            "{exported}"
+        );
+        assert!(exported.contains("GrabModule::clear_all"), "{exported}");
+        assert!(!exported.contains("AttackModule::clear_all"), "{exported}");
+
+        // And the whole thing round-trips: re-parsing the export gives the same grab back.
+        assert_eq!(
+            parse_acmd_script(&exported).to_hitboxes(),
+            boxes,
+            "{exported}"
+        );
+    }
+
+    /// An attack clear does not close a grab box, and a grab clear does not close an attack.
+    #[test]
+    fn attack_and_grab_clears_do_not_close_each_other() {
+        let src = r#"unsafe extern "C" fn game_catch(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK(agent, 0, 0, Hash40::new("top"), 10.0, 361, 100, 0, 30, 4.0, 0.0, 8.0, 0.0, None, None, None, 1.0, 1.0, 0, 1, false, 0, 0.0, 0, false, false, true, true, false, 0, 0, 0, false, Hash40::new("collision_attr_normal"), 0, 0, 0);
+        macros::CATCH(agent, 0, Hash40::new("top"), 5.5, 0.0, 6.4, 10.2, None, None, None, 0, 0);
+    }
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        AttackModule::clear_all(agent.module_accessor);
+    }
+    frame(agent.lua_state_agent, 20.0);
+    if macros::is_excute(agent) {
+        GrabModule::clear_all(agent.module_accessor);
+    }
+}
+"#;
+        let boxes = parse_acmd_script(src).to_hitboxes();
+        let attack = boxes.iter().find(|h| h.category == 0).expect("an attack");
+        let grab = boxes.iter().find(|h| h.category == 1).expect("a grab");
+        assert_eq!(
+            attack.active_end, 9,
+            "AttackModule::clear_all ends the attack"
+        );
+        assert_eq!(
+            grab.active_end, 19,
+            "and leaves the grab running to its own clear"
+        );
+    }
+
     #[test]
     fn id_scoped_attack_clear_round_trips() {
         let source = r#"
@@ -1825,7 +2080,25 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
 
     // ═══ Generated-source compile golden ════════════════════════════════════
 
+    /// The inputs `sample_project` is built from, so a test can check the preview against
+    /// the very same edits the export consumed.
+    type SampleEdits = (
+        crate::data::AcmdScript,
+        Vec<crate::data::EffectCall>,
+        Vec<crate::mod_project::LiveTweak>,
+    );
+
     fn sample_project() -> ModProject {
+        let (script, fx, tweaks) = sample_edits();
+        build_mod_project_full(
+            &[("mario".into(), "attack_air_n".into(), script)],
+            &[("mario".into(), "attack_air_n".into(), fx)],
+            &tweaks,
+            "sample_plugin",
+        )
+    }
+
+    fn sample_edits() -> SampleEdits {
         let atk = crate::data::AttackCall {
             id: 0,
             part: 0,
@@ -1883,6 +2156,13 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 active_start: 3,
                 active_end: 3,
                 disabled: false,
+                extra_args: Some(
+                    vec!["0".into(); 6]
+                        .into_iter()
+                        .chain(["false".into()])
+                        .collect(),
+                ),
+                raw_line: None,
             },
             crate::data::EffectCall {
                 effect_name: "sys_flash".into(),
@@ -1896,18 +2176,16 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 active_start: 5,
                 active_end: 20,
                 disabled: false,
+                extra_args: Some(vec!["true".into()]),
+                raw_line: None,
             },
         ];
-        build_mod_project_full(
-            &[("mario".into(), "attack_air_n".into(), script)],
-            &[("mario".into(), "attack_air_n".into(), fx)],
-            &[crate::mod_project::LiveTweak {
-                effect_name: "sys_attack_arc".into(),
-                color: Some([0.2, 0.4, 2.0, 1.0]),
-                speed: Some(1.5),
-            }],
-            "sample_plugin",
-        )
+        let tweaks = vec![crate::mod_project::LiveTweak {
+            effect_name: "sys_attack_arc".into(),
+            color: Some([0.2, 0.4, 2.0, 1.0]),
+            speed: Some(1.5),
+        }];
+        (script, fx, tweaks)
     }
 
     /// Always materializes the generated project under the editor cache dir; with
@@ -2166,5 +2444,331 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         assert_eq!(calls[0].active_start, 4);
         assert_eq!(calls[1].active_start, 8);
+    }
+
+    // ═══ Spawn-macro fidelity ═══════════════════════════════════════════════
+
+    /// The whole point of issue #4: an export must reissue the macro the script used.
+    #[test]
+    fn spawn_macros_survive_a_source_round_trip() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("sys_hit_l"), Hash40::new("sys_hit_r"), Hash40::new("haver"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_NO_STOP(agent, Hash40::new("sys_smoke"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].spawn_func, "EFFECT_FOLLOW_FLIP");
+        assert_eq!(calls[0].effect_name_alt.as_deref(), Some("sys_hit_r"));
+        assert_eq!(
+            calls[0].extra_args.as_deref(),
+            Some(&["true".to_string(), "*EF_FLIP_YZ".to_string()][..])
+        );
+        assert_eq!(calls[1].spawn_func, "EFFECT_FOLLOW_NO_STOP");
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new(\"sys_hit_l\"), Hash40::new(\"sys_hit_r\"), Hash40::new(\"haver\"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);"
+            ),
+            "flipped follow spawn must come back out whole:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::EFFECT_FOLLOW_NO_STOP(agent, Hash40::new(\"sys_smoke\")"),
+            "a NO_STOP follow must not be swapped for plain EFFECT_FOLLOW:\n{emitted}"
+        );
+    }
+
+    /// The macros take rotation as `zr, yr, xr`. Parsing them left to right into `[x, y, z]`
+    /// swapped two of the three angles against every other path in the editor.
+    #[test]
+    fn rotation_arguments_keep_their_zyx_slot_order() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("g"), Hash40::new("top"), 0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 1.0, 0, 0, 0, 0, 0, 0, false);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        // zr=10, yr=20, xr=30 → the editor's [x, y, z].
+        assert_eq!(calls[0].rotation, [30.0, 20.0, 10.0]);
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        assert!(
+            emitted.contains("0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 1.0"),
+            "the angles must land back in the slots they came from:\n{emitted}"
+        );
+    }
+
+    /// A sword trail is a texture and a set of trail parameters, not a graphic with a
+    /// transform. Rebuilding one as `EFFECT_FOLLOW` spawned a nonexistent effect and left
+    /// the trail running.
+    /// A trail's texture and joint are editable fields in the panels, but the whole call was
+    /// replayed verbatim, so renaming one exported the ORIGINAL trail and said nothing.
+    #[test]
+    fn renaming_a_trail_reaches_the_exported_source() {
+        let src = wrap_effect_fn(
+            r#"        macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), Hash40::new("sword2"), 3, 8, 0.75);"#,
+        );
+        let calls = parse_effect_script(&src).to_effect_calls();
+        assert_eq!(calls.len(), 1, "{calls:#?}");
+
+        let mut edited = calls.clone();
+        edited[0].effect_name = "my_trail".into();
+        edited[0].bone_name = "HaveL".into();
+        let out = preview_effect_fn(&edited, "attacks4", &[]);
+
+        assert!(out.contains(r#"Hash40::new("my_trail")"#), "{out}");
+        // Joints are hashed lowercase, as everywhere else.
+        assert!(out.contains(r#"Hash40::new("havel")"#), "{out}");
+        // Everything the editor has no field for is left exactly as the user wrote it.
+        assert!(out.contains(r#"Hash40::new("tex2"), 4,"#), "{out}");
+        assert!(
+            out.contains(r#"Hash40::new("sword2"), 3, 8, 0.75)"#),
+            "{out}"
+        );
+        assert!(out.contains("macros::AFTER_IMAGE4_ON_arg29("), "{out}");
+
+        // And an untouched trail still comes back byte-identical.
+        let untouched = preview_effect_fn(&calls, "attacks4", &[]);
+        assert!(
+            untouched.contains(
+                r#"macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), Hash40::new("sword2"), 3, 8, 0.75);"#
+            ),
+            "{untouched}"
+        );
+    }
+
+    #[test]
+    fn after_image_trails_export_as_trails() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), Hash40::new("sword2"), 0, 0, 0, 3, 8, 0.75);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::AFTER_IMAGE_OFF(agent);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].spawn_func, "AFTER_IMAGE_ON");
+        assert_eq!((calls[0].active_start, calls[0].active_end), (3, 9));
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        assert!(
+            emitted.contains("macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new(\"tex1\")"),
+            "the trail call must be replayed verbatim:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::AFTER_IMAGE_OFF(agent);"),
+            "a trail is closed by AFTER_IMAGE_OFF:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("EFFECT_OFF_KIND") && !emitted.contains("EFFECT_FOLLOW"),
+            "a trail is not an effect spawn:\n{emitted}"
+        );
+    }
+
+    /// Projects saved before `extra_args` existed still have to export something that
+    /// compiles — the macro name alone is not enough to rebuild an unknown signature.
+    #[test]
+    fn a_spawn_with_no_recorded_tail_falls_back_to_the_plain_pair() {
+        let call = crate::data::EffectCall {
+            effect_name: "sys_hit".into(),
+            effect_name_alt: Some("sys_hit_alt".into()),
+            spawn_func: "EFFECT_FOLLOW_FLIP".into(),
+            bone_name: "HaveR".into(),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: true,
+            active_start: 2,
+            active_end: 9999,
+            disabled: false,
+            extra_args: None,
+            raw_line: None,
+        };
+        let (_, emitted) = emit_effect_move_fn(&[call], "test", &Default::default());
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_FOLLOW(agent, Hash40::new(\"sys_hit\"), Hash40::new(\"haver\"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);"
+            ),
+            "an unrecoverable tail must fall back to a single-graphic EFFECT_FOLLOW:\n{emitted}"
+        );
+    }
+
+    /// Audit the emitter against every script in the local fetch cache: each spawn must come
+    /// back out under the same macro name and with the same number of arguments it went in
+    /// with. Skipped when nothing has been fetched yet, so a clean machine still passes.
+    #[test]
+    fn cached_scripts_round_trip_through_the_emitter() {
+        let cache = crate::scratch_dirs::app_storage_root().join("script-cache");
+        if !cache.is_dir() {
+            return;
+        }
+        let mut bodies = Vec::new();
+        for fighter in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
+            for script in std::fs::read_dir(fighter.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if let Ok(body) = std::fs::read_to_string(script.path()) {
+                    bodies.push(body);
+                }
+            }
+        }
+        if bodies.is_empty() {
+            return;
+        }
+
+        let mut spawns = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for body in &bodies {
+            let calls = parse_effect_script(body).to_effect_calls();
+            if calls.is_empty() {
+                continue;
+            }
+            // Re-reading the generated function must find the same set of spawns: this is
+            // the property an exported mod depends on, end to end.
+            let (_, emitted) = emit_effect_move_fn(&calls, "audit", &Default::default());
+            let mut before: Vec<(String, String)> = calls
+                .iter()
+                .filter(|c| !c.disabled)
+                .map(|c| (c.spawn_func.clone(), c.effect_name.clone()))
+                .collect();
+            let mut after: Vec<(String, String)> = parse_effect_script(&emitted)
+                .to_effect_calls()
+                .iter()
+                .map(|c| (c.spawn_func.clone(), c.effect_name.clone()))
+                .collect();
+            before.sort();
+            after.sort();
+            if before != after {
+                problems.push(format!("re-parse mismatch:\n{before:?}\n{after:?}"));
+            }
+
+            // Every spawn macro the source used must appear in the output under its own
+            // name, with the same arity. A miscount here is a call the game would reject.
+            for call in calls.iter().filter(|c| !c.disabled) {
+                spawns += 1;
+                let Some(tail) = &call.extra_args else {
+                    continue;
+                };
+                let expected = 1 // agent
+                    + 1 // graphic
+                    + usize::from(call.effect_name_alt.is_some())
+                    + 1 // joint
+                    + 7 // pos, rot, size
+                    + tail.len();
+                let line = emit_spawn_call(call, "");
+                let Some(open) = line.find('(') else {
+                    problems.push(format!("no call emitted for {}", call.spawn_func));
+                    continue;
+                };
+                if !line.starts_with(&format!("macros::{}(", call.spawn_func)) {
+                    problems.push(format!("{} was emitted as {line}", call.spawn_func));
+                    continue;
+                }
+                let args = tokenize_args(line[open + 1..].rsplit_once(')').unwrap().0);
+                if args.len() != expected {
+                    problems.push(format!(
+                        "{} emitted {} args, source had {expected}: {line}",
+                        call.spawn_func,
+                        args.len()
+                    ));
+                }
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{} of {spawns} spawns did not round-trip:\n{}",
+            problems.len(),
+            problems
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        eprintln!("[audit] {spawns} spawns across {} scripts", bodies.len());
+    }
+
+    // ═══ Export preview ═════════════════════════════════════════════════════
+
+    /// The preview is only worth showing if it is what you actually get. Both functions have
+    /// to appear verbatim in the project the export writes.
+    #[test]
+    fn the_preview_is_exactly_what_the_export_writes() {
+        let project = sample_project();
+        let acmd = project
+            .files
+            .iter()
+            .find(|f| f.rel_path == "src/mario/acmd.rs")
+            .map(|f| f.contents.as_str())
+            .expect("generated fighter ACMD");
+
+        let sample = sample_edits();
+        let game = preview_game_fn(&sample.0, "attack_air_n");
+        assert!(
+            acmd.contains(&game),
+            "the previewed game_* function is not what was exported:\n{game}\n---\n{acmd}"
+        );
+        let effect = preview_effect_fn(&sample.1, "attack_air_n", &sample.2);
+        assert!(
+            acmd.contains(&effect),
+            "the previewed effect_* function is not what was exported:\n{effect}\n---\n{acmd}"
+        );
+        // And the preview really is showing the user's macro, not a substitute.
+        assert!(effect.contains("macros::EFFECT_FOLLOW(agent, Hash40::new(\"sys_flash\")"));
+    }
+
+    /// A call with no recorded tail is the one case the export still cannot reproduce, so the
+    /// window has to say so rather than showing a substitute macro with no explanation.
+    #[test]
+    fn spawns_the_export_cannot_reproduce_are_reported() {
+        let mut calls = sample_edits().1;
+        // Faithful: both carry their tails.
+        assert!(export_spawn_downgrades(&calls).is_empty());
+
+        // A project saved before tails were recorded, on a macro with no plain equivalent.
+        calls[1].spawn_func = "EFFECT_FOLLOW_NO_STOP".into();
+        calls[1].extra_args = None;
+        assert_eq!(
+            export_spawn_downgrades(&calls),
+            vec![("EFFECT_FOLLOW_NO_STOP".to_string(), "sys_flash".to_string())]
+        );
+
+        // A disabled call is not exported at all, so it is not a downgrade.
+        calls[1].disabled = true;
+        assert!(export_spawn_downgrades(&calls).is_empty());
+
+        // Neither is one whose macro IS what the fallback emits.
+        calls[1].disabled = false;
+        calls[1].spawn_func = "EFFECT_FOLLOW".into();
+        assert!(export_spawn_downgrades(&calls).is_empty());
+    }
+
+    /// Graphic slots are not always string literals; consts and locals must pass through
+    /// rather than being re-quoted into a graphic literally named after the expression.
+    #[test]
+    fn expression_valued_graphic_arguments_are_not_re_quoted() {
+        assert_eq!(hash_arg("sys_hit"), "Hash40::new(\"sys_hit\")");
+        assert_eq!(hash_arg("0x1234abcd"), "Hash40::new_raw(0x1234abcd)");
+        assert_eq!(hash_arg("*EFFECT_KIND"), "*EFFECT_KIND");
+        assert_eq!(hash_arg("Hash40::new(\"x\")"), "Hash40::new(\"x\")");
     }
 }

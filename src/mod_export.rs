@@ -116,12 +116,19 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
     if acmd_edits.is_empty() && effect_edits.is_empty() {
         return Ok(None);
     }
-    Ok(Some(build_mod_project_full(
-        &acmd_edits,
-        &effect_edits,
-        &tweaks,
-        &plugin_name(project),
-    )))
+    let built = build_mod_project_full(&acmd_edits, &effect_edits, &tweaks, &plugin_name(project));
+
+    // Nothing reaches disk until the generated code has been read back and matched against the
+    // edits it came from. A mod that will not compile, or that ships numbers other than the
+    // ones on screen, is worse than an export that stops and says why.
+    let report = crate::acmd_verify::verify_export(&built, &acmd_edits, &effect_edits, &tweaks);
+    if report.has_blockers() {
+        bail!(
+            "the generated mod source did not pass verification:\n{}",
+            report.blocker_summary()
+        );
+    }
+    Ok(Some(built))
 }
 
 /// Materialize a generated Cargo project at exactly `root` (without adding another surprise
@@ -409,6 +416,75 @@ mod tests {
             Ok(_) => panic!("incomplete effect edits unexpectedly exported"),
         };
         assert!(error.contains("kirby/attack_dash"), "{error}");
+    }
+
+    /// End to end: a script the user actually wrote → parsed → carried through a saved
+    /// project → generated plugin source. The macros they called have to come out the other
+    /// side, because a mod that silently swaps `EFFECT_FOLLOW_FLIP` for `EFFECT` does not
+    /// behave like the move they were editing.
+    #[test]
+    fn a_moves_own_spawn_macros_survive_the_whole_export_path() {
+        const SOURCE: &str = r#"
+unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("mario_hit_l"), Hash40::new("mario_hit_r"), Hash40::new("haver"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);
+        macros::EFFECT_ALPHA(agent, Hash40::new("sys_smoke"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.6);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("mario_hit_l"), false, true);
+    }
+}
+"#;
+        let calls = crate::acmd::parse_effect_script(SOURCE).to_effect_calls();
+        assert_eq!(calls.len(), 2);
+
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "fidelity".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                effect_calls_full: std::collections::HashMap::from([(
+                    "attack_air_n".into(),
+                    calls.clone(),
+                )]),
+                ..Default::default()
+            },
+        );
+        // Through a real save/load, so the new fields have to actually serialize.
+        let json = serde_json::to_string(&project).unwrap();
+        let project: ModProjectFile = serde_json::from_str(&json).unwrap();
+
+        let generated = source_project(&project).unwrap().expect("source project");
+        let acmd = generated
+            .files
+            .iter()
+            .find(|f| f.rel_path == "src/mario/acmd.rs")
+            .map(|f| f.contents.as_str())
+            .expect("generated fighter ACMD");
+
+        assert!(
+            acmd.contains(
+                r#"macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("mario_hit_l"), Hash40::new("mario_hit_r"), Hash40::new("haver"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);"#
+            ),
+            "the flipped follow spawn and its second graphic must survive:\n{acmd}"
+        );
+        assert!(
+            acmd.contains(
+                r#"macros::EFFECT_ALPHA(agent, Hash40::new("sys_smoke"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.6);"#
+            ),
+            "EFFECT_ALPHA's alpha argument must survive:\n{acmd}"
+        );
+        assert!(
+            acmd.contains(
+                r#"macros::EFFECT_OFF_KIND(agent, Hash40::new("mario_hit_l"), false, true);"#
+            ),
+            "the follow effect's end must still close it:\n{acmd}"
+        );
     }
 
     #[test]

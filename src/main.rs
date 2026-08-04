@@ -1,5 +1,7 @@
 // Visionary: character/circle preview, authored effect editing, and live in-game rendering.
 mod acmd;
+mod acmd_src;
+mod acmd_verify;
 mod app;
 mod app_icon;
 mod credits;

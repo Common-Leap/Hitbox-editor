@@ -61,6 +61,13 @@ pub struct Hitbox {
     /// is required for accurate rendering, live rewriting, retiming, and export.
     #[serde(default)]
     pub wind: Option<WindboxData>,
+    /// The `CATCH` arguments category 1 has no editable field for. Keeping them is what lets
+    /// a grab read from a script export with the author's own values rather than a
+    /// substituted default. Deliberately NOT the whole call: every other argument is an
+    /// editable property of the hitbox itself, and duplicating those would let the copy go
+    /// stale the moment the user dragged one.
+    #[serde(default)]
+    pub catch: Option<CatchExtras>,
 }
 
 impl Default for Hitbox {
@@ -105,6 +112,7 @@ impl Default for Hitbox {
             hitbox_type: 0,
             category: 0,
             wind: None,
+            catch: None,
         }
     }
 }
@@ -199,12 +207,39 @@ impl WindboxData {
             active_end,
             category: 2,
             wind: Some(self.clone()),
+            catch: None,
             ..Default::default()
         }
     }
 }
 
 impl Hitbox {
+    /// Back-convert to a CATCH call.
+    ///
+    /// The status and situation come from the originating call when there was one. A grab
+    /// that reached the editor from a live capture has neither — the plugin appends these
+    /// same two constants when it injects a grab with no donor, so an exported mod grabs the
+    /// way the live preview did.
+    pub fn to_catch_call(&self) -> CatchCall {
+        let base = self.catch.clone();
+        CatchCall {
+            id: self.id,
+            bone_name: self.bone_name.clone(),
+            size: self.size,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            offset_z: self.offset_z,
+            capsule_end: self.capsule_end,
+            status: base
+                .as_ref()
+                .map(|c| c.status.clone())
+                .unwrap_or_else(|| CATCH_DEFAULT_STATUS.to_string()),
+            situation: base
+                .map(|c| c.situation)
+                .unwrap_or_else(|| CATCH_DEFAULT_SITUATION.to_string()),
+        }
+    }
+
     /// Back-convert to an ATTACK call (script synthesis for capture-sourced moves).
     pub fn to_attack_call(&self) -> AttackCall {
         AttackCall {
@@ -250,6 +285,71 @@ impl Hitbox {
 
 /// A fully-parsed ATTACK(...) call — every parameter is named.
 /// This is the source of truth for export; nothing is lost.
+/// The two `CATCH` arguments a [`Hitbox`] has no field for.
+///
+/// A grab's status kind and situation mask live on the originating call, not in editor state.
+/// These are the constants the plugin substitutes when it injects a grab with no donor (see
+/// `hitbox_viewer::inject`), so a grab that never came from a script still behaves on export
+/// the way it did in the live preview.
+pub const CATCH_DEFAULT_STATUS: &str = "FIGHTER_STATUS_KIND_CAPTURE_PULLED";
+pub const CATCH_DEFAULT_SITUATION: &str = "COLLISION_SITUATION_MASK_GA";
+
+/// The `CATCH` arguments that are not editable properties of a grab box.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatchExtras {
+    /// The status the grabbed fighter is put into, e.g. `FIGHTER_STATUS_KIND_CAPTURE_PULLED`.
+    pub status: String,
+    pub situation: String,
+}
+
+/// A parsed `macros::CATCH` call — a grab box.
+///
+/// `status` and `situation` have no counterpart on [`Hitbox`], so they are kept here: a grab
+/// read from a script exports with the author's own values rather than a substituted default.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatchCall {
+    pub id: u32,
+    pub bone_name: String,
+    pub size: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub offset_z: f32,
+    /// Capsule second endpoint — `Some([x,y,z])` or `None` for a spherical grab.
+    pub capsule_end: Option<[f32; 3]>,
+    /// The status the grabbed fighter is put into, e.g. `FIGHTER_STATUS_KIND_CAPTURE_PULLED`.
+    pub status: String,
+    pub situation: String,
+}
+
+impl CatchCall {
+    pub fn to_hitbox(&self, active_start: u32) -> Hitbox {
+        Hitbox {
+            id: self.id,
+            bone_name: self.bone_name.clone(),
+            size: self.size,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            offset_z: self.offset_z,
+            capsule_end: self.capsule_end,
+            // A grab box deals no damage or knockback — the attack-only fields stay zeroed,
+            // matching what a live capture builds for one.
+            damage: 0.0,
+            angle: 0,
+            kb_scaling: 0,
+            fkb: 0,
+            kb_base: 0,
+            active_start,
+            active_end: u32::MAX,
+            category: 1,
+            catch: Some(CatchExtras {
+                status: self.status.clone(),
+                situation: self.situation.clone(),
+            }),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttackCall {
     // ── Positional / shape ────────────────────────────────────────────────
@@ -336,6 +436,7 @@ impl AttackCall {
             hitbox_type: 0,
             category: 0,
             wind: None,
+            catch: None,
         }
     }
 }
@@ -347,10 +448,15 @@ impl AttackCall {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ExcuteStmt {
     Attack(AttackCall),
+    /// CATCH — a grab box. Its own family: `CATCH` shares no argument layout with `ATTACK`
+    /// and is cleared by `GrabModule`, not `AttackModule`.
+    Catch(CatchCall),
     Wind(WindboxData),
     EraseWind(u32),
     Clear(u32),
     ClearAll,
+    /// GrabModule::clear_all — ends every open grab box, and only grab boxes.
+    GrabClearAll,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -428,21 +534,48 @@ fn eval_stmts(stmts: &[AcmdStmt], start_frame: f32, hitboxes: &mut Vec<Hitbox>) 
                                 hitbox.active_end = end.max(hitbox.active_start);
                             }
                         }
+                        ExcuteStmt::Catch(call) => {
+                            let spawn = script_frame(frame);
+                            // Reusing a grab id replaces the open one, the same way ATTACK does.
+                            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
+                                hitbox.category == 1
+                                    && hitbox.id == call.id
+                                    && hitbox.active_end == u32::MAX
+                            }) {
+                                existing.active_end = spawn.saturating_sub(1);
+                            }
+                            hitboxes.push(call.to_hitbox(spawn));
+                        }
+                        // AttackModule clears attack hitboxes only — a grab box survives it and
+                        // is ended by GrabModule::clear_all instead.
                         ExcuteStmt::Clear(id) => {
                             let end = script_frame(frame).saturating_sub(1);
                             for hitbox in hitboxes.iter_mut().filter(|hitbox| {
-                                hitbox.category != 2
+                                hitbox.category == 0
                                     && hitbox.id == *id
                                     && hitbox.active_end == u32::MAX
                             }) {
                                 hitbox.active_end = end.max(hitbox.active_start);
                             }
                         }
+                        // `.max(active_start)` for the same reason the id-scoped clear does it:
+                        // a collision that comes out and is cleared on the next `wait` is out
+                        // for that one frame, not for none. Without the clamp a hitbox spawned
+                        // before any `frame()` call ends up ending the frame before it starts,
+                        // and the timeline draws nothing at all.
                         ExcuteStmt::ClearAll => {
-                            let end = script_frame(frame);
-                            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category != 2) {
+                            let end = script_frame(frame).saturating_sub(1);
+                            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 0) {
                                 if hb.active_end == u32::MAX {
-                                    hb.active_end = end.saturating_sub(1);
+                                    hb.active_end = end.max(hb.active_start);
+                                }
+                            }
+                        }
+                        ExcuteStmt::GrabClearAll => {
+                            let end = script_frame(frame).saturating_sub(1);
+                            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 1) {
+                                if hb.active_end == u32::MAX {
+                                    hb.active_end = end.max(hb.active_start);
                                 }
                             }
                         }
@@ -1082,11 +1215,23 @@ pub enum EffectMacro {
         scale: f32,
         /// `true` for EFFECT_FOLLOW / EFFECT_FOLLOW_FLIP / EFFECT_FLIP variants.
         follows_bone: bool,
+        /// Every argument after `scale`, verbatim from the source call.
+        ///
+        /// The spawn families differ only past the shared transform block: alpha, colour,
+        /// random ranges, contact flags. Keeping them as text is what lets an export
+        /// reproduce the caller's own macro instead of falling back to plain `EFFECT`,
+        /// without this code having to know all two dozen signatures.
+        #[serde(default)]
+        extra_args: Vec<String>,
     },
     /// AFTER_IMAGE4_ON / AFTER_IMAGE_ON — sword/weapon trail effects.
     AfterImage {
         effect_name: String,
         bone_name: String,
+        /// The call verbatim. A trail's arguments are textures and per-frame trail
+        /// parameters, not a transform, so there is nothing to recompose it from.
+        #[serde(default)]
+        raw: String,
     },
     /// AFTER_IMAGE_OFF — turns off a sword trail.
     AfterImageOff,
@@ -1115,7 +1260,7 @@ pub struct EffectScript {
 }
 
 /// A resolved effect event with computed active frame range.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EffectCall {
     pub effect_name: String,
     /// Second graphic for FLIP variants. `None` for single-graphic spawn functions.
@@ -1137,6 +1282,19 @@ pub struct EffectCall {
     /// Soft-removed by the user (kept in place so edit indices stay stable).
     #[serde(default)]
     pub disabled: bool,
+    /// Arguments after `scale` in the originating call, verbatim (see
+    /// [`EffectMacro::Effect::extra_args`]).
+    ///
+    /// `None` means "not known" — a call the user added from scratch, a live capture whose
+    /// tail could not be spelled in Rust, or a project saved before this field existed. It
+    /// is NOT the same as `Some(vec![])`: several spawn macros genuinely end at `scale`, and
+    /// conflating the two downgraded them to plain `EFFECT_FOLLOW` on export.
+    #[serde(default)]
+    pub extra_args: Option<Vec<String>>,
+    /// Set for spawns that cannot be recomposed from a transform (currently the
+    /// AFTER_IMAGE trail macros); exports re-emit this line as-is.
+    #[serde(default)]
+    pub raw_line: Option<String>,
 }
 
 fn default_effect_spawn_func() -> String {
@@ -1214,6 +1372,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                             rotation,
                             scale,
                             follows_bone,
+                            extra_args,
                         } => {
                             let active_end = if *follows_bone {
                                 9999
@@ -1232,6 +1391,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 active_start: script_frame(frame),
                                 active_end,
                                 disabled: false,
+                                extra_args: Some(extra_args.clone()),
+                                raw_line: None,
                             });
                         }
                         EffectMacro::EffectOffKind { effect_name } => {
@@ -1245,6 +1406,7 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                         EffectMacro::AfterImage {
                             effect_name,
                             bone_name,
+                            raw,
                         } => {
                             // Sword/weapon trail — active until AfterImageOff
                             calls.push(EffectCall {
@@ -1259,6 +1421,8 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
                                 active_start: script_frame(frame),
                                 active_end: 9999,
                                 disabled: false,
+                                extra_args: None,
+                                raw_line: (!raw.is_empty()).then(|| raw.clone()),
                             });
                         }
                         EffectMacro::AfterImageOff => {
@@ -1281,6 +1445,51 @@ fn eval_effect_stmts(stmts: &[EffectStmt], start_frame: f32, calls: &mut Vec<Eff
         }
     }
     frame
+}
+
+impl EffectScript {
+    /// For each call [`to_effect_calls`](Self::to_effect_calls) produces, the ordinal of the
+    /// spawn macro in the script text that produced it.
+    ///
+    /// The two are not one-to-one: a macro inside a `for` runs once per iteration, so several
+    /// calls share one ordinal. Writing an edit back to source needs to know which text the
+    /// call came from, and this is the only thing that connects them — so it MUST visit the
+    /// statement tree exactly the way `eval_effect_stmts` does. Keep them in step.
+    pub fn call_macro_ordinals(&self) -> Vec<usize> {
+        fn walk(stmts: &[EffectStmt], next: &mut usize, out: &mut Vec<usize>) {
+            for stmt in stmts {
+                match stmt {
+                    EffectStmt::Excute(macros) => {
+                        for m in macros {
+                            // Only spawns are numbered — they are the only macros that both
+                            // produce a call and carry an editable transform, so the scanner
+                            // counts exactly these and the two sequences stay aligned.
+                            if matches!(
+                                m,
+                                EffectMacro::Effect { .. } | EffectMacro::AfterImage { .. }
+                            ) {
+                                out.push(*next);
+                                *next += 1;
+                            }
+                        }
+                    }
+                    EffectStmt::Loop { count, body } => {
+                        // Every iteration re-runs the SAME text: restore the counter so the
+                        // second pass lands on the same ordinals as the first.
+                        let start = *next;
+                        for _ in 0..*count {
+                            *next = start;
+                            walk(body, next, out);
+                        }
+                    }
+                    EffectStmt::Frame(_) | EffectStmt::Wait(_) | EffectStmt::Raw(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.stmts, &mut 0, &mut out);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1536,6 +1745,7 @@ mod tests {
                     rotation: [0.0; 3],
                     scale: 1.0,
                     follows_bone: false,
+                    extra_args: Vec::new(),
                 }]),
                 EffectStmt::Wait(5.0),
                 EffectStmt::Excute(vec![EffectMacro::Effect {
@@ -1547,6 +1757,7 @@ mod tests {
                     rotation: [0.0; 3],
                     scale: 1.0,
                     follows_bone: false,
+                    extra_args: Vec::new(),
                 }]),
                 // An absolute frame AFTER waits must not be treated as another wait.
                 EffectStmt::Frame(20.0),
@@ -1559,6 +1770,7 @@ mod tests {
                     rotation: [0.0; 3],
                     scale: 1.0,
                     follows_bone: false,
+                    extra_args: Vec::new(),
                 }]),
             ],
         };

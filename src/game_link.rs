@@ -198,6 +198,24 @@ impl LuaArgWire {
             _ => None,
         }
     }
+
+    /// Render this argument as Rust source, for exports that replay a captured call.
+    ///
+    /// `None` for `Nil`: lua's nil has no single Rust spelling, and a spawn whose tail
+    /// contains one has to fall back to a known-good macro rather than emit a guess.
+    ///
+    /// Floats go through the emitter's own renderer, not a fixed decimal count: a captured
+    /// tail is replayed verbatim, so rounding one here changes the move with nothing left to
+    /// compare against — the export verifier sees the already-rounded string on both sides.
+    pub fn to_source_arg(&self) -> Option<String> {
+        Some(match self {
+            LuaArgWire::Hash(h) => format!("Hash40::new_raw({h:#x})"),
+            LuaArgWire::Num(n) => crate::acmd::num(*n),
+            LuaArgWire::Int(i) => i.to_string(),
+            LuaArgWire::Bool(b) => b.to_string(),
+            LuaArgWire::Nil => return None,
+        })
+    }
 }
 
 /// One captured ACMD call, as streamed by the plugin (`AcmdCapture`).

@@ -112,6 +112,93 @@ emulator installation, set `VISIONARY_SD_DIR` to the emulator SD root before
 starting Visionary. `VISIONARY_CACHE_DIR` can similarly move Visionary's cache
 and temporary workspace to another location.
 
+## Your own ACMD source
+
+By default Visionary reads ACMD scripts from an online archive of the *vanilla*
+scripts. If you have already modded a move, that is not the code your game runs.
+
+Open **Windows → ACMD Source** and link the Rust project that builds your
+plugin — the folder holding its `Cargo.toml`. Visionary indexes every
+`unsafe extern "C" fn game_*` / `effect_*` function in it and reads the selected
+move from there instead, so the editor shows the macros you actually called.
+Both the smashline layout (`Agent::new("mario")` beside the scripts) and the
+older `#[acmd_script(agent = "…", script = "…")]` attributes are recognised.
+
+The same window edits a script in place: pick **Hitboxes** or **Effects** to
+open that function in a small text editor.
+
+The editor and the rest of the app stay in sync both ways while you work:
+
+- Typing in the source updates the timeline, the viewport, and the live game
+  preview as soon as the text settles. Half-finished code is ignored rather than
+  blanking the panels, and the last readable version stays on screen.
+- Dragging a value in the editor panels writes it straight back into the source
+  text, so the code always shows what you are looking at.
+
+Nothing touches the file on disk until you press **Save**, which rewrites only
+that one function and leaves the rest of the file alone. **Revert** restores the
+script as loaded, panels included.
+
+**Show** switches between your source, the code Visionary *would* write into
+`acmd_source/` if you exported the move right now, and both side by side. The
+generated pane runs the real export emitter on the move as it currently stands,
+so it is exactly what you would get — not an approximation of it. If a spawn
+cannot be exported under the macro your script used, it says which one and why.
+
+The generated pane does not need a linked project, and works for any move the
+editor has loaded — including one captured live from the game, which has no
+script file anywhere. That case is the reason it is worth having.
+
+### Checking the generated code
+
+Under that pane is the result of the same check every export runs. It does not
+ask the emitter what it meant to write. It reads the generated code back with the
+parser the editor uses on your own scripts, and compares what comes out with the
+move on screen — every field of every collision and spawn, by name.
+
+Four things are checked. The first three stop an export rather than warn about
+it, because a mod that does not build, or that quietly ships numbers other than
+the ones you set, is worse than no mod:
+
+- **It is Rust.** Every generated file is parsed. Lines kept verbatim from your
+  script, and recorded macro tails, are spliced into the output as they are, so
+  this is not a formality.
+- **It says what you said.** A single rounded decimal is a failure. Exports used
+  to write collision values to one decimal place, so a vanilla `0.35` hitbox
+  attribute shipped as `0.3`, and a grab box at `-17.25` as `-17.2`, with nothing
+  anywhere to say so.
+- **It will build.** A value that is not a number, a graphic name with a quote in
+  it, a wind command an argument short, two moves whose names differ only by
+  punctuation and collapse onto one function — anything that produces a
+  well-formed but broken mod is caught here rather than by your toolchain.
+- **It is not wasteful.** A call issued twice in one block, an empty block, a
+  `wait(0)`, a collision cleared before it comes out. These only inform.
+
+The timing checks are skipped for a script carrying branches of its own — an
+`if(WorkModule::is_flag(…)){`, an `FT_MOTION_RATE`. Those decide at runtime what
+runs and when, the editor does not model them, and a warning that guesses is
+worse than no warning at all. Everything else is checked either way.
+
+Write-back rewrites argument *values* only: the macros you called, your
+comments, and your formatting all stay exactly as written. Every property the
+hitbox and effect panels expose is covered — the masks, the sound and collision
+attributes, the flags, the capsule endpoints — so an edit either lands in the
+file or is named in the report under the editor. It is never dropped quietly.
+
+Grab boxes are read and written as the `CATCH` calls they are, so a grab in your
+script shows up on the timeline and can be retuned like any other collision. The
+status kind and situation mask are not editable properties, and your own values
+for them are carried through untouched.
+
+Anything that cannot be written as a value change to an existing argument is
+reported instead of guessed at: a spawn you added or removed, a graphic you
+renamed, a retimed call, one iteration of a `for` loop edited on its own, a wind
+box (`AREA_WIND` is a flat list of command-specific floats with no shared layout
+to retune against), or a sword trail's position — a trail is drawn between the
+joints it names and has no transform arguments at all. **Sync Edits Into
+Source**, in the **Mod** menu, applies the same write-back to the file directly,
+for when the source window is not open.
+
 ## Projects and mod exports
 
 The **Mod** menu keeps hitbox, effect-spawn, authored effect, texture, and

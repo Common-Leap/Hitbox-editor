@@ -48,6 +48,13 @@ anyhow = "1"
 rfd = "0.15"
 dirs = "5"
 tempfile = "3"
+# Parses the Rust that Visionary generates, so an export that would not compile is caught
+# before it reaches disk rather than by the user's toolchain. Already in the dependency graph
+# for the host, so this only pulls in the `full` item grammar.
+syn = { version = "2", features = ["full"] }
+# Not used directly — `syn` reports where a parse failed only when proc-macro2 is built with
+# span locations, and "line 41, column 8" is the whole value of that report.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # These native window systems only exist on Linux. Keeping them out of the common eframe
 # declaration prevents Windows builds from inheriting host features they cannot use.

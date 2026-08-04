@@ -727,6 +727,72 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
 
 type AcmdFetchResult = (String, String, Result<String, String>);
 
+/// One ACMD function checked out of the linked project for editing.
+///
+/// Only the function's own text is held, not the whole file: saving splices it back into the
+/// span it came from, so anything else in the file — other moves, imports, the install block
+/// — cannot be clobbered by an editor that never showed it.
+struct SourceBuffer {
+    fighter: String,
+    move_name: String,
+    /// ACMD script name, e.g. `effect_attackairn`.
+    script: String,
+    file: PathBuf,
+    span: std::ops::Range<usize>,
+    text: String,
+    /// The text as loaded, for change detection and Revert.
+    original: String,
+    /// The text the editor panels were last reconciled against.
+    ///
+    /// The two sides drive each other, so each needs to tell "I changed this" from "the
+    /// other side changed this" — otherwise adopting a change looks like a new edit and the
+    /// two ping-pong forever.
+    synced: String,
+    /// Candidate text and when it appeared, for debouncing the re-parse. Half-typed source
+    /// parses to nonsense, and blanking the panels on every keystroke is unusable.
+    settling: Option<(String, std::time::Instant)>,
+    /// The panel state the buffer text currently reflects.
+    mirrored: Option<(Vec<crate::data::Hitbox>, Vec<crate::data::EffectCall>)>,
+    /// Why the last reconcile declined to write, shown under the editor.
+    note: Option<String>,
+}
+
+/// Why the source pane has no script to edit. Each state gets its own answer, because
+/// "nothing here" is exactly the unhelpful thing this window used to say.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoSource {
+    /// No project linked at all.
+    NotLinked,
+    /// Linked, but it has nothing for this fighter — the usual case for a live capture.
+    FighterAbsent,
+    /// Linked and has the fighter, but not this move.
+    MoveAbsent,
+    /// The move IS in the project; the user just has not opened either script yet.
+    NothingOpen,
+}
+
+/// Which panes the ACMD Source window shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceView {
+    /// The user's own code, editable.
+    Source,
+    /// What an export would emit for this move, read-only.
+    Generated,
+    /// Both, for comparing them directly — the question issue #4 was really asking.
+    Split,
+}
+
+impl SourceBuffer {
+    fn dirty(&self) -> bool {
+        self.text != self.original
+    }
+
+    /// Whether this buffer holds the `game_*` (hitbox) side of the move.
+    fn is_game_script(&self) -> bool {
+        self.script.starts_with("game_")
+    }
+}
+
 pub struct VisionaryApp {
     /// Keeps the Wayland shared-memory icon buffer alive for the root toplevel. winit 0.30
     /// handles X11 and Windows icons itself; Wayland compositors use the native icon protocol.
@@ -837,6 +903,13 @@ pub struct VisionaryApp {
     use_scan: Option<UseScan>,
     fighter_search: String,
     move_search: String,
+    /// The user's own smashline project, when linked. Scripts are read from here in
+    /// preference to the dumped-script mirror — see `acmd_src`.
+    acmd_src: Option<crate::acmd_src::SourceIndex>,
+    show_acmd_src: bool,
+    /// The script currently open in the source editor window.
+    acmd_src_buffer: Option<SourceBuffer>,
+    acmd_src_view: SourceView,
     /// Eff-file editor with in-game live preview (replaces RPM).
     eff_editor: crate::eff_editor::EffEditor,
     /// TCP client to the slight_replica plugin (:7878).
@@ -1088,6 +1161,10 @@ impl VisionaryApp {
             use_scan: None,
             fighter_search: String::new(),
             move_search: String::new(),
+            acmd_src: None,
+            show_acmd_src: false,
+            acmd_src_buffer: None,
+            acmd_src_view: SourceView::Source,
             eff_editor: crate::eff_editor::EffEditor::default(),
             game_link: crate::game_link::GameLink::default(),
             live_overrides: crate::game_link::LiveOverrides::default(),
@@ -1122,6 +1199,14 @@ impl VisionaryApp {
         });
         if let Some(root) = eff_root {
             app.eff_editor.set_export_root(root);
+        }
+
+        // Re-link the user's own ACMD source, quietly: a project that has moved or been
+        // deleted since last session should not open with an error over an unrelated task.
+        if let Some(root) = load_config_path(ACMD_SRC_CONFIG_KEY) {
+            app.acmd_src = crate::acmd_src::SourceIndex::build(&root)
+                .ok()
+                .filter(|index| index.script_count() > 0);
         }
 
         // Profiling helper: preselect a fighter by internal name so a `VISIONARY_PROFILE` run
@@ -1588,9 +1673,24 @@ impl VisionaryApp {
             _ => return,
         };
 
-        self.fetching_acmd = true;
         self.acmd_error = None;
 
+        // A linked project is the authoritative script for anyone who has already modded the
+        // move — the mirror only ever holds vanilla. It is a local file read, so it resolves
+        // inline instead of paying for a thread and a repaint.
+        if let Some(body) = self
+            .acmd_src
+            .as_ref()
+            .and_then(|index| index.script_body(&fighter_name, &move_name))
+        {
+            // Drop any mirror fetch still in flight for this same move, or it would land
+            // afterwards and overwrite the source-loaded script with the vanilla one.
+            self.acmd_receiver = None;
+            self.apply_acmd_body(&fighter_name, &move_name, Ok(body), "Project source");
+            return;
+        }
+
+        self.fetching_acmd = true;
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = self.egui_ctx.clone();
         std::thread::spawn(move || {
@@ -1602,6 +1702,471 @@ impl VisionaryApp {
             ctx.request_repaint();
         });
         self.acmd_receiver = Some(rx);
+    }
+
+    // ── Linked ACMD source project ────────────────────────────────────────────
+
+    /// Index `root` as the ACMD source project and remember it for next session.
+    fn link_acmd_source(&mut self, root: PathBuf) {
+        match crate::acmd_src::SourceIndex::build(&root) {
+            Ok(index) => {
+                let scripts = index.script_count();
+                let fighters = index.fighters.len();
+                if scripts == 0 {
+                    self.state.status = format!(
+                        "No ACMD scripts found under {} — expected a smashline project with \
+                         `unsafe extern \"C\" fn game_*` functions",
+                        root.display()
+                    );
+                    return;
+                }
+                self.state.status = format!(
+                    "Linked {scripts} script{} across {fighters} fighter{} from {}",
+                    if scripts == 1 { "" } else { "s" },
+                    if fighters == 1 { "" } else { "s" },
+                    root.display()
+                );
+                self.acmd_src = Some(index);
+                save_config_path(ACMD_SRC_CONFIG_KEY, &root);
+                // The open move was loaded from the mirror; re-read it from source now.
+                self.reload_move_scripts();
+            }
+            Err(e) => self.state.status = format!("Could not read that source project: {e}"),
+        }
+    }
+
+    /// Re-read the linked project from disk, keeping the same root.
+    fn rescan_acmd_source(&mut self) {
+        if let Some(root) = self.acmd_src.as_ref().map(|index| index.root.clone()) {
+            self.link_acmd_source(root);
+        }
+    }
+
+    fn unlink_acmd_source(&mut self) {
+        self.acmd_src = None;
+        self.acmd_src_buffer = None;
+        clear_config_path(ACMD_SRC_CONFIG_KEY);
+        self.state.status = "Unlinked the ACMD source project — scripts come from the \
+                             online archive again"
+            .into();
+        self.reload_move_scripts();
+    }
+
+    /// Re-load the open move's scripts from whichever source is now authoritative.
+    fn reload_move_scripts(&mut self) {
+        if self.state.selected_move.is_some() {
+            self.fetch_acmd();
+        }
+    }
+
+    /// Check the open move's script out of the linked project into the source editor.
+    fn open_source_buffer(&mut self, script_prefix: &str) {
+        let Some(index) = self.acmd_src.as_ref() else {
+            return;
+        };
+        let (Some(fighter), Some(move_entry)) = (
+            self.state
+                .selected_fighter
+                .and_then(|i| self.state.fighters.get(i)),
+            self.state.selected_move.as_ref(),
+        ) else {
+            return;
+        };
+        let (fighter, move_name) = (fighter.name.clone(), move_entry.name.clone());
+        let script = crate::acmd::acmd_script_name(script_prefix, &move_name);
+        let Some(site) = index.script(&fighter, &script) else {
+            self.state.status = format!("{script} is not in the linked project");
+            return;
+        };
+        let (file, span) = (site.file.clone(), site.span.clone());
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) => {
+                self.state.status = format!("Could not read {}: {e}", file.display());
+                return;
+            }
+        };
+        let Some(body) = text.get(span.clone()) else {
+            self.state.status = format!(
+                "{} changed on disk since it was indexed — rescan the project",
+                file.display()
+            );
+            return;
+        };
+        let body = body.to_string();
+        self.acmd_src_buffer = Some(SourceBuffer {
+            fighter,
+            move_name,
+            script,
+            file,
+            span,
+            original: body.clone(),
+            synced: body.clone(),
+            text: body,
+            settling: None,
+            // Left unset so the first reconcile adopts the panels as-is rather than reading
+            // the freshly-opened text as a pending GUI edit.
+            mirrored: None,
+            note: None,
+        });
+    }
+
+    /// Write the source editor's buffer back into the file it came from.
+    ///
+    /// The buffer covers one function, so the rest of the file is preserved by splicing
+    /// rather than rewriting. The span is re-validated against the file's CURRENT contents
+    /// first: an external edit between checkout and save would otherwise have its text
+    /// overwritten by whatever the stale span happened to point at.
+    fn save_source_buffer(&mut self) {
+        let Some(buffer) = self.acmd_src_buffer.as_mut() else {
+            return;
+        };
+        let text = match std::fs::read_to_string(&buffer.file) {
+            Ok(text) => text,
+            Err(e) => {
+                self.state.status = format!("Could not read {}: {e}", buffer.file.display());
+                return;
+            }
+        };
+        if text.get(buffer.span.clone()) != Some(buffer.original.as_str()) {
+            self.state.status = format!(
+                "{} changed on disk since this script was opened — reopen it to avoid \
+                 discarding that edit",
+                buffer.file.display()
+            );
+            return;
+        }
+        let mut updated = String::with_capacity(text.len());
+        updated.push_str(&text[..buffer.span.start]);
+        updated.push_str(&buffer.text);
+        updated.push_str(&text[buffer.span.end..]);
+        if let Err(e) = std::fs::write(&buffer.file, &updated) {
+            self.state.status = format!("Could not write {}: {e}", buffer.file.display());
+            return;
+        }
+        buffer.span = buffer.span.start..buffer.span.start + buffer.text.len();
+        buffer.original = buffer.text.clone();
+        let (script, file) = (buffer.script.clone(), buffer.file.clone());
+        self.state.status = format!("Saved {script} to {}", file.display());
+        // Spans past the edit have all shifted, so the index has to be rebuilt before it is
+        // used again — including by the reload below.
+        self.rescan_acmd_source();
+    }
+
+    /// The function(s) an export would write for the selected move, and anything it could
+    /// not reproduce faithfully.
+    ///
+    /// Built from the CURRENT editor state through the same emitters `mod_export` uses, so
+    /// this answers "what do I get if I export right now" rather than "what was exported
+    /// last time". The `game_*` script is rebuilt from the hitboxes exactly the way
+    /// [`Self::commit_current_edits`] does before it reaches the edit log — otherwise the
+    /// preview would show a script the export would never actually produce.
+    ///
+    /// Deliberately independent of the linked project: a move that came from live capture
+    /// has no source file anywhere, and that is exactly the case where seeing the generated
+    /// code matters most. An open source buffer only narrows the preview to that buffer's
+    /// counterpart, so the two panes line up side by side.
+    fn generated_source_for_move(&self) -> (String, crate::acmd_verify::Report) {
+        let Some(move_name) = self.state.selected_move.as_ref().map(|m| m.name.clone()) else {
+            return (String::new(), Default::default());
+        };
+        let only_game = self
+            .acmd_src_buffer
+            .as_ref()
+            .filter(|buffer| buffer.move_name == move_name)
+            .map(SourceBuffer::is_game_script);
+
+        let mut out = String::new();
+        let mut report = crate::acmd_verify::Report::default();
+
+        let has_hitbox_script =
+            !self.state.hitboxes.is_empty() || !self.state.script.stmts.is_empty();
+        if only_game != Some(false) && has_hitbox_script {
+            let script = if self.state.script.stmts.is_empty() {
+                synthesize_script_from_hitboxes(&self.state.hitboxes)
+            } else {
+                rebuild_script_from_hitboxes(&self.state.script, &self.state.hitboxes)
+            };
+            let emitted = crate::acmd::preview_game_fn(&script, &move_name);
+            crate::acmd_verify::verify_move(&move_name, &script, &emitted, &mut report);
+            out.push_str(&emitted);
+        }
+
+        if only_game != Some(true) && !self.state.effects.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let tweaks: Vec<crate::mod_project::LiveTweak> = self
+                .live_overrides
+                .tweaked()
+                .iter()
+                .filter_map(|(_, form)| live_tweak_from_override(form))
+                .collect();
+            let emitted = crate::acmd::preview_effect_fn(&self.state.effects, &move_name, &tweaks);
+            crate::acmd_verify::verify_effect_move(
+                &move_name,
+                &self.state.effects,
+                &emitted,
+                &mut report,
+            );
+            out.push_str(&emitted);
+        }
+        (out, report)
+    }
+
+    /// Keep the source editor and the editor panels showing the same move.
+    ///
+    /// Runs once per frame, in one place, rather than hooking every widget that can mutate
+    /// the move — the panels change `state.hitboxes` and `state.effects` from a dozen call
+    /// sites, and a watcher catches all of them including the ones added later.
+    ///
+    /// Exactly one side wins per frame. Typing in the source is adopted into the panels
+    /// (after the text settles); otherwise a panel edit is written into the source text. The
+    /// `synced`/`mirrored` marks are what stop the two from echoing each other forever.
+    fn reconcile_source_buffer(&mut self, ctx: &egui::Context) {
+        /// Long enough that a burst of typing reparses once, short enough to feel live.
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+        let Some(buffer) = self.acmd_src_buffer.as_ref() else {
+            return;
+        };
+        // A buffer left open from another move is a viewer, not a live mirror: adopting its
+        // text would overwrite the move the user is actually looking at.
+        let current = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .zip(self.state.selected_move.as_ref())
+            .is_some_and(|(f, m)| f.name == buffer.fighter && m.name == buffer.move_name);
+        if !current {
+            // Drop the baseline: coming back to this move reloads the panels, and comparing
+            // that against a snapshot from before the switch would read as a panel edit and
+            // write it into the source.
+            if let Some(buffer) = self.acmd_src_buffer.as_mut() {
+                buffer.mirrored = None;
+            }
+            return;
+        }
+
+        // ── Source → panels ───────────────────────────────────────────────────
+        if buffer.text != buffer.synced {
+            let buffer = self.acmd_src_buffer.as_mut().expect("checked above");
+            let settled = match &buffer.settling {
+                Some((text, since)) if *text == buffer.text => since.elapsed() >= SETTLE,
+                _ => {
+                    buffer.settling = Some((buffer.text.clone(), std::time::Instant::now()));
+                    false
+                }
+            };
+            if !settled {
+                ctx.request_repaint_after(SETTLE);
+                return;
+            }
+            buffer.settling = None;
+            self.adopt_source_buffer_into_panels();
+            return;
+        }
+        if let Some(buffer) = self.acmd_src_buffer.as_mut() {
+            buffer.settling = None;
+        }
+
+        // ── Panels → source ───────────────────────────────────────────────────
+        // Compared by reference before cloning: this runs every frame, and the snapshot is
+        // a couple of dozen structs carrying eight owned strings apiece.
+        let buffer = self.acmd_src_buffer.as_mut().expect("checked above");
+        let had_baseline = match &buffer.mirrored {
+            Some((hitboxes, effects)) => {
+                if *hitboxes == self.state.hitboxes && *effects == self.state.effects {
+                    return;
+                }
+                true
+            }
+            None => false,
+        };
+        buffer.mirrored = Some((self.state.hitboxes.clone(), self.state.effects.clone()));
+        // With no baseline this is the first pass after a checkout or a move switch, and the
+        // text already matches the panels — there is nothing to write, only a mark to set.
+        if had_baseline {
+            self.mirror_panels_into_source_buffer();
+        }
+    }
+
+    /// Re-parse the source buffer and make the editor panels show it.
+    ///
+    /// The parsed script becomes the new pristine as well as the current state: the user is
+    /// editing the code itself, so the code IS the baseline, and keeping an older one would
+    /// make the panels' "orig" columns describe a script that no longer exists.
+    fn adopt_source_buffer_into_panels(&mut self) {
+        let Some(buffer) = self.acmd_src_buffer.as_ref() else {
+            return;
+        };
+        let (text, is_game) = (buffer.text.clone(), buffer.is_game_script());
+
+        let note = if is_game {
+            let script = crate::acmd::parse_acmd_script(&text);
+            let mut hitboxes = script.to_hitboxes();
+            // Mid-edit source parses to nothing. Holding the last good state is much better
+            // than emptying the timeline under the user between keystrokes.
+            if hitboxes.is_empty() && !self.state.hitboxes.is_empty() {
+                Some("Source has no readable hitboxes — showing the last version that did")
+            } else {
+                self.normalize_hitbox_bones(&mut hitboxes);
+                self.state.hitboxes_pristine = hitboxes.clone();
+                self.state.hitboxes = hitboxes;
+                self.state.script = script;
+                None
+            }
+        } else {
+            let effect_script = crate::acmd::parse_effect_script(&text);
+            let calls = effect_script.to_effect_calls();
+            if calls.is_empty() && !self.state.effects.is_empty() {
+                Some("Source has no readable effect spawns — showing the last version that did")
+            } else {
+                self.state.effects_pristine = calls.clone();
+                self.state.effects = calls;
+                self.state.selected_effect_call = None;
+                self.state.effect_script = effect_script;
+                self.push_effect_rules();
+                None
+            }
+        };
+
+        self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
+            &self.state.hitboxes,
+            &self.state.effects,
+        ));
+        if let Some(buffer) = self.acmd_src_buffer.as_mut() {
+            buffer.synced = buffer.text.clone();
+            buffer.note = note.map(str::to_string);
+            // The panels now match the text, so this is not a pending panel edit.
+            buffer.mirrored = None;
+        }
+        // Hitbox live rules ride the existing per-frame watcher; effects pushed above.
+    }
+
+    /// Write the panels' current values into the open source buffer's text.
+    fn mirror_panels_into_source_buffer(&mut self) {
+        let Some(buffer) = self.acmd_src_buffer.as_ref() else {
+            return;
+        };
+        let label = format!("{}/{}", buffer.fighter, buffer.move_name);
+        let outcome = if buffer.is_game_script() {
+            crate::acmd_src::rewrite_hitboxes(
+                &buffer.text,
+                &label,
+                &self.state.hitboxes_pristine,
+                &self.state.hitboxes,
+            )
+        } else {
+            crate::acmd_src::rewrite_effect_calls(
+                &buffer.text,
+                &label,
+                &self.state.effects_pristine,
+                &self.state.effects,
+            )
+        };
+        let Some(buffer) = self.acmd_src_buffer.as_mut() else {
+            return;
+        };
+        match outcome {
+            Ok((updated, report)) => {
+                buffer.text = updated;
+                buffer.note = (!report.skipped.is_empty()).then(|| report.skipped.join("; "));
+            }
+            Err(e) => buffer.note = Some(e.to_string()),
+        }
+        // Whichever way it went, the text now reflects this panel state — do not read the
+        // write back as fresh typing on the next frame.
+        buffer.synced = buffer.text.clone();
+    }
+
+    /// Write the editor's hitbox and effect-spawn edits for the open move back into source.
+    fn sync_edits_to_source(&mut self) {
+        let Some(index) = self.acmd_src.as_ref() else {
+            return;
+        };
+        let (Some(fighter), Some(move_entry)) = (
+            self.state
+                .selected_fighter
+                .and_then(|i| self.state.fighters.get(i)),
+            self.state.selected_move.as_ref(),
+        ) else {
+            return;
+        };
+        let (fighter, move_name) = (fighter.name.clone(), move_entry.name.clone());
+
+        let mut changed = 0usize;
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+        let mut ran = false;
+
+        if index
+            .script(
+                &fighter,
+                &crate::acmd::acmd_script_name("effect", &move_name),
+            )
+            .is_some()
+        {
+            ran = true;
+            match crate::acmd_src::sync_effect_calls(
+                index,
+                &fighter,
+                &move_name,
+                &self.state.effects_pristine,
+                &self.state.effects,
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+        }
+        if index
+            .script(&fighter, &crate::acmd::acmd_script_name("game", &move_name))
+            .is_some()
+        {
+            ran = true;
+            match crate::acmd_src::sync_hitboxes(
+                index,
+                &fighter,
+                &move_name,
+                &self.state.hitboxes_pristine,
+                &self.state.hitboxes,
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+        }
+
+        if !ran {
+            self.state.status =
+                format!("{fighter}/{move_name} is not in the linked project — nothing to sync");
+            return;
+        }
+        files.sort();
+        files.dedup();
+        let mut status = format!(
+            "Synced {changed} value{} into {} file{}",
+            if changed == 1 { "" } else { "s" },
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
+        );
+        if !notes.is_empty() {
+            status.push_str(" — ");
+            status.push_str(&notes.join("; "));
+        }
+        self.state.status = status;
+        if changed > 0 {
+            // The written values are now the pristine ones; re-reading also refreshes the
+            // spans the next sync will target.
+            self.rescan_acmd_source();
+        }
     }
 
     /// Restore the saved main-window geometry (once), then track and persist geometry changes.
@@ -1681,7 +2246,7 @@ impl VisionaryApp {
         if !still_current {
             return;
         }
-        self.apply_acmd_body(&fighter_name, &move_name, body);
+        self.apply_acmd_body(&fighter_name, &move_name, body, "GitHub");
     }
 
     /// Put both fetch paths on the first frame where the move actually shows something.
@@ -1699,11 +2264,49 @@ impl VisionaryApp {
         }
     }
 
+    /// Rewrite parsed ACMD bone names to the skeleton's own casing.
+    ///
+    /// Scripts hash the lowercase resource name, while the skel exposes display case, and
+    /// several ACMD joints are virtual — they have no bone of their own and have to resolve
+    /// to the one the game attaches them to.
+    fn normalize_hitbox_bones(&self, hitboxes: &mut [crate::data::Hitbox]) {
+        let bone_name_map: std::collections::HashMap<String, String> = self
+            .bone_names
+            .iter()
+            .map(|n| (n.to_lowercase(), n.clone()))
+            .collect();
+
+        const VIRTUAL_BONE_FALLBACKS: &[(&str, &str)] = &[
+            ("haver", "HandR"),
+            ("havel", "HandL"),
+            ("haver2", "HandR"),
+            ("throw", "Hip"),
+            ("itemroot", "Hip"),
+            ("top", "Trans"),
+            ("trans", "Trans"),
+            ("rot", "Rot"),
+        ];
+
+        for hb in hitboxes {
+            let lower = hb.bone_name.to_lowercase();
+            if let Some(canonical) = bone_name_map.get(&lower) {
+                hb.bone_name = canonical.clone();
+            } else if let Some(&(_, fallback)) =
+                VIRTUAL_BONE_FALLBACKS.iter().find(|(v, _)| *v == lower)
+            {
+                if let Some(canonical) = bone_name_map.get(&fallback.to_lowercase()) {
+                    hb.bone_name = canonical.clone();
+                }
+            }
+        }
+    }
+
     fn apply_acmd_body(
         &mut self,
         fighter_name: &str,
         move_name: &str,
         body: Result<String, String>,
+        source_label: &str,
     ) {
         match body {
             Ok(body) => {
@@ -1711,7 +2314,12 @@ impl VisionaryApp {
                 let effect_script = crate::acmd::parse_effect_script(&body);
 
                 let mut hitboxes = script.to_hitboxes();
-                if hitboxes.is_empty() {
+                // A move with effects but no hitboxes is a real script, not a failed load.
+                // Throwing its effects away used to make a linked source project that only
+                // carries `effect_*` functions — the common shape for a VFX-only mod — look
+                // like it had loaded nothing at all.
+                let effects_only = hitboxes.is_empty() && !effect_script.stmts.is_empty();
+                if hitboxes.is_empty() && !effects_only {
                     self.acmd_error = Some(format!(
                         "No hitboxes found for {}/{}",
                         fighter_name, move_name
@@ -1719,41 +2327,14 @@ impl VisionaryApp {
                     self.state.effect_script = crate::data::EffectScript::default();
                     self.state.effects = Vec::new();
                 } else {
-                    // Normalize bone names to match the skel's casing
-                    let bone_name_map: std::collections::HashMap<String, String> = self
-                        .bone_names
-                        .iter()
-                        .map(|n| (n.to_lowercase(), n.clone()))
-                        .collect();
-
-                    let virtual_bone_fallbacks: &[(&str, &str)] = &[
-                        ("haver", "HandR"),
-                        ("havel", "HandL"),
-                        ("haver2", "HandR"),
-                        ("throw", "Hip"),
-                        ("itemroot", "Hip"),
-                        ("top", "Trans"),
-                        ("trans", "Trans"),
-                        ("rot", "Rot"),
-                    ];
-
-                    for hb in &mut hitboxes {
-                        let lower = hb.bone_name.to_lowercase();
-                        if let Some(canonical) = bone_name_map.get(&lower) {
-                            hb.bone_name = canonical.clone();
-                        } else {
-                            if let Some(&(_, fallback)) =
-                                virtual_bone_fallbacks.iter().find(|(v, _)| *v == lower)
-                            {
-                                if let Some(canonical) = bone_name_map.get(&fallback.to_lowercase())
-                                {
-                                    hb.bone_name = canonical.clone();
-                                }
-                            }
-                        }
+                    if effects_only {
+                        self.acmd_error = Some(format!(
+                            "{fighter_name}/{move_name} has effect spawns but no hitboxes"
+                        ));
                     }
+                    self.normalize_hitbox_bones(&mut hitboxes);
                     self.state.hitboxes_pristine = hitboxes.clone();
-                    self.state.acmd_source = "GitHub".into();
+                    self.state.acmd_source = source_label.into();
                     self.state.hitboxes = hitboxes;
                     self.state.script = script;
 
@@ -1800,6 +2381,283 @@ impl VisionaryApp {
             }
         }
         self.fetching_acmd = false;
+    }
+
+    /// The ACMD Source window: link a project, read the open move's script out of it, edit
+    /// that script in place, and push editor edits back into it.
+    fn draw_acmd_source_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_acmd_src;
+        let saved = self.window_geometry.get("acmd_source").copied();
+        let mut window = egui::Window::new("ACMD Source")
+            .open(&mut open)
+            .resizable(true)
+            .default_size(saved.map_or([720.0, 560.0], |g| [g.w, g.h]));
+        if let Some(g) = saved {
+            window = window.default_pos([g.x, g.y]);
+        }
+
+        // Actions are recorded and run after the closure: every one of them needs `&mut self`,
+        // which the borrow of `self.acmd_src` for display rules out inside it.
+        let mut link: Option<PathBuf> = None;
+        let mut rescan = false;
+        let mut unlink = false;
+        let mut checkout: Option<&'static str> = None;
+        let mut save = false;
+        let mut revert = false;
+        let mut sync = false;
+
+        // Both are read off `self` before the closure takes its mutable borrow of the open
+        // buffer. Generating is cheap, but only pay for it when a pane is actually showing it.
+        let mut view = self.acmd_src_view;
+        let generated = (view != SourceView::Source).then(|| self.generated_source_for_move());
+
+        let response = window.show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Read ACMD scripts from your own smashline project instead of the online \
+                     archive of vanilla scripts, so the editor shows the code your game \
+                     actually runs.",
+                )
+                .small()
+                .color(egui::Color32::GRAY),
+            );
+            ui.separator();
+
+            // The linked project is a HEADER, not a gate. It used to return early when
+            // nothing was linked, when the fighter was not in the project, or when no script
+            // was open — which meant a live-captured move, the one case with no source file
+            // anywhere, showed an empty window instead of the code it would export.
+            ui.horizontal_wrapped(|ui| match self.acmd_src.as_ref() {
+                None => {
+                    ui.label(
+                        egui::RichText::new("No source project linked")
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
+                    if ui
+                        .small_button("Link Source Project…")
+                        .on_hover_text(
+                            "Point at the root of the Rust project that builds your ACMD \
+                                 plugin — the folder holding Cargo.toml",
+                        )
+                        .clicked()
+                    {
+                        link = rfd::FileDialog::new()
+                            .set_title("Link ACMD source project")
+                            .pick_folder();
+                    }
+                }
+                Some(index) => {
+                    ui.label(
+                        egui::RichText::new(index.root.display().to_string())
+                            .small()
+                            .monospace(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "· {} scripts · {} fighters",
+                            index.script_count(),
+                            index.fighters.len()
+                        ))
+                        .small()
+                        .color(egui::Color32::GRAY),
+                    );
+                    if ui
+                        .small_button("Rescan")
+                        .on_hover_text(
+                            "Re-read the project from disk, picking up edits made elsewhere",
+                        )
+                        .clicked()
+                    {
+                        rescan = true;
+                    }
+                    if ui.small_button("Unlink").clicked() {
+                        unlink = true;
+                    }
+                }
+            });
+            ui.separator();
+
+            let selection = self
+                .state
+                .selected_fighter
+                .and_then(|i| self.state.fighters.get(i))
+                .zip(self.state.selected_move.as_ref())
+                .map(|(f, m)| (f.name.clone(), m.name.clone()));
+            let Some((fighter, move_name)) = selection else {
+                ui.label(
+                    egui::RichText::new("Select a fighter and a move to see its script.")
+                        .color(egui::Color32::GRAY),
+                );
+                return;
+            };
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("{fighter} / {move_name}")).strong());
+                if !self.state.acmd_source.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("from {}", self.state.acmd_source))
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Show:");
+                ui.selectable_value(&mut view, SourceView::Source, "Your source")
+                    .on_hover_text("The move's own code in your linked project");
+                ui.selectable_value(&mut view, SourceView::Generated, "Generated")
+                    .on_hover_text(
+                        "The code Visionary would write into acmd_source/ if you exported \
+                         right now, from the move as it stands in the editor. Works for any \
+                         move the editor has loaded, including live captures.",
+                    );
+                ui.selectable_value(&mut view, SourceView::Split, "Side by side");
+            });
+            ui.separator();
+
+            // Everything that needs `&self` is resolved before the buffer is borrowed
+            // mutably below — closures capturing both would not borrow-check.
+            let scripts: Vec<(&str, String, bool, bool)> =
+                [("game", "Hitboxes"), ("effect", "Effects")]
+                    .into_iter()
+                    .map(|(prefix, label)| {
+                        let name = crate::acmd::acmd_script_name(prefix, &move_name);
+                        let present = self
+                            .acmd_src
+                            .as_ref()
+                            .is_some_and(|index| index.script(&fighter, &name).is_some());
+                        let showing = self
+                            .acmd_src_buffer
+                            .as_ref()
+                            .is_some_and(|b| b.script == name);
+                        (label, name, present, showing)
+                    })
+                    .collect();
+            let any_script = scripts.iter().any(|(_, _, present, _)| *present);
+            let reason = match self.acmd_src.as_ref() {
+                None => NoSource::NotLinked,
+                Some(index) if !index.has_fighter(&fighter) => NoSource::FighterAbsent,
+                Some(_) if !any_script => NoSource::MoveAbsent,
+                Some(_) => NoSource::NothingOpen,
+            };
+
+            if view != SourceView::Generated {
+                ui.horizontal_wrapped(|ui| {
+                    for (index, (label, name, present, showing)) in scripts.iter().enumerate() {
+                        if ui
+                            .add_enabled(
+                                *present && !*showing,
+                                egui::Button::new(format!("{label}  {name}")),
+                            )
+                            .on_hover_text(if *present {
+                                format!("Open {name} from the project")
+                            } else {
+                                format!("{name} is not in the linked project")
+                            })
+                            .clicked()
+                        {
+                            checkout = Some(if index == 0 { "game" } else { "effect" });
+                        }
+                    }
+                    if ui
+                        .add_enabled(any_script, egui::Button::new("Sync edits into source"))
+                        .on_hover_text(
+                            "Write this move's edited hitbox and spawn VALUES back into your \
+                             source. The macros you called, your comments, and your formatting \
+                             are left exactly as written; anything that would need the code \
+                             restructured is reported instead of guessed at.",
+                        )
+                        .clicked()
+                    {
+                        sync = true;
+                    }
+                });
+            }
+
+            if let Some((text, report)) = generated.as_ref() {
+                draw_verification(ui, report, !text.is_empty());
+            }
+
+            let mut generated_text = generated.map(|(text, _)| text).unwrap_or_default();
+            let buffer = self.acmd_src_buffer.as_mut();
+            match view {
+                SourceView::Source => draw_source_pane(
+                    ui,
+                    buffer,
+                    &fighter,
+                    &move_name,
+                    reason,
+                    &mut save,
+                    &mut revert,
+                ),
+                SourceView::Generated => draw_generated_pane(ui, &mut generated_text),
+                SourceView::Split => {
+                    let (mut save_split, mut revert_split) = (false, false);
+                    ui.columns(2, |columns| {
+                        columns[0].label(egui::RichText::new("Your source").small().strong());
+                        draw_source_pane(
+                            &mut columns[0],
+                            buffer,
+                            &fighter,
+                            &move_name,
+                            reason,
+                            &mut save_split,
+                            &mut revert_split,
+                        );
+                        columns[1]
+                            .label(egui::RichText::new("Generated by export").small().strong());
+                        draw_generated_pane(&mut columns[1], &mut generated_text);
+                    });
+                    save |= save_split;
+                    revert |= revert_split;
+                }
+            }
+        });
+
+        if let Some(response) = response {
+            let rect = response.response.rect;
+            self.remember_geometry(
+                "acmd_source",
+                WindowGeometry {
+                    x: rect.min.x,
+                    y: rect.min.y,
+                    w: rect.width(),
+                    h: rect.height(),
+                },
+            );
+        }
+        self.show_acmd_src = open;
+        self.acmd_src_view = view;
+
+        if let Some(root) = link {
+            self.link_acmd_source(root);
+        }
+        if rescan {
+            self.rescan_acmd_source();
+        }
+        if unlink {
+            self.unlink_acmd_source();
+        }
+        if let Some(prefix) = checkout {
+            self.open_source_buffer(prefix);
+        }
+        if save {
+            // Re-indexing after the write reloads the move, so the panels follow.
+            self.save_source_buffer();
+        }
+        if revert {
+            if let Some(buffer) = self.acmd_src_buffer.as_mut() {
+                buffer.text = buffer.original.clone();
+                buffer.note = None;
+                // Left differing from `synced`, so the reconcile adopts the restored text
+                // and the panels come back with it.
+            }
+        }
+        if sync {
+            self.sync_edits_to_source();
+        }
     }
 
     /// Open an arbitrary .eff from disk and make it available to the editor and donor pool.
@@ -3081,6 +3939,9 @@ impl VisionaryApp {
                     active_start: current,
                     active_end: current.saturating_add(10),
                     disabled: false,
+                    // No originating macro — exports emit the plain EFFECT_FOLLOW form.
+                    extra_args: None,
+                    raw_line: None,
                 };
                 self.state.effects.push(call.clone());
                 let idx = self.state.effects.len() - 1;
@@ -3127,6 +3988,10 @@ impl VisionaryApp {
                 let mut toggle_pick = false;
                 {
                     let ec = &mut self.state.effects[i];
+                    // A trail is placed by the joints it names — its call has no position,
+                    // rotation, or scale arguments at all. Offering those fields let the user
+                    // drag values that no export and no write-back could ever put anywhere.
+                    let is_trail = ec.raw_line.is_some();
                     let orig = |ui: &mut Ui, txt: String| {
                         ui.label(egui::RichText::new(txt).small().color(egui::Color32::GRAY));
                     };
@@ -3196,12 +4061,29 @@ impl VisionaryApp {
                             } else {
                                 &ec.spawn_func
                             };
-                            ui.label(egui::RichText::new(spawn_command).monospace())
-                                .on_hover_text(
-                                    "Exact ACMD function detected live. Its alpha, attribute, \
-                                     contact, random, flip, and no-stop arguments are preserved \
-                                     when this spawn is replayed.",
-                                );
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(spawn_command).monospace())
+                                    .on_hover_text(
+                                        "The exact ACMD function this spawn came from. Its \
+                                         alpha, attribute, contact, random, flip, and no-stop \
+                                         arguments are preserved both when the spawn is \
+                                         replayed live and when the mod is exported.",
+                                    );
+                                // A flipped spawn carries a second graphic that has no field of
+                                // its own. Show it, so renaming the first one is not mistaken
+                                // for renaming the effect on both sides of the flip.
+                                if let Some(alt) = &ec.effect_name_alt {
+                                    ui.label(
+                                        egui::RichText::new(format!("flipped: {alt}"))
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    )
+                                    .on_hover_text(
+                                        "The graphic this macro uses for the other facing. \
+                                         Preserved as-is by live replay and export.",
+                                    );
+                                }
+                            });
                             if let Some(p) = &pristine {
                                 orig(
                                     ui,
@@ -3254,55 +4136,72 @@ impl VisionaryApp {
                             }
                             ui.end_row();
 
-                            ui.label("Offset");
-                            ui.horizontal(|ui| {
-                                for v in ec.offset.iter_mut() {
-                                    changed |=
-                                        ui.add(egui::DragValue::new(v).speed(0.05)).changed();
-                                }
-                            });
-                            if let Some(p) = &pristine {
-                                orig(
-                                    ui,
-                                    format!(
-                                        "orig [{:.2} {:.2} {:.2}]",
-                                        p.offset[0], p.offset[1], p.offset[2]
-                                    ),
+                            if is_trail {
+                                ui.label("Transform");
+                                ui.label(
+                                    egui::RichText::new("set by its joints")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                )
+                                .on_hover_text(
+                                    "A trail has no position, rotation, or scale arguments — it \
+                                     is drawn between the joints named in the call. Change the \
+                                     joint above to move it.",
                                 );
-                            } else {
                                 ui.label("");
-                            }
-                            ui.end_row();
-
-                            ui.label("Rotation");
-                            ui.horizontal(|ui| {
-                                for v in ec.rotation.iter_mut() {
-                                    changed |= ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+                                ui.end_row();
+                            } else {
+                                ui.label("Offset");
+                                ui.horizontal(|ui| {
+                                    for v in ec.offset.iter_mut() {
+                                        changed |=
+                                            ui.add(egui::DragValue::new(v).speed(0.05)).changed();
+                                    }
+                                });
+                                if let Some(p) = &pristine {
+                                    orig(
+                                        ui,
+                                        format!(
+                                            "orig [{:.2} {:.2} {:.2}]",
+                                            p.offset[0], p.offset[1], p.offset[2]
+                                        ),
+                                    );
+                                } else {
+                                    ui.label("");
                                 }
-                            });
-                            if let Some(p) = &pristine {
-                                orig(
-                                    ui,
-                                    format!(
-                                        "orig [{:.1} {:.1} {:.1}]",
-                                        p.rotation[0], p.rotation[1], p.rotation[2]
-                                    ),
-                                );
-                            } else {
-                                ui.label("");
-                            }
-                            ui.end_row();
+                                ui.end_row();
 
-                            ui.label("Scale");
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut ec.scale).speed(0.02))
-                                .changed();
-                            if let Some(p) = &pristine {
-                                orig(ui, format!("orig {:.2}", p.scale));
-                            } else {
-                                ui.label("");
+                                ui.label("Rotation");
+                                ui.horizontal(|ui| {
+                                    for v in ec.rotation.iter_mut() {
+                                        changed |=
+                                            ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+                                    }
+                                });
+                                if let Some(p) = &pristine {
+                                    orig(
+                                        ui,
+                                        format!(
+                                            "orig [{:.1} {:.1} {:.1}]",
+                                            p.rotation[0], p.rotation[1], p.rotation[2]
+                                        ),
+                                    );
+                                } else {
+                                    ui.label("");
+                                }
+                                ui.end_row();
+
+                                ui.label("Scale");
+                                changed |= ui
+                                    .add(egui::DragValue::new(&mut ec.scale).speed(0.02))
+                                    .changed();
+                                if let Some(p) = &pristine {
+                                    orig(ui, format!("orig {:.2}", p.scale));
+                                } else {
+                                    ui.label("");
+                                }
+                                ui.end_row();
                             }
-                            ui.end_row();
 
                             // One-shot effects have no meaningful "end" (they play their own
                             // lifetime), so only follow effects show an end frame — otherwise the
@@ -3762,20 +4661,8 @@ impl VisionaryApp {
                 .and_then(|i| self.state.fighters.get(i))
                 .map(|f| f.name.clone());
             for (hash, form) in tweaks {
-                let identity_color = (form.rainbow.color.red - 1.0).abs() < 1e-4
-                    && (form.rainbow.color.green - 1.0).abs() < 1e-4
-                    && (form.rainbow.color.blue - 1.0).abs() < 1e-4;
-                let identity_speed = (form.speed - 1.0).abs() < 1e-4;
-                if identity_color && identity_speed {
+                let Some(tweak) = live_tweak_from_override(&form) else {
                     continue;
-                }
-                let tweak = crate::mod_project::LiveTweak {
-                    effect_name: form.effect_name.clone(),
-                    color: (!identity_color).then(|| {
-                        let c = form.rainbow.color;
-                        [c.red, c.green, c.blue, c.alpha]
-                    }),
-                    speed: (!identity_speed).then_some(form.speed),
                 };
                 let mut owners: Vec<(String, String, Vec<crate::data::EffectCall>)> = self
                     .state
@@ -4041,7 +4928,8 @@ impl VisionaryApp {
             match crate::mod_export::write_source_project(&src_project, &root) {
                 Ok(()) => {
                     report.push(format!(
-                        "ACMD source: {} move script(s), {} effect script(s)",
+                        "ACMD source: {} move script(s), {} effect script(s) — verified to \
+                         read back as the moves in the editor",
                         acmd_edits.len(),
                         effect_edits.len()
                     ));
@@ -4989,6 +5877,7 @@ impl VisionaryApp {
             hitbox_type: 0,
             category: 0,
             wind: None,
+            catch: None,
         })
     }
 
@@ -5014,6 +5903,18 @@ impl VisionaryApp {
             _ => None,
         };
         let start = Self::motion_to_script_frame(frame);
+        // Slots 9 and 10 are the grab's status kind and situation mask. Nothing in the editor
+        // exposes them, but keeping them means an export writes the values the game actually
+        // used rather than the plugin's stand-ins. They have no const table, so they ride
+        // along as the bare integers they arrived as — which is what `CATCH` takes.
+        let catch = crate::data::CatchExtras {
+            status: i64_at(9)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| crate::data::CATCH_DEFAULT_STATUS.to_string()),
+            situation: i64_at(10)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| crate::data::CATCH_DEFAULT_SITUATION.to_string()),
+        };
         Some(crate::data::Hitbox {
             id: i64_at(0).unwrap_or(0) as u32,
             bone_name,
@@ -5022,6 +5923,7 @@ impl VisionaryApp {
             offset_y: f32_at(4).unwrap_or(0.0),
             offset_z: f32_at(5).unwrap_or(0.0),
             capsule_end,
+            catch: Some(catch),
             // Grabboxes deal no damage/knockback — zero the attack-only fields.
             damage: 0.0,
             angle: 0,
@@ -5103,6 +6005,15 @@ impl VisionaryApp {
             active_start: start,
             active_end: if follows { 9999 } else { start },
             disabled: false,
+            // Everything past the size argument, so an export can reissue THIS macro rather
+            // than substituting plain EFFECT/EFFECT_FOLLOW. All-or-nothing: a tail we cannot
+            // spell in full is dropped, and the export falls back to the known-good pair.
+            extra_args: args.get(9 + off..).and_then(|tail| {
+                tail.iter()
+                    .map(crate::game_link::LuaArgWire::to_source_arg)
+                    .collect::<Option<Vec<_>>>()
+            }),
+            raw_line: None,
         })
     }
 
@@ -9068,6 +9979,12 @@ impl eframe::App for VisionaryApp {
             self.perf.end("edit_log_window", t);
         }
 
+        if self.show_acmd_src {
+            let t = self.perf.start();
+            self.draw_acmd_source_window(&ctx);
+            self.perf.end("acmd_source_window", t);
+        }
+
         self.credits.show(&ctx);
 
         // Top menu bar: File / Windows / Mod + status
@@ -9195,6 +10112,11 @@ impl eframe::App for VisionaryApp {
                         ui.checkbox(&mut self.show_edit_log, "Edit Log")
                             .on_hover_text("View and manage all saved edits");
                     });
+                    ui.checkbox(&mut self.show_acmd_src, "ACMD Source")
+                        .on_hover_text(
+                            "Read and edit ACMD scripts from your own smashline project, \
+                             instead of the online archive of vanilla scripts",
+                        );
                     ui.checkbox(&mut self.show_debug, "Debug");
                     ui.checkbox(&mut self.credits.open, "Credits")
                         .on_hover_text("The people who helped make Visionary possible");
@@ -9258,6 +10180,22 @@ impl eframe::App for VisionaryApp {
                         .clicked()
                     {
                         self.export_developer_files();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(
+                            self.acmd_src.is_some(),
+                            egui::Button::new("Sync Edits Into Source"),
+                        )
+                        .on_hover_text(
+                            "Write this move's edited hitbox and spawn values back into your \
+                             own linked ACMD project, leaving the macros you called and your \
+                             formatting untouched. Link a project in Windows → ACMD Source.",
+                        )
+                        .clicked()
+                    {
+                        self.sync_edits_to_source();
                         ui.close();
                     }
                 });
@@ -10291,6 +11229,9 @@ impl eframe::App for VisionaryApp {
         // Every handler for this frame has run, so the project state is final: publish at most
         // one donor/carrier snapshot rather than the transient sequence the handlers produce.
         self.flush_effect_aliases();
+        // Same reason: the source window and the editor panels have both had their turn, so
+        // a value changed in either one is reconciled against the other before the next frame.
+        self.reconcile_source_buffer(&ctx);
         self.perf.end_frame(frame_t);
     }
 
@@ -10424,8 +11365,18 @@ fn rebuild_script_from_hitboxes(
                         .push(ExcuteStmt::EraseWind(hitbox.id));
                 }
             }
-            // CATCH is not represented by this source AST. Live grab edits continue to use the
-            // dedicated category-1 rule path and must not be emitted as an ATTACK by accident.
+            1 => {
+                spawns
+                    .entry(start)
+                    .or_default()
+                    .push(ExcuteStmt::Catch(hitbox.to_catch_call()));
+                // GrabModule, not AttackModule — an attack clear leaves a grab box open.
+                if end < 9999 {
+                    ends.entry(end.saturating_add(1))
+                        .or_default()
+                        .push(ExcuteStmt::GrabClearAll);
+                }
+            }
             _ => {}
         }
     }
@@ -10458,10 +11409,208 @@ fn rebuild_script_from_hitboxes(
     AcmdScript { stmts }
 }
 
+/// The editable half of the ACMD Source window: the open script, or why there is none.
+///
+/// A free function rather than a method because it needs `&mut` on the open buffer while the
+/// window is already holding other parts of the app — and because it must render something
+/// useful in all four states, not bail out of the window as it once did.
+fn draw_source_pane(
+    ui: &mut egui::Ui,
+    buffer: Option<&mut SourceBuffer>,
+    fighter: &str,
+    move_name: &str,
+    reason: NoSource,
+    save: &mut bool,
+    revert: &mut bool,
+) {
+    let Some(buffer) = buffer else {
+        let message = match reason {
+            NoSource::NotLinked => "No source project is linked, so this move has no code of \
+                 its own to show. Link one above, or switch to Generated to see what an \
+                 export would write."
+                .to_string(),
+            NoSource::FighterAbsent => format!(
+                "The linked project has no scripts for {fighter} at all. If this move came \
+                 from live capture, that is expected — switch to Generated to see what an \
+                 export would write for it."
+            ),
+            NoSource::MoveAbsent => format!(
+                "The linked project has {fighter}, but not {move_name}. Switch to Generated \
+                 to see what an export would write for it."
+            ),
+            NoSource::NothingOpen => {
+                "Open one of this move's scripts above to edit it.".to_string()
+            }
+        };
+        ui.label(egui::RichText::new(message).color(egui::Color32::GRAY));
+        return;
+    };
+
+    if buffer.move_name != move_name || buffer.fighter != fighter {
+        ui.label(
+            egui::RichText::new(format!(
+                "Showing {} / {} — open a script for the selected move to edit it here.",
+                buffer.fighter, buffer.move_name
+            ))
+            .small()
+            .color(egui::Color32::from_rgb(230, 190, 90)),
+        );
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new(buffer.file.display().to_string())
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+        if buffer.dirty() {
+            ui.colored_label(egui::Color32::from_rgb(230, 190, 90), "● unsaved");
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(buffer.dirty(), egui::Button::new("Save"))
+            .on_hover_text("Write this function back into the file it came from")
+            .clicked()
+        {
+            *save = true;
+        }
+        if ui
+            .add_enabled(buffer.dirty(), egui::Button::new("Revert"))
+            .clicked()
+        {
+            *revert = true;
+        }
+        ui.label(
+            egui::RichText::new("↕ live")
+                .small()
+                .color(egui::Color32::from_rgb(120, 190, 130)),
+        )
+        .on_hover_text(
+            "Typing here updates the timeline, the viewport, and the game preview once the \
+             text settles. Dragging a value in the editor panels writes it back into this \
+             text. Nothing touches the file until you press Save.",
+        );
+    });
+    if let Some(note) = &buffer.note {
+        ui.label(
+            egui::RichText::new(note.as_str())
+                .small()
+                .color(egui::Color32::from_rgb(230, 190, 90)),
+        );
+    }
+    egui::ScrollArea::both()
+        .id_salt("acmd_src_yours")
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut buffer.text)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .desired_rows(24)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+}
+
+/// What the export verifier made of the code above.
+///
+/// The same check the export itself runs, shown live so a problem is visible while the move is
+/// still open rather than as a failed export later. A clean result is stated explicitly: the
+/// useful thing to know about a generated file is usually that it is fine.
+fn draw_verification(ui: &mut egui::Ui, report: &crate::acmd_verify::Report, has_code: bool) {
+    use crate::acmd_verify::Severity;
+
+    if !has_code {
+        return;
+    }
+    if report.is_clean() {
+        ui.label(
+            egui::RichText::new(
+                "✔ Verified — this reads back as exactly the move on screen, and compiles.",
+            )
+            .small()
+            .color(egui::Color32::from_rgb(120, 200, 120)),
+        );
+        return;
+    }
+    for finding in &report.findings {
+        let (mark, color) = match finding.severity {
+            Severity::Blocker => ("✖", egui::Color32::from_rgb(240, 110, 110)),
+            Severity::Warning => ("⚠", egui::Color32::from_rgb(255, 170, 60)),
+        };
+        ui.label(
+            egui::RichText::new(format!("{mark} {}", finding.message))
+                .small()
+                .color(color),
+        );
+    }
+    if report.has_blockers() {
+        ui.label(
+            egui::RichText::new("An export will refuse to write this until it is resolved.")
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+    }
+}
+
+/// The read-only half: what an export would write.
+///
+/// `interactive(false)` rather than a label, so the generated text stays selectable and
+/// copyable — which is most of the point of showing it.
+fn draw_generated_pane(ui: &mut egui::Ui, text: &mut String) {
+    if text.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "This move has no hitboxes or effect spawns loaded yet, so an export would \
+                 write nothing for it. Fetch the move, or perform it in game with the plugin \
+                 connected to capture it live.",
+            )
+            .color(egui::Color32::GRAY),
+        );
+        return;
+    }
+    egui::ScrollArea::both()
+        .id_salt("acmd_src_generated")
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(text)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .interactive(false)
+                    .desired_rows(24)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+}
+
+/// One live color/speed override as the export records it.
+///
+/// `None` when both multipliers are identity: that is the absence of an edit, and shipping it
+/// would emit LAST_EFFECT_SET_COLOR/RATE calls that do nothing. Shared by the export and by
+/// the generated-source preview so the preview cannot promise code the export will not write.
+fn live_tweak_from_override(
+    form: &crate::game_link::RpmEffectData,
+) -> Option<crate::mod_project::LiveTweak> {
+    let color = form.rainbow.color;
+    let identity_color = (color.red - 1.0).abs() < 1e-4
+        && (color.green - 1.0).abs() < 1e-4
+        && (color.blue - 1.0).abs() < 1e-4;
+    let identity_speed = (form.speed - 1.0).abs() < 1e-4;
+    if identity_color && identity_speed {
+        return None;
+    }
+    Some(crate::mod_project::LiveTweak {
+        effect_name: form.effect_name.clone(),
+        color: (!identity_color).then_some([color.red, color.green, color.blue, color.alpha]),
+        speed: (!identity_speed).then_some(form.speed),
+    })
+}
+
 /// Build a whole ACMD script from a collision list (capture-sourced moves have no base script
 /// to patch). Wind areas retain their exact command family/payload and use `erase_wind`; ATTACK
 /// entries retain the existing frame-grouped `clear_all` behavior.
-fn synthesize_script_from_hitboxes(hitboxes: &[crate::data::Hitbox]) -> crate::data::AcmdScript {
+pub fn synthesize_script_from_hitboxes(
+    hitboxes: &[crate::data::Hitbox],
+) -> crate::data::AcmdScript {
     use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
     use std::collections::BTreeMap;
     if hitboxes.is_empty() {
@@ -10473,6 +11622,7 @@ fn synthesize_script_from_hitboxes(hitboxes: &[crate::data::Hitbox]) -> crate::d
     let mut ends: BTreeMap<u32, Vec<ExcuteStmt>> = BTreeMap::new();
     let mut spawns: BTreeMap<u32, Vec<ExcuteStmt>> = BTreeMap::new();
     let mut attack_clear_at: Option<u32> = None;
+    let mut grab_clear_at: Option<u32> = None;
     for hb in hitboxes {
         if hb.category == 2 {
             let Some(wind) = hb.wind.clone().filter(|wind| wind.is_valid()) else {
@@ -10485,6 +11635,23 @@ fn synthesize_script_from_hitboxes(hitboxes: &[crate::data::Hitbox]) -> crate::d
             ends.entry(hb.active_end.saturating_add(1))
                 .or_default()
                 .push(ExcuteStmt::EraseWind(hb.id));
+        } else if hb.category == 1 {
+            // A grab is a CATCH call. Sending it through `to_attack_call` exported a
+            // zero-damage ATTACK where the user had a grab box, so the move stopped
+            // grabbing — the same mistake the wind path above exists to avoid.
+            spawns
+                .entry(hb.active_start)
+                .or_default()
+                .push(ExcuteStmt::Catch(hb.to_catch_call()));
+            // A grab the capture never saw cleared runs to the end of the timeline, the
+            // same reading `collision_end_injection` gives 9999 on the live path.
+            if hb.active_end < 9999 {
+                grab_clear_at = Some(
+                    grab_clear_at
+                        .unwrap_or(0)
+                        .max(hb.active_end.saturating_add(1)),
+                );
+            }
         } else {
             spawns
                 .entry(hb.active_start)
@@ -10496,6 +11663,11 @@ fn synthesize_script_from_hitboxes(hitboxes: &[crate::data::Hitbox]) -> crate::d
                     .max(hb.active_end.saturating_add(1)),
             );
         }
+    }
+    if let Some(frame) = grab_clear_at {
+        ends.entry(frame)
+            .or_default()
+            .insert(0, ExcuteStmt::GrabClearAll);
     }
     if let Some(frame) = attack_clear_at {
         ends.entry(frame)
@@ -10779,12 +11951,25 @@ pub(crate) const EFF_ROOT_CONFIG_KEY: &str = "eff_root";
 /// is a portable install that lives somewhere else entirely.
 pub(crate) const SD_ROOT_CONFIG_KEY: &str = "sd_root";
 
+/// Config key for the user's own ACMD source project — the smashline crate that builds their
+/// plugin. When set, its scripts are read in preference to the dumped-script mirror.
+pub(crate) const ACMD_SRC_CONFIG_KEY: &str = "acmd_src_root";
+
 pub(crate) fn save_config_path(key: &str, path: &std::path::Path) {
     if let Some(dest) = config_path(key) {
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&dest, path.to_string_lossy().as_bytes());
+    }
+}
+
+fn clear_config_path(key: &str) {
+    if let Some(dest) = config_path(key) {
+        let _ = std::fs::remove_file(&dest);
+    }
+    if let Some(dest) = legacy_config_path(key) {
+        let _ = std::fs::remove_file(&dest);
     }
 }
 
@@ -11571,6 +12756,88 @@ mod live_effect_capture_tests {
         let exported = crate::acmd::export_acmd_source(&synthesized, "mario", "attack_air_n");
         assert!(exported.contains("macros::AREA_WIND_2ND_arg10"));
         assert!(exported.contains("AreaModule::erase_wind"));
+    }
+
+    /// A grab box is a `CATCH` call, not an `ATTACK`. Synthesis used to send every
+    /// non-wind hitbox through `to_attack_call`, so exporting a captured grab wrote a
+    /// zero-damage attack hitbox and the move stopped grabbing entirely.
+    #[test]
+    fn a_captured_grab_box_exports_as_a_catch_call() {
+        let boxes = vec![crate::data::Hitbox {
+            id: 0,
+            bone_name: "Top".into(),
+            size: 5.5,
+            offset_x: 0.0,
+            offset_y: 6.4,
+            offset_z: 10.2,
+            active_start: 8,
+            active_end: 12,
+            category: 1,
+            ..Default::default()
+        }];
+
+        let script = synthesize_script_from_hitboxes(&boxes);
+        let exported = crate::acmd::export_acmd_source(&script, "mario", "catch");
+        assert!(exported.contains("macros::CATCH(agent, 0,"), "{exported}");
+        // Never as an attack, and never cleared as one.
+        assert!(!exported.contains("macros::ATTACK("), "{exported}");
+        assert!(!exported.contains("AttackModule::clear_all"), "{exported}");
+        assert!(exported.contains("GrabModule::clear_all"), "{exported}");
+        // Joints hash lowercase, and a sphere spells its capsule slots `None` — CATCH takes
+        // `Option<f32>` there, exactly as ATTACK does.
+        assert!(
+            exported.contains(r#"Hash40::new("top"), 5.5, 0.0, 6.4, 10.2, None, None, None"#),
+            "{exported}"
+        );
+    }
+
+    /// A grab the capture never saw cleared runs to the end of the timeline rather than
+    /// emitting a clear at frame 10000.
+    #[test]
+    fn an_uncleared_grab_box_gets_no_clear() {
+        let boxes = vec![crate::data::Hitbox {
+            id: 0,
+            bone_name: "top".into(),
+            active_start: 8,
+            active_end: 9999,
+            category: 1,
+            ..Default::default()
+        }];
+        let exported = crate::acmd::export_acmd_source(
+            &synthesize_script_from_hitboxes(&boxes),
+            "mario",
+            "catch",
+        );
+        assert!(exported.contains("macros::CATCH("), "{exported}");
+        assert!(!exported.contains("GrabModule::clear_all"), "{exported}");
+    }
+
+    /// A live-captured move exists only in memory — there is no script file for it anywhere,
+    /// on GitHub or in anyone's project. That is precisely when seeing the code an export
+    /// would write matters most, so the preview must not need a linked source project.
+    ///
+    /// The ACMD Source window used to return early when nothing was linked, so a captured
+    /// move showed an empty window.
+    #[test]
+    fn a_captured_move_still_previews_the_code_an_export_would_write() {
+        let bone = hash40::hash40("top").0;
+        let bones = HashMap::from([(bone, "top".to_string())]);
+        let boxes = VisionaryApp::hitboxes_from_captures(
+            &[attack_capture(0, 9.0, bone), clear_capture(15.0)],
+            &bones,
+            &HashMap::new(),
+        );
+        assert!(!boxes.is_empty());
+
+        // Exactly what `generated_source_for_move` does for a move whose `state.script` is
+        // empty, which is every capture-sourced move.
+        let script = synthesize_script_from_hitboxes(&boxes);
+        let preview = crate::acmd::preview_game_fn(&script, "dash");
+        assert!(
+            preview.contains("unsafe extern \"C\" fn game_dash")
+                && preview.contains("macros::ATTACK("),
+            "a captured move must preview real code:\n{preview}"
+        );
     }
 
     /// A hitbox lasts until it is cleared. This used to be a hardcoded two frames, which is
