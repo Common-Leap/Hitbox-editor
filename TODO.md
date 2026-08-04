@@ -438,7 +438,7 @@ plain `to_string`, never `num`.
   stayed broken.
 - **Trap:** kind-level colour/speed overrides already exist on the live wire and apply to
   *every* spawn of an effect. These are per-spawn. Read the comment above `LiveOverride`
-  ([game_link.rs:373](src/game_link.rs:373)) before wiring anything — conflating per-kind with
+  ([game_link.rs:399](src/game_link.rs:399)) before wiring anything — conflating per-kind with
   per-emitter recoloured whole effects once already. A3 hit the export half of this: a live
   speed tweak and a script rate both wanted to write a `LAST_EFFECT_SET_RATE` line. The
   override wins, exactly one line is emitted, and the verifier warns. Colour needs the same
@@ -617,7 +617,7 @@ Highest-leverage task in Part 1, and the one most likely to break things.
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks**
-([acmd_verify.rs:743](src/acmd_verify.rs:743)) — the editor does not model animation rate, and
+([acmd_verify.rs:818](src/acmd_verify.rs:818)) — the editor does not model animation rate, and
 a timing warning that guesses is worse than none. Modelling rate would re-enable those checks
 for a large slice of the corpus.
 
