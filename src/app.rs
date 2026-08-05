@@ -6245,6 +6245,13 @@ impl VisionaryApp {
         };
         let has_source = generated_source.is_some();
         let mut source_root: Option<std::path::PathBuf> = None;
+        // Derived once, here, rather than assigned from inside the branch below. Three separate
+        // places have to say the same thing about a dropped line, and the failure mode this
+        // whole line of work keeps running into is one of them quietly holding an empty list.
+        let warnings: Vec<String> = generated_source
+            .as_ref()
+            .map(|generated| generated.warnings.clone())
+            .unwrap_or_default();
         if let Some(generated) = generated_source {
             let src_project = &generated.project;
             let root = if developer {
@@ -6262,15 +6269,12 @@ impl VisionaryApp {
                         acmd_edits.len(),
                         effect_edits.len()
                     ));
-                    // The export summary is the only place these are ever shown. Before C6c
-                    // they were computed on every export and discarded, so "verified" above was
-                    // the whole story a user got even when a line had just been deleted.
-                    report.extend(
-                        generated
-                            .warnings
-                            .iter()
-                            .map(|warning| format!("  ⚠ {warning}")),
-                    );
+                    // Before C6c these were computed on every export and discarded, so
+                    // "verified" above was the whole story a user got even when a line had just
+                    // been deleted. They go to three places now, because the status line alone
+                    // does not hold: the summary here, the mod folder's README, and the message
+                    // the background build ends with.
+                    report.extend(warnings.iter().map(|warning| format!("  ⚠ {warning}")));
                     source_root = Some(root);
                 }
                 Err(e) => errors.push(format!("smashline source: {e}")),
@@ -6331,6 +6335,7 @@ impl VisionaryApp {
                 name = self.project_name,
             )
         };
+        let readme = readme + &export_warning_section(&warnings);
         let _ = std::fs::write(dest.join("README.md"), readme);
 
         // 3. Mod-folder exports compile the generated plugin in the background and keep the NRO
@@ -6338,7 +6343,7 @@ impl VisionaryApp {
         if !developer && errors.is_empty() {
             if let Some(src_root) = source_root {
                 let nro = dest.join("plugin.nro");
-                self.spawn_export_build(dest.clone(), src_root, plugin_name, nro);
+                self.spawn_export_build(dest.clone(), src_root, plugin_name, nro, warnings.clone());
             }
         }
 
@@ -6371,12 +6376,16 @@ impl VisionaryApp {
 
     /// Run `cargo skyline build --release` on generated source in a background thread.
     /// Progress lands in `self.export_build`; the finished NRO is copied inside the mod folder.
+    ///
+    /// `warnings` is carried through only so the message this ends on does not erase them: it
+    /// replaces `state.status`, which is where the export summary reported them.
     fn spawn_export_build(
         &mut self,
         dest: std::path::PathBuf,
         src_root: std::path::PathBuf,
         plugin_name: String,
         nro_destination: std::path::PathBuf,
+        warnings: Vec<String>,
     ) {
         let state = std::sync::Arc::new(std::sync::Mutex::new(ExportBuildState {
             done: false,
@@ -6417,6 +6426,9 @@ impl VisionaryApp {
                 }
                 Err(e) => format!("plugin build could not start: {e}"),
             };
+            // Applied to every outcome, not just the successful one. A build that failed and a
+            // line that was dropped are two separate facts, and the second one stays true.
+            let msg = export_build_done_message(&msg, &warnings);
             if let Ok(mut s) = state.lock() {
                 s.done = true;
                 s.message = msg;
@@ -14264,6 +14276,45 @@ fn write_mod_project(
     Ok(root)
 }
 
+/// The export's verification warnings, as a section for the README written into the mod folder.
+/// Empty when the export carried everything through.
+///
+/// The status line is not a place a warning can live. It holds one line, it is overwritten by
+/// the next thing that has something to say, and on a mod-folder export the background plugin
+/// build overwrites it a few seconds later with "Mod folder ready" — see
+/// [`export_build_done_message`]. A file beside the mod is the only copy that survives the
+/// session.
+fn export_warning_section(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n## Lines this export dropped\n\n\
+         The effect scripts below are regenerated from the spawns Visionary understood, so these \
+         lines are **not** in the exported plugin. Everything else came through.\n\n",
+    );
+    for warning in warnings {
+        out.push_str(&format!("- {warning}\n"));
+    }
+    out
+}
+
+/// The status shown when the background plugin build finishes, keeping the export's warnings
+/// visible instead of replacing them with a success message.
+///
+/// Without this the mod-folder export reports a dropped line for exactly as long as the build
+/// takes and then claims, in the same place, that the mod is ready.
+fn export_build_done_message(base: &str, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        return base.to_string();
+    }
+    let mut out = base.to_string();
+    for warning in warnings {
+        out.push_str(&format!(" · ⚠ {warning}"));
+    }
+    out
+}
+
 /// Pick a fresh export directory without deleting or mixing with an older package. Re-exporting
 /// to the same parent therefore cannot leave stale EFF or plugin files in the new result.
 fn unused_export_root(parent: &std::path::Path, base_name: &str) -> std::path::PathBuf {
@@ -16696,5 +16747,55 @@ mod live_effect_capture_tests {
         assert_eq!(args[20], A::Int(3));
         assert_eq!(args[21], A::Num(0.75));
         assert_eq!(args[32], A::Hash(hash40::hash40("collision_attr_fire").0));
+    }
+}
+
+#[cfg(test)]
+mod export_warning_channel_tests {
+    use super::{export_build_done_message, export_warning_section};
+
+    fn warnings() -> Vec<String> {
+        vec![
+            "kirby / SpecialHi2: the export drops 1 line: methodlib::L2CAgent::pop();".into(),
+            "… and 3 more".into(),
+        ]
+    }
+
+    #[test]
+    fn a_clean_export_adds_no_readme_section_and_no_status_tail() {
+        assert_eq!(export_warning_section(&[]), "");
+        assert_eq!(
+            export_build_done_message("Mod folder ready → /tmp/mod", &[]),
+            "Mod folder ready → /tmp/mod"
+        );
+    }
+
+    #[test]
+    fn the_readme_names_every_dropped_line() {
+        let section = export_warning_section(&warnings());
+        for warning in warnings() {
+            assert!(section.contains(&warning), "README section lost {warning}");
+        }
+        assert!(section.contains("## Lines this export dropped"));
+    }
+
+    #[test]
+    fn the_finished_build_does_not_replace_the_warnings_with_a_success_line() {
+        // The regression this exists for: `state.status` carried the export summary, and the
+        // background build's completion message assigns straight over it. A user who exported a
+        // mod folder saw a dropped line for as long as `cargo skyline build` took, and then saw
+        // only that the mod was ready.
+        let done = export_build_done_message("Mod folder ready → /tmp/mod", &warnings());
+        assert!(done.starts_with("Mod folder ready → /tmp/mod"));
+        for warning in warnings() {
+            assert!(done.contains(&warning), "completion message lost {warning}");
+        }
+    }
+
+    #[test]
+    fn a_failed_build_still_reports_them() {
+        let done = export_build_done_message("plugin build FAILED — see build.log", &warnings());
+        assert!(done.contains("plugin build FAILED"));
+        assert!(done.contains("methodlib::L2CAgent::pop();"));
     }
 }

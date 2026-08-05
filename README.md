@@ -270,6 +270,12 @@ is re-derived; leave it closed and export, and you get what was true when you
 saved. That is the honest reading of a note about a script the project no longer
 has.
 
+The same list is written into the exported mod's `README.md`, under a heading
+naming the lines that were left out. The status line is not a place a warning can
+live: it holds one line, and on a mod-folder export the plugin build finishes a
+few seconds later and writes its own result over the top. So the summary is where
+you notice, and the file beside the mod is where you can go back and look.
+
 Throws carry a hit with no volume. `ATTACK_ABS` sets the damage and knockback
 applied to an opponent who is *already* caught, so it has no bone, no size, and
 no position — the fields that would describe those are hidden rather than shown

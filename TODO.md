@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**375 green after C6c**), including the eight corpus
+- [ ] `cargo test` passes (**379 green after C6b closed**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -944,6 +944,34 @@ worse problem underneath it.**
 So the joint pair is deferred, not refused: it is a reasonable feature with no way to verify it
 today. Take it if a corpus with a real trail call ever appears, and read the signature first.
 
+**A real trail-ON call does exist in the corpus, and it is none of the three names above
+(found 2026-08-05 by C6b's loss audit).** Four occurrences, two scripts:
+
+```
+kirby/SpecialHi2.txt:39, :54      effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …)
+kirby/SpecialAirHi2.txt:39, :54   effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …)
+```
+
+- **`AFTER_IMAGE3`, not `AFTER_IMAGE4` or bare `AFTER_IMAGE`.** A variant this entry did not
+  know about.
+- **It is written in the raw `effect(*CMD, …)` form, not as a `macros::` call** — which is
+  consistent with, and explains, the finding above that the wrapper names do not exist. The game
+  reaches the command through the `lua_const` id. So the shape of any editing support here is
+  the raw command form, and anything built around `macros::AFTER_IMAGE4_ON` is still building on
+  a function that is not there.
+- **27 arguments after the command id**, opening `Hash40("tex_kirby_cutter")` twice, then `12`,
+  then `Hash40("haver")` — so the joints are hashes and there are three of them, not the pair
+  this entry assumed. Read the real line before designing anything; **do not reuse the
+  fabricated `_arg29` fixture**, which the bullet above already condemns.
+- Two of the four are in the loss list (each script carries one and drops the other), so this is
+  also live evidence for the C5 report. **It would not move the ratchet, though**: `pop()` is in
+  these same two files and nowhere else, so `SpecialHi2` and `SpecialAirHi2` stay lossy either
+  way. 20 dropped lines would become 18; 15 lossy scripts would stay 15. Check that before
+  proposing this as a way to bring the count down.
+
+That is the "real call in hand" this entry was waiting for. It does not make the joint-pair work
+*done*, and it changes what that work is — but it is no longer blocked on evidence.
+
 ### [x] C2a — `AFTER_IMAGE_OFF` is exported without its argument (done 2026-08-04)
 
 Found by the measurement above, and this one *is* testable — against 4 real corpus lines.
@@ -1197,7 +1225,7 @@ would have put add, delete and retime — the editor's actual value — at risk 
   nothing of that kind is live, so an unguarded stop for a guarded spawn is harmless — whereas a
   guarded stop would leave the effect running forever on the branch that skipped the guard.
 
-### [~] C6b — The effect scripts the export still loses a line from
+### [x] C6b — The effect scripts the export still loses a line from (closed 2026-08-05 at 15)
 
 C6 took the corpus from 28 lossy scripts to 19 and asserted the number, so this is what is
 left. Read C6's result table first — it says exactly which lines these are. Nothing here is
@@ -1271,28 +1299,56 @@ entry is still open.
   All 4 occurrences are in dolly's `FinalAirStart` / `FinalAirEnd` — full-screen final-smash
   staging, which is exactly what E3 describes, and E3 already lists both macros by name. Do it
   there, with the camera work, or not at all.
-- **Then reconsider** whether the C5 warning should become a blocker. C6 and C6b both changed the
-  arithmetic behind that decision: it was a warning because a quarter of vanilla scripts tripped
-  it, and now under one in eight does, of which half are the deliberate `wait_loop_sync_mot`.
-  Still probably a warning — but the reasoning in C5's entry is now out of date and should be
-  re-derived rather than re-quoted.
+- **[x] The C5 finding stays a warning (settled 2026-08-05).** The old reasoning was an
+  argument about frequency — a warning because a quarter of vanilla scripts tripped it, and
+  under one in eight now. **Frequency turns out to be the wrong axis entirely**, and the three
+  facts that actually decide it were all read out of the code rather than remembered:
 
-  **C6c (2026-08-05) changed one of the inputs to that re-derivation.** The choice was framed as
-  warning *versus* blocker, which assumed a warning is heard. On the export path it was not: the
-  report was built and discarded, so "warning" meant silence there until C6c gave it a channel.
-  Re-derive against what the two now actually do, not against what the words imply.
+  - **A blocker has no per-move granularity.** `has_blockers()` in
+    [mod_export.rs:173](src/mod_export.rs:173) is a `bail!` over the whole verification, and
+    `export_mod` turns that into an early return. One effect script that drops a line would
+    therefore stop the export of every other move, every other fighter, and the EFF data — a
+    project-wide failure caused by one line of one script.
+  - **It would abort halfway, not before starting.** `source_project` is called at
+    [app.rs:6239](src/app.rs:6239), and the EFF data mod is already on disk by then
+    ([app.rs:6166](src/app.rs:6166)); `info.toml` is written *after*, at
+    [app.rs:6283](src/app.rs:6283). So a blocker leaves a folder holding effect files and no
+    `info.toml` — which ARCropolis will not load and which does not look like a failure. See
+    **C6d**, which is this bug for the blockers that already exist.
+  - **Most of what is left is not the user's to fix.** Of the 20 remaining dropped lines, 7 are
+    `wait_loop_sync_mot`, dropped by this tool's own decision, and 5 are the mis-scoped `else {`
+    that C6b declined to pin. Refusing to export until the user fixes those is refusing over
+    something they cannot edit and did not write.
 
-  **[~] In progress 2026-08-05.** Checking "what the two now actually do" first, as instructed,
-  rather than reasoning from the words.
+  **And the argument *for* escalating was "a warning is not heard", which is a defect in the
+  channel, not in the severity.** C6c gave it one; this change made it survive. Severity should
+  describe whether the output is *wrong* — `source_project`'s own comment already draws that
+  line, "a mod that will not compile, or that ships numbers other than the ones on screen". A
+  script missing a `wait_loop_sync_mot` compiles, installs and plays. It is incomplete, not
+  broken. **Do not reopen this on a frequency argument.**
 
-**Measured remainder after `COL_NORMAL`, 15 of 132 scripts:** `wait_loop_sync_mot` 7, `else {` 5,
-`methodlib::L2CAgent::pop()` 2, `CANCEL_FILL_SCREEN` 2, `EffectModule::remove_screen` 2.
+**Measured remainder, 20 lines across 15 of 132 scripts** (`the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`,
+[acmd.rs:5937](src/acmd.rs:5937)): `wait_loop_sync_mot` 7, `else {` 5,
+`effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …)` 2, `macros::CANCEL_FILL_SCREEN` 2,
+`methodlib::L2CAgent::pop()` 2, `EffectModule::remove_screen` 2.
 
-**Nothing cheap is left in this entry.** Every remaining line is now either deliberate
+**The old version of that table listed 18 of the 20, and no test could tell.** The two raw
+`AFTER_IMAGE3_ON` calls were missing from it. The ratchet asserted the script *count*, so a
+table claiming to say exactly what is left was pinned to how much of it there was. The audit now
+asserts the composition as a map, which is the assertion an entry like this one needs.
+
+**Trap, paid for on the way to that:** the throwaway script that found the discrepancy split each
+corpus file on `"\n}\n"` and parsed the bodies separately, and it reported 18 lines with
+`remove_screen` absent — two mistakes that happened to cancel into the right-looking total. The
+audit parses each file whole, which is what the export does. **A measurement that chunks the
+corpus differently from the code under test is not measuring the code under test**; run the
+question through the existing oracle instead of writing a second one.
+
+**Nothing cheap is left in this entry.** Every remaining line is either deliberate
 (`wait_loop_sync_mot`), untestable against this corpus (`else {`), genuine plumbing with no
-editor meaning (`pop()`, `remove_screen`), or another entry's work (`CANCEL_FILL_SCREEN` → E3).
-C6b should be closed at 15 rather than kept open for a cheap win that does not exist — the only
-thing still owed is the warning-vs-blocker re-derivation below, which is a decision, not code.
+editor meaning (`pop()`, `remove_screen`), another entry's work (`CANCEL_FILL_SCREEN` → E3), or
+newly-arrived evidence for a different entry (`AFTER_IMAGE3_ON` → **C2**, which was deferred for
+want of exactly this). Closed at 15.
 
 ### [x] C6c — Close C5's export-path gap (done 2026-08-05)
 
@@ -1346,13 +1402,53 @@ is served with a snapshot.
   orphan note is never consulted. **Removed rather than tested.** The behaviour it claimed to
   protect is still asserted, at the layer that actually enforces it.
 
-**Named exceptions.** Live is untouched and out of scope — this is a disk surface. Warnings
-still do not appear for the `.nro` build path, only the source export, because that path does
-not call `source_project`.
+**Named exceptions.** Live is untouched and out of scope — this is a disk surface.
+
+**~~Warnings still do not appear for the `.nro` build path, because that path does not call
+`source_project`.~~ Both halves of that were wrong (corrected 2026-08-05 while closing C6b).**
+There is one export path: `export_mod` calls `source_project`, prints its warnings, and then
+spawns `cargo skyline build` on the source it just wrote — so the `.nro` path is the same path
+and did print them. What it then did was *erase* them: the background build's completion message
+assigns straight to `state.status`
+([app.rs:12873](src/app.rs:12873)), which is where the export summary had put them. A
+mod-folder export reported a dropped line for as long as the build took, then replaced it with
+"Mod folder ready". The developer export, which does not build, was unaffected — so the erasure
+hit exactly the path a normal user takes.
+
+The fix is under C6b: the warnings now also go into the exported mod's `README.md`, and the
+completion message re-states them on every outcome. **`state.status` is one line, and anything
+in it is a matter of time** — treat it as a notification, never as the record.
 
 **Trap for whoever adds the next verification check:** `Report` findings are only rendered in
 the source pane. Anything new reaching only `verify_export` is invisible unless it is a blocker
 or it goes through `warning_summary`.
+
+### [ ] C6d — A blocked export leaves a half-written mod folder
+
+Found by C6b's warning-vs-blocker re-derivation, which had to establish what a blocker actually
+does. It does not do what its own comment says.
+
+`source_project` is introduced with "Nothing reaches disk until the generated code has been read
+back and matched against the edits it came from." That is true of the *source*, and false of the
+*folder*. `export_mod` writes the rebuilt EFF files at [app.rs:6166](src/app.rs:6166), calls
+`source_project` at [app.rs:6239](src/app.rs:6239), and writes `info.toml` at
+[app.rs:6283](src/app.rs:6283). A blocker `bail!`s in the middle of that and `export_mod` returns
+straight away.
+
+What is left behind is a directory holding `effect/fighter/…/ef_x.eff` and no `info.toml` and no
+`plugin.nro`. ARCropolis will not load it, the status line says "Export failed" and is gone at
+the next click, and `unused_export_root` means the *next* export goes to a differently-named
+sibling folder rather than replacing it. So the debris accumulates and does not announce itself.
+
+- **This is not hypothetical and not about C5.** It is what every blocker that already exists
+  does today — a rounded hitbox value, a mismatched number, anything `verify_export` refuses.
+- **Work order:** decide the whole export before writing any of it. Verification does not depend
+  on the EFF files being on disk, so `source_project` can run before the EFF loop; that is
+  probably a move, not a redesign.
+- **Done when:** a project whose verification fails writes nothing at all, asserted by a test
+  that exports into a temp dir and checks it is empty — not by reading the order of the calls.
+- **Watch for:** the EFF loop pushes to `errors`, which is a different failure channel that
+  *does* continue. Do not merge the two; a failed EFF write should still leave the rest.
 
 ### [ ] C4 — Effect lifetime control
 

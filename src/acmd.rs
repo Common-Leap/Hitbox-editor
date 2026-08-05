@@ -5942,6 +5942,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let mut lossy = 0usize;
         let mut with_calls = 0usize;
         let mut unbalanced: Vec<String> = Vec::new();
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
         for fighter in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
             for entry in std::fs::read_dir(fighter.path())
                 .into_iter()
@@ -5957,8 +5958,12 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                     continue;
                 }
                 with_calls += 1;
-                if !unexportable_effect_lines(&script).is_empty() {
+                let lost = unexportable_effect_lines(&script);
+                if !lost.is_empty() {
                     lossy += 1;
+                }
+                for line in &lost {
+                    *kinds.entry(loss_kind(line)).or_default() += 1;
                 }
                 let (_, emitted) = emit_effect_move_fn(&calls, "audit", &Default::default());
                 let opens = emitted.matches('{').count();
@@ -5983,6 +5988,45 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
              28, C6 brought it to 19, and C6b's COL_NORMAL to 15. Something started dropping \
              user code again."
         );
+
+        // The count alone was not enough. C6b wrote its remainder down as a table of which
+        // lines these are, and that table listed 18 of the 20 — the two raw
+        // `effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …)` calls were simply missing from it,
+        // and nothing could notice because only the script count was asserted. An entry that
+        // says "here is exactly what is left" has to be pinned to what is left, not to how much
+        // of it there is.
+        let expected: std::collections::BTreeMap<String, usize> = [
+            ("wait_loop_sync_mot", 7),
+            ("else {", 5),
+            ("effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON)", 2),
+            ("macros::CANCEL_FILL_SCREEN", 2),
+            ("methodlib::L2CAgent::pop", 2),
+            ("EffectModule::remove_screen", 2),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(
+            kinds, expected,
+            "the remaining losses are not the ones C6b measured — update that entry's table"
+        );
+    }
+
+    /// Collapse a dropped line to what it *is*, so the audit above can assert composition
+    /// without pinning argument values. `macros::X(…)` → `macros::X`; the raw `effect(*CMD, …)`
+    /// form → `effect(*CMD)`, since every such call would otherwise collapse to `effect`.
+    fn loss_kind(line: &str) -> String {
+        let line = line.trim();
+        let Some(open) = line.find('(') else {
+            return line.to_string();
+        };
+        let head = &line[..open];
+        if head != "effect" {
+            return head.to_string();
+        }
+        let rest = &line[open + 1..];
+        let end = rest.find(',').unwrap_or(rest.len());
+        format!("effect({})", rest[..end].trim())
     }
 
     // ═══ Export preview ═════════════════════════════════════════════════════
