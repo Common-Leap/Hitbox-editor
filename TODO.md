@@ -1356,7 +1356,10 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
      export and write-back.
      Note the generated plugin installs per category, so a `sound_` script it does not emit
      still plays vanilla — nothing is lost by sound being absent until here.
-  5. Plugin hooks for the sound primitives, capture, then live.
+  5. **[~] D1e (started 2026-08-05)** — Let write-back *create* the category function a
+     project does not have. This is the one surface D1b left open, and D1d turned it from an
+     edge case into the ordinary one.
+  6. Plugin hooks for the sound primitives, capture, then live.
 
 **Work order revised 2026-08-05, and this is the correction Rule 5 asks for.** The old steps 4
 and 5 were "plugin hooks, capture, then live" followed by "export + write-back", and *both
@@ -1599,6 +1602,50 @@ existing ones**, which is the part worth carrying forward:
 emulator, and the plugin was not touched. Retiming, adding and deleting a sound are out of scope
 by the entry's own scope line, and the panel offers no widget for them rather than offering one
 whose change comes back reported as skipped.
+
+#### [~] D1e — Create the category function the project does not have (started 2026-08-05)
+
+**This is not a sound task, and it only lives under D1 because that is where the debt was
+incurred.** It is surface 5 for every category at once.
+
+D1b made a mirror-sourced script *editable* in a project that does not define it, and stopped
+there: `sync_script` ([acmd_src.rs:920](src/acmd_src.rs:920)) bails with "the project has no
+`effect_attackairn` to sync into". Refusing was the honest answer while the case was rare.
+D1d made it the common one — `sound_` joined `DISPLAYED_PREFIXES`, so **every** project without
+a `sound_` function of its own now shows an editable sound section whose edits cannot be saved.
+A hitbox mod is exactly that project. The user renames a sound, the panel accepts it, the export
+carries it, and the sync says no.
+
+- **The fix is not an emitter.** Do *not* regenerate the function from the IR: the effect
+  emitter deletes lines it could not type (C5, C6), so creating an `effect_` function that way
+  would write a lossy copy of vanilla into the user's project and call it theirs. Take the
+  **mirror's verbatim function text**, run the ordinary value rewrite over it, and write *that*.
+  Creation then obeys the same rule every other write obeys: argument values change, nothing
+  else does, and the result differs from vanilla only where the user edited it.
+- **The registration is the part that can silently do nothing.** A function smashline never
+  installs is dead text, and a dead function is worse than a refusal because it looks like it
+  worked. Derive the registration from a sibling script of the same fighter: copy its
+  `#[acmd_script(...)]` attribute with the script name and category substituted, or add a
+  parallel `agent.acmd("…", …, …)` line beside its own. A sibling that carries **neither** is
+  registered by convention or not at all — mirror it exactly and say so in the report, because
+  guessing a registration the project's own style does not use is the failure above.
+- **Refuse when there is no sibling at all.** No sibling means no file to write into, no fighter
+  attribution, and no registration shape to copy. That case keeps today's error.
+- **The index is stale the moment a file grows a function.** Every `ScriptSite` span after the
+  insertion point shifts. Rebuild the index rather than patching spans — creation is a rare
+  user action and a whole rescan is correct by construction, where offset arithmetic across two
+  insertions in one file is the kind of thing that works until it does not.
+
+**Scope:** creating the function and registering it. Not creating a *fighter* — a project that
+says nothing about the character is still out of scope, and still an error.
+
+- **Test bar:** creating into a project registered by `agent.acmd` produces a file that names the
+  new script in the install block; creating into an attribute-registered project produces the
+  attribute; a created function re-indexes to exactly the script name that was asked for; the
+  created text differs from the mirror's only at the edited argument; and a project with no
+  sibling is still refused with a message naming what is missing.
+- **The trap this shares with D1d:** a created function that is registered under the wrong script
+  name parses, compiles, and round-trips. Assert the *re-indexed* name, not the file's contents.
 
 ### [ ] D2 — `expression_` scripts
 
