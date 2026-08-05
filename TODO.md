@@ -870,7 +870,7 @@ one of these by name.
   `has_macro_wrapper` in [data.rs](src/data.rs).
 - Whatever is added, return its unbound lines from `to_effect_calls_reporting_losses`. See C1.
 
-### [ ] C2 — Sword trail joints
+### [~] C2 — Sword trails
 
 `AFTER_IMAGE4_ON` / `_arg29` / `AFTER_IMAGE_ON`. Read-only today: the trail shows on the
 timeline with its graphic and joint, and write-back explicitly refuses it
@@ -883,6 +883,45 @@ arguments 4 onward. Those are editable; the transform never will be.
   writes, with the existing message.
 - **Done when:** changing a trail's joints rewrites those arguments and nothing else, and
   dragging a position still reports the existing "no position arguments" skip.
+
+**Measured on the way in (2026-08-04). The joint half cannot be done, and measuring found a
+worse problem underneath it.**
+
+- **Every trail-ON macro has zero corpus calls.** `AFTER_IMAGE4_ON` 0, `AFTER_IMAGE4_ON_arg29`
+  0, `AFTER_IMAGE_ON` 0. Only `AFTER_IMAGE_OFF` appears, 4 times. So there is no vanilla call to
+  build the round-trip test the definition of done requires — the same bar **B2** fails on.
+- **Two of the three names do not exist.** `smash-script` declares only
+  `AFTER_IMAGE4_ON_arg29`, `AFTER_IMAGE4_ON_WORK_arg29` and `AFTER_IMAGE_OFF`. There is no
+  `macros::AFTER_IMAGE4_ON` and no `macros::AFTER_IMAGE_ON`, so an export emitting either names
+  a function that does not exist — exactly the `AREA_WIND_2ND` trap `WIND_MACRO_COMMANDS`
+  already documents. The parser accepting those names is *fine* (a source file may contain
+  them and they ride through verbatim); synthesising one would not be.
+- **The `_arg29` fixture in the tests is fabricated and has the wrong shape.** The real
+  signature is 29 arguments with the second joint at slot **8**, not slot 5, and slots 5..=7
+  are `trail_x1/y1/z1`. The fixture writes a `Hash40` where a coordinate goes. Any joint-pair
+  work built on that fixture would have been built on a call the game never makes. **Do not
+  reuse it — replace it if this is ever picked up with a real call in hand.**
+
+So the joint pair is deferred, not refused: it is a reasonable feature with no way to verify it
+today. Take it if a corpus with a real trail call ever appears, and read the signature first.
+
+### [~] C2a — `AFTER_IMAGE_OFF` is exported without its argument
+
+Found by the measurement above, and this one *is* testable — against 4 real corpus lines.
+
+`AFTER_IMAGE_OFF<F: ToF32>(agent, unk: F)` takes one argument. The corpus writes
+`macros::AFTER_IMAGE_OFF(agent, 0);` twice and `(agent, 3);` twice. `emit_spawn_stop` in
+[acmd.rs:1940](src/acmd.rs:1940) emits `macros::AFTER_IMAGE_OFF(agent);` — **no argument at
+all** — so every exported effect script containing a sword trail is a project that does not
+build. The existing test asserts the wrong output, which is why it was never noticed.
+
+- Why no oracle caught it: no corpus script pairs a trail ON with an OFF (there are zero ONs),
+  so the emitter branch is never reached by the corpus round-trip. Coverage, not blindness.
+- The `ToF32` slot carries B3's formatting trap: the corpus writes bare `0` and `3`, so this
+  must not emit `0.0`. Reuse `attack_mod_num`.
+- The author's own value has to survive, so `EffectMacro::AfterImageOff` needs to carry it.
+  For a trail the editor ended itself there is no donor and a default is needed; the corpus
+  splits 2/2 between `0` and `3`, so the default is a genuine choice and should say so.
 
 ### [x] C3 — Screen and body colour effects
 
