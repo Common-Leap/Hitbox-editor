@@ -1333,8 +1333,8 @@ mod tests {
         assert!(verify(&parsed).is_clean(), "{}", messages(&verify(&parsed)));
 
         // Emit it, then corrupt exactly the status — the shape of a slot-table mistake.
-        let emitted = preview_game_fn(&parsed, "test")
-            .replace("*HIT_STATUS_XLU", "*HIT_STATUS_NORMAL");
+        let emitted =
+            preview_game_fn(&parsed, "test").replace("*HIT_STATUS_XLU", "*HIT_STATUS_NORMAL");
         let mut report = Report::default();
         verify_move("test", &parsed, &emitted, &mut report);
         assert!(
@@ -1352,8 +1352,7 @@ mod tests {
             "    frame(agent.lua_state_agent, 9.0);\n    if macros::is_excute(agent) {\n        \
              macros::COL_PRI(agent, 200);\n    }",
         );
-        let emitted =
-            preview_game_fn(&parsed, "test").replace("macros::COL_PRI(agent, 200);", "");
+        let emitted = preview_game_fn(&parsed, "test").replace("macros::COL_PRI(agent, 200);", "");
         let mut report = Report::default();
         verify_move("test", &parsed, &emitted, &mut report);
         assert!(
@@ -1714,4 +1713,3 @@ mod tests {
         assert!(!toml_strings_are_closed("display_name = \"a\n"));
     }
 }
-

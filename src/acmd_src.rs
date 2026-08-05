@@ -1672,9 +1672,8 @@ fn attack_abs_edits(
             ArgValue::Text(crate::acmd::const_expr(now)),
         )
     };
-    let kind = |hb: &crate::data::Hitbox| {
-        hb.abs.as_ref().map(|a| a.kind.clone()).unwrap_or_default()
-    };
+    let kind =
+        |hb: &crate::data::Hitbox| hb.abs.as_ref().map(|a| a.kind.clone()).unwrap_or_default();
     let slots: [(usize, &'static str, bool, ArgValue); 13] = [
         konst(1, "absolute kind", &kind(before), &kind(after)),
         (
@@ -2003,8 +2002,14 @@ fn hurt_sites(text: &str) -> Vec<MacroSite> {
 pub fn rewrite_hurtboxes(
     text: &str,
     label: &str,
-    pristine: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
-    edited: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
+    pristine: &(
+        Vec<crate::data::HurtboxState>,
+        Vec<crate::data::ColPriState>,
+    ),
+    edited: &(
+        Vec<crate::data::HurtboxState>,
+        Vec<crate::data::ColPriState>,
+    ),
 ) -> Result<(String, SyncReport)> {
     use crate::data::HurtTarget;
 
@@ -2072,7 +2077,11 @@ pub fn rewrite_hurtboxes(
         }
         if before.status != now.status {
             if let Some(span) = site.args.get(2) {
-                edits.extend(text_edit(text, span, &crate::acmd::emit_status(&now.status)));
+                edits.extend(text_edit(
+                    text,
+                    span,
+                    &crate::acmd::emit_status(&now.status),
+                ));
             }
         }
     }
@@ -2113,8 +2122,14 @@ pub fn sync_hurtboxes(
     index: &SourceIndex,
     fighter: &str,
     move_name: &str,
-    pristine: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
-    edited: &(Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>),
+    pristine: &(
+        Vec<crate::data::HurtboxState>,
+        Vec<crate::data::ColPriState>,
+    ),
+    edited: &(
+        Vec<crate::data::HurtboxState>,
+        Vec<crate::data::ColPriState>,
+    ),
 ) -> Result<SyncReport> {
     let script_name = crate::acmd::acmd_script_name("game", move_name);
     sync_script(index, fighter, &script_name, |body| {
@@ -2599,7 +2614,12 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
 }
 "#;
 
-    fn hurt_of(text: &str) -> (Vec<crate::data::HurtboxState>, Vec<crate::data::ColPriState>) {
+    fn hurt_of(
+        text: &str,
+    ) -> (
+        Vec<crate::data::HurtboxState>,
+        Vec<crate::data::ColPriState>,
+    ) {
         crate::acmd::parse_acmd_script(text).to_hurtboxes()
     }
 
