@@ -514,21 +514,52 @@ already built. So it needed **no new `ExcuteStmt` variant** — a third `HurtTar
   calibrate a cross-target rule against, and inventing one would draw spans the script does not
   describe. Revisit if a real mixed example turns up.
 
-That leaves B3 proper at **17 occurrences**, still the thinnest of the hitbox tasks.
+That leaves B3 proper at **17 occurrences** — but they are not one family, and the work order
+below was written for a shape only two of them have. **Re-measured 2026-08-04 against
+`macros.rs`, which is the oracle `lua_const` cannot be here** (it has no `MA_MSC_CMD_*` constant
+for any of the four):
 
+| macro | signature | corpus | is it an `(id, value)` modifier? |
+| --- | --- | --- | --- |
+| `ATK_SET_SHIELD_SETOFF_MUL` | `(id: u64, val: ToF32)` | 9 | **yes** |
+| `ATK_POWER` | `(id: u64, power: ToF32)` | 2 | **yes** |
+| `ATK_HIT_ABS` | `(kind: i32, unk: Hash40, target: u64, target_group: u64, target_no: u64)` | 6 | no — no id slot at all |
+| `ATK_LERP_RATIO` | `(ratio: ToF32)` | 0 | no — no id slot at all |
+
+So **B3 is scoped to the two that share the `(id, value)` shape**, 11 occurrences. The other two
+are not "the same idea at a different arity"; they take no hitbox id, so the whole premise of
+attaching them to a hitbox does not apply. Each is written up below with why it is not being
+done rather than left to look merely unfinished.
+
+- **The signature settled what the corpus could not.** The old bullet was right that
+  `ATK_SET_SHIELD_SETOFF_MUL`'s 9 calls are byte-identical `(agent, 0, 7)` and so cannot tell the
+  id slot from the value slot — but `macros.rs` declares `id: u64, val: ToF32`, which names them
+  outright. `ATK_POWER` then confirms it from the corpus side: its two calls are `(agent, 0, 10)`
+  and `(agent, 1, 10)`, varying the *first* slot across two hitboxes that share a value. This is
+  the third time the signature was the oracle after `lua_const` came back silent.
 - **Work order:** model them as modifiers attached to the hitbox id they target, shown on the
   timeline at their own frame. Do not fold their values into the parent `ATTACK` — the export
-  must re-emit them as separate calls at their own frames.
-- **Trap:** the `_argN` suffixes are different arities of the same idea, exactly like the wind
-  family. One table each.
-- **Trap — `ATK_HIT_ABS`'s 6 occurrences are not literals.** All six are the identical line
-  `ATK_HIT_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, Hash40::new("throw"), target,
-  target_group, target_no)`, where the last three are **local variables**, not values. A parser
-  that expects numbers will drop them, and an emitter that writes numbers back would break the
-  throw. Check what B1 did for `ATTACK_ABS` before assuming these can be typed at all; carrying
-  them verbatim may be the honest answer.
-- **`ATK_SET_SHIELD_SETOFF_MUL`'s 9 are all byte-identical** (`(agent, 0, 7)`), so the corpus
-  proves the arity and nothing else. It cannot distinguish the id slot from the value slot.
+  must re-emit them as separate calls at their own frames. The corpus shows both placements:
+  kirby/Attack100Sub puts `ATK_SET_SHIELD_SETOFF_MUL(agent, 0, 7)` in the *same* `is_excute`
+  block as its `ATTACK(agent, 0, …)`, while kirby/AttackLw4 puts `ATK_POWER` five frames after
+  the `ATTACK` it retunes. Both must survive as separate calls at their own frames.
+- **Trap — the value slots are `ToF32`-generic, and the corpus writes bare integers.** All 11
+  calls spell the value `7` or `10`, not `7.0`. [`acmd::num`](src/acmd.rs) deliberately appends
+  `.0` because most float arguments sit in slots *declared* `f32`, where a bare `6` is a type
+  error. These two are not: `ToF32` is implemented for `i32`, so both spellings compile, and
+  emitting `10.0` over a vanilla `10` is gratuitous diff noise on a line the user never touched.
+  Needs its own formatter, documented against `num` so the difference is not read as an
+  oversight.
+- **Not done — `ATK_HIT_ABS` (6), carried verbatim as `Raw` and that is the honest answer.**
+  All six are the identical line `ATK_HIT_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW,
+  Hash40::new("throw"), target, target_group, target_no)`, where the last three are **local
+  variables**, not values. There is nothing to edit: a parser expecting numbers drops the line,
+  and an emitter writing numbers back breaks the throw. It is also not a modifier — with no id
+  slot it is closer to B1's `ATTACK_ABS`, whose family it shares a prefix with. `game_` export
+  walks the tree and keeps everything, so these already survive an export untouched.
+- **Not done — `ATK_LERP_RATIO` (0).** No id slot, so it is not this family, and zero corpus
+  occurrences, so it fails the same bar B2 does: the definition of done needs a round-trip test
+  built from a real vanilla call and there is none. Re-measure if more of the archive is fetched.
 
 ### [x] B4 — Hurtbox control (done 2026-08-04)
 
