@@ -13038,6 +13038,73 @@ fn rebuild_script_from_hitboxes(
     use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
     use std::collections::BTreeMap;
 
+    /// The statements in one `is_excute` block that the rebuilt script has to carry itself.
+    ///
+    /// Exhaustive rather than `matches!(.., Raw(_))`, so adding a statement kind is a compile
+    /// error here instead of a silent deletion. B4 walked into that: `HIT_NODE` parsed into its
+    /// own variant, stopped being `Raw`, and every hurtbox line in the move vanished the moment
+    /// a hitbox was dragged.
+    fn retain_non_collisions_in_block(inner: &[ExcuteStmt]) -> Vec<ExcuteStmt> {
+        inner
+            .iter()
+            .filter(|stmt| match stmt {
+                // Collisions are rebuilt from the edited list below; keeping the source's own
+                // as well would double every hitbox.
+                ExcuteStmt::Attack(_)
+                | ExcuteStmt::Catch(_)
+                | ExcuteStmt::AttackAbs(_)
+                | ExcuteStmt::Search(_)
+                | ExcuteStmt::Wind(_)
+                | ExcuteStmt::EraseWind(_)
+                | ExcuteStmt::Clear(_)
+                | ExcuteStmt::ClearAll
+                | ExcuteStmt::GrabClearAll => false,
+                // Hurtbox state is not a collision and is not rebuilt, so it has to survive
+                // this pass to reach the export at all. An attack modifier is retained for the
+                // same reason and not as part of the hitbox it names: it is carried in the
+                // script, not in the edited list, so dropping it here would delete it on the
+                // first hitbox drag.
+                ExcuteStmt::HitStatus { .. }
+                | ExcuteStmt::HitResetAll
+                | ExcuteStmt::ColPri(_)
+                | ExcuteStmt::ColNormal
+                | ExcuteStmt::AttackMod { .. }
+                | ExcuteStmt::Raw(_) => true,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// A branch's interior, kept as written but with its collisions taken out.
+    ///
+    /// The collisions still reach the export through the edited list — `to_hitboxes` walks into
+    /// a branch and reads them, so they are already in it — and leaving them here as well would
+    /// emit each one twice. Everything else, timing statements included, stays inside the block:
+    /// it only runs when the condition holds, so it cannot be hoisted onto the flat timeline.
+    fn retain_inside_raw_block(stmts: &[AcmdStmt]) -> Vec<AcmdStmt> {
+        stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                AcmdStmt::Excute(inner) => {
+                    let retained = retain_non_collisions_in_block(inner);
+                    (!retained.is_empty()).then_some(AcmdStmt::Excute(retained))
+                }
+                AcmdStmt::RawBlock { header, body } => Some(AcmdStmt::RawBlock {
+                    header: header.clone(),
+                    body: retain_inside_raw_block(body),
+                }),
+                AcmdStmt::Loop { count, body } => Some(AcmdStmt::Loop {
+                    count: *count,
+                    body: retain_inside_raw_block(body),
+                }),
+                AcmdStmt::Frame(_)
+                | AcmdStmt::Wait(_)
+                | AcmdStmt::WaitLoopClear
+                | AcmdStmt::Raw(_) => Some(stmt.clone()),
+            })
+            .collect()
+    }
+
     /// Expand the source's finite control flow into timestamped non-collision statements.
     fn retain_non_collisions(
         stmts: &[AcmdStmt],
@@ -13050,38 +13117,7 @@ fn rebuild_script_from_hitboxes(
                 AcmdStmt::Frame(value) => frame = *value,
                 AcmdStmt::Wait(value) => frame += *value,
                 AcmdStmt::Excute(inner) => {
-                    // Exhaustive rather than `matches!(.., Raw(_))`, so adding a statement kind
-                    // is a compile error here instead of a silent deletion. B4 walked into that:
-                    // `HIT_NODE` parsed into its own variant, stopped being `Raw`, and every
-                    // hurtbox line in the move vanished the moment a hitbox was dragged.
-                    let retained: Vec<_> = inner
-                        .iter()
-                        .filter(|stmt| match stmt {
-                            // Collisions are rebuilt from the edited list below; keeping the
-                            // source's own as well would double every hitbox.
-                            ExcuteStmt::Attack(_)
-                            | ExcuteStmt::Catch(_)
-                            | ExcuteStmt::AttackAbs(_)
-                            | ExcuteStmt::Search(_)
-                            | ExcuteStmt::Wind(_)
-                            | ExcuteStmt::EraseWind(_)
-                            | ExcuteStmt::Clear(_)
-                            | ExcuteStmt::ClearAll
-                            | ExcuteStmt::GrabClearAll => false,
-                            // Hurtbox state is not a collision and is not rebuilt, so it has to
-                            // survive this pass to reach the export at all. An attack modifier
-                            // is retained for the same reason and not as part of the hitbox it
-                            // names: it is carried in the script, not in the edited list, so
-                            // dropping it here would delete it on the first hitbox drag.
-                            ExcuteStmt::HitStatus { .. }
-                            | ExcuteStmt::HitResetAll
-                            | ExcuteStmt::ColPri(_)
-                            | ExcuteStmt::ColNormal
-                            | ExcuteStmt::AttackMod { .. }
-                            | ExcuteStmt::Raw(_) => true,
-                        })
-                        .cloned()
-                        .collect();
+                    let retained = retain_non_collisions_in_block(inner);
                     if !retained.is_empty() {
                         out.push((frame, AcmdStmt::Excute(retained)));
                     }
@@ -13090,6 +13126,18 @@ fn rebuild_script_from_hitboxes(
                     for _ in 0..*count {
                         frame = retain_non_collisions(body, frame, out);
                     }
+                }
+                // Kept whole and in place. The frame clock does not advance across it: whether
+                // the lines inside ran at all is decided at runtime, which is exactly what the
+                // editor does not model.
+                AcmdStmt::RawBlock { header, body } => {
+                    out.push((
+                        frame,
+                        AcmdStmt::RawBlock {
+                            header: header.clone(),
+                            body: retain_inside_raw_block(body),
+                        },
+                    ));
                 }
                 AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {
                     out.push((frame, stmt.clone()));
@@ -15367,6 +15415,74 @@ mod live_effect_capture_tests {
         assert_eq!(hitboxes.len(), 2);
         assert_eq!((hitboxes[0].damage, hitboxes[0].angle), (4.0, 361));
         assert_eq!((hitboxes[1].damage, hitboxes[1].angle), (19.0, 80));
+    }
+
+    /// Dragging a hitbox rebuilds the whole script, and a runtime branch has to come through
+    /// that intact — header, interior and closing brace.
+    ///
+    /// Every line inside a branch is conditional, so none of it can be lifted onto the flat
+    /// timeline the rest of the rebuild works on. The one thing that is taken out is the
+    /// branch's own collisions: `to_hitboxes` already walked into the branch and put them in
+    /// the edited list, so leaving them here as well would emit each one twice. Kirby's Final
+    /// Smash start is the real case — a `frame()`, an `is_excute` and a sound call under an
+    /// `if`.
+    #[test]
+    fn a_branch_survives_the_rebuild_with_everything_inside_it() {
+        use crate::data::{AcmdScript, AcmdStmt, ExcuteStmt};
+        let conditional = Hitbox {
+            id: 1,
+            active_start: 10,
+            damage: 6.0,
+            ..Default::default()
+        };
+        let original = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(1.0),
+                AcmdStmt::RawBlock {
+                    header: "if WorkModule::is_flag(agent.module_accessor, *FLAG) {".into(),
+                    body: vec![
+                        AcmdStmt::Frame(10.0),
+                        AcmdStmt::Excute(vec![
+                            ExcuteStmt::Raw("macros::FT_START_CUTIN(agent);".into()),
+                            ExcuteStmt::Attack(conditional.to_attack_call()),
+                        ]),
+                    ],
+                },
+            ],
+        };
+
+        let mut edited = conditional.clone();
+        edited.damage = 12.0;
+        let rebuilt = rebuild_script_from_hitboxes(&original, &[edited]);
+        let emitted = crate::acmd::preview_game_fn(&rebuilt, "test");
+
+        assert!(
+            emitted.contains("if WorkModule::is_flag(agent.module_accessor, *FLAG) {"),
+            "the branch header is gone:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::FT_START_CUTIN(agent);"),
+            "the branch's interior was dropped:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("frame(agent.lua_state_agent, 10.0);"),
+            "a branch's own timing cannot be hoisted out of it:\n{emitted}"
+        );
+        assert_eq!(
+            emitted.matches('{').count(),
+            emitted.matches('}').count(),
+            "the rebuilt branch must still close:\n{emitted}"
+        );
+        // The edit landed, and exactly once — the branch kept its lines but not its collision.
+        assert_eq!(
+            emitted.matches("macros::ATTACK(").count(),
+            1,
+            "the branch's hitbox is rebuilt from the edited list, not kept as well:\n{emitted}"
+        );
+        assert!(
+            emitted.contains(", 12.0, "),
+            "the edited damage did not reach the export:\n{emitted}"
+        );
     }
 
     /// Renumbering a hitbox is an ordinary edit made from the ID drag box. The rebuild used to

@@ -296,13 +296,23 @@ impl SourceIndex {
         self.fighters.contains_key(&normalize_fighter(fighter))
     }
 
-    /// The `game_*` and `effect_*` functions for a move, concatenated into one body the
-    /// existing `acmd::parse_*` functions can read — the same shape the dumped scripts have.
+    /// The `game_*`, `effect_*` and `sound_*` functions for a move, concatenated into one body
+    /// the existing `acmd::parse_*` functions can read — the same shape the dumped scripts have.
     ///
-    /// `None` when the project defines neither, so callers can fall back to the mirror.
+    /// `None` when the project defines no `game_` and no `effect_`, so callers can fall back to
+    /// the mirror.
+    ///
+    /// **A `sound_` on its own does not count as defining the move**, and that is a deliberate
+    /// gap rather than an oversight. Returning `Some` here suppresses the mirror fetch outright
+    /// ([app.rs](src/app.rs)), so a project that overrides only the sounds would show the move
+    /// with no hitboxes and no effects at all. Falling back means such a project's own sound
+    /// script is not what gets displayed — the vanilla one is. Nothing rewrites sound lines yet,
+    /// so that costs only accuracy of display; it has to be fixed by merging project and mirror
+    /// per category before anything does.
     pub fn script_body(&self, fighter: &str, move_name: &str) -> Option<String> {
         let mut body = String::new();
-        for prefix in ["game", "effect"] {
+        let mut defines_move = false;
+        for prefix in ["game", "effect", "sound"] {
             let name = crate::acmd::acmd_script_name(prefix, move_name);
             if let Some(site) = self.script(fighter, &name) {
                 if let Ok(text) = std::fs::read_to_string(&site.file) {
@@ -310,11 +320,12 @@ impl SourceIndex {
                     if let Some(source) = text.get(site.span.clone()) {
                         body.push_str(source);
                         body.push_str("\n\n");
+                        defines_move |= prefix != "sound";
                     }
                 }
             }
         }
-        (!body.is_empty()).then_some(body)
+        defines_move.then_some(body)
     }
 
     fn index_file(

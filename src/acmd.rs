@@ -87,8 +87,17 @@ pub fn fetch_script_body_cached(fighter: &str, move_name: &str) -> anyhow::Resul
 }
 
 pub fn parse_acmd_script(source: &str) -> AcmdScript {
-    let game_fn = extract_game_function(source);
-    let source = game_fn.as_deref().unwrap_or(source);
+    let game_fn = extract_function(source, "game_");
+    // A body with no function header at all is a live capture or a paste, and is read whole —
+    // that is the only reason this falls back. A source that *does* hold ACMD functions but no
+    // `game_` is a different thing entirely: reading it whole pulls another category's lines in
+    // as `Raw`, and `emit_stmts` writes those straight back out into the generated `game_`
+    // function. A sound-only or effect-only move would export its sounds twice.
+    let source = match game_fn {
+        Some(ref extracted) => extracted.as_str(),
+        None if holds_acmd_function(source) => return AcmdScript::default(),
+        None => source,
+    };
     let lines: Vec<&str> = source.lines().collect();
     // Skip the function signature line and closing brace
     let body_lines = if lines.len() >= 2 {
@@ -159,6 +168,21 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
                 pos += 1;
                 continue;
             }
+        }
+
+        // Any other line that opens a block — a runtime branch, its `else`, a `for` whose
+        // count could not be read. The body is walked, so a `frame()` or a hitbox inside a
+        // branch is still seen; the brace is kept, so the function still closes.
+        if line.ends_with('{') {
+            let body_start = pos + 1;
+            let (body_end, _) = find_block_end(lines, pos);
+            let (body, _) = parse_stmts(&lines[body_start..body_end], 0);
+            stmts.push(AcmdStmt::RawBlock {
+                header: line.to_string(),
+                body,
+            });
+            pos = body_end + 1;
+            continue;
         }
 
         // Everything else — preserve verbatim
@@ -273,69 +297,46 @@ fn find_block_end(lines: &[&str], start: usize) -> (usize, i32) {
     (lines.len().saturating_sub(1), depth)
 }
 
-/// Extract only the `game_` function body.
-fn extract_game_function(source: &str) -> Option<String> {
-    let mut result = String::new();
-    let mut in_game_fn = false;
-    let mut depth: i32 = 0;
-    let mut found = false;
+/// The four ACMD categories, in the order a dumped script file writes them.
+///
+/// Used as the set a function header is matched *against*, not just for: a header names
+/// exactly one of these, so the other three appearing in the same line is what rules it out.
+pub(crate) const SCRIPT_PREFIXES: [&str; 4] = ["game_", "effect_", "sound_", "expression_"];
 
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if !in_game_fn
-            && trimmed.contains("game_")
-            && !trimmed.contains("effect_")
-            && !trimmed.contains("sound_")
-            && !trimmed.contains("expression_")
-            && (trimmed.contains("fn game_") || trimmed.starts_with("unsafe extern"))
-        {
-            in_game_fn = true;
-            found = true;
-        }
-        if in_game_fn {
-            result.push_str(line);
-            result.push('\n');
-            for ch in line.chars() {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                    }
-                    _ => {}
-                }
-            }
-            if depth == 0 {
-                break;
-            }
-        }
-    }
-    if found {
-        Some(result)
-    } else {
-        None
-    }
+/// Whether `trimmed` opens the function for `prefix` and no other category.
+fn is_function_header(trimmed: &str, prefix: &str) -> bool {
+    SCRIPT_PREFIXES
+        .iter()
+        .all(|other| (*other == prefix) == trimmed.contains(other))
+        && (trimmed.contains(&format!("fn {prefix}")) || trimmed.starts_with("unsafe extern"))
 }
 
-/// Extract only the `effect_` function body (mirrors `extract_game_function`).
-fn extract_effect_function(source: &str) -> Option<String> {
+/// Whether `source` holds any ACMD function at all, of any category.
+///
+/// The question [`parse_acmd_script`] asks to tell a headerless body — a live capture, or text
+/// the user pasted — apart from a real file that simply has no `game_` in it.
+fn holds_acmd_function(source: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim();
+        SCRIPT_PREFIXES
+            .iter()
+            .any(|prefix| is_function_header(trimmed, prefix))
+    })
+}
+
+/// Extract one category's function body from a source that may hold all four.
+fn extract_function(source: &str, prefix: &str) -> Option<String> {
     let mut result = String::new();
-    let mut in_effect_fn = false;
+    let mut in_fn = false;
     let mut depth: i32 = 0;
     let mut found = false;
 
     for line in source.lines() {
-        let trimmed = line.trim();
-        if !in_effect_fn
-            && trimmed.contains("effect_")
-            && !trimmed.contains("game_")
-            && !trimmed.contains("sound_")
-            && !trimmed.contains("expression_")
-            && (trimmed.contains("fn effect_") || trimmed.starts_with("unsafe extern"))
-        {
-            in_effect_fn = true;
+        if !in_fn && is_function_header(line.trim(), prefix) {
+            in_fn = true;
             found = true;
         }
-        if in_effect_fn {
+        if in_fn {
             result.push_str(line);
             result.push('\n');
             for ch in line.chars() {
@@ -707,7 +708,7 @@ fn effect_spawn_macro_layout(line: &str) -> Option<(&'static str, bool, bool)> {
 
 /// Parse an effect_ script source into an `EffectScript` IR.
 pub fn parse_effect_script(source: &str) -> crate::data::EffectScript {
-    let effect_fn = extract_effect_function(source);
+    let effect_fn = extract_function(source, "effect_");
     let effect_fn = match effect_fn {
         Some(ref s) => s.as_str(),
         None => return EffectScript::default(),
@@ -720,6 +721,49 @@ pub fn parse_effect_script(source: &str) -> crate::data::EffectScript {
     };
     let (stmts, _) = parse_effect_stmts(body_lines, 0);
     EffectScript { stmts }
+}
+
+/// Parse the `sound_` function's timeline, with every command left as `Raw`.
+///
+/// The structure — `frame`, `wait`, `is_excute` blocks, branches — is read by the same walker
+/// the `game_` script uses, because it is the same shape; only the calls inside the blocks
+/// differ, and none of them is typed yet. That is deliberate: this pass exists to prove the
+/// round trip is byte-exact before anything starts rewriting sound lines. See the `sound_`
+/// entry in `TODO.md` for the staging.
+///
+/// `AcmdScript::to_hitboxes` and `to_hurtboxes` are meaningless on the result — a sound script
+/// has no collisions — and nothing calls them on it.
+///
+/// Called only by its own corpus gate for now, which is the whole point of landing it on its
+/// own: the round trip has to be proven before a panel or an export is built on top of it. The
+/// generated-source pane is not that consumer — it promises what an export would write, and an
+/// export does not write sound scripts yet.
+#[allow(dead_code)]
+pub fn parse_sound_script(source: &str) -> AcmdScript {
+    let Some(sound_fn) = extract_function(source, "sound_") else {
+        return AcmdScript::default();
+    };
+    let lines: Vec<&str> = sound_fn.lines().collect();
+    let body_lines = if lines.len() >= 2 {
+        &lines[1..lines.len() - 1]
+    } else {
+        &lines[..]
+    };
+    let (stmts, _) = parse_stmts(body_lines, 0);
+    AcmdScript { stmts }
+}
+
+/// Re-emit a `sound_` function body at the corpus's own indentation.
+///
+/// The inverse of [`parse_sound_script`] up to the function header and closing brace, which the
+/// caller owns. Fidelity over the corpus is asserted by
+/// `every_sound_script_in_the_corpus_survives_a_round_trip`.
+#[allow(dead_code)]
+pub fn emit_sound_body(script: &AcmdScript) -> String {
+    emit_stmts(&script.stmts, "    ")
+        .into_iter()
+        .map(|line| format!("{line}\n"))
+        .collect()
 }
 
 fn parse_for_loop_header(line: &str) -> Option<usize> {
@@ -1684,6 +1728,13 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
             }
             crate::data::AcmdStmt::Loop { count, body } => {
                 lines.push(format!("{indent}for _ in 0..{count} {{"));
+                lines.extend(emit_stmts(body, &format!("{indent}    ")));
+                lines.push(format!("{indent}}}"));
+            }
+            // The header is carried verbatim — it can be any Rust the dumper wrote, including
+            // a raw address call — and the brace it opens is closed here.
+            crate::data::AcmdStmt::RawBlock { header, body } => {
+                lines.push(format!("{indent}{header}"));
                 lines.extend(emit_stmts(body, &format!("{indent}    ")));
                 lines.push(format!("{indent}}}"));
             }
@@ -4804,6 +4855,268 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 "macros::EFFECT_FOLLOW(agent, Hash40::new(\"sys_hit\"), Hash40::new(\"haver\"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);"
             ),
             "an unrecoverable tail must fall back to a single-graphic EFFECT_FOLLOW:\n{emitted}"
+        );
+    }
+
+    /// Every `.txt` in the local fetch cache, as `(path, body)`. Empty on a clean machine,
+    /// which is why every caller checks for that rather than trusting the corpus to be there.
+    fn corpus_bodies() -> Vec<(String, String)> {
+        let cache = crate::scratch_dirs::app_storage_root().join("script-cache");
+        let mut bodies = Vec::new();
+        for fighter in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
+            for script in std::fs::read_dir(fighter.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if let Ok(body) = std::fs::read_to_string(script.path()) {
+                    bodies.push((script.path().display().to_string(), body));
+                }
+            }
+        }
+        bodies
+    }
+
+    /// The body between a function's header line and its closing brace, newline-terminated —
+    /// the exact text `emit_*_body` is the inverse of.
+    fn function_interior(source: &str, prefix: &str) -> Option<String> {
+        let extracted = extract_function(source, prefix)?;
+        let lines: Vec<&str> = extracted.lines().collect();
+        (lines.len() >= 2).then(|| {
+            lines[1..lines.len() - 1]
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect()
+        })
+    }
+
+    /// The gate on loading `sound_` at all.
+    ///
+    /// Until now no `sound_` function was ever read, so no file holding one could be rewritten
+    /// by mistake. Reading them gives that up, and the defence is that re-emitting what was
+    /// read reproduces the script that went in. A spot check would not do: the corpus is where
+    /// the shapes the parser has never seen live, and it is the whole population this feature
+    /// will meet.
+    ///
+    /// Three separate properties, because "byte-identical" turns out to be the wrong bar on its
+    /// own. Six corpus scripts are mis-indented at source — the dumper does not re-indent after
+    /// an `else`, so the arm's body sits at the wrong depth — and the emitter corrects them.
+    /// That is a diff, but it is not a loss, and demanding byte-equality would either fail on a
+    /// dumper bug or force the emitter to reproduce it.
+    ///
+    /// 1. **Nothing is lost.** The trimmed lines, in order, are the same. This is the property
+    ///    that matters: no line dropped, added, reordered or rewritten.
+    /// 2. **Rewriting settles.** Emitting the emitted text again is a fixed point, so a file
+    ///    rewritten once never drifts on later saves.
+    /// 3. **Formatting does not quietly rot.** Almost all of them *are* byte-exact, and the
+    ///    count is asserted so a change that reformats the whole corpus has to be deliberate.
+    #[test]
+    fn every_sound_script_in_the_corpus_survives_a_round_trip() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        let trimmed = |text: &str| -> Vec<String> {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+
+        let mut checked = 0usize;
+        let mut byte_exact = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for (path, body) in &bodies {
+            let Some(original) = function_interior(body, "sound_") else {
+                continue;
+            };
+            checked += 1;
+            let emitted = emit_sound_body(&parse_sound_script(body));
+
+            if trimmed(&emitted) != trimmed(&original) {
+                problems.push(format!(
+                    "{path} lost or changed a line:\n--- was ---\n{original}--- now ---\n{emitted}"
+                ));
+                continue;
+            }
+            // Re-parsing the emitted text has to reach the same place, or a second save would
+            // move the file again.
+            let again = emit_sound_body(&parse_sound_script(&format!(
+                "unsafe extern \"C\" fn sound_test(agent: &mut L2CAgentBase) {{\n{emitted}}}\n"
+            )));
+            if again != emitted {
+                problems.push(format!(
+                    "{path} does not settle:\n--- once ---\n{emitted}--- twice ---\n{again}"
+                ));
+                continue;
+            }
+            byte_exact += usize::from(emitted == original);
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} of {checked} sound scripts do not round-trip:\n\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+        assert!(
+            checked > 100,
+            "only {checked} sound scripts found — the corpus is too thin to be a gate"
+        );
+        assert_eq!(
+            checked - byte_exact,
+            6,
+            "{} of {checked} sound scripts came back with different whitespace; 6 are known \
+             mis-indented at source, so any other number is the emitter's formatting changing",
+            checked - byte_exact
+        );
+    }
+
+    /// The same brace property over every `game_` script in the corpus, which is where the bug
+    /// actually was: 35 of them open a runtime branch, and each one exported a function with
+    /// more `{` than `}`. Nothing downstream compiled, and no test said so — the effect and
+    /// hitbox round-trips both re-parse the output with the same lenient parser that wrote it,
+    /// so an unbalanced function read back exactly as it went in.
+    #[test]
+    fn no_game_script_in_the_corpus_exports_an_unbalanced_function() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        let mut checked = 0usize;
+        let mut branching = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for (path, body) in &bodies {
+            if function_interior(body, "game_").is_none() {
+                continue;
+            }
+            checked += 1;
+            let script = parse_acmd_script(body);
+            if script
+                .stmts
+                .iter()
+                .any(|stmt| matches!(stmt, crate::data::AcmdStmt::RawBlock { .. }))
+            {
+                branching += 1;
+            }
+            let emitted = emit_stmts(&script.stmts, "    ").join("\n");
+            let opens = emitted.matches('{').count();
+            let closes = emitted.matches('}').count();
+            if opens != closes {
+                problems.push(format!("{path}: {opens} `{{` against {closes} `}}`"));
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} of {checked} game scripts export a function that does not close:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+        assert!(
+            branching >= 30,
+            "only {branching} of {checked} game scripts have a top-level branch — this test \
+             passes vacuously if branches stop being recognised"
+        );
+    }
+
+    /// Kirby's Final Smash start, verbatim: a `frame()` and an `is_excute` inside a runtime
+    /// branch, with an `else` arm.
+    ///
+    /// Before this was a block, the branch's opening line was kept as `Raw` and its closing
+    /// brace was thrown away, so the exported function had two fewer `}` than `{` and did not
+    /// close — the next function in the generated file was swallowed by it. Both arms were also
+    /// promoted to unconditional, so `FT_START_CUTIN` was issued twice.
+    const RAW_BRANCH: &str = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if !WorkModule::is_flag(agent.module_accessor, *FIGHTER_INSTANCE_WORK_ID_FLAG_DISABLE_FINAL_START_CAMERA) {
+        frame(agent.lua_state_agent, 10.0);
+        if macros::is_excute(agent) {
+            macros::FT_START_CUTIN(agent);
+        }
+    }
+    else {
+        if macros::is_excute(agent) {
+            macros::FT_START_CUTIN(agent);
+        }
+    }
+    frame(agent.lua_state_agent, 17.0);
+}
+"#;
+
+    #[test]
+    fn a_branch_keeps_the_brace_that_closes_it() {
+        let script = parse_acmd_script(RAW_BRANCH);
+        let emitted = emit_stmts(&script.stmts, "    ").join("\n");
+        let opens = emitted.matches('{').count();
+        let closes = emitted.matches('}').count();
+        assert_eq!(
+            (opens, closes),
+            (4, 4),
+            "the branch, its else and the two excute blocks must all close:\n{emitted}"
+        );
+        // The `else` has to stay attached to something, or it is not Rust at all.
+        assert!(
+            emitted.contains("    }\n    else {"),
+            "the else arm lost the brace it hangs off:\n{emitted}"
+        );
+        // One issue per arm, not two in a row at the top level.
+        assert_eq!(
+            emitted.matches("FT_START_CUTIN").count(),
+            2,
+            "both arms are still there:\n{emitted}"
+        );
+    }
+
+    /// The frame walk has always read a conditional hitbox as an unconditional one, because the
+    /// branch used to be flattened. Blocks must not change that on their own — eighteen `game_`
+    /// scripts in the corpus put an `ATTACK` inside an `if`, and they would all lose their
+    /// hitbox from the editor the moment a branch stopped being walked.
+    #[test]
+    fn a_hitbox_inside_a_branch_is_still_seen_by_the_frame_walk() {
+        let source = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if WorkModule::get_int(agent.module_accessor, *FIGHTER_STATUS_WORK_ID_INT_STRENGTH) == 0 {
+        if macros::is_excute(agent) {
+            macros::ATTACK(agent, 0, 0, Hash40::new("top"), 12.0, 361, 100, 0, 30, 4.0, 0.0, 8.0, 0.0, None, None, None, 1.0, 1.0, *ATTACK_SETOFF_KIND_ON, *ATTACK_LR_CHECK_F, false, 0, 0.0, 0, false, false, false, false, true, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_M, *COLLISION_SOUND_ATTR_PUNCH, *ATTACK_REGION_PUNCH);
+        }
+    }
+}
+"#;
+        let hitboxes = parse_acmd_script(source).to_hitboxes();
+        assert_eq!(hitboxes.len(), 1, "the conditional hitbox is still read");
+        assert_eq!((hitboxes[0].active_start, hitboxes[0].damage), (4, 12.0));
+    }
+
+    /// A body holding an `effect_` function but no `game_` used to be read *whole* by the game
+    /// parser, so every effect line came back as `Raw` — and `emit_stmts` writes `Raw` straight
+    /// into the generated `game_` function. The move's effects would spawn twice: once from the
+    /// generated effect script, once from the game one.
+    #[test]
+    fn a_body_with_no_game_function_contributes_no_game_statements() {
+        let source = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_attack_impact"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }
+}
+"#;
+        assert!(
+            parse_acmd_script(source).stmts.is_empty(),
+            "an effect-only body has no game script in it"
+        );
+        // The headerless case is what the fallback exists for, and still works.
+        assert!(
+            !parse_acmd_script("    frame(agent.lua_state_agent, 3.0);\n")
+                .stmts
+                .is_empty(),
+            "a bare pasted body is still read whole"
         );
     }
 

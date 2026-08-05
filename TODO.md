@@ -107,6 +107,22 @@ Two export paths, different rules — do not conflate them:
   with itself on the way out, so the check is green — which is how four short-form `CATCH`
   calls sat in the corpus for the whole project reading as ordinary grabs instead of Kirby's
   swallow. When a parse change is the thing at issue, **assert against the original text.**
+- **A parser that "preserves unknown lines verbatim" still has to preserve their braces.**
+  `parse_stmts` skipped every lone `}` and kept an `if …{` as a one-line `Raw`, so a runtime
+  branch was flattened: the closing brace vanished and both arms of an `if`/`else` were promoted
+  to unconditional. **35 of 236 `game_` scripts in the corpus exported a function with more `{`
+  than `}`** — a mod that does not build — and the round-trip oracles all passed, because they
+  re-parse the export with the same lenient parser that wrote it, and an unbalanced function
+  reads back exactly as it went in. The general rule: *a "verbatim" escape hatch that is a
+  single line cannot represent a construct that spans lines.* `AcmdStmt::RawBlock` is the shape
+  that can. When adding one, check what a `}` on its own line currently does.
+- **Verbatim round-trip is the wrong bar when the source itself is malformed.** Six corpus
+  `sound_` scripts are mis-indented — the dumper does not re-indent after an `else` — so a
+  byte-equality gate fails on a *dumper* bug and pressures you into reproducing it. Assert the
+  three properties that actually matter instead: the trimmed lines are the same (nothing lost),
+  emitting twice is a fixed point (a rewritten file does not drift), and the byte-exact count is
+  pinned (formatting cannot rot unnoticed). See
+  `every_sound_script_in_the_corpus_survives_a_round_trip`.
 - **A bullet written from memory is not a measurement, even when you wrote it.** C6b's
   `CANCEL_FILL_SCREEN` item claimed C3 modelled `FILL_SCREEN_MODEL_COLOR` and that the reset was
   a `COLOR_COMMANDS`-shaped row. C3 does not, and it is not — C6's own result table three
@@ -227,19 +243,24 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**337 green after C2a**), including the three corpus
+- [ ] `cargo test` passes (**343 green after D1a**), including the five corpus
       oracles — run
-      them by name with `cargo test cached_script` and `cargo test still_loses`:
+      them by name with `cargo test cached_script`, `cargo test still_loses`,
+      `cargo test unbalanced` and `cargo test survives_a_round_trip`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
-      `acmd::tests::cached_scripts_round_trip_through_the_emitter`, and
-      `acmd::tests::the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`. They run
+      `acmd::tests::cached_scripts_round_trip_through_the_emitter`,
+      `acmd::tests::the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`,
+      `acmd::tests::no_game_script_in_the_corpus_exports_an_unbalanced_function` and
+      `acmd::tests::every_sound_script_in_the_corpus_survives_a_round_trip`. They run
       the new code over every script the app has ever fetched (currently 461 files under
       `~/.cache/visionary/script-cache`, ~1000 functions). The third asserts a *number* — how
       many effect scripts still lose a line — so it fails on a regression rather than only on a
-      crash.
-      **Both return early and pass vacuously if that cache directory is missing.** The first
-      then asserts `checked > 100`, so a *thin* cache fails loudly — but an *absent* one is
-      silently green. Confirm the directory exists before trusting either. `ls` shows only 3
+      crash, and the fifth pins the byte-exact count for the same reason.
+      **All five return early and pass vacuously if that cache directory is missing**, and each
+      carries its own guard against a corpus too thin to mean anything: `checked > 100` on three
+      of them, and `branching >= 30` on the unbalanced-function one, which would otherwise stay
+      green if branches simply stopped being recognised. Confirm the directory exists before
+      trusting any of them. `ls` shows only 3
       entries; the files are nested per fighter, so count with
       `find ~/.cache/visionary/script-cache -type f | wc -l`.
       **Neither oracle is a full-fidelity check, so do not read a green run as one.** The
@@ -1261,13 +1282,20 @@ project saves. Dropped lines do not: nothing in a saved project remembers them.
 
 ### [ ] C4 — Effect lifetime control
 
-Detach and inhibit interact with the follow/off-kind lifetime the editor already models for
-spawns.
+Detach interacts with the follow/off-kind lifetime the editor already models for spawns.
 
-**Measured after A3:** `SET_PLAY_INHIVIT` 10, `EFFECT_DETACH_KIND` 0, `EFFECT_DETACH_KIND_WORK`
-0 — all three have `macros.rs` wrappers. So the detach half, which is the part carrying the
-trap below, has no vanilla usage to test against; `SET_PLAY_INHIVIT` is the only member with
-real corpus backing. Consider scoping to it alone.
+**Not schedulable as written — every remaining member has zero corpus calls.**
+
+**Re-measured 2026-08-05: `SET_PLAY_INHIVIT` is not an effect command and never was.** Its
+signature is `(agent, se: Hash40, unk: ToF32)`, its 10 corpus arguments are all sound-effect
+labels (`se_kirby_dash_stop`, `se_common_dizzy`), and **all 10 calls sit inside `sound_`
+functions.** It suppresses a sound effect, not an effect spawn. It belongs to D1 and has been
+counted there. That leaves this entry with `EFFECT_DETACH_KIND` 0, `EFFECT_DETACH_KIND_WORK` 0,
+`ENABLE_AREA` 0 and `UNABLE_AREA` 0 — nothing to test a round trip against.
+
+The earlier "measured after A3" line counted `SET_PLAY_INHIVIT` without reading its signature,
+which is the trap two entries above this one warns about, applied to an entry's *own* evidence.
+A count says a macro is used; only the signature says what it is.
 
 **Inherited from B5 (2026-08-04):** `ENABLE_AREA(agent, kind: i32)` and
 `UNABLE_AREA(agent, kind: i32)` were filed under B5 as detection volumes. They take one int
@@ -1293,15 +1321,59 @@ Not supported at all today. The project indexer recognises the `sound_` prefix
 Nothing is at risk right now — files holding them are never rewritten. That safety property
 is what makes this task optional-until-scheduled rather than urgent.
 
+**Measured 2026-08-05.** Sound is the largest unmodelled thing left in the corpus by a wide
+margin — `PLAY_SE` alone has **429 calls**, against 386 for `ATTACK`. Counting the family:
+`PLAY_SE` 429, `STOP_SE` 41, `PLAY_STEP_FLIPPABLE` 38, `PLAY_SEQUENCE` 28, `PLAY_SE_REMAIN` 21,
+`PLAY_STATUS` 15, `PLAY_LANDING_SE` 12, `PLAY_DOWN_SE` 11, `SET_PLAY_INHIVIT` 10,
+`PLAY_FLY_VOICE` 5 — about 610 calls across 301 of the 460 corpus files. If "largest task" was
+the reason to defer it, "largest coverage gap" is the reason to take it.
+
 - **Work order, in this order, each landing on its own:**
-  1. Load `sound_` in `script_body` and parse it to `Raw` only. Round-trip proven byte-identical
-     over the corpus. **Ship this before touching anything else** — it is where the risk is.
-  2. Type the `PLAY_SE` family; sound timeline lane.
+  1. **[x] D1a (done 2026-08-05)** — Load `sound_` in `script_body` and parse it to `Raw` only,
+     with a corpus round-trip gate.
+  2. Type the `PLAY_SE` family; sound timeline lane. **Start by fixing what D1a named:** a
+     project holding only a `sound_` override still falls back to the vanilla mirror, because
+     `script_body` returning `Some` suppresses the fetch outright and a sound-only `Some` would
+     show the move with no hitboxes and no effects. Merging project and mirror per category is
+     the fix, and it has to land before anything rewrites a sound line.
   3. Plugin hooks for the sound primitives, capture, then live.
-  4. Export + write-back.
-- **Trap:** the moment step 1 lands, a file that was previously never rewritten becomes
-  rewritable. The byte-identical round-trip over the whole corpus is the gate for that, not a
-  spot check.
+  4. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
+     it does not emit still plays vanilla — nothing is lost by sound being absent until here.
+- **Trap:** the moment a *write* path lands, a file that was previously never rewritten becomes
+  rewritable. The corpus round-trip is the gate for that, not a spot check.
+
+#### [x] D1a — Load and re-emit `sound_` scripts (done 2026-08-05)
+
+**Result:** `extract_function(source, prefix)` replaces the two copy-pasted extractors;
+`parse_sound_script` / `emit_sound_body` read and write the body. Both are staged — the
+corpus gate is their only caller, deliberately: the generated-source pane promises what an
+export would write, and step 4 is where an export starts writing sound.
+
+`every_sound_script_in_the_corpus_survives_a_round_trip` asserts three properties over all
+**301** sound scripts, rather than the byte-equality the entry originally asked for. See the
+trap about malformed sources for why. 295 are byte-exact; the other 6 differ only in the
+indentation the dumper got wrong.
+
+**Two pre-existing bugs the gate surfaced on its first run, both older than this entry and
+neither about sound:**
+
+- **A runtime branch lost the brace that closes it.** `parse_stmts` kept `if …{` as a one-line
+  `Raw` and skipped every lone `}`. **35 of 236 `game_` scripts** exported a function with two
+  more `{` than `}`, and an `if`/`else` had both arms promoted to unconditional — Kirby's Final
+  Smash start issued `FT_START_CUTIN` twice. Fixed with `AcmdStmt::RawBlock`, which keeps the
+  header, the walked body and the brace. `no_game_script_in_the_corpus_exports_an_unbalanced_function`
+  is the standing gate; it asserts at least 30 scripts actually branch so it cannot pass
+  vacuously.
+- **A body with no `game_` function was read whole by the game parser.** Every line of an
+  effect-only or sound-only move came back as `Raw`, and `emit_stmts` writes `Raw` into the
+  generated `game_` function — so its effects would spawn twice, once from each script. The
+  fallback now applies only to a body with no ACMD function header at all, which is the live
+  capture and paste case it exists for.
+
+**Deliberately unchanged:** a hitbox inside a branch is still walked as though the branch always
+runs, which is what happened when branches were flattened. 18 corpus `game_` scripts place an
+`ATTACK` this way and would lose it from the editor otherwise. The fix here was to the *brace*,
+not to the condition; pinned by `a_hitbox_inside_a_branch_is_still_seen_by_the_frame_walk`.
 
 ### [ ] D2 — `expression_` scripts
 
@@ -1332,6 +1404,30 @@ presence deliberately **disables the export timing checks**
 a timing warning that guesses is worse than none. Modelling rate would re-enable those checks
 for a large slice of the corpus.
 
+**Blocked 2026-08-05 on a fact that cannot be established offline: which way the multiplier
+goes.** 17 corpus calls, all Kirby, all top-level, values 0.25–1.0. The two readings give
+opposite answers and both have evidence:
+
+- *Rate is playback speed*, so `game = motion / rate`. `FT_MOTION_RATE(0.5)` halves the speed.
+  This is the community reading and what "rate" normally means.
+- *Rate is game frames per motion frame*, so `game = rate × motion`. This is what
+  `FT_MOTION_RATE_RANGE`'s own arithmetic says — it computes
+  `rate = game_frames / (motion_end_frame - motion_start_frame)`, which only makes sense if a
+  rate above 1 stretches a span.
+
+Under the first reading Kirby's jab 1 hitbox lands on game frame 5; under the second, frame 2.
+Nothing on this machine distinguishes them: the smashline docs say only that rate "changes the
+speed of the animation and how fast the script playback is", and the corpus cannot be used as
+an oracle because it contains no independent statement of when a move actually hits.
+
+**Do not take this entry until the direction is settled**, and settle it by *measuring*, not by
+reasoning: the plugin already reports `MotionModule::frame`, so capturing a rate-carrying move
+live and comparing the reported frame against the script frame answers it in one run. Getting
+it backwards is worse than today's "not modelled" — the entry's own done-when says so.
+
+- **Also unmodelled and inherited from the same reading:** a `game_` script's rate calls change
+  the pacing of that move's `effect_` and `sound_` scripts too. Whatever the timeline does with
+  rate has to apply across all four categories, not just the one the call is written in.
 - **Work order:** rate scales the frame advance for everything after it. The timeline must show
   real frames, not script frames, once one is in play.
 - **Done when:** the timing checks run on rate-carrying scripts and are *correct* on the

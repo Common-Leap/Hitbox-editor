@@ -994,7 +994,21 @@ pub enum AcmdStmt {
     Wait(f32),
     WaitLoopClear,
     Excute(Vec<ExcuteStmt>),
-    Loop { count: usize, body: Vec<AcmdStmt> },
+    Loop {
+        count: usize,
+        body: Vec<AcmdStmt>,
+    },
+    /// A block the editor does not model, kept whole: a runtime branch
+    /// (`if WorkModule::is_flag(…) {`), its `else {`, a raw `for`.
+    ///
+    /// It has to be a block rather than a `Raw` opening line because the closing brace is part
+    /// of it. Flattening one drops that brace — the exported function then never closes, and
+    /// the next function in the file is swallowed by it — and it promotes both arms of a
+    /// branch to unconditional. `header` is the opening line, trimmed of its indentation.
+    RawBlock {
+        header: String,
+        body: Vec<AcmdStmt>,
+    },
     Raw(String),
 }
 
@@ -1446,6 +1460,15 @@ fn eval_stmts(
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
                 hurt.next_mod_site = mod_site_at_entry + count_attack_mod_stmts(body);
+            }
+            // Walked as though the branch always runs, which is what happened before it was a
+            // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
+            // inside an `if` has always shown in the editor unconditionally. Eighteen `game_`
+            // scripts in the corpus place an `ATTACK` this way. Keeping that behaviour is the
+            // point — the fix here is to the *brace*, not to the condition, and changing both
+            // at once would leave neither tested.
+            AcmdStmt::RawBlock { body, .. } => {
+                frame = eval_stmts(body, frame, hitboxes, hurt);
             }
         }
     }

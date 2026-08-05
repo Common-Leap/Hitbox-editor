@@ -1054,7 +1054,9 @@ fn check_script_shape(subject: &str, script: &AcmdScript, report: &mut Report) {
 
 fn has_unmodelled_flow(stmts: &[AcmdStmt]) -> bool {
     stmts.iter().any(|stmt| match stmt {
-        AcmdStmt::Raw(_) => true,
+        // A branch is the strongest form of this: not only is the line unmodelled, whether the
+        // lines under it run at all is decided at runtime.
+        AcmdStmt::Raw(_) | AcmdStmt::RawBlock { .. } => true,
         AcmdStmt::Loop { body, .. } => has_unmodelled_flow(body),
         _ => false,
     })
@@ -1125,18 +1127,26 @@ fn check_shape(subject: &str, stmts: &[AcmdStmt], clock: &mut f32, report: &mut 
                 // the same statement once per iteration would say nothing new.
                 check_shape(subject, body, clock, report);
             }
-            AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {}
+            // Unreachable: a branch makes `has_unmodelled_flow` true and this pass never runs.
+            AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) | AcmdStmt::RawBlock { .. } => {}
         }
     }
 }
 
-/// Every statement in the tree, loop bodies included, in source order.
+/// Every statement in the tree, loop and branch bodies included, in source order.
+///
+/// Branches are descended into because the checks this feeds are about *values* — a NaN offset
+/// or an unhashable name is just as broken inside an `if` as outside one, and whether the
+/// branch is taken has no bearing on it.
 fn flatten(stmts: &[AcmdStmt]) -> Vec<&AcmdStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
         out.push(stmt);
-        if let AcmdStmt::Loop { body, .. } = stmt {
-            out.extend(flatten(body));
+        match stmt {
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                out.extend(flatten(body))
+            }
+            _ => {}
         }
     }
     out

@@ -183,10 +183,16 @@ the ones you set, is worse than no mod:
   valid Rust on its own. The few lines that genuinely cannot be kept are named
   individually, with the exact text and how many times it goes.
 
-The timing checks are skipped for a script carrying branches of its own — an
-`if(WorkModule::is_flag(…)){`, an `FT_MOTION_RATE`. Those decide at runtime what
-runs and when, the editor does not model them, and a warning that guesses is
-worse than no warning at all. Everything else is checked either way.
+A branch of the move's own — an `if(WorkModule::is_flag(…)){`, its `else` — is
+kept whole, condition and closing brace included, and the lines inside it stay
+inside it. A hitbox written under one still shows on the timeline, because the
+editor cannot know which way the branch will go and hiding it would be worse;
+editing that hitbox rewrites it where it is.
+
+The timing checks are skipped for a script carrying branches of its own, or an
+`FT_MOTION_RATE`. Those decide at runtime what runs and when, the editor does
+not model them, and a warning that guesses is worse than no warning at all.
+Everything else is checked either way.
 
 Write-back rewrites argument *values* only: the macros you called, your
 comments, and your formatting all stay exactly as written. Every property the
