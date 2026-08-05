@@ -82,6 +82,9 @@ pub struct Hitbox {
     /// The `ATTACK_ABS` arguments category 3 has no editable field for — see [`AbsExtras`].
     #[serde(default)]
     pub abs: Option<AbsExtras>,
+    /// The `SEARCH` arguments category 4 has no editable field for — see [`SearchExtras`].
+    #[serde(default)]
+    pub search: Option<SearchExtras>,
 }
 
 impl Default for Hitbox {
@@ -129,6 +132,7 @@ impl Default for Hitbox {
             wind: None,
             catch: None,
             abs: None,
+            search: None,
         }
     }
 }
@@ -298,6 +302,35 @@ impl Hitbox {
         }
     }
 
+    /// Back-convert to a SEARCH call.
+    ///
+    /// The four arguments with no panel control come from the originating call. A detection box
+    /// that reached the editor from a live capture has none, so it falls back to the shape the
+    /// corpus writes most often — look for something, in any hurtbox state, with the trailing
+    /// flag clear.
+    pub fn to_search_call(&self) -> SearchCall {
+        let extras = self.search.clone().unwrap_or(SearchExtras {
+            collision_kind: SEARCH_DEFAULT_COLLISION_KIND.to_string(),
+            hit_status: SEARCH_DEFAULT_HIT_STATUS.to_string(),
+            unk: 0,
+            unk2: false,
+        });
+        SearchCall {
+            id: self.id,
+            part: self.part,
+            bone_name: self.bone_name.clone(),
+            size: self.size,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            offset_z: self.offset_z,
+            capsule_end: self.capsule_end,
+            situation_mask: self.situation_mask.clone(),
+            category_mask: self.category_mask.clone(),
+            part_mask: self.part_mask.clone(),
+            extras,
+        }
+    }
+
     /// Back-convert to an ATTACK call (script synthesis for capture-sourced moves).
     pub fn to_attack_call(&self) -> AttackCall {
         AttackCall {
@@ -353,6 +386,14 @@ impl Hitbox {
 pub const CATCH_DEFAULT_STATUS: &str = "FIGHTER_STATUS_KIND_CAPTURE_PULLED";
 pub const CATCH_DEFAULT_SITUATION: &str = "COLLISION_SITUATION_MASK_GA";
 
+/// Stand-ins for the two `SEARCH` mask arguments when the box did not come from a script.
+///
+/// The corpus splits 5/2 on the first and 4/3 on the second, so neither is a safe "the game
+/// always writes this" — these are the majority, chosen so a captured box behaves on export
+/// the way the common case does, and they are only ever used when there is no donor call.
+pub const SEARCH_DEFAULT_COLLISION_KIND: &str = "COLLISION_KIND_MASK_ATTACK";
+pub const SEARCH_DEFAULT_HIT_STATUS: &str = "HIT_STATUS_MASK_ALL";
+
 /// The `CATCH` arguments that are not editable properties of a grab box.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CatchExtras {
@@ -367,6 +408,95 @@ pub struct CatchExtras {
 /// caught, so it has no bone, no size, and no offsets — the panel hides those rather than
 /// showing zeroed controls that would look like a hitbox sitting at the origin.
 pub const CAT_ABS: u8 = 3;
+
+/// `SEARCH` is category 4: a detection volume that does not hit anything.
+///
+/// Geometrically it is the closest thing to a grab box in the game — bone, size, offsets and an
+/// optional capsule end — but it deals no damage and causes no hitlag. It tells the script that
+/// something is *inside* it, and what the fighter does about that lives in the status code, not
+/// in the ACMD. So it draws like a collision and carries none of the attack fields.
+pub const CAT_SEARCH: u8 = 4;
+
+/// The `SEARCH` arguments that have no counterpart field on a [`Hitbox`].
+///
+/// Scoped the way [`CatchExtras`] and [`AbsExtras`] are: id, part, bone, size, offsets and the
+/// capsule map onto fields the panel already has, and so do all three of the trailing masks —
+/// `ground_air` is [`Hitbox::situation_mask`], `collision_category` is
+/// [`Hitbox::category_mask`], `collision_parts` is [`Hitbox::part_mask`]. Only the four with no
+/// home live here.
+///
+/// Unlike `ATTACK_ABS`'s unknowns, none of these is invariant across the corpus, so substituting
+/// a default for any of them would change what the box detects. The two that are named and
+/// meaningful get panel controls; the two that are not are carried verbatim.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SearchExtras {
+    /// What the volume looks for — `COLLISION_KIND_MASK_ATTACK` or `_HIT` in the corpus.
+    ///
+    /// Editable, against [`crate::param_labels::COLLISION_KIND_MASK`]. A `String` rather than a
+    /// decoded value for the reason [`AbsExtras::kind`] is one: an unfamiliar mask is carried
+    /// as written rather than snapped to the nearest known name.
+    pub collision_kind: String,
+    /// Which hurtbox states count as found — `HIT_STATUS_MASK_ALL` or `_NORMAL` in the corpus.
+    ///
+    /// Editable, against [`crate::param_labels::HIT_STATUS_MASK`] — which is a *different table*
+    /// from `HIT_STATUS` and overlaps it numerically. See that table's note.
+    pub hit_status: String,
+    /// Slot 12, `unk` in `macros.rs`. Undocumented, and **not** invariant: the corpus writes
+    /// 0, 1 and 60. Carried verbatim rather than exposed — a control whose meaning is a guess
+    /// is worse than no control, and dropping it would change the call.
+    pub unk: i64,
+    /// The trailing bool, `unk2` in `macros.rs`. `false` in all 7 corpus calls, kept for the
+    /// same reason.
+    pub unk2: bool,
+}
+
+/// A parsed `macros::SEARCH` call — a detection box.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SearchCall {
+    pub id: u32,
+    pub part: u32,
+    pub bone_name: String,
+    pub size: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub offset_z: f32,
+    /// Capsule second endpoint — `Some([x,y,z])` or `None` for a spherical search.
+    pub capsule_end: Option<[f32; 3]>,
+    pub situation_mask: String,
+    pub category_mask: String,
+    pub part_mask: String,
+    pub extras: SearchExtras,
+}
+
+impl SearchCall {
+    pub fn to_hitbox(&self, active_start: u32) -> Hitbox {
+        Hitbox {
+            id: self.id,
+            part: self.part,
+            bone_name: self.bone_name.clone(),
+            size: self.size,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            offset_z: self.offset_z,
+            capsule_end: self.capsule_end,
+            situation_mask: self.situation_mask.clone(),
+            category_mask: self.category_mask.clone(),
+            part_mask: self.part_mask.clone(),
+            // A detection box deals nothing. Zeroing these matches what a grab box does and
+            // keeps the attack defaults from showing up in a panel for a box that cannot hit.
+            damage: 0.0,
+            angle: 0,
+            kb_scaling: 0,
+            fkb: 0,
+            kb_base: 0,
+            active_start,
+            active_end: u32::MAX,
+            category: CAT_SEARCH,
+            search: Some(self.extras.clone()),
+            ..Default::default()
+        }
+    }
+}
 
 /// The `ATTACK_ABS` arguments that are not editable properties of a [`Hitbox`].
 ///
@@ -538,6 +668,7 @@ impl AttackCall {
             wind: None,
             catch: None,
             abs: None,
+            search: None,
         }
     }
 }
@@ -799,6 +930,9 @@ pub enum ExcuteStmt {
     Catch(CatchCall),
     /// ATTACK_ABS — damage applied to an opponent already caught. No volume, no bone.
     AttackAbs(AttackAbsCall),
+    /// SEARCH — a detection volume. Its own family for the same reason `CATCH` is: it shares
+    /// no argument layout with `ATTACK`, and nothing in a `game_` script takes it back.
+    Search(SearchCall),
     Wind(WindboxData),
     EraseWind(u32),
     Clear(u32),
@@ -1239,6 +1373,29 @@ fn eval_stmts(
                                     && h.id == call.id
                                     && h.abs.as_ref().is_some_and(|a| a.kind == call.kind)
                                     && h.active_end == u32::MAX
+                            }) {
+                                existing.active_end =
+                                    spawn.saturating_sub(1).max(existing.active_start);
+                            }
+                            hitboxes.push(call.to_hitbox(spawn));
+                        }
+                        // Deliberately not ended by any clear. `AttackModule::clear_all` does
+                        // not touch a search volume, and none of the 7 corpus scripts contains
+                        // a clear of any kind for one — the two that do end (kirby's inhale)
+                        // end it from the status code, which no ACMD script can see. So an
+                        // unclosed search runs to the end of the move, the same `9999` an
+                        // unclosed `ATTACK_ABS` gets, rather than a frame nothing ever wrote.
+                        //
+                        // Reusing an id still replaces the open box, matching every other
+                        // family. Scoped to `CAT_SEARCH`: kirby/SpecialNStart opens a `CATCH`,
+                        // a `SEARCH` and an `ATTACK_ABS` that all three carry id 0 in one
+                        // block, so a match on id alone would close two of them here.
+                        ExcuteStmt::Search(call) => {
+                            let spawn = script_frame(frame);
+                            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
+                                hitbox.category == CAT_SEARCH
+                                    && hitbox.id == call.id
+                                    && hitbox.active_end == u32::MAX
                             }) {
                                 existing.active_end =
                                     spawn.saturating_sub(1).max(existing.active_start);

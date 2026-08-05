@@ -194,6 +194,15 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
                 continue;
             }
         }
+        // The `macros::NAME(` form with the paren is doing real work here too:
+        // `macros::SET_SEARCH_SIZE_EXIST(` does not contain `macros::SEARCH(`, so the
+        // size-modifier macro cannot be read through the 17-slot box layout.
+        if line.contains("macros::SEARCH(") {
+            if let Some(call) = parse_search_call(line) {
+                stmts.push(ExcuteStmt::Search(call));
+                continue;
+            }
+        }
         // Safe below the `ATTACK_FUNCS` test above only because that one matches on
         // `macros::NAME(` with the paren: `macros::ATTACK_ABS(` does not contain
         // `macros::ATTACK(`. Without the paren this call would be read through `ATTACK`'s
@@ -957,9 +966,9 @@ fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
     };
     let has_capsule_slots = t.get(7).is_some_and(|v| is_capsule_slot(v));
     let capsule_end = match (
-        t.get(7).and_then(|v| parse_option_f32(v.trim())),
-        t.get(8).and_then(|v| parse_option_f32(v.trim())),
-        t.get(9).and_then(|v| parse_option_f32(v.trim())),
+        t.get(7).and_then(|v| parse_capsule_coord(v.trim())),
+        t.get(8).and_then(|v| parse_capsule_coord(v.trim())),
+        t.get(9).and_then(|v| parse_capsule_coord(v.trim())),
     ) {
         (Some(x), Some(y), Some(z)) if has_capsule_slots => Some([x, y, z]),
         _ => None,
@@ -981,6 +990,70 @@ fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
         capsule_end,
         status: konst(tail, crate::data::CATCH_DEFAULT_STATUS),
         situation: konst(tail + 1, crate::data::CATCH_DEFAULT_SITUATION),
+    })
+}
+
+/// Parse `macros::SEARCH(agent, id, part, bone, size, x, y, z, x2, y2, z2, collision_kind,
+/// hit_status, unk, ground_air, collision_category, collision_parts, unk2)`.
+///
+/// Dumped in the same two shapes as `CATCH` — the Lua-derived scripts omit the three capsule
+/// arguments rather than writing `None` — so the tail is located with [`is_capsule_slot`]
+/// rather than by slot number. 4 of the corpus's 7 calls are the short form.
+fn parse_search_call(line: &str) -> Option<crate::data::SearchCall> {
+    let start = line.find("macros::SEARCH(")?;
+    let inner = &line[start + "macros::SEARCH(".len()..];
+    let end = inner.rfind(')')?;
+    let t = tokenize_args(&inner[..end]);
+    if t.len() < 8 {
+        return None;
+    }
+
+    // [0]=agent [1]=id [2]=part [3]=bone [4]=size [5]=x [6]=y [7]=z, then either
+    // [8..=10]=capsule and the tail at 11, or the tail straight away at 8.
+    let num = |i: usize, default: f32| {
+        t.get(i)
+            .and_then(|value| value.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+    let has_capsule_slots = t.get(8).is_some_and(|v| is_capsule_slot(v));
+    let capsule_end = match (
+        t.get(8).and_then(|v| parse_capsule_coord(v.trim())),
+        t.get(9).and_then(|v| parse_capsule_coord(v.trim())),
+        t.get(10).and_then(|v| parse_capsule_coord(v.trim())),
+    ) {
+        (Some(x), Some(y), Some(z)) if has_capsule_slots => Some([x, y, z]),
+        _ => None,
+    };
+    let tail = if has_capsule_slots { 11 } else { 8 };
+    let konst = |i: usize, default: &str| {
+        t.get(i)
+            .map(|v| strip_deref(v.trim()))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    Some(crate::data::SearchCall {
+        id: t[1].trim().parse().ok()?,
+        part: t[2].trim().parse().ok()?,
+        bone_name: extract_hash40_string(&t[3]).unwrap_or_else(|| t[3].trim().to_string()),
+        size: num(4, 1.0),
+        offset_x: num(5, 0.0),
+        offset_y: num(6, 0.0),
+        offset_z: num(7, 0.0),
+        capsule_end,
+        situation_mask: konst(tail + 3, "COLLISION_SITUATION_MASK_GA"),
+        category_mask: konst(tail + 4, "COLLISION_CATEGORY_MASK_ALL"),
+        part_mask: konst(tail + 5, "COLLISION_PART_MASK_ALL"),
+        extras: crate::data::SearchExtras {
+            collision_kind: konst(tail, crate::data::SEARCH_DEFAULT_COLLISION_KIND),
+            hit_status: konst(tail + 1, crate::data::SEARCH_DEFAULT_HIT_STATUS),
+            unk: t
+                .get(tail + 2)
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(0),
+            unk2: t
+                .get(tail + 6)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
+        },
     })
 }
 
@@ -1244,6 +1317,26 @@ fn parse_option_f32(s: &str) -> Option<f32> {
     inner.trim().parse().ok()
 }
 
+/// One capsule endpoint coordinate, in any of the three spellings that occur.
+///
+/// `Some(1.0)` and `None` are the smashline signature's. The Lua-derived dumps write the
+/// coordinate **bare** — `macros::SEARCH(.., 0.0, 7.0, 13.0, *COLLISION_KIND_MASK_ATTACK, ..)` —
+/// so a reader that only understood `Some(..)` would see a stretched box as spherical and
+/// quietly shorten it to a point.
+///
+/// Only ever called on a slot [`is_capsule_slot`] has already claimed, which is what keeps a
+/// bare number here from swallowing the argument that follows an omitted capsule.
+fn parse_capsule_coord(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if s == "None" {
+        return None;
+    }
+    match s.strip_prefix("Some(").and_then(|v| v.strip_suffix(')')) {
+        Some(inner) => inner.trim().parse().ok(),
+        None => s.parse().ok(),
+    }
+}
+
 fn tokenize_args(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut depth = 0usize;
@@ -1436,6 +1529,36 @@ fn emit_catch(call: &crate::data::CatchCall, indent: &str) -> String {
     )
 }
 
+/// Emit `macros::SEARCH`, in its own slot order.
+///
+/// Always the full form, with the capsule spelled `Some(..)`/`None`, even when the call was
+/// read from the shorter Lua-shaped dump. That shorter form is not valid Rust — `macros::SEARCH`
+/// is fixed-arity — so a mod exported in it would not build. Same choice `emit_catch` makes.
+fn emit_search(call: &crate::data::SearchCall, indent: &str) -> String {
+    let bone = format!("Hash40::new(\"{}\")", call.bone_name.to_ascii_lowercase());
+    let capsule = match call.capsule_end {
+        Some([x, y, z]) => format!("Some({}), Some({}), Some({})", num(x), num(y), num(z)),
+        None => "None, None, None".to_string(),
+    };
+    format!(
+        "{indent}macros::SEARCH(agent, {id}, {part}, {bone}, {size}, {x}, {y}, {z}, \
+{capsule}, {kind}, {status}, {unk}, {situation}, {category}, {parts}, {unk2});",
+        id = call.id,
+        part = call.part,
+        size = num(call.size),
+        x = num(call.offset_x),
+        y = num(call.offset_y),
+        z = num(call.offset_z),
+        kind = const_expr(&call.extras.collision_kind),
+        status = const_expr(&call.extras.hit_status),
+        unk = call.extras.unk,
+        situation = const_expr(&call.situation_mask),
+        category = const_expr(&call.category_mask),
+        parts = const_expr(&call.part_mask),
+        unk2 = call.extras.unk2,
+    )
+}
+
 /// Emit `macros::ATTACK_ABS`, in its own slot order.
 ///
 /// `damage` and `hitlag` go through `num` because the archive writes them with a decimal
@@ -1472,6 +1595,7 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
             crate::data::ExcuteStmt::Catch(call) => emit_catch(call, indent),
             crate::data::ExcuteStmt::AttackAbs(call) => emit_attack_abs(call, indent),
+            crate::data::ExcuteStmt::Search(call) => emit_search(call, indent),
             crate::data::ExcuteStmt::GrabClearAll => {
                 format!("{indent}GrabModule::clear_all(agent.module_accessor);")
             }
@@ -3205,6 +3329,145 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         assert_eq!(
             parse_acmd_script(&exported).to_hitboxes(),
             boxes,
+            "{exported}"
+        );
+    }
+
+    /// A `SEARCH` is a detection box of its own family, in both of the shapes it is written in.
+    ///
+    /// Both fixtures are verbatim corpus lines: the short one from kirby/SpecialNStart, the long
+    /// one from kirby/BatSwing4. They differ in arity by exactly the three capsule slots, which
+    /// is what makes them worth asserting together — every argument after the capsule moves.
+    #[test]
+    fn search_boxes_parse_in_both_of_the_shapes_the_corpus_writes_them() {
+        let src = r#"unsafe extern "C" fn game_search(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SEARCH(agent, 0, 0, Hash40::new("top"), 4.0, 0.0, 7.0, 8.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_ALL, 0, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_FIGHTER, *COLLISION_PART_MASK_ALL, false);
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::SEARCH(agent, 1, 0, Hash40::new("top"), 7.5, 0.0, 7.0, 4.0, 0.0, 7.0, 13.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_NORMAL, 60, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let boxes = script.to_hitboxes();
+        assert_eq!(boxes.len(), 2, "{boxes:#?}");
+
+        let short = &boxes[0];
+        assert_eq!(short.category, crate::data::CAT_SEARCH);
+        assert_eq!(short.size, 4.0);
+        assert_eq!(
+            (short.offset_x, short.offset_y, short.offset_z),
+            (0.0, 7.0, 8.0)
+        );
+        assert_eq!(short.capsule_end, None);
+        // The three masks land on the fields that already existed, not in the extras.
+        assert_eq!(short.situation_mask, "COLLISION_SITUATION_MASK_GA");
+        assert_eq!(short.category_mask, "COLLISION_CATEGORY_MASK_FIGHTER");
+        assert_eq!(short.part_mask, "COLLISION_PART_MASK_ALL");
+        let extras = short.search.as_ref().expect("a SEARCH carries its extras");
+        assert_eq!(extras.collision_kind, "COLLISION_KIND_MASK_ATTACK");
+        assert_eq!(extras.hit_status, "HIT_STATUS_MASK_ALL");
+        assert_eq!(extras.unk, 0);
+        assert!(!extras.unk2);
+        // A detection box deals nothing — the attack defaults must not leak in.
+        assert_eq!(short.damage, 0.0);
+
+        let long = &boxes[1];
+        assert_eq!(long.capsule_end, Some([0.0, 7.0, 13.0]));
+        assert_eq!(long.size, 7.5);
+        assert_eq!(long.category_mask, "COLLISION_CATEGORY_MASK_ALL");
+        let extras = long.search.as_ref().expect("a SEARCH carries its extras");
+        assert_eq!(extras.hit_status, "HIT_STATUS_MASK_NORMAL");
+        // Not invariant across the corpus, so it has to survive rather than be defaulted.
+        assert_eq!(extras.unk, 60);
+
+        // Nothing closes a search volume, so both run to the end of the move.
+        assert_eq!(short.active_end, 9999);
+        assert_eq!(long.active_end, 9999);
+
+        // And the whole thing round-trips.
+        let exported = preview_game_fn(&script, "search");
+        assert_eq!(
+            parse_acmd_script(&exported).to_hitboxes(),
+            boxes,
+            "{exported}"
+        );
+    }
+
+    /// Three families open a box with id 0 in one block, and all three must survive.
+    ///
+    /// This is kirby/SpecialNStart, near enough verbatim: a `CATCH`, a `SEARCH` and an
+    /// `ATTACK_ABS` in a single `is_excute`, every one of them id 0. Matching on id alone
+    /// anywhere in the walk would close two of the three the moment the next one was read.
+    #[test]
+    fn a_search_a_grab_and_a_throw_hit_sharing_id_zero_do_not_close_each_other() {
+        let src = r#"unsafe extern "C" fn game_specialnstart(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 18.0);
+    if macros::is_excute(agent) {
+        macros::CATCH(agent, 0, Hash40::new("top"), 6.0, 0.0, 6.0, 5.0, *FIGHTER_STATUS_KIND_SWALLOWED, *COLLISION_SITUATION_MASK_GA);
+        macros::SEARCH(agent, 0, 0, Hash40::new("top"), 4.0, 0.0, 7.0, 8.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_ALL, 0, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_FIGHTER, *COLLISION_PART_MASK_ALL, false);
+        macros::ATTACK_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH, 0, 5.0, 361, 100, 0, 0, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_NONE);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let boxes = script.to_hitboxes();
+        assert_eq!(boxes.len(), 3, "all three families stay open\n{boxes:#?}");
+
+        let mut categories: Vec<u8> = boxes.iter().map(|b| b.category).collect();
+        categories.sort_unstable();
+        assert_eq!(
+            categories,
+            vec![1, crate::data::CAT_ABS, crate::data::CAT_SEARCH]
+        );
+        assert!(
+            boxes.iter().all(|b| b.id == 0 && b.active_start == 18),
+            "{boxes:#?}"
+        );
+        // None of them was ended by another's arrival.
+        assert!(boxes.iter().all(|b| b.active_end == 9999), "{boxes:#?}");
+
+        // The inhale's own arguments all survive the export, each through its own layout.
+        let exported = preview_game_fn(&script, "specialnstart");
+        assert!(
+            exported.contains("*FIGHTER_STATUS_KIND_SWALLOWED"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("*COLLISION_CATEGORY_MASK_FIGHTER"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("*FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH"),
+            "{exported}"
+        );
+    }
+
+    /// `SET_SEARCH_SIZE_EXIST` is not a `SEARCH`, and must not be read through its layout.
+    ///
+    /// It re-sizes a box already out and takes two arguments; `SEARCH` takes seventeen. The
+    /// `macros::NAME(` form with the paren is what keeps them apart — the same guard that
+    /// stops `ATTACK_ABS` being read as an `ATTACK`. Reading one as the other is the silent
+    /// cross-family corruption this parser is built to refuse.
+    #[test]
+    fn the_search_size_modifier_is_not_parsed_as_a_search_box() {
+        let src = r#"unsafe extern "C" fn game_search(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SET_SEARCH_SIZE_EXIST(agent, 0, 7);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        assert!(
+            script.to_hitboxes().is_empty(),
+            "a size modifier is not a box of its own"
+        );
+        // Unmodelled, so it rides through verbatim rather than being dropped.
+        let exported = preview_game_fn(&script, "search");
+        assert!(
+            exported.contains("macros::SET_SEARCH_SIZE_EXIST(agent, 0, 7);"),
             "{exported}"
         );
     }

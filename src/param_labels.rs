@@ -218,6 +218,48 @@ pub const PART_MASK: ConstTable = &[
     ("COLLISION_PART_MASK_ALL", 0x1f),
 ];
 
+/// `COLLISION_KIND_MASK_*` — which kinds of collision a `SEARCH` volume looks for.
+///
+/// Ascending by value, like every table here, so [`const_name`] resolves the composites
+/// unambiguously. The multi-letter names are unions of the single ones — `AH` is attack|hit,
+/// `AHS` adds shield — and they are listed because a script may write one, not because the
+/// editor has any way to compose them.
+pub const COLLISION_KIND_MASK: ConstTable = &[
+    ("COLLISION_KIND_MASK_ATTACK", 0x1),
+    ("COLLISION_KIND_MASK_HIT", 0x2),
+    ("COLLISION_KIND_MASK_AH", 0x3),
+    ("COLLISION_KIND_MASK_SHIELD", 0x4),
+    ("COLLISION_KIND_MASK_HS", 0x6),
+    ("COLLISION_KIND_MASK_AHS", 0x7),
+    ("COLLISION_KIND_MASK_REFLECTOR", 0x8),
+    ("COLLISION_KIND_MASK_HR", 0xa),
+    ("COLLISION_KIND_MASK_HSR", 0xe),
+    ("COLLISION_KIND_MASK_AHSR", 0xf),
+    ("COLLISION_KIND_MASK_ABSORBER", 0x10),
+    ("COLLISION_KIND_MASK_HSRAB", 0x1e),
+    ("COLLISION_KIND_MASK_AHSRAB", 0x1f),
+    ("COLLISION_KIND_MASK_SEARCH", 0x20),
+    ("COLLISION_KIND_MASK_GRAB", 0x40),
+    ("COLLISION_KIND_MASK_ALL", 0x7f),
+];
+
+/// `HIT_STATUS_MASK_*` — which hurtbox states a `SEARCH` volume counts as found.
+///
+/// The table [`HIT_STATUS`] warned about. These share a namespace with the four hurtbox states
+/// and **overlap them numerically** — `HIT_STATUS_MASK_NORMAL` is `0x1`, the same value as
+/// `HIT_STATUS_INVINCIBLE` — so keeping them apart is what stops a live capture of an
+/// invincible bone coming back labelled as a mask. They are a different argument to a different
+/// function; do not merge the two tables.
+pub const HIT_STATUS_MASK: ConstTable = &[
+    ("HIT_STATUS_MASK_NORMAL", 0x1),
+    ("HIT_STATUS_MASK_INVINCIBLE", 0x2),
+    ("HIT_STATUS_MASK_NI", 0x3),
+    ("HIT_STATUS_MASK_XLU", 0x4),
+    ("HIT_STATUS_MASK_NX", 0x5),
+    ("HIT_STATUS_MASK_ALL", 0x7),
+    ("HIT_STATUS_MASK_OFF", 0x8),
+];
+
 /// `HIT_STATUS_*` — how a bone or hurtbox group receives hits.
 ///
 /// Exactly the four real states, and deliberately not every constant whose name starts with

@@ -87,6 +87,26 @@ Two export paths, different rules — do not conflate them:
   `HIT_NODE`'s site, retuning a call the user never clicked — and no existing test would have
   failed, because each family passes its own tests in isolation. Test the boundary from *both*
   sides when adding a family beside an existing one.
+- **The same trap again, and worse, across the wire: `Hitbox.category` is not the plugin's
+  category.** They agree for attack (0), grab (1) and wind (2) and then diverge — the editor's
+  `CAT_ABS` is 3, the plugin's is 4, because the plugin's space also carries hurtbox state,
+  which took 3. B5 found that every live `ATTACK_ABS` edit since B1 had gone out as category 3
+  and been read as a hurtbox rule: **silently dead, for two whole tasks.** Everything now goes
+  through `game_link::wire_category()`. The general rule: *two id spaces that agree on their
+  first few members are not the same space, and the agreement is exactly what hides it.* When
+  adding a family, add its wire value to that function and to the test that pins the mapping.
+- **The same fact needs a different test on each surface.** `SEARCH` and `CATCH` are each
+  written with and without their capsule arguments, and every surface has to tell which. In
+  source text the discriminator is the *shape of the token* — a coordinate versus a `*CONST`.
+  On the live wire that test is wrong, because an int and a float are both just numbers there,
+  and it happily read a 14-argument call's collision kind, hit status and undocumented int as a
+  capsule of `[2.0, 1.0, 60.0]`. There the discriminator is the argument *count*. Do not carry
+  a guard across surfaces without asking what signal that surface actually has.
+- **A round-trip oracle cannot see a value lost on the way in.** `check_hitbox_fidelity`
+  compares the export against the *parsed model*. Anything the parser drops or defaults agrees
+  with itself on the way out, so the check is green — which is how four short-form `CATCH`
+  calls sat in the corpus for the whole project reading as ordinary grabs instead of Kirby's
+  swallow. When a parse change is the thing at issue, **assert against the original text.**
 - **A bullet written from memory is not a measurement, even when you wrote it.** C6b's
   `CANCEL_FILL_SCREEN` item claimed C3 modelled `FILL_SCREEN_MODEL_COLOR` and that the reset was
   a `COLOR_COMMANDS`-shaped row. C3 does not, and it is not — C6's own result table three
@@ -207,7 +227,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**325 green after B3**), including the three corpus
+- [ ] `cargo test` passes (**335 green after B5**), including the three corpus
       oracles — run
       them by name with `cargo test cached_script` and `cargo test still_loses`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
@@ -651,7 +671,7 @@ addition rather than a restructure. The real cost was somewhere the entry did no
   hurtbox call is known to re-export identically. The live surface is built but not exercised
   against a running game — that needs a deploy, which is not available here.
 
-### [~] B5 — `SEARCH` / detection boxes
+### [x] B5 — `SEARCH` / detection boxes (done 2026-08-04)
 
 Grab-range and detection volumes. Geometrically these are close to grab boxes, so the panel
 work is mostly reuse.
@@ -690,6 +710,65 @@ int, and a trailing bool — become a `SearchExtras` beside `CatchExtras` and `A
 
 - **Trap:** new collision family → it must be added to the plugin's `is_collision_func` and
   given a category id on the wire, alongside 0 attack / 1 grab / 2 wind.
+
+**Result (done 2026-08-04).** All five surfaces. 335 tests, clippy clean, `cargo fmt --check`
+clean, `build_check.sh` exit 0, plugin builds and the binary contains `hook_search` and the
+`ATTACK/CATCH/SEARCH/WIND/CLEAR/HURT/ATKMOD` banner. Corpus at 460 files, so the oracles are
+not vacuous. The live surface is built but not exercised against a running game.
+
+- **Half the trap above was wrong, and reading the function said so.** `is_collision_func` is
+  not "is this a collision" — it arms a gate that notes something is *out to be cleared*. A
+  search volume is never cleared, exactly as `ATTACK_ABS` is not, and that comment is already
+  in the function explaining why `ATTACK_ABS` is excluded. Adding `SEARCH` would have made the
+  next `AttackModule::clear_all` look like it ended something. It is deliberately not added.
+- **`SEARCH` is written in two shapes and the tail moves three slots between them.** Four of
+  the seven vanilla calls omit the capsule arguments outright rather than writing `None`, so
+  the mask arguments sit at 11..=13 in one and 8..=10 in the other. Each of the four surfaces
+  needs its own discriminator, and **they are not the same test**: in source text a capsule
+  slot is visibly a coordinate and the next argument is visibly a `*CONST`, but on the wire
+  both are just numbers, so the live reader has to go by *argument count*. Testing the value
+  there gave a 14-argument call a capsule of `[2.0, 1.0, 60.0]` — its own collision kind, hit
+  status and undocumented int, bent into geometry. A test caught it; nothing else would have.
+- **Two real bugs found on the way in, both older than this task.** Written up below.
+- Not done, deliberately: `SET_SEARCH_SIZE_EXIST` (moved to **B3**), `ENABLE_AREA` and
+  `UNABLE_AREA` (moved to **C4**). None has a corpus call to test against.
+
+### [x] B5a — The short-form `CATCH` bug B5 surfaced (done 2026-08-04)
+
+Not a planned entry; found while measuring B5, because `CATCH` is dumped in the same two shapes
+`SEARCH` is. Both halves read the status kind and situation mask from fixed slots 10 and 11.
+
+- **Parsing** ran off the end of the token list on the short form and substituted the defaults,
+  so all four short-form calls in the corpus — every one of them Kirby's inhale — came into the
+  editor as an ordinary `CAPTURE_PULLED` grab instead of a swallow.
+- **Writing** was worse: a capsule edit put `Some(1.0)` over the status constant, destroying the
+  grab's behaviour and producing a file that does not compile. Now refused and reported.
+
+**Why no oracle caught it, which is the part worth keeping.** `check_hitbox_fidelity` compares
+the export against the *parsed model*, not against the original text — so a value lost on the
+way in agrees with itself on the way out and the round trip is green. Both new tests assert
+against the original text instead. Any future check of this kind needs the same shape.
+
+### [x] B5b — Live rules were sent under the editor's category, not the plugin's (done 2026-08-04)
+
+Also found on the way in, and it is why B5's live surface could not have been correct without
+fixing it first.
+
+The editor put `Hitbox.category` straight onto the wire. That works for attack, grab and wind,
+where the two numbering spaces agree, and then stops: the editor's `CAT_ABS` is **3**, which is
+the plugin's `CAT_HURT`. So **every live `ATTACK_ABS` edit since B1 has been read as a hurtbox
+rule and silently done nothing** — the plugin listens for those on 4. A search box (display 4)
+would have collided with `ATTACK_ABS` (wire 4) the same way.
+
+Fixed with an explicit `game_link::wire_category()` that every rule-push site now goes through,
+plus a test pinning each mapping and asserting neither family lands on the hurtbox category.
+
+- **The lesson is the one this file keeps relearning, in a new place.** Two id spaces that
+  agree on their first few members are not the same space, and the agreement is what hides it.
+  It is the same shape as the site-ordinal counters in B3 and the per-family slot tables at the
+  top of this file: *sharing a numbering space across families is the recurring bug here.*
+- **Not verified against a running game.** The mapping is proven by test; that a live `ATTACK_ABS`
+  edit now actually lands needs a deploy, which is not available here.
 
 ## Effects
 

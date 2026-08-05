@@ -177,6 +177,13 @@ fn abs_kind_short(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// `COLLISION_KIND_MASK_ATTACK` → `ATTACK`, for a timeline row that has no damage to show.
+fn search_kind_short(name: &str) -> &str {
+    name.rsplit_once("COLLISION_KIND_MASK_")
+        .map(|(_, tail)| tail)
+        .unwrap_or(name)
+}
+
 fn setoff_combo(ui: &mut egui::Ui, v: &mut String, id: &str) {
     const_combo(ui, v, id, "Setoff Kind:", crate::param_labels::SETOFF_KIND);
 }
@@ -753,6 +760,9 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
         // Throw damage — violet. It draws on the timeline but never in the viewport: there is
         // no volume to draw, which is what makes a distinct colour worth having here.
         crate::data::CAT_ABS => Color32::from_rgba_premultiplied(230, 160, 255, 170),
+        // Detection — amber. It has a real volume and draws in the viewport, so it needs to be
+        // told apart from a hitbox at a glance: it looks like one and hits nothing.
+        crate::data::CAT_SEARCH => Color32::from_rgba_premultiplied(255, 210, 90, 150),
         _ => hitbox_color(hb.hitbox_type),
     }
 }
@@ -3656,6 +3666,20 @@ impl VisionaryApp {
                             "{} GRAB #{} {} [{}-{}]",
                             shape, hb.id, hb.bone_name, hb.active_start, hb.active_end
                         ),
+                        // No damage to name, so what it is looking for takes that slot — it is
+                        // the property that distinguishes two search boxes on the same bone.
+                        crate::data::CAT_SEARCH => format!(
+                            "{} SEARCH #{} {} {} [{}-{}]",
+                            shape,
+                            hb.id,
+                            hb.bone_name,
+                            hb.search
+                                .as_ref()
+                                .map(|s| search_kind_short(&s.collision_kind))
+                                .unwrap_or("?"),
+                            hb.active_start,
+                            hb.active_end
+                        ),
                         2 => format!(
                             "{} WIND #{} {} [{}-{}]",
                             shape,
@@ -3738,6 +3762,9 @@ impl VisionaryApp {
                         crate::data::CAT_ABS => {
                             ("Throw damage", egui::Color32::from_rgb(230, 160, 255))
                         }
+                        crate::data::CAT_SEARCH => {
+                            ("Detection box", egui::Color32::from_rgb(255, 210, 90))
+                        }
                         _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
                     };
                     ui.horizontal(|ui| {
@@ -3817,7 +3844,10 @@ impl VisionaryApp {
                         ui.horizontal(|ui| {
                             ui.label("ID:");
                             ui.add(egui::DragValue::new(&mut hb.id));
-                            if hb.category == 0 {
+                            // `SEARCH` takes a part slot too, and the write-back keys on it —
+                            // so it has to be visible here, or a box could never be told apart
+                            // from another with the same id.
+                            if hb.category == 0 || hb.category == crate::data::CAT_SEARCH {
                                 ui.label("Part:");
                                 ui.add(egui::DragValue::new(&mut hb.part));
                             }
@@ -3992,6 +4022,35 @@ impl VisionaryApp {
                             situation_mask_combo(ui, &mut hb.situation_mask, "sit_mask");
                             category_mask_combo(ui, &mut hb.category_mask, "cat_mask");
                             part_mask_combo(ui, &mut hb.part_mask, "part_mask");
+                        });
+                    }
+
+                    // ── Detection-only fields ────────────────────────────
+                    //
+                    // A search box has no damage and no knockback, so what it *looks for* is
+                    // the whole of its behaviour. Its three trailing masks are the same three
+                    // an attack has and reuse those controls; the two above them are its own.
+                    if hb.category == crate::data::CAT_SEARCH {
+                        if let Some(search) = hb.search.as_mut() {
+                            const_combo(
+                                ui,
+                                &mut search.collision_kind,
+                                "search_kind",
+                                "Looks for:",
+                                crate::param_labels::COLLISION_KIND_MASK,
+                            );
+                            const_combo(
+                                ui,
+                                &mut search.hit_status,
+                                "search_hit_status",
+                                "Counts states:",
+                                crate::param_labels::HIT_STATUS_MASK,
+                            );
+                        }
+                        ui.collapsing("Collision Masks", |ui| {
+                            situation_mask_combo(ui, &mut hb.situation_mask, "search_sit_mask");
+                            category_mask_combo(ui, &mut hb.category_mask, "search_cat_mask");
+                            part_mask_combo(ui, &mut hb.part_mask, "search_part_mask");
                         });
                         ui.collapsing("Effect / Sound", |ui| {
                             collision_attr_combo(ui, &mut hb.collision_attr, "col_attr");
@@ -6740,6 +6799,7 @@ impl VisionaryApp {
             wind: None,
             catch: None,
             abs: None,
+            search: None,
         })
     }
 
@@ -6850,6 +6910,86 @@ impl VisionaryApp {
             // Open until a clear (or another hitbox with this id) ends it.
             active_end: u32::MAX,
             category: 1,
+            ..Default::default()
+        })
+    }
+
+    /// `SEARCH` capture → a detection box, through this family's own slots.
+    ///
+    /// The live stack carries whatever the running script pushed, so a vanilla call arrives with
+    /// the 14-argument shape and everything after the geometry sits three slots earlier.
+    ///
+    /// The signal here is the **argument count**, not the shape of the value — which is the
+    /// difference from the parser. In source text a capsule slot is visibly a coordinate and the
+    /// argument after an omitted capsule is visibly a `*CONST`; on the wire both are just
+    /// numbers, and the tail's leading masks read as perfectly good floats. Testing the value
+    /// gave a 14-argument call a capsule of `[2.0, 1.0, 60.0]` — its own collision kind, hit
+    /// status and undocumented int, bent into geometry.
+    fn hitbox_from_capture_search(
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        bone_rev: &HashMap<u64, String>,
+    ) -> Option<crate::data::Hitbox> {
+        use crate::param_labels as pl;
+        if args.len() < 8 {
+            return None;
+        }
+        let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32());
+        let i64_at = |i: usize| args.get(i).and_then(|a| a.as_i64());
+        let bone_hash = args.get(2).and_then(|a| a.as_hash())?;
+        let bone_name = bone_rev
+            .get(&bone_hash)
+            .cloned()
+            .unwrap_or_else(|| format!("{bone_hash:#x}"));
+        // 17 slots means the capsule triple is present; 14 means it was never pushed.
+        let has_capsule_slots = args.len() >= 17;
+        let capsule_end = match (f32_at(7), f32_at(8), f32_at(9)) {
+            (Some(x), Some(y), Some(z)) if has_capsule_slots => Some([x, y, z]),
+            _ => None,
+        };
+        let tail = if has_capsule_slots { 10 } else { 7 };
+        let konst = |i: usize, table: pl::ConstTable, default: &str| {
+            i64_at(i)
+                .and_then(|v| pl::const_name(table, v))
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| default.to_string())
+        };
+        Some(crate::data::Hitbox {
+            id: i64_at(0).unwrap_or(0) as u32,
+            part: i64_at(1).unwrap_or(0) as u32,
+            bone_name,
+            size: f32_at(3).unwrap_or(2.0),
+            offset_x: f32_at(4).unwrap_or(0.0),
+            offset_y: f32_at(5).unwrap_or(0.0),
+            offset_z: f32_at(6).unwrap_or(0.0),
+            capsule_end,
+            situation_mask: konst(tail + 3, pl::SITUATION_MASK, "COLLISION_SITUATION_MASK_GA"),
+            category_mask: konst(tail + 4, pl::CATEGORY_MASK, "COLLISION_CATEGORY_MASK_ALL"),
+            part_mask: konst(tail + 5, pl::PART_MASK, "COLLISION_PART_MASK_ALL"),
+            search: Some(crate::data::SearchExtras {
+                collision_kind: konst(
+                    tail,
+                    pl::COLLISION_KIND_MASK,
+                    crate::data::SEARCH_DEFAULT_COLLISION_KIND,
+                ),
+                hit_status: konst(
+                    tail + 1,
+                    pl::HIT_STATUS_MASK,
+                    crate::data::SEARCH_DEFAULT_HIT_STATUS,
+                ),
+                unk: i64_at(tail + 2).unwrap_or(0),
+                unk2: i64_at(tail + 6).is_some_and(|v| v != 0),
+            }),
+            // A detection box deals nothing — zero the attack-only fields.
+            damage: 0.0,
+            angle: 0,
+            kb_scaling: 0,
+            fkb: 0,
+            kb_base: 0,
+            active_start: Self::motion_to_script_frame(frame),
+            // Nothing ends a search volume, so it stays open.
+            active_end: u32::MAX,
+            category: crate::data::CAT_SEARCH,
             ..Default::default()
         })
     }
@@ -7090,6 +7230,19 @@ impl VisionaryApp {
                 if let Some(hb) = Self::hitbox_from_capture_grab(&line.args, line.frame, bone_rev) {
                     if !hitboxes.iter().any(|h| {
                         h.category == 1 && h.id == hb.id && h.active_start == hb.active_start
+                    }) {
+                        hitboxes.push(hb);
+                    }
+                }
+            // Name equality, not a prefix: `SET_SEARCH_SIZE_EXIST` is a different function with
+            // two arguments, and reading it through the box layout would invent a collision.
+            } else if line.func == "SEARCH" {
+                if let Some(hb) = Self::hitbox_from_capture_search(&line.args, line.frame, bone_rev)
+                {
+                    if !hitboxes.iter().any(|h| {
+                        h.category == crate::data::CAT_SEARCH
+                            && h.id == hb.id
+                            && h.active_start == hb.active_start
                     }) {
                         hitboxes.push(hb);
                     }
@@ -7403,6 +7556,8 @@ impl VisionaryApp {
         let fam_prefix = |cat: u8| match cat {
             1 => "CATCH",
             2 => "AREA_WIND",
+            // Not a prefix of anything else: `SET_SEARCH_SIZE_EXIST` starts with `SET_`.
+            crate::data::CAT_SEARCH => "SEARCH",
             _ => "ATTACK",
         };
         let donor_for = |cat: u8, id: u32| {
@@ -7447,7 +7602,7 @@ impl VisionaryApp {
                         let (fs, fe) = win(p.active_start);
                         rules.push(crate::game_link::HitboxRuleWire {
                             motion,
-                            category: p.category,
+                            category: crate::game_link::wire_category(p.category),
                             hitbox_id: Some(p.id as u64),
                             suppress: false,
                             frame_start: fs,
@@ -7468,7 +7623,7 @@ impl VisionaryApp {
             let (fs, fe) = win(p.active_start);
             rules.push(crate::game_link::HitboxRuleWire {
                 motion,
-                category: p.category,
+                category: crate::game_link::wire_category(p.category),
                 hitbox_id: Some(p.id as u64),
                 suppress: true,
                 frame_start: fs,
@@ -7487,6 +7642,7 @@ impl VisionaryApp {
             let args = match h.category {
                 1 => Self::build_catch_args(h, donor_for(1, h.id)),
                 2 => Self::build_wind_args(h),
+                crate::data::CAT_SEARCH => Self::build_search_args(h),
                 _ => Self::build_attack_args(h, donor_for(0, h.id)),
             };
             let command = Self::inject_command(h);
@@ -7494,7 +7650,7 @@ impl VisionaryApp {
                 Some(args) => {
                     rules.push(crate::game_link::HitboxRuleWire {
                         motion,
-                        category: h.category,
+                        category: crate::game_link::wire_category(h.category),
                         hitbox_id: None,
                         suppress: false,
                         frame_start: None,
@@ -7509,7 +7665,7 @@ impl VisionaryApp {
                     if let Some(end) = Self::collision_end_injection(h) {
                         rules.push(crate::game_link::HitboxRuleWire {
                             motion,
-                            category: h.category,
+                            category: crate::game_link::wire_category(h.category),
                             hitbox_id: None,
                             suppress: false,
                             frame_start: None,
@@ -7752,6 +7908,7 @@ impl VisionaryApp {
             let family_prefix = |category: u8| match category {
                 1 => "CATCH",
                 2 => "AREA_WIND",
+                crate::data::CAT_SEARCH => "SEARCH",
                 _ => "ATTACK",
             };
             let donor_for = |category: u8, id: u32| {
@@ -7798,7 +7955,7 @@ impl VisionaryApp {
                                 Self::rule_frame_window(original.active_start);
                             rules.push(crate::game_link::HitboxRuleWire {
                                 motion,
-                                category: original.category,
+                                category: crate::game_link::wire_category(original.category),
                                 hitbox_id: Some(original.id as u64),
                                 suppress: false,
                                 frame_start,
@@ -7817,7 +7974,7 @@ impl VisionaryApp {
                 let (frame_start, frame_end) = Self::rule_frame_window(original.active_start);
                 rules.push(crate::game_link::HitboxRuleWire {
                     motion,
-                    category: original.category,
+                    category: crate::game_link::wire_category(original.category),
                     hitbox_id: Some(original.id as u64),
                     suppress: true,
                     frame_start,
@@ -7839,7 +7996,7 @@ impl VisionaryApp {
                 if let Some(args) = args {
                     rules.push(crate::game_link::HitboxRuleWire {
                         motion,
-                        category: edited.category,
+                        category: crate::game_link::wire_category(edited.category),
                         hitbox_id: None,
                         suppress: false,
                         frame_start: None,
@@ -7854,7 +8011,7 @@ impl VisionaryApp {
                     if let Some(end) = Self::collision_end_injection(edited) {
                         rules.push(crate::game_link::HitboxRuleWire {
                             motion,
-                            category: edited.category,
+                            category: crate::game_link::wire_category(edited.category),
                             hitbox_id: None,
                             suppress: false,
                             frame_start: None,
@@ -8099,6 +8256,52 @@ impl VisionaryApp {
         Some(args)
     }
 
+    /// The 17 slots `sv_animcmd::SEARCH` expects, for injecting a detection box.
+    ///
+    /// Always the full arity, capsule included, even though 4 of the 7 vanilla calls are
+    /// written with 14. The plugin invokes the function directly rather than going through the
+    /// smashline wrapper, so what it pushes *is* the argument list — a short push would leave
+    /// the trailing masks reading whatever the previous call left on the stack.
+    fn build_search_args(h: &crate::data::Hitbox) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::game_link::LuaArgWire as A;
+        use crate::param_labels as pl;
+        let call = h.to_search_call();
+        let (x2, y2, z2) = match call.capsule_end {
+            Some([x, y, z]) => (A::Num(x), A::Num(y), A::Num(z)),
+            None => (A::Nil, A::Nil, A::Nil),
+        };
+        Some(vec![
+            A::Int(call.id as i64),
+            A::Int(call.part as i64),
+            A::Hash(hash40::hash40(&call.bone_name.to_lowercase()).0),
+            A::Num(call.size),
+            A::Num(call.offset_x),
+            A::Num(call.offset_y),
+            A::Num(call.offset_z),
+            x2,
+            y2,
+            z2,
+            // `?` rather than a fallback: a mask that will not resolve means the box would be
+            // injected looking for something other than what the panel shows. Sending nothing
+            // leaves the vanilla call running, which is wrong in a way the user can see.
+            A::Int(pl::encode_const(
+                pl::COLLISION_KIND_MASK,
+                &call.extras.collision_kind,
+            )?),
+            // The mask table, not `HIT_STATUS` — they overlap numerically and mean different
+            // things. See the note on `param_labels::HIT_STATUS_MASK`.
+            A::Int(pl::encode_const(
+                pl::HIT_STATUS_MASK,
+                &call.extras.hit_status,
+            )?),
+            A::Int(call.extras.unk),
+            A::Int(pl::encode_const(pl::SITUATION_MASK, &call.situation_mask)?),
+            A::Int(pl::encode_const(pl::CATEGORY_MASK, &call.category_mask)?),
+            A::Int(pl::encode_const(pl::PART_MASK, &call.part_mask)?),
+            A::Bool(call.extras.unk2),
+        ])
+    }
+
     fn build_wind_args(h: &crate::data::Hitbox) -> Option<Vec<crate::game_link::LuaArgWire>> {
         h.wind.as_ref().filter(|wind| wind.is_valid()).map(|wind| {
             wind.args
@@ -8118,7 +8321,10 @@ impl VisionaryApp {
     /// that is not one of the rare throw-piercing ones.
     fn inject_command(h: &crate::data::Hitbox) -> Option<String> {
         match h.category {
-            1 => None,
+            // The category already names the function for these two, and `func` holds the
+            // `ATTACK` default a non-attack box was built with — sending it would ask the
+            // plugin to fire a grab through `sv_animcmd::ATTACK`.
+            1 | crate::data::CAT_SEARCH => None,
             2 => h.wind.as_ref().map(|wind| wind.command.clone()),
             _ => Some(h.func.clone()),
         }
@@ -12852,6 +13058,7 @@ fn rebuild_script_from_hitboxes(
                             ExcuteStmt::Attack(_)
                             | ExcuteStmt::Catch(_)
                             | ExcuteStmt::AttackAbs(_)
+                            | ExcuteStmt::Search(_)
                             | ExcuteStmt::Wind(_)
                             | ExcuteStmt::EraseWind(_)
                             | ExcuteStmt::Clear(_)
@@ -12935,6 +13142,15 @@ fn rebuild_script_from_hitboxes(
                         .or_default()
                         .push(ExcuteStmt::AttackAbs(call));
                 }
+            }
+            // Also no end event, and for a stronger reason than `ATTACK_ABS`: there is no
+            // macro that ends a search volume at all. Kirby's inhale closes one from the
+            // status code, which no ACMD script can reach.
+            crate::data::CAT_SEARCH => {
+                spawns
+                    .entry(start)
+                    .or_default()
+                    .push(ExcuteStmt::Search(hitbox.to_search_call()));
             }
             1 => {
                 spawns
@@ -14179,6 +14395,118 @@ mod live_effect_capture_tests {
             exported.contains("macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);"),
             "{exported}"
         );
+    }
+
+    /// A captured `SEARCH` reads its tail from where the live stack actually put it.
+    ///
+    /// A vanilla script pushes the 14-argument shape; the editor's own injection pushes 17.
+    /// Both reach this reader, and everything after the geometry sits three slots apart between
+    /// them — so a fixed offset would read one of the two with the situation mask in the
+    /// collision-kind slot and still produce a plausible box.
+    #[test]
+    fn a_captured_search_box_reads_its_masks_from_the_shape_it_arrived_in() {
+        let bone = hash40::hash40("top").0;
+        let bone_rev: HashMap<u64, String> = [(bone, "top".to_string())].into_iter().collect();
+        let kind = *crate::param_labels::COLLISION_KIND_MASK
+            .iter()
+            .find(|(n, _)| *n == "COLLISION_KIND_MASK_HIT")
+            .map(|(_, v)| v)
+            .unwrap();
+        let status = *crate::param_labels::HIT_STATUS_MASK
+            .iter()
+            .find(|(n, _)| *n == "HIT_STATUS_MASK_NORMAL")
+            .map(|(_, v)| v)
+            .unwrap();
+        let situation = *crate::param_labels::SITUATION_MASK
+            .iter()
+            .find(|(n, _)| *n == "COLLISION_SITUATION_MASK_GA")
+            .map(|(_, v)| v)
+            .unwrap();
+        let category = *crate::param_labels::CATEGORY_MASK
+            .iter()
+            .find(|(n, _)| *n == "COLLISION_CATEGORY_MASK_ALL")
+            .map(|(_, v)| v)
+            .unwrap();
+        let part = *crate::param_labels::PART_MASK
+            .iter()
+            .find(|(n, _)| *n == "COLLISION_PART_MASK_ALL")
+            .map(|(_, v)| v)
+            .unwrap();
+        let tail = vec![
+            A::Int(kind),
+            A::Int(status),
+            A::Int(60),
+            A::Int(situation),
+            A::Int(category),
+            A::Int(part),
+            A::Int(0),
+        ];
+
+        let geometry = vec![
+            A::Int(3),
+            A::Int(0),
+            A::Hash(bone),
+            A::Num(7.5),
+            A::Num(0.0),
+            A::Num(7.0),
+            A::Num(4.0),
+        ];
+        // The shape a vanilla script pushes: no capsule slots at all.
+        let mut short = geometry.clone();
+        short.extend(tail.clone());
+        // The shape the editor injects: capsule slots present.
+        let mut long = geometry;
+        long.extend([A::Num(0.0), A::Num(7.0), A::Num(13.0)]);
+        long.extend(tail);
+
+        for (label, args, capsule) in [
+            ("short", short, None),
+            ("long", long, Some([0.0, 7.0, 13.0])),
+        ] {
+            let hb = VisionaryApp::hitbox_from_capture_search(&args, 1.0, &bone_rev)
+                .unwrap_or_else(|| panic!("{label} form did not parse"));
+            assert_eq!(hb.category, crate::data::CAT_SEARCH, "{label}");
+            assert_eq!(hb.id, 3, "{label}");
+            assert_eq!(hb.size, 7.5, "{label}");
+            assert_eq!(hb.capsule_end, capsule, "{label}");
+            // The tail landed where it belongs in both shapes — this is the whole point.
+            assert_eq!(hb.situation_mask, "COLLISION_SITUATION_MASK_GA", "{label}");
+            assert_eq!(hb.category_mask, "COLLISION_CATEGORY_MASK_ALL", "{label}");
+            let extras = hb.search.as_ref().expect("extras");
+            assert_eq!(extras.collision_kind, "COLLISION_KIND_MASK_HIT", "{label}");
+            assert_eq!(extras.hit_status, "HIT_STATUS_MASK_NORMAL", "{label}");
+            assert_eq!(extras.unk, 60, "{label}");
+        }
+    }
+
+    /// A collision goes on the wire under the category the *plugin* matches, not its own.
+    ///
+    /// The two numbering spaces agree for attack, grab and wind and then stop: the editor's
+    /// `CAT_ABS` is 3, which is the plugin's hurtbox category. Sending the display number
+    /// straight out meant every live throw-damage edit was read as a hurtbox rule and silently
+    /// did nothing. A search box would have collided with `ATTACK_ABS` the same way.
+    #[test]
+    fn a_collisions_wire_category_is_the_one_the_plugin_matches() {
+        use crate::game_link::{wire_category, CAT_ABS, CAT_SEARCH};
+        // Unchanged where the spaces agree.
+        assert_eq!(wire_category(0), 0);
+        assert_eq!(wire_category(1), 1);
+        assert_eq!(wire_category(2), 2);
+        // Translated where they do not.
+        assert_eq!(wire_category(crate::data::CAT_ABS), CAT_ABS);
+        assert_eq!(wire_category(crate::data::CAT_SEARCH), CAT_SEARCH);
+        // The two that used to collide now differ, and neither lands on the hurtbox category.
+        assert_ne!(
+            wire_category(crate::data::CAT_ABS),
+            wire_category(crate::data::CAT_SEARCH)
+        );
+        for display in [crate::data::CAT_ABS, crate::data::CAT_SEARCH] {
+            assert_ne!(
+                wire_category(display),
+                3,
+                "category {display} would be read as a hurtbox rule"
+            );
+        }
     }
 
     /// A captured modifier keeps its id and value in the slots its signature declares.

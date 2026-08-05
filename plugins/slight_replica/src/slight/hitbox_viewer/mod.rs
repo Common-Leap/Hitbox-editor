@@ -123,6 +123,9 @@ const ATTACK_ARGC: i32 = 36;
 const CATCH_ARGC: i32 = 11;
 /// `ATTACK_ABS` takes sixteen — a different family, not a short `ATTACK`.
 const ATTACK_ABS_ARGC: i32 = 16;
+/// `SEARCH`: id, part, bone, size, x/y/z, the capsule triple, collision kind, hit status, an
+/// undocumented int, then the situation/category/part masks and a trailing flag.
+const SEARCH_ARGC: i32 = 17;
 /// Max args to probe for the AREA_WIND family (all floats, variable arity 8..10).
 const WIND_ARGC_MAX: i32 = 12;
 
@@ -159,6 +162,14 @@ pub const CAT_ATK_POWER: u8 = 5;
 /// `ATK_SET_SHIELD_SETOFF_MUL` — scale the shield push-off of a hitbox already out.
 /// **Must equal the editor's `game_link::CAT_ATK_SETOFF_MUL`.**
 pub const CAT_ATK_SETOFF_MUL: u8 = 6;
+
+/// `SEARCH` — a detection volume. Keyed by its id, like an attack hitbox.
+///
+/// **Must equal the editor's `game_link::CAT_SEARCH`.** Note that a search box's *display*
+/// category in the editor is `4`, which is this file's [`CAT_ABS`]: the two numbering spaces
+/// stopped agreeing at `ATTACK_ABS`, and the editor now converts with
+/// `game_link::wire_category`. A category on the wire is not a `Hitbox.category`.
+pub const CAT_SEARCH: u8 = 7;
 
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
@@ -1061,6 +1072,89 @@ unsafe fn hook_catch(lua_state: u64) {
     original!()(lua_state);
 }
 
+// ── SEARCH (detection volume) hook ───────────────────────────────────────────
+
+/// Rewrite a `SEARCH` call's geometry in place.
+///
+/// The capsule slots are only touched when the live call actually has them. A vanilla script
+/// pushes the 14-argument shape, where slot 7 is `collision_kind` — writing an endpoint there
+/// would leave the box looking for something the editor never asked for. This is the same trap
+/// the parser and the write-back each have their own guard for; here the signal is the argument
+/// count, because that is what a live stack carries.
+unsafe fn rewrite_search_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg]) {
+    let mut vals: Vec<LuaArg> = args.to_vec();
+    let has_capsule_slots = vals.len() >= SEARCH_ARGC as usize;
+    let set = |idx: usize, v: Option<f32>, vals: &mut Vec<LuaArg>| {
+        if let Some(v) = v {
+            if idx < vals.len() {
+                vals[idx] = LuaArg::Num(v);
+            }
+        }
+    };
+    if let Some(bone) = ov.bone {
+        if vals.len() > 2 {
+            vals[2] = LuaArg::Hash(bone);
+        }
+    }
+    set(3, ov.size, &mut vals);
+    set(4, ov.x, &mut vals);
+    set(5, ov.y, &mut vals);
+    set(6, ov.z, &mut vals);
+    if has_capsule_slots {
+        if ov.capsule == Some(false) {
+            for idx in 7..=9 {
+                vals[idx] = LuaArg::Nil;
+            }
+        } else {
+            set(7, ov.x2, &mut vals);
+            set(8, ov.y2, &mut vals);
+            set(9, ov.z2, &mut vals);
+        }
+    }
+
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    for v in &vals {
+        let mut l2c = v.to_l2c();
+        agent.push_lua_stack(&mut l2c);
+    }
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::SEARCH)]
+unsafe fn hook_search(lua_state: u64) {
+    let args = read_args_exact(lua_state, SEARCH_ARGC);
+    if args.len() >= 8 {
+        record(lua_state, "SEARCH", &args);
+        if any_rules() {
+            let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                as *mut smash::app::BattleObjectModuleAccessor;
+            if !boma.is_null() {
+                let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                // Same Int-or-Num tolerance `CATCH` needs: how the id arrives depends on how
+                // the script pushed it, and an Int-only read misses float ids entirely.
+                let id = match args.first() {
+                    Some(LuaArg::Int(i)) => *i as u64,
+                    Some(LuaArg::Num(n)) => *n as u64,
+                    _ => u64::MAX,
+                };
+                if let Some((suppress, overrides)) = action_for(CAT_SEARCH, motion, id, frame) {
+                    crate::slight::diag::note(format!(
+                        "search rule hit (motion {motion:#x} id {id} frame {frame:.1} suppress {suppress})"
+                    ));
+                    if suppress {
+                        return;
+                    }
+                    if let Some(ov) = overrides {
+                        rewrite_search_args(lua_state, &ov, &args);
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state);
+}
+
 // ── WIND (AREA_WIND family) hooks ────────────────────────────────────────────
 // Arity and layout are exact: id, four wind-physics values, object-relative X/Y, then
 // radius (RAD) or width/height (rectangle), with an optional final lifetime.
@@ -1589,6 +1683,16 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 ));
                 continue;
             }
+            // The editor always sends the full arity for a search box. Firing a short one
+            // would leave the trailing masks reading whatever the last call left behind, so
+            // a mismatch is refused rather than padded with guesses.
+            if category == CAT_SEARCH && args.len() != SEARCH_ARGC as usize {
+                crate::slight::diag::note(format!(
+                    "rejected search injection with {} args (expected {SEARCH_ARGC})",
+                    args.len()
+                ));
+                continue;
+            }
             for a in &args {
                 let mut v = a.to_l2c();
                 agent.push_lua_stack(&mut v);
@@ -1599,6 +1703,7 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 let _g = InjectGuard::new();
                 match category {
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
+                    CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
                     CAT_WIND => match inj.command.as_deref() {
                         Some("AREA_WIND_2ND_RAD") => {
                             smash::app::sv_animcmd::AREA_WIND_2ND_RAD(agent.lua_state_agent)
@@ -1647,6 +1752,7 @@ pub fn install() {
         hook_attack,
         hook_attack_ignore_throw,
         hook_catch,
+        hook_search,
         hook_wind_2nd,
         hook_wind_2nd_rad,
         hook_wind_2nd_rad_arg9,
@@ -1663,6 +1769,6 @@ pub fn install() {
         hook_atk_set_shield_setoff_mul
     );
     skyline::println!(
-        "[SLight] ACMD ATTACK/CATCH/WIND/CLEAR/HURT/ATKMOD hooks installed (capture + rules)"
+        "[SLight] ACMD ATTACK/CATCH/SEARCH/WIND/CLEAR/HURT/ATKMOD hooks installed (capture + rules)"
     );
 }

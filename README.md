@@ -295,6 +295,34 @@ Two commands that look like they belong here do not. `ATK_HIT_ABS` and
 vanilla `ATK_HIT_ABS` also passes local variables rather than values, so there is
 nothing to edit either. Both are carried through an export exactly as written.
 
+**Detection boxes** — `SEARCH` — are collisions that hit nothing. A search volume
+has the same geometry a grab box does, and it is drawn in amber to keep that
+distinction visible: it looks like a hitbox and cannot damage anyone. What it
+*does* is report that something is inside it, and what the fighter does about
+that lives in the status code, which no ACMD script can reach. Kirby's inhale is
+the clearest example — a grab box, a detection box and the swallow's damage all
+come out in the same frame, all three numbered 0.
+
+Alongside the geometry you can edit what the volume looks for and which hurtbox
+states count as found. Note that these use the `HIT_STATUS_MASK_*` constants,
+which are a different set from the `HIT_STATUS_*` states in the hurtbox section
+above and overlap them numerically — `HIT_STATUS_MASK_NORMAL` is 1, the same
+number as `HIT_STATUS_INVINCIBLE`. They are different arguments to different
+commands; the editor keeps them apart and so should you.
+
+Nothing ends a search volume, so one has no end frame: there is no macro that
+takes it back, and the two vanilla scripts that do close one close it from the
+status code. A box therefore runs to the end of the move, which is what the
+script actually says rather than a frame invented for the timeline.
+
+`SEARCH` is written two ways in the game's own scripts — with and without its
+three capsule-endpoint arguments — and four of the seven vanilla calls use the
+shorter one. Adding a capsule to a call written without the slots needs three new
+arguments rather than a changed one, so that edit is reported and lands in an
+export instead of being written into your source. `SET_SEARCH_SIZE_EXIST`, which
+re-sizes a box already out, is not modelled: it belongs with the hitbox tuning
+above rather than here, and no vanilla script uses it.
+
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour

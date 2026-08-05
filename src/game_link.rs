@@ -279,6 +279,33 @@ pub const HURT_KEY_COL_PRI: u64 = u64::MAX;
 /// arrived at from the other direction. **Must equal the plugin's value.**
 pub const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
 
+/// Wire category for `ATTACK_ABS`. **Must equal the plugin's `CAT_ABS`.**
+///
+/// Deliberately *not* [`crate::data::CAT_ABS`], which is `3`. These are two different numbering
+/// spaces that happen to agree for attack, grab and wind: the editor's numbers only cover things
+/// that are [`crate::data::Hitbox`]es, while the wire's also carry hurtbox state, which took `3`
+/// first. They were assumed identical, so every live `ATTACK_ABS` edit went out as category `3`
+/// and reached the plugin's hurtbox hook instead — B1's live surface has never worked.
+pub const CAT_ABS: u8 = 4;
+
+/// Wire category for `SEARCH`. **Must equal the plugin's value.**
+pub const CAT_SEARCH: u8 = 7;
+
+/// Translate a [`crate::data::Hitbox`]'s display category into the one the plugin matches on.
+///
+/// Every place that puts a collision on the wire goes through this. Passing the display number
+/// straight out is what aimed throw-damage rules at the hurtbox hook, and the two spaces diverge
+/// further with each family added — so the conversion is explicit rather than an identity that
+/// happens to be right for the first three.
+pub fn wire_category(display: u8) -> u8 {
+    match display {
+        crate::data::CAT_ABS => CAT_ABS,
+        crate::data::CAT_SEARCH => CAT_SEARCH,
+        // Attack, grab and wind agree in both spaces.
+        other => other,
+    }
+}
+
 /// Wire category for `ATK_POWER`. **Must equal the plugin's value.**
 ///
 /// The two post-hoc modifiers get a category each rather than sharing one keyed by hitbox id.

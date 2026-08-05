@@ -1164,6 +1164,10 @@ pub fn rewrite_hitboxes(
         .collect();
     let catches: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "CATCH").collect();
     let abs: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "ATTACK_ABS").collect();
+    // Name equality, not a prefix: `SET_SEARCH_SIZE_EXIST` is a two-argument modifier, and
+    // retuning it through the 17-slot box layout is exactly the cross-family write this
+    // per-family split exists to prevent.
+    let searches: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "SEARCH").collect();
     let winds: Vec<&MacroSite> = sites
         .iter()
         .filter(|s| crate::data::is_wind_command(&s.name))
@@ -1248,14 +1252,27 @@ pub fn rewrite_hitboxes(
             ));
             continue;
         }
-        // `CATCH` takes no `part`, so a grab box is keyed on its id alone.
+        // `CATCH` takes no `part`, so a grab box is keyed on its id alone. `SEARCH` takes both,
+        // and is keyed like an `ATTACK` — but against its own calls, since kirby/SpecialNStart
+        // opens a `CATCH`, a `SEARCH` and an `ATTACK_ABS` all carrying id 0 in one block.
         let is_grab = hitbox.category == 1;
+        let is_search = hitbox.category == crate::data::CAT_SEARCH;
         let matching: Vec<&MacroSite> = if is_grab {
             catches
                 .iter()
                 .copied()
                 .filter(|site| {
                     site.arg(text, 1).and_then(|a| a.trim().parse::<u32>().ok()) == Some(before.id)
+                })
+                .collect()
+        } else if is_search {
+            searches
+                .iter()
+                .copied()
+                .filter(|site| {
+                    site.arg(text, 1).and_then(|a| a.trim().parse::<u32>().ok()) == Some(before.id)
+                        && site.arg(text, 2).and_then(|a| a.trim().parse::<u32>().ok())
+                            == Some(before.part)
                 })
                 .collect()
         } else {
@@ -1294,6 +1311,8 @@ pub fn rewrite_hitboxes(
         }
         let (call_edits, missing) = if is_grab {
             catch_edits(text, macro_site, before, hitbox)
+        } else if is_search {
+            search_edits(text, macro_site, before, hitbox)
         } else {
             attack_edits(text, macro_site, before, hitbox)
         };
@@ -1643,6 +1662,134 @@ fn apply_slots(
             ArgValue::Text(v) => text_edit(text, span, v),
         };
         edits.extend(edit);
+    }
+    (edits, missing)
+}
+
+/// Replacements for the arguments of one `SEARCH` call that the user actually changed.
+///
+/// A detection box's editable properties are its geometry, what it looks for, which hurtbox
+/// states it counts, and its three trailing masks. The two undocumented slots have no control
+/// and are never written; see [`crate::data::SearchExtras`].
+///
+/// The tail moves. `SEARCH` is dumped both with and without its three capsule arguments, and 4
+/// of the corpus's 7 calls are the short form, so every argument after the geometry sits three
+/// slots earlier in one shape than the other. Locating them by a fixed number would write the
+/// situation mask over the hit status — a call that still compiles and detects the wrong thing,
+/// which is the failure mode this file exists to refuse.
+fn search_edits(
+    text: &str,
+    site: &MacroSite,
+    before: &crate::data::Hitbox,
+    after: &crate::data::Hitbox,
+) -> (Vec<Replacement>, Vec<&'static str>) {
+    let bone = format!("Hash40::new(\"{}\")", after.bone_name.to_ascii_lowercase());
+    let capsule = |axis: usize| match after.capsule_end {
+        Some(end) => format!("Some({:.1})", end[axis]),
+        None => "None".to_string(),
+    };
+    let has_capsule_slots = site.arg(text, 8).is_some_and(crate::acmd::is_capsule_slot);
+    let capsule_changed = before.capsule_end != after.capsule_end;
+    let capsule_writable = capsule_changed && has_capsule_slots;
+    let tail = if has_capsule_slots { 11 } else { 8 };
+    let konst = |slot: usize, field: &'static str, was: &str, now: &str| {
+        (
+            slot,
+            field,
+            was != now,
+            ArgValue::Text(crate::acmd::const_expr(now)),
+        )
+    };
+    // A box with no extras at all can only come from a capture; fall back to the same stand-ins
+    // the export uses, so "unchanged" means the same thing on both paths.
+    let extras = |hb: &crate::data::Hitbox| {
+        hb.search
+            .clone()
+            .unwrap_or_else(|| crate::data::Hitbox::default().to_search_call().extras)
+    };
+    let (was, now) = (extras(before), extras(after));
+    let slots: [(usize, &'static str, bool, ArgValue); 14] = [
+        (
+            3,
+            "bone",
+            before.bone_name != after.bone_name,
+            ArgValue::Text(bone),
+        ),
+        (
+            4,
+            "size",
+            before.size != after.size,
+            ArgValue::Float(after.size),
+        ),
+        (
+            5,
+            "x offset",
+            before.offset_x != after.offset_x,
+            ArgValue::Float(after.offset_x),
+        ),
+        (
+            6,
+            "y offset",
+            before.offset_y != after.offset_y,
+            ArgValue::Float(after.offset_y),
+        ),
+        (
+            7,
+            "z offset",
+            before.offset_z != after.offset_z,
+            ArgValue::Float(after.offset_z),
+        ),
+        (
+            8,
+            "capsule end",
+            capsule_writable,
+            ArgValue::Text(capsule(0)),
+        ),
+        (
+            9,
+            "capsule end",
+            capsule_writable,
+            ArgValue::Text(capsule(1)),
+        ),
+        (
+            10,
+            "capsule end",
+            capsule_writable,
+            ArgValue::Text(capsule(2)),
+        ),
+        konst(
+            tail,
+            "collision kind",
+            &was.collision_kind,
+            &now.collision_kind,
+        ),
+        konst(tail + 1, "hit status", &was.hit_status, &now.hit_status),
+        konst(
+            tail + 3,
+            "situation mask",
+            &before.situation_mask,
+            &after.situation_mask,
+        ),
+        konst(
+            tail + 4,
+            "category mask",
+            &before.category_mask,
+            &after.category_mask,
+        ),
+        konst(tail + 5, "part mask", &before.part_mask, &after.part_mask),
+        (
+            1,
+            "id",
+            before.id != after.id,
+            ArgValue::Int(after.id as i64),
+        ),
+    ];
+    let (edits, mut missing) = apply_slots(text, site, &slots);
+    // Same refusal `catch_edits` makes: adding a capsule to a call written without the slots
+    // needs three arguments inserted, which a slot rewrite cannot do. Writing them anyway
+    // would put `Some(1.0)` over `*COLLISION_KIND_MASK_ATTACK`.
+    if capsule_changed && !has_capsule_slots && !missing.contains(&"capsule end") {
+        missing.push("capsule end");
     }
     (edits, missing)
 }
@@ -3793,6 +3940,112 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         // The two arguments no panel exposes are never touched.
         assert!(after.contains("*FIGHTER_STATUS_KIND_SWALLOWED"), "{after}");
         assert!(after.contains("*COLLISION_SITUATION_MASK_A"), "{after}");
+    }
+
+    /// A detection box is retuned through its own slots, in whichever shape it was written.
+    ///
+    /// The two calls here are the same box in the two forms the corpus uses, and the masks sit
+    /// three slots apart between them. Editing the same property in both is what proves the
+    /// tail is being located rather than assumed — a fixed slot number passes for one form and
+    /// silently writes the situation mask over the hit status in the other.
+    #[test]
+    fn a_search_box_is_retuned_through_the_shape_it_was_written_in() {
+        let text = r#"unsafe extern "C" fn game_search(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SEARCH(agent, 0, 0, Hash40::new("top"), 4.0, 0.0, 7.0, 8.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_ALL, 0, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_FIGHTER, *COLLISION_PART_MASK_ALL, false);
+        macros::SEARCH(agent, 1, 0, Hash40::new("top"), 7.5, 0.0, 7.0, 4.0, 0.0, 7.0, 13.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_NORMAL, 60, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        assert_eq!(pristine.len(), 2, "{pristine:#?}");
+
+        let mut edited = pristine.clone();
+        // The short-form box: edit a slot on each side of the absent capsule.
+        edited[0].size = 5.25;
+        edited[0].situation_mask = "COLLISION_SITUATION_MASK_G".into();
+        edited[0].search.as_mut().unwrap().collision_kind = "COLLISION_KIND_MASK_GRAB".into();
+        // The long-form box: the same two properties, three slots further along.
+        edited[1].offset_z = 6.5;
+        edited[1].category_mask = "COLLISION_CATEGORY_MASK_FIGHTER".into();
+        edited[1].search.as_mut().unwrap().hit_status = "HIT_STATUS_MASK_XLU".into();
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_hitboxes(),
+            edited,
+            "\n{after}"
+        );
+
+        // The two arguments no panel exposes are untouched in both shapes, and a property left
+        // alone on one box keeps what it had even though the other box changed it.
+        assert!(after.contains("*HIT_STATUS_MASK_ALL"), "{after}");
+        assert!(after.contains("*COLLISION_KIND_MASK_ATTACK"), "{after}");
+        assert!(
+            after.contains(", 60, "),
+            "the undocumented slot survives\n{after}"
+        );
+        assert!(after.contains("false);"), "{after}");
+    }
+
+    /// Giving a capsule to a search box with no capsule slots is reported, never written.
+    ///
+    /// Slot 8 holds `*COLLISION_KIND_MASK_ATTACK` in the short form. This is the same refusal
+    /// `CATCH` makes, and it is here as its own test because the slot number differs — a fix
+    /// applied to one family says nothing about the other.
+    #[test]
+    fn adding_a_capsule_to_a_short_form_search_is_refused() {
+        let text = r#"unsafe extern "C" fn game_search(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SEARCH(agent, 0, 0, Hash40::new("top"), 4.0, 0.0, 7.0, 8.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_ALL, 0, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_FIGHTER, *COLLISION_PART_MASK_ALL, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        let mut edited = pristine.clone();
+        edited[0].capsule_end = Some([1.0, 2.0, 3.0]);
+        edited[0].size = 9.0;
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert!(
+            after.contains("*COLLISION_KIND_MASK_ATTACK"),
+            "what the box looks for must survive a refused capsule edit\n{after}"
+        );
+        assert!(!after.contains("Some(1.0)"), "{after}");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("capsule end")),
+            "{report:?}"
+        );
+        assert!(after.contains("Hash40::new(\"top\"), 9.0,"), "{after}");
+    }
+
+    /// A search box never retunes the size modifier that shares its name.
+    ///
+    /// `SET_SEARCH_SIZE_EXIST(agent, 0, 7)` names the same id. Matching sites by prefix, or
+    /// pooling every collision into one candidate list, would write a bone hash into its size.
+    #[test]
+    fn a_search_edit_does_not_reach_the_search_size_modifier() {
+        let text = r#"unsafe extern "C" fn game_search(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SEARCH(agent, 0, 0, Hash40::new("top"), 4.0, 0.0, 7.0, 8.0, *COLLISION_KIND_MASK_ATTACK, *HIT_STATUS_MASK_ALL, 0, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_FIGHTER, *COLLISION_PART_MASK_ALL, false);
+        macros::SET_SEARCH_SIZE_EXIST(agent, 0, 7);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        assert_eq!(pristine.len(), 1, "only the box is a box\n{pristine:#?}");
+        let mut edited = pristine.clone();
+        edited[0].size = 5.5;
+        edited[0].bone_name = "ArmL".into();
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("macros::SET_SEARCH_SIZE_EXIST(agent, 0, 7);"),
+            "the modifier is left exactly as it was\n{after}"
+        );
+        assert!(after.contains("Hash40::new(\"arml\"), 5.5,"), "{after}");
     }
 
     /// Giving a capsule to a grab that has no capsule slots is reported, never written.
