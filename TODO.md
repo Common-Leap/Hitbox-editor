@@ -63,6 +63,21 @@ Two export paths, different rules — do not conflate them:
   `EffectStmt::Loop` in `eval_effect_stmts` are the two worked examples. **The tell is a count
   that is an exact multiple of the truth**, so check a new number against `main` in a worktree
   before believing it; a plausible number is the easiest kind to ship.
+- **A macro's name is not its family. Check `lua_const` before modelling it.** `COL_PRI` and
+  `COL_NORMAL` read as body collision for four tasks running, and B4 modelled them as hurtbox
+  statements on the strength of it. They are `MA_MSC_CMD_COLOR_BLEND_COL_PRI` and
+  `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL` — the `FLASH` family. Grepping `lua_const.rs` for the
+  macro's name takes a second and gives you the `MA_MSC_CMD_<FAMILY>_` prefix the game itself
+  files it under; that prefix is the answer to "which existing table does this belong in", and
+  it is usually a table you already have. The cost of guessing is not just a wrong doc comment:
+  it puts the control in the wrong panel and sends the fix down a new-type path when a one-row
+  path existed.
+- **Two builders that accept the same macro name export it twice.** A `CaptureLine` records no
+  source function, so every capture builder filters the one stream by name. While the name
+  tables are disjoint this is invisible; the moment a macro joins a second table, one live call
+  is written into two different exported functions. Adding a name to a table is therefore a
+  question about *every other* table too — grep the name across the builders before adding it,
+  and if two must claim it, make one of them claim it only in the case it truly needs.
 - **Two sources of truth for arity, and they disagree. You need both.**
   `/home/leap/.cargo/git/checkouts/smash-script-*/*/src/macros.rs` tells you what *compiles*,
   which is what an export must emit. The vanilla archive tells you what you must *parse* — and
@@ -170,7 +185,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**305 green after C6**), including the three corpus oracles — run
+- [ ] `cargo test` passes (**310 green after C6b**), including the three corpus oracles — run
       them by name with `cargo test cached_script` and `cargo test still_loses`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`, and
@@ -841,37 +856,51 @@ would have put add, delete and retime — the editor's actual value — at risk 
   nothing of that kind is live, so an unguarded stop for a guarded spawn is harmless — whereas a
   guarded stop would leave the effect running forever on the branch that skipped the guard.
 
-### [~] C6b — The 19 effect scripts the export still loses a line from
+### [~] C6b — The effect scripts the export still loses a line from
 
 C6 took the corpus from 28 lossy scripts to 19 and asserted the number, so this is what is
 left. Read C6's result table first — it says exactly which lines these are. Nothing here is
 large; the point of the entry is that the remainder has been *identified*, so it can be closed
 deliberately rather than discovered again.
 
-- **`COL_NORMAL`, 8 occurrences — the biggest item, and the cheapest.** These sit in `is_excute`
-  blocks that contain no spawn, so there is no call for them to ride on. B4 already modelled
-  `COL_NORMAL` and `COL_PRI` as `ExcuteStmt` for `game_` scripts; the same macros in an
-  `effect_` script have no typed form at all. Giving them one is the fix, and it is the same
-  shape as C3 — a non-spawn entry that shares the effect list. Note the two scripts are not the
-  same surface: do not assume the `game_` variant's panel work carries over.
+**`COL_NORMAL` is done (2026-08-04): 19 → 15, all 8 occurrences recovered.** The rest of this
+entry is still open.
 
-  **Measured 2026-08-04, and it changes the fix.** `COL_PRI` and `COL_NORMAL` are *colour-blend*
-  commands, not body collision. `lua_const.rs` names them `MA_MSC_CMD_COLOR_BLEND_COL_PRI` and
-  `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`, in a family of exactly six alongside `FLASH`,
-  `FLASH_FRM` and `FLASH_OFF`. So they are not merely "the same shape as C3" — they are C3's
-  family, and `COL_NORMAL` is the direct sibling of the `BURN_COLOR_NORMAL` already in
-  `COLOR_COMMANDS`. The fix is one row in that table, not a new type.
+- **[x] `COL_NORMAL`, 8 occurrences — the biggest item, and the cheapest.** These sat in
+  `is_excute` blocks that contain no spawn, so there was no call for them to ride on.
 
-  Two consequences worth carrying:
-  - All 10 occurrences are in `effect_` functions and **none in a `game_` function**, so B4's
-    `ExcuteStmt::ColPri` / `ColNormal` path has zero corpus backing. Its plumbing is fine — the
-    panel, the wire field and the plugin hook all move an `i64` correctly — but it calls the
-    value a *pushbox* priority and files it under hurtboxes, where it does not belong.
-  - `COL_PRI` is **not** in the loss list: both occurrences share an `is_excute` block with a
-    `FLASH`, so C6 already carries them as that call's `leading`. Folding it into
-    `COLOR_COMMANDS` too would need a third payload shape — it takes one integer, not a
-    transition and not an RGBA — so it is deliberately left carried. Do it only if something
-    else forces a `ColorCall` field anyway.
+  **The entry's premise was wrong, and checking it first is what made this a one-row change.**
+  `COL_PRI` and `COL_NORMAL` are *colour-blend* commands, not body collision: `lua_const` names
+  them `MA_MSC_CMD_COLOR_BLEND_COL_PRI` and `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`, in a family of
+  exactly six with `FLASH`, `FLASH_FRM` and `FLASH_OFF`. So `COL_NORMAL` is not merely "the same
+  shape as C3" — it is C3's family, and the direct sibling of the `BURN_COLOR_NORMAL` already in
+  `COLOR_COMMANDS`. One row in that table, no new type, and the panel, the emitter and the
+  write-back all picked it up untouched because two argument-free colour commands already shipped
+  through them.
+
+  What it actually cost beyond that row:
+  - **A plugin hook move, not an addition.** `sv_animcmd::COL_NORMAL` was *already* hooked, in
+    `hitbox_viewer`, next to `COL_PRI` and recording only. Only one hook may replace a symbol, so
+    the second one failed to link — which is the good failure. It now lives with the colour
+    family in `effect_viewer::acmd_hooks`, records identically, and additionally honours
+    suppression, so disabling a reset live is what it should be: the tint stays up.
+  - **A duplication a `CaptureLine` cannot resolve.** Capture lines do not record which function
+    ran them, so every builder filters the one stream by macro name — and two builders that
+    accept the same name export it into two different functions off one live call. The tables
+    happened to be disjoint until now. `hurtbox_script_from_captures` therefore takes
+    `COL_NORMAL` only while a `COL_PRI` it saw is open, which is the one thing that side still
+    needs it for. **Trap inside the trap:** the open/closed flag must be moved by that pair
+    alone. Reading it off every statement lets the `HIT_RESET_ALL` that so often shares the reset's
+    frame close the span first, and the existing capture test catches exactly that.
+  - **`COL_PRI` deliberately left alone.** It is not in the loss list — both occurrences share an
+    `is_excute` block with a `FLASH`, so C6 already carries them as that call's `leading`. Folding
+    it into `COLOR_COMMANDS` needs a third payload shape, since it takes one integer rather than a
+    transition or an RGBA. Do it only if something else forces a `ColorCall` field anyway.
+  - **The `game_` side is now correctly *labelled* but still oddly *placed*.** All ten corpus
+    occurrences of the pair are in `effect_` functions, so `ExcuteStmt::ColPri` / `ColNormal` has
+    no corpus backing at all. Its plumbing is fine and the panel no longer calls the value a
+    pushbox priority, but it still sits under hurtboxes. Moving it is a UI decision, not a
+    correctness one — left for whoever next touches that panel.
 - **`else {`, 5 occurrences — nested guards.** C6 keeps one guard per spawn and reports an inner
   one rather than overwriting the outer. Closing this means `EffectWalk::guard` becoming a stack
   and `EffectCall::guard` a `Vec<String>`. Cheap, but there is **no corpus case that exercises
@@ -882,13 +911,20 @@ deliberately rather than discovered again.
   carrying it shifts every effect after it. The honest close is to *model* it as a timing
   statement that the frame walk understands, which is E2's neighbourhood (`FT_MOTION_RATE`),
   not this one.
-- **`methodlib::L2CAgent::pop()`, 2, and the bare `EffectModule::` calls, ~4.** Genuine script
-  plumbing with no editor meaning. Worth leaving reported.
-- **Then reconsider** whether the C5 warning should become a blocker. C6 changed the arithmetic
-  behind that decision: it was a warning because a quarter of vanilla scripts tripped it, and
-  now one in seven does, of which half are the deliberate `wait_loop_sync_mot`. Still probably a
-  warning — but the reasoning in C5's entry is now out of date and should be re-derived rather
-  than re-quoted.
+- **`methodlib::L2CAgent::pop()`, 2, and the bare `EffectModule::remove_screen` calls, 2.**
+  Genuine script plumbing with no editor meaning. Worth leaving reported.
+- **`CANCEL_FILL_SCREEN`, 2 — the only one here with a real fix.** Unlike the plumbing above it
+  *is* wrapped in smash-script's `macros.rs`, so it is emittable, and it is the reset for the
+  `FILL_SCREEN_MODEL_COLOR` family C3 already models. Likely another `COLOR_COMMANDS`-shaped
+  row; check its arity against `macros.rs` before assuming it takes none.
+- **Then reconsider** whether the C5 warning should become a blocker. C6 and C6b both changed the
+  arithmetic behind that decision: it was a warning because a quarter of vanilla scripts tripped
+  it, and now under one in eight does, of which half are the deliberate `wait_loop_sync_mot`.
+  Still probably a warning — but the reasoning in C5's entry is now out of date and should be
+  re-derived rather than re-quoted.
+
+**Measured remainder after `COL_NORMAL`, 15 of 132 scripts:** `wait_loop_sync_mot` 7, `else {` 5,
+`methodlib::L2CAgent::pop()` 2, `CANCEL_FILL_SCREEN` 2, `EffectModule::remove_screen` 2.
 
 ### [ ] C6c — Close C5's export-path gap
 

@@ -1309,11 +1309,11 @@ unsafe fn hook_hit_reset_all(lua_state: u64) {
     original!()(lua_state)
 }
 
-#[skyline::hook(replace = smash::app::sv_animcmd::COL_NORMAL)]
-unsafe fn hook_col_normal(lua_state: u64) {
-    record(lua_state, "COL_NORMAL", &[]);
-    original!()(lua_state)
-}
+// `COL_NORMAL` was hooked here, next to `COL_PRI`, back when both read as body collision. It is
+// a colour-blend command — `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL` — so its hook now lives with the
+// rest of that family in `effect_viewer::acmd_hooks`, which records it exactly as this did and
+// additionally honours suppression. Only one hook may replace a given symbol, so this is a move
+// rather than an addition. `COL_PRI` stays: it carries an editable value this side writes.
 
 // ── Injection (per-frame, from the smashline line callback) ──────────────────
 
@@ -1480,8 +1480,7 @@ pub fn install() {
         hook_hit_node,
         hook_hit_no,
         hook_col_pri,
-        hook_hit_reset_all,
-        hook_col_normal
+        hook_hit_reset_all
     );
     skyline::println!(
         "[SLight] ACMD ATTACK/CATCH/WIND/CLEAR/HURT hooks installed (capture + rules)"

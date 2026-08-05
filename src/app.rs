@@ -68,7 +68,13 @@ fn timeline_thin_row() -> f32 {
 fn timeline_content_height(hitboxes: usize, effects: usize, hurtboxes: usize) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
-    let band = |rows: usize| if rows == 0 { 0.0 } else { 4.0 + rows as f32 * thin };
+    let band = |rows: usize| {
+        if rows == 0 {
+            0.0
+        } else {
+            4.0 + rows as f32 * thin
+        }
+    };
     (24.0 + hitbox_band + band(effects) + band(hurtboxes)).max(24.0)
 }
 
@@ -3748,8 +3754,7 @@ impl VisionaryApp {
                                                 abs_kind_short(name),
                                             );
                                         }
-                                        if !abs.kind.starts_with("FIGHTER_ATTACK_ABSOLUTE_KIND_")
-                                        {
+                                        if !abs.kind.starts_with("FIGHTER_ATTACK_ABSOLUTE_KIND_") {
                                             let own = abs.kind.clone();
                                             ui.selectable_value(
                                                 &mut abs.kind,
@@ -4063,7 +4068,11 @@ impl VisionaryApp {
                     .show_ui(ui, |ui| {
                         for (name, _) in crate::param_labels::HIT_STATUS {
                             changed |= ui
-                                .selectable_value(&mut status, (*name).into(), hit_status_short(name))
+                                .selectable_value(
+                                    &mut status,
+                                    (*name).into(),
+                                    hit_status_short(name),
+                                )
                                 .changed();
                         }
                     });
@@ -4078,9 +4087,8 @@ impl VisionaryApp {
                                 .width(90.0)
                                 .show_ui(ui, |ui| {
                                     for name in &bone_names {
-                                        changed |= ui
-                                            .selectable_value(bone, name.clone(), name)
-                                            .changed();
+                                        changed |=
+                                            ui.selectable_value(bone, name.clone(), name).changed();
                                     }
                                 });
                         }
@@ -4100,7 +4108,7 @@ impl VisionaryApp {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(150, 200, 255), "▮");
                 ui.label(format!(
-                    "collision priority [{}-{}]",
+                    "colour blend priority [{}-{}]",
                     pri.active_start, pri.active_end
                 ));
                 let mut value = pri.pri;
@@ -4110,8 +4118,11 @@ impl VisionaryApp {
             })
             .response
             .on_hover_text(
-                "COL_PRI sets which fighter's pushbox wins when two overlap. Ended by \
-                 COL_NORMAL, not by HIT_RESET_ALL.",
+                "COL_PRI ranks this fighter's colour blend against the others applied at the \
+                 same time — it is a FLASH-family command, not a hurtbox one. Ended by \
+                 COL_NORMAL, not by HIT_RESET_ALL. It appears here because this move's game_ \
+                 script writes it; in an effect_ script the pair is edited with the other \
+                 colour commands.",
             );
         }
 
@@ -4861,9 +4872,7 @@ impl VisionaryApp {
                                         respawn_needed = true;
                                     }
                                     if let Some(alpha) = ec.alpha.as_mut() {
-                                        if ui
-                                            .add(egui::DragValue::new(alpha).speed(0.01))
-                                            .changed()
+                                        if ui.add(egui::DragValue::new(alpha).speed(0.01)).changed()
                                         {
                                             changed = true;
                                             respawn_needed = true;
@@ -7037,9 +7046,7 @@ impl VisionaryApp {
                     // A bone whose name this dump does not know cannot be written back as a
                     // `Hash40::new("…")`, so the call is dropped rather than exported against
                     // the wrong bone.
-                    target: HurtTarget::Bone(
-                        bone_rev.get(&line.args.first()?.as_hash()?)?.clone(),
-                    ),
+                    target: HurtTarget::Bone(bone_rev.get(&line.args.first()?.as_hash()?)?.clone()),
                     status: status()?,
                 }),
                 "HIT_NO" => Some(ExcuteStmt::HitStatus {
@@ -7053,8 +7060,31 @@ impl VisionaryApp {
             }
         }
 
+        // `COL_NORMAL` is claimed here only while a `COL_PRI` this capture saw is still open.
+        //
+        // A `CaptureLine` does not say which function ran it, so every builder filters the one
+        // stream by macro name and two builders that accept the same name both export it — into
+        // two different functions. That was harmless while the tables were disjoint; C6b put
+        // `COL_NORMAL` in `COLOR_COMMANDS` as well, because it is a colour-blend reset
+        // (`MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`) and the effect export was deleting all eight of
+        // the corpus's occurrences. Closing an open priority span is the one thing this side
+        // still needs it for, so that is the only case it is taken; every other one belongs to
+        // the effect list alone. All ten corpus occurrences of the pair are in `effect_`
+        // functions, so this side is guessing either way — it may as well guess narrowly.
+        let mut pri_open = false;
         for (_, line) in ordered {
+            if line.func == "COL_NORMAL" && !pri_open {
+                continue;
+            }
             if let Some(stmt) = stmt_of(line, bone_rev) {
+                // Only this pair moves the flag. Reading it off every statement would let the
+                // `HIT_RESET_ALL` that so often shares a frame with the reset close the span
+                // first, and the `COL_NORMAL` would then be dropped as unpaired.
+                match stmt {
+                    ExcuteStmt::ColPri(_) => pri_open = true,
+                    ExcuteStmt::ColNormal => pri_open = false,
+                    _ => {}
+                }
                 by_frame
                     .entry(Self::motion_to_script_frame(line.frame))
                     .or_default()
@@ -7065,12 +7095,7 @@ impl VisionaryApp {
         crate::data::AcmdScript {
             stmts: by_frame
                 .into_iter()
-                .flat_map(|(frame, stmts)| {
-                    [
-                        AcmdStmt::Frame(frame as f32),
-                        AcmdStmt::Excute(stmts),
-                    ]
-                })
+                .flat_map(|(frame, stmts)| [AcmdStmt::Frame(frame as f32), AcmdStmt::Excute(stmts)])
                 .collect(),
         }
     }
@@ -7404,9 +7429,7 @@ impl VisionaryApp {
         let (states, pris) = self.state.script.to_hurtboxes();
         let mut rules: Vec<crate::game_link::HitboxRuleWire> = Vec::new();
 
-        let rule = |target_key: u64,
-                    frame: u32,
-                    overrides: crate::game_link::HbOverridesWire| {
+        let rule = |target_key: u64, frame: u32, overrides: crate::game_link::HbOverridesWire| {
             let (frame_start, frame_end) = Self::rule_frame_window(frame);
             crate::game_link::HitboxRuleWire {
                 motion,
@@ -13894,9 +13917,93 @@ mod live_effect_capture_tests {
         // And it must survive an export, which is what "editable" has to mean here.
         let exported = crate::acmd::export_acmd_source(&script, "dolly", "special_air_hi");
         assert!(
-            exported
-                .contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
+            exported.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
             "{exported}"
+        );
+    }
+
+    /// A `CaptureLine` does not record which function ran it, so a macro both capture builders
+    /// accept is exported into two different functions off one live call. `COL_NORMAL` became
+    /// such a macro in C6b, when it joined `COLOR_COMMANDS` as the colour-blend reset it
+    /// actually is.
+    ///
+    /// The rule that keeps the two apart: the hurtbox side takes it only to close a `COL_PRI`
+    /// it saw, which is the one thing it still needs it for. Kirby's `SpecialSStart` is the
+    /// shape below — a bare reset, no priority anywhere — and it must reach the effect list
+    /// alone.
+    #[test]
+    fn an_unpaired_captured_col_normal_goes_to_the_effect_list_only() {
+        use crate::game_link::LuaArgWire as A;
+        let bone = hash40::hash40("haver").0;
+        let line = |func: &str, frame: f32, args: Vec<A>| crate::game_link::CaptureLine {
+            kind: 0,
+            motion: hash40::hash40("special_s").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        };
+        let captures = vec![
+            line("HIT_RESET_ALL", 4.0, vec![]),
+            line("COL_NORMAL", 4.0, vec![]),
+        ];
+        let bone_rev: HashMap<u64, String> = [(bone, "haver".to_string())].into_iter().collect();
+
+        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "special_s");
+        assert!(
+            !exported.contains("COL_NORMAL"),
+            "the game_ script claimed a reset that closes nothing:\n{exported}"
+        );
+
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bone_rev, &HashMap::new());
+        assert_eq!(
+            calls
+                .iter()
+                .map(|c| c.spawn_func.as_str())
+                .collect::<Vec<_>>(),
+            vec!["COL_NORMAL"],
+            "and the effect list is where it should have landed instead"
+        );
+    }
+
+    /// The other half of that rule: a reset that *does* close a captured `COL_PRI` is still
+    /// taken, or the priority span the hurtbox panel draws would run to the end of the timeline.
+    /// It is duplicated into the effect list, which is the honest answer when the capture cannot
+    /// say which function ran the line.
+    #[test]
+    fn a_captured_col_normal_that_closes_a_priority_span_is_kept_on_both_sides() {
+        use crate::game_link::LuaArgWire as A;
+        let line = |func: &str, frame: f32, args: Vec<A>| crate::game_link::CaptureLine {
+            kind: 0,
+            motion: hash40::hash40("special_hi").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        };
+        let captures = vec![
+            line("COL_PRI", 9.0, vec![A::Int(200)]),
+            line("COL_NORMAL", 20.0, vec![]),
+        ];
+
+        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &HashMap::new());
+        let (_, pris) = script.to_hurtboxes();
+        assert_eq!(
+            (pris[0].pri, pris[0].active_end),
+            (200, 20),
+            "the span has to close, which is the whole reason this side still takes the reset"
+        );
+
+        let calls =
+            VisionaryApp::effect_calls_from_captures(&captures, &HashMap::new(), &HashMap::new());
+        assert_eq!(
+            calls
+                .iter()
+                .map(|c| c.spawn_func.as_str())
+                .collect::<Vec<_>>(),
+            vec!["COL_NORMAL"],
+            "COL_PRI takes no colour payload, so only the reset joins the effect list"
         );
     }
 

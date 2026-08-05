@@ -261,12 +261,15 @@ written into your source; adding or removing a call, or moving one to a
 different frame, is structure and so lands in an export and is reported when
 syncing.
 
-`COL_PRI` sits in the same section. It is body-collision priority — which
-fighter's pushbox wins when two overlap — and is ended by `COL_NORMAL`, not by
-`HIT_RESET_ALL`. They are separate resets of separate things, so one is never
-used to close the other.
+`COL_PRI` sits in the same section, and is the odd one out there. It ranks a
+fighter's colour blend against the others applied at the same moment — it is a
+`FLASH`-family command rather than a hurtbox one — and it is ended by
+`COL_NORMAL`, not by `HIT_RESET_ALL`. They are separate resets of separate
+things, so one is never used to close the other. It appears among the hurtboxes
+because that is where a `game_` script's statements are edited; in an `effect_`
+script the pair is edited with the colour commands below.
 
-`FLASH` and the `BURN_COLOR` family tint the fighter's model or the screen
+`FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour
 picker takes their place. **Add colour command** creates one. The vanilla scripts
@@ -275,6 +278,12 @@ one directly after that fades the blend in or out over a number of frames — an
 both halves are editable. Changing values writes them into your source; switching
 which command a call is changes how many arguments it takes, so that lands in an
 export and is reported when syncing.
+
+Three of them take no arguments at all — `COL_NORMAL`, `BURN_COLOR_NORMAL` and
+`START_INFO_FLASH_EYE` are resets, and there is nothing in them to change. They
+still appear in the list, because where a reset sits is the whole of what it
+does: dragging it later leaves the tint on screen for longer, and disabling it
+leaves the tint on for good.
 
 Before this they were dropped: the effect export regenerates the whole function
 from the calls it knows about, so every exported move lost its colouring without

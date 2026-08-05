@@ -1849,55 +1849,55 @@ fn emit_effect_move_fn(
             for call in run_calls.iter().copied() {
                 out.push_str(&emit_spawn_call(call, &body));
                 let tweak = tweaks.get(&tweak_hash(&call.effect_name));
-            // One tint line, never two, on exactly the terms the rate below uses: a live colour
-            // multiplier is a deliberate replacement of this kind's tint, so it wins over the
-            // spawn's own `LAST_EFFECT_SET_COLOR`. Before this the script's line was not in
-            // `EffectCall` at all, so there was nothing to reconcile with — the export wrote the
-            // tweak's tint and silently deleted the script's, which is the loss C5 measured at
-            // 33 occurrences and the reason this is the biggest single item in the family.
-            //
-            // The tweak's fourth component is deliberately ignored. It is the live form's alpha,
-            // which no panel exposes and `live_tweak_from_override` does not test for identity,
-            // so emitting it would ship an opacity the user never set.
-            let tint = tweak
-                .and_then(|tw| tw.color)
-                .map(|[r, g, b, _a]| [r, g, b])
-                .or(call.tint);
-            if let Some([r, g, b]) = tint {
-                // `num`, not the bare `to_string` the rate uses, because every one of the 65
-                // colour calls in the archive is written with a decimal point while its rates
-                // are whole numbers. Matching each macro's own spelling is what keeps a
-                // re-exported vanilla script textually identical to the one it came from.
-                out.push_str(&format!(
-                    "{body}macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
-                    num(r),
-                    num(g),
-                    num(b)
-                ));
-            }
-            if let Some(alpha) = call.alpha {
-                // No tweak counterpart to reconcile with: the live override has no opacity
-                // control, so a spawn's alpha can only ever come from its own script line.
-                out.push_str(&format!(
-                    "{body}macros::LAST_EFFECT_SET_ALPHA(agent, {});\n",
-                    num(alpha)
-                ));
-            }
-            // One rate line, never two. A live speed tweak is a deliberate override of this
-            // kind's playback rate, so it wins over the spawn's own — emitting both would
-            // leave the second one winning anyway, and reading the pair back would attribute
-            // the tweak's value to the script. Otherwise the spawn's rate is written, which
-            // is what makes a vanilla `LAST_EFFECT_SET_RATE` survive an export at all: it is
-            // read into the call and re-emitted here, rather than dropped on the floor.
-            if let Some(rate) = tweak.and_then(|tw| tw.speed).or(call.rate) {
-                // Deliberately not `num`, which puts a decimal point back on: the rate slot is
-                // generic over `ToF32`, so `2` compiles and is what both the archive and the
-                // source write-back spell. Emitting `2.0` here would mean the two export paths
-                // wrote different text for the same value. `check_effect_values` refuses a
-                // non-finite rate, which is the one thing `to_string` cannot spell as Rust.
-                out.push_str(&format!(
-                    "{body}macros::LAST_EFFECT_SET_RATE(agent, {rate});\n"
-                ));
+                // One tint line, never two, on exactly the terms the rate below uses: a live colour
+                // multiplier is a deliberate replacement of this kind's tint, so it wins over the
+                // spawn's own `LAST_EFFECT_SET_COLOR`. Before this the script's line was not in
+                // `EffectCall` at all, so there was nothing to reconcile with — the export wrote the
+                // tweak's tint and silently deleted the script's, which is the loss C5 measured at
+                // 33 occurrences and the reason this is the biggest single item in the family.
+                //
+                // The tweak's fourth component is deliberately ignored. It is the live form's alpha,
+                // which no panel exposes and `live_tweak_from_override` does not test for identity,
+                // so emitting it would ship an opacity the user never set.
+                let tint = tweak
+                    .and_then(|tw| tw.color)
+                    .map(|[r, g, b, _a]| [r, g, b])
+                    .or(call.tint);
+                if let Some([r, g, b]) = tint {
+                    // `num`, not the bare `to_string` the rate uses, because every one of the 65
+                    // colour calls in the archive is written with a decimal point while its rates
+                    // are whole numbers. Matching each macro's own spelling is what keeps a
+                    // re-exported vanilla script textually identical to the one it came from.
+                    out.push_str(&format!(
+                        "{body}macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
+                        num(r),
+                        num(g),
+                        num(b)
+                    ));
+                }
+                if let Some(alpha) = call.alpha {
+                    // No tweak counterpart to reconcile with: the live override has no opacity
+                    // control, so a spawn's alpha can only ever come from its own script line.
+                    out.push_str(&format!(
+                        "{body}macros::LAST_EFFECT_SET_ALPHA(agent, {});\n",
+                        num(alpha)
+                    ));
+                }
+                // One rate line, never two. A live speed tweak is a deliberate override of this
+                // kind's playback rate, so it wins over the spawn's own — emitting both would
+                // leave the second one winning anyway, and reading the pair back would attribute
+                // the tweak's value to the script. Otherwise the spawn's rate is written, which
+                // is what makes a vanilla `LAST_EFFECT_SET_RATE` survive an export at all: it is
+                // read into the call and re-emitted here, rather than dropped on the floor.
+                if let Some(rate) = tweak.and_then(|tw| tw.speed).or(call.rate) {
+                    // Deliberately not `num`, which puts a decimal point back on: the rate slot is
+                    // generic over `ToF32`, so `2` compiles and is what both the archive and the
+                    // source write-back spell. Emitting `2.0` here would mean the two export paths
+                    // wrote different text for the same value. `check_effect_values` refuses a
+                    // non-finite rate, which is the one thing `to_string` cannot spell as Rust.
+                    out.push_str(&format!(
+                        "{body}macros::LAST_EFFECT_SET_RATE(agent, {rate});\n"
+                    ));
                 }
             }
 
@@ -1951,7 +1951,11 @@ fn push_carried(out: &mut String, lines: &[String], base: &str) {
         let closes = line.matches('}').count() as i32;
         // A line that closes more than it opens dedents itself before printing, so `}` lines
         // up with the header that opened it rather than with the body.
-        let at = if closes > opens { depth - (closes - opens) } else { depth };
+        let at = if closes > opens {
+            depth - (closes - opens)
+        } else {
+            depth
+        };
         out.push_str(base);
         for _ in 0..at.max(0) {
             out.push_str("    ");
@@ -3790,6 +3794,119 @@ unsafe extern "C" fn effect_attackdash(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// `COL_NORMAL` is a colour-blend reset — `lua_const` names it
+    /// `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`, one of six such commands with `FLASH` — and not the
+    /// body-collision command the `game_` hurtbox panel files it under. Before C6b the effect
+    /// export had no form for it, so it deleted all eight of the corpus's occurrences: they sit
+    /// in blocks with no spawn, so C6's residue had no call to ride on.
+    ///
+    /// The source is kirby/SpecialSStart's `effect_` function verbatim, which is the smallest
+    /// real case and the one that shows the line is written *outside* an `is_excute` block.
+    #[test]
+    fn a_lone_col_normal_survives_the_effect_export() {
+        let src = r#"
+unsafe extern "C" fn effect_specialsstart(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_flash"), Hash40::new("haver"), -0.012, 11.999, 0.137, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }
+    macros::COL_NORMAL(agent);
+    wait(agent.lua_state_agent, 2.0);
+    if macros::is_excute(agent) {
+        macros::FLASH(agent, 1, 1, 1, 0.7);
+    }
+    wait(agent.lua_state_agent, 2.0);
+}
+"#;
+        let script = parse_effect_script(src);
+        assert!(
+            unexportable_effect_lines(&script).is_empty(),
+            "nothing in this function should be reported lost: {:?}",
+            unexportable_effect_lines(&script)
+        );
+
+        let calls = script.to_effect_calls();
+        assert_eq!(calls.len(), 3, "the spawn, the reset, and the flash");
+        assert_eq!(calls[1].spawn_func, "COL_NORMAL");
+        assert_eq!(
+            calls[1].color,
+            Some(crate::data::ColorCall {
+                transition: None,
+                rgba: None
+            }),
+            "it takes no arguments, exactly like BURN_COLOR_NORMAL"
+        );
+        // It reads as its own entry rather than as residue on the spawn above it, which is what
+        // makes it separately disableable — and it must not have been pulled onto that spawn's
+        // frame either.
+        assert!(calls[0].trailing.is_empty() && calls[1].leading.is_empty());
+        assert_eq!(calls[1].active_start, calls[0].active_start);
+        assert_eq!(calls[2].active_start, calls[1].active_start + 2);
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialsstart", &Default::default());
+        assert!(
+            emitted.contains("macros::COL_NORMAL(agent);"),
+            "missing the reset from:\n{emitted}"
+        );
+        assert_eq!(
+            parse_effect_script(&emitted).to_effect_calls(),
+            calls,
+            "reading the export back must produce the very same calls"
+        );
+    }
+
+    /// The colour table is matched by substring, so a shorter name that is a tail of a longer
+    /// one is the standing hazard in this file — `COL_NORMAL` is a tail of `BURN_COLOR_NORMAL`.
+    /// The `macros::` prefix is what keeps them apart; this pins that it does, because reading a
+    /// burn reset as a blend reset would export the wrong macro and silently stop the burn from
+    /// clearing.
+    #[test]
+    fn a_burn_color_normal_is_not_read_as_a_col_normal() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::BURN_COLOR_NORMAL(agent);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].spawn_func, "BURN_COLOR_NORMAL");
+    }
+
+    /// Teaching the effect parser about `COL_NORMAL` must not reach the `game_` parser, which
+    /// keeps its own [`crate::data::ExcuteStmt::ColNormal`] so that a `COL_PRI` span still
+    /// closes. The two never meet — every one of the corpus's ten occurrences is in an
+    /// `effect_` function — but nothing in the code says so, so it is asserted here.
+    #[test]
+    fn a_game_script_still_reads_col_normal_as_its_own_statement() {
+        let src = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::COL_PRI(agent, 200);
+    }
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::COL_NORMAL(agent);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let stmts: Vec<_> = script
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                crate::data::AcmdStmt::Excute(inner) => Some(inner),
+                _ => None,
+            })
+            .flatten()
+            .map(|stmt| format!("{stmt:?}"))
+            .collect();
+        assert_eq!(stmts, vec!["ColPri(200)", "ColNormal"]);
+    }
+
     /// A colour command produces an entry in the call list, so it consumes a write-back
     /// ordinal — and it is not a spawn, so it must not anchor a rate. Getting either half
     /// wrong writes one call's value into another's line.
@@ -4140,9 +4257,10 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         eprintln!("[audit] {lossy} of {with_calls} effect scripts still lose a line");
         assert!(
-            lossy <= 19,
+            lossy <= 15,
             "the export deletes lines from {lossy} of {with_calls} effect scripts; C5 measured \
-             28 and C6 brought it to 19. Something started dropping user code again."
+             28, C6 brought it to 19, and C6b's COL_NORMAL to 15. Something started dropping \
+             user code again."
         );
     }
 

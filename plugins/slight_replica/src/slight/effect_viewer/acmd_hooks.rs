@@ -1504,6 +1504,19 @@ color_hook!(
     0,
     0
 );
+// `COL_NORMAL` is the colour-blend family's reset — `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`,
+// alongside FLASH above — not the body-collision command the editor's hurtbox panel calls it.
+// It belongs on this hook list rather than beside `hook_col_pri` in the hitbox viewer. Taking no
+// arguments, the only live edit it has is suppression, which is exactly what an argument-free
+// reset should offer: disable it and the tint before it keeps running.
+color_hook!(
+    hook_col_normal,
+    smash::app::sv_animcmd::COL_NORMAL,
+    "COL_NORMAL",
+    "col_normal",
+    0,
+    0
+);
 
 /// EFFECT_OFF_KIND is both timeline data and a lifetime command. Capture its pristine typed
 /// arguments, preserve the game's original call, then bridge the stop to concrete carrier-owned
@@ -1706,7 +1719,8 @@ pub fn install() {
         hook_burn_color_frame,
         hook_burn_color_normal,
         hook_start_info_flash_eye,
+        hook_col_normal,
     );
-    skyline::println!("[SLight] ACMD effect hooks installed (33 spawn/stop/colour variants)");
+    skyline::println!("[SLight] ACMD effect hooks installed (34 spawn/stop/colour variants)");
     crate::slight::diag::note("ACMD hooks installed");
 }

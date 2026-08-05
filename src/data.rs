@@ -674,7 +674,10 @@ pub struct HurtboxState {
     pub site: usize,
 }
 
-/// One resolved stretch of non-default body-collision priority (`COL_PRI` … `COL_NORMAL`).
+/// One resolved stretch of non-default colour-blend priority (`COL_PRI` … `COL_NORMAL`).
+///
+/// Named for the macro rather than for what it does, which is why it read as body collision for
+/// so long — see [`ExcuteStmt::ColPri`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColPriState {
     pub pri: i64,
@@ -723,9 +726,16 @@ pub enum ExcuteStmt {
     },
     /// `HIT_RESET_ALL` — return every bone and group to its default state at once.
     HitResetAll,
-    /// `COL_PRI` — body-collision priority (pushbox precedence), not a hurtbox state.
+    /// `COL_PRI` — which colour blend wins while several are applied, not a hurtbox state.
+    ///
+    /// `lua_const` calls it `MA_MSC_CMD_COLOR_BLEND_COL_PRI`, one of six
+    /// `MA_MSC_CMD_COLOR_BLEND_*` commands with `FLASH` and `FLASH_FRM`, so it is the `FLASH`
+    /// family's priority and has nothing to do with pushboxes. It is parsed here rather than
+    /// with the colour commands only because this is where a `game_` script's statements live;
+    /// all ten corpus occurrences of the pair are in `effect_` functions, where `COL_NORMAL`
+    /// goes through [`COLOR_COMMANDS`] instead and `COL_PRI` rides along verbatim.
     ColPri(i64),
-    /// `COL_NORMAL` — restore default body collision, ending an open `COL_PRI`.
+    /// `COL_NORMAL` — clear the colour blend, ending an open `COL_PRI` or `FLASH`.
     ColNormal,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
@@ -1785,13 +1795,24 @@ pub struct ColorCall {
 /// The model- and screen-colour commands, as `(command, takes a transition length, takes a
 /// colour)`.
 ///
-/// All six are declared in smash-script's `macros.rs`, so all six are emittable. Every
+/// All seven are declared in smash-script's `macros.rs`, so all seven are emittable. Every
 /// argument is generic over `ToF32`, which is why they are written with plain `to_string`
 /// rather than the decimal-forcing `num` — see the note on [`crate::data::WIND_COMMANDS`].
 ///
-/// `FLASH_SET_DIRECTION` is deliberately absent: `sv_animcmd` has it and the corpus uses it
-/// eight times, but smash-script never wrapped it, so modelling it would mean emitting a
-/// macro that does not exist. It stays an unmodelled line, as it is today.
+/// `COL_NORMAL` belongs here and not with the hurtbox statements it is currently filed under in
+/// [`ExcuteStmt`]: `lua_const` names it `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`, one of six
+/// `MA_MSC_CMD_COLOR_BLEND_*` commands with `FLASH` and `FLASH_FRM`. It is the exact sibling of
+/// `BURN_COLOR_NORMAL` above — the argument-free reset for the other half of the family.
+///
+/// `COL_PRI` is the seventh member of that family and is deliberately **not** here. It takes a
+/// single integer priority, which is neither a transition length nor a colour, so it would need
+/// a third payload shape in [`ColorCall`] for the two calls the corpus makes. Both of those sit
+/// in an `is_excute` block with a `FLASH`, so the export already carries them verbatim as that
+/// call's `leading` and nothing is lost by leaving them there.
+///
+/// `FLASH_SET_DIRECTION` is deliberately absent for a different reason: `sv_animcmd` has it and
+/// the corpus uses it eight times, but smash-script never wrapped it, so modelling it would mean
+/// emitting a macro that does not exist. It stays an unmodelled line, as it is today.
 pub const COLOR_COMMANDS: &[(&str, bool, bool)] = &[
     ("FLASH", false, true),
     ("FLASH_FRM", true, true),
@@ -1799,6 +1820,7 @@ pub const COLOR_COMMANDS: &[(&str, bool, bool)] = &[
     ("BURN_COLOR_FRAME", true, true),
     ("BURN_COLOR_NORMAL", false, false),
     ("START_INFO_FLASH_EYE", false, false),
+    ("COL_NORMAL", false, false),
 ];
 
 /// `(takes a transition length, takes a colour)` for a colour command, or `None` if the name
