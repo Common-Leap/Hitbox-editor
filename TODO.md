@@ -74,6 +74,19 @@ Two export paths, different rules — do not conflate them:
   path existed. **When `lua_const` is silent, the signature is the next-best oracle** — it has
   no constant for any of B3's five macros, and it was `WHOLE_HIT`'s `(hit_status)` argument that
   showed it to be B4's family rather than the hitbox tuner its name and its entry both claimed.
+- **Not every macro in an entry's list belongs to that entry's shape — check the signature of
+  each, not just of the first.** B3 was framed as "modifiers attached to the hitbox id they
+  target" and named four macros. Two of them (`ATK_HIT_ABS`, `ATK_LERP_RATIO`) take no id at
+  all, so the framing could not describe them; they were not a smaller version of the task but a
+  different one, and saying so in the entry was the deliverable. A grouping is a hypothesis until
+  each member's `macros.rs` line is read. The tell that you are about to do this wrong is
+  planning the work for a *list* rather than for a shape.
+- **A shared numbering space is a coupling, and site ordinals are the place it bites.** Families
+  that are edited by ordinal-into-source need their own counter each. Folding B3's modifiers into
+  `HurtSite` would have meant adding an `ATK_POWER` to a move silently shifted every later
+  `HIT_NODE`'s site, retuning a call the user never clicked — and no existing test would have
+  failed, because each family passes its own tests in isolation. Test the boundary from *both*
+  sides when adding a family beside an existing one.
 - **A bullet written from memory is not a measurement, even when you wrote it.** C6b's
   `CANCEL_FILL_SCREEN` item claimed C3 modelled `FILL_SCREEN_MODEL_COLOR` and that the reset was
   a `COLOR_COMMANDS`-shaped row. C3 does not, and it is not — C6's own result table three
@@ -194,7 +207,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**316 green after B3's `WHOLE_HIT`**), including the three corpus
+- [ ] `cargo test` passes (**325 green after B3**), including the three corpus
       oracles — run
       them by name with `cargo test cached_script` and `cargo test still_loses`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
@@ -470,7 +483,7 @@ first and re-measure, or take it deliberately as an unverifiable convenience for
 who write `ATTACK_FP` by hand — and say which in the entry, since the second is a real choice
 and not a default.
 
-### [~] B3 — Post-hoc hitbox tuning
+### [x] B3 — Post-hoc hitbox tuning (done 2026-08-04)
 
 These modify hitboxes *already out*, so they are edits to an existing collision rather than
 new collisions.
@@ -560,6 +573,38 @@ done rather than left to look merely unfinished.
 - **Not done — `ATK_LERP_RATIO` (0).** No id slot, so it is not this family, and zero corpus
   occurrences, so it fails the same bar B2 does: the definition of done needs a round-trip test
   built from a real vanilla call and there is none. Re-measure if more of the archive is fetched.
+
+**Result (2026-08-04).** `ATK_POWER` and `ATK_SET_SHIELD_SETOFF_MUL` land on all five surfaces as
+one `ExcuteStmt::AttackMod { kind, id, value }` — one variant with a discriminant, since the two
+share an argument layout exactly. 325 tests green, all 11 vanilla calls verified to round-trip
+**byte-identically**.
+
+- **Point events, not spans, and that is the whole shape of the feature.** Every other family
+  here resolves to a range because some macro takes it back. Nothing takes these back, so
+  `to_attack_mods` has no end-frame pass and the panel draws a marker at one frame. Inventing a
+  span would have drawn a range the script never wrote — the same call B4's `WHOLE_HIT` reach
+  made, arrived at from a different direction.
+- **Its own site numbering space, which is the sharp part.** Reusing `HurtSite` would have meant
+  that adding an `ATK_POWER` to a move shifted the ordinal of every later `HIT_NODE`, retuning a
+  different call than the one clicked. `is_attack_mod_stmt` / `count_attack_mod_stmts` /
+  `next_mod_site` mirror the hurtbox machinery beside it, including the zero-iteration `for`
+  rewind, and `the_two_families_number_their_sites_independently` pins the boundary from both
+  sides. `HurtboxAccum` became `WalkAccum` because it now carries two families.
+- **A category per macro, not one keyed by hitbox id.** The two members can legally name the
+  same id in the same frame window, so a shared category would let an `ATK_POWER` rule fire on an
+  `ATK_SET_SHIELD_SETOFF_MUL` call and write damage into a shield multiplier. `CAT_ATK_POWER` 5
+  and `CAT_ATK_SETOFF_MUL` 6 make that unrepresentable rather than merely unlikely — the same
+  lesson `HURT_KEY_WHOLE` records, applied before the bug instead of after it.
+- **The float formatter is a second one on purpose.** `acmd::num` appends `.0` because most
+  float slots are declared `f32`, where a bare `6` is a type error. These are `ToF32`-generic and
+  every vanilla call writes a bare integer, so `attack_mod_num` keeps the integer spelling and
+  the write-back uses `to_f32_edit` rather than `float_edit` to match. Without this every export
+  would have rewritten 11 untouched lines. **No oracle would have caught it**: `verify_move`
+  checks semantics, and `7.0` means what `7` means.
+- **The corpus could not have settled the slot order** — all 9 `ATK_SET_SHIELD_SETOFF_MUL` calls
+  are byte-identical. `macros.rs` declaring `id: u64, val: ToF32` is what did, with `ATK_POWER`'s
+  two calls confirming it by varying the first slot alone. Third time the signature was the
+  oracle after `lua_const` came back silent.
 
 ### [x] B4 — Hurtbox control (done 2026-08-04)
 

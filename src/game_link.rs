@@ -279,6 +279,27 @@ pub const HURT_KEY_COL_PRI: u64 = u64::MAX;
 /// arrived at from the other direction. **Must equal the plugin's value.**
 pub const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
 
+/// Wire category for `ATK_POWER`. **Must equal the plugin's value.**
+///
+/// The two post-hoc modifiers get a category each rather than sharing one keyed by hitbox id.
+/// They can legally name the same id in the same frame window — kirby/Attack100Sub tunes id 0
+/// and a move may retune the same box two ways — so one shared category would let an
+/// `ATK_POWER` rule fire on an `ATK_SET_SHIELD_SETOFF_MUL` call and write damage into a shield
+/// multiplier. Separating them makes that unrepresentable instead of merely unlikely, which is
+/// the lesson `HURT_KEY_WHOLE` records from the other direction.
+pub const CAT_ATK_POWER: u8 = 5;
+
+/// Wire category for `ATK_SET_SHIELD_SETOFF_MUL`. **Must equal the plugin's value.**
+pub const CAT_ATK_SETOFF_MUL: u8 = 6;
+
+/// The wire category a modifier's rules go out under.
+pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
+    match kind {
+        crate::data::AttackModKind::Power => CAT_ATK_POWER,
+        crate::data::AttackModKind::ShieldSetoffMul => CAT_ATK_SETOFF_MUL,
+    }
+}
+
 /// Sparse ATTACK-arg overrides (plugin `HbOverrides`).
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HbOverridesWire {
@@ -378,6 +399,15 @@ pub struct HbOverridesWire {
     pub hit_target: Option<LuaArgWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub col_pri: Option<i64>,
+    // ── Post-hoc hitbox tuning (category 5 only) ─────────────────────────────
+    //
+    // `ATK_POWER` and `ATK_SET_SHIELD_SETOFF_MUL` share one `(id, value)` layout, so one pair of
+    // fields covers both; the rule's own category and key say which call it is aimed at. Skipped
+    // when absent like everything above, so a plugin build predating this family ignores them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atk_mod_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atk_mod_value: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize)]

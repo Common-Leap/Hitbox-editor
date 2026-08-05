@@ -2128,6 +2128,121 @@ pub fn rewrite_hurtboxes(
     Ok((apply(text, edits), report))
 }
 
+// ── Attack modifier write-back ───────────────────────────────────────────────
+
+/// The post-hoc tuning commands, with the argument count each one has after `agent`.
+///
+/// Both take `(id, value)`, so unlike [`HURT_COMMANDS`] there is no per-macro asymmetry to get
+/// wrong here. The arity is still part of identifying the call, for the same reason: the parser
+/// leaves a wrong-arity call as `Raw`, and counting it anyway would number every later site one
+/// too high and retune a different call.
+///
+/// `ATK_HIT_ABS` and `ATK_LERP_RATIO` are deliberately absent — they take no id, so they are not
+/// this family and have no site here. See `TODO.md` B3.
+const ATTACK_MOD_COMMANDS: &[(&str, usize)] = &[("ATK_POWER", 2), ("ATK_SET_SHIELD_SETOFF_MUL", 2)];
+
+/// The attack-modifier calls in `text`, in document order — index `n` is site `n`.
+///
+/// Its own scan and its own numbering, not a share of [`hurt_sites`]: the two families are
+/// counted separately in the parsed script too, so that adding an `ATK_POWER` to a move cannot
+/// shift the site of a `HIT_NODE` that comes after it.
+fn attack_mod_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            ATTACK_MOD_COMMANDS
+                .iter()
+                .any(|(name, arity)| site.name == *name && site.args.len() == arity + 1)
+        })
+        .collect()
+}
+
+/// Rewrite edited post-hoc hitbox modifiers into the user's own source.
+///
+/// Value edits only, as everywhere on this path. A retime is reported rather than written, since
+/// the frame is the block the call sits in and not an argument; so is a change of *kind*, which
+/// is a different macro rather than a different value.
+pub fn rewrite_attack_mods(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::AttackModState],
+    edited: &[crate::data::AttackModState],
+) -> Result<(String, SyncReport)> {
+    let sites = attack_mod_sites(text);
+    let mut report = SyncReport::default();
+    let mut edits = Vec::new();
+
+    for (before, now) in pristine.iter().zip(edited.iter()) {
+        if before == now {
+            continue;
+        }
+        let Some(site) = sites.get(now.site) else {
+            report.skipped.push(format!(
+                "{label}: a `{}` has no matching call in the source — it was added in the \
+                 editor, and source syncing only retunes existing calls",
+                now.kind.macro_name()
+            ));
+            continue;
+        };
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: the `{}` on hitbox {} was retimed — its frame is the block it sits in, \
+                 not an argument, so source syncing cannot move it",
+                before.kind.macro_name(),
+                before.id
+            ));
+        }
+        if before.kind != now.kind {
+            report.skipped.push(format!(
+                "{label}: a `{}` became a `{}` — that is a different macro, not a change of \
+                 argument value",
+                before.kind.macro_name(),
+                now.kind.macro_name()
+            ));
+            continue;
+        }
+        // Slot 0 is `agent`, so the id is 1 and the value is 2 — the order `macros.rs` declares
+        // and the order `ATK_POWER`'s two vanilla calls confirm by varying the id alone.
+        if before.id != now.id {
+            if let Some(span) = site.args.get(1) {
+                edits.extend(int_edit(text, span, now.id));
+            }
+        }
+        if before.value != now.value {
+            if let Some(span) = site.args.get(2) {
+                // `to_f32_edit`, not `float_edit`: these slots are `ToF32`-generic and every
+                // vanilla call writes a bare integer, so a value of 7 must stay `7` and not
+                // become `7.0` — the same rule `crate::acmd::attack_mod_num` follows on export.
+                edits.extend(to_f32_edit(text, span, now.value));
+            }
+        }
+    }
+
+    if pristine.len() != edited.len() {
+        report.skipped.push(format!(
+            "{label}: hitbox modifiers were added or removed — source syncing only retunes \
+             existing calls, so use an export to land that"
+        ));
+    }
+
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited post-hoc hitbox modifiers for one move back into the project source on disk.
+pub fn sync_attack_mods(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::AttackModState],
+    edited: &[crate::data::AttackModState],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_attack_mods(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// Sync edited hurtbox state for one move back into the project source on disk.
 pub fn sync_hurtboxes(
     index: &SourceIndex,
@@ -2764,6 +2879,110 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         ] {
             assert!(after.contains(line), "{line} was disturbed:\n{after}");
         }
+    }
+
+    /// A modifier between two hurtbox calls, so a family that miscounted sites is visible.
+    const ATTACK_MODS_SRC: &str = r#"unsafe extern "C" fn game_attacklw4(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);
+        macros::ATK_SET_SHIELD_SETOFF_MUL(agent, 0, 7);
+        macros::ATK_POWER(agent, 1, 10);
+        macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_XLU);
+    }
+}
+"#;
+
+    fn mods_of(text: &str) -> Vec<crate::data::AttackModState> {
+        crate::acmd::parse_acmd_script(text).to_attack_mods()
+    }
+
+    /// A value edit rewrites that argument and nothing else, keeping the bare-integer spelling.
+    ///
+    /// The two calls sit next to each other with different macros, so writing to the wrong site
+    /// shows up rather than being masked. `10` must not become `10.0`: these slots are
+    /// `ToF32`-generic, so both compile, and churning an untouched spelling is the diff noise
+    /// `to_f32_edit` exists to avoid.
+    #[test]
+    fn a_modifier_value_edit_rewrites_only_that_argument() {
+        let pristine = mods_of(ATTACK_MODS_SRC);
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[1].value = 14.0;
+        let (after, report) =
+            rewrite_attack_mods(ATTACK_MODS_SRC, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains("macros::ATK_POWER(agent, 1, 14);"),
+            "{after}"
+        );
+        assert!(
+            after.contains("macros::ATK_SET_SHIELD_SETOFF_MUL(agent, 0, 7);"),
+            "the neighbouring modifier was disturbed:\n{after}"
+        );
+    }
+
+    /// The id is slot 1 and the value slot 2 — the one thing the corpus could not have proved.
+    ///
+    /// Every vanilla `ATK_SET_SHIELD_SETOFF_MUL` is the identical `(agent, 0, 7)`, so only
+    /// `macros.rs` says which slot is which. Editing the id alone would silently rewrite the
+    /// value if the two were ever transposed.
+    #[test]
+    fn a_modifier_id_edit_writes_the_id_slot_and_leaves_the_value() {
+        let pristine = mods_of(ATTACK_MODS_SRC);
+        let mut edited = pristine.clone();
+        edited[0].id = 3;
+        let (after, report) =
+            rewrite_attack_mods(ATTACK_MODS_SRC, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("macros::ATK_SET_SHIELD_SETOFF_MUL(agent, 3, 7);"),
+            "{after}"
+        );
+    }
+
+    /// The two families must not share a numbering space.
+    ///
+    /// Both `HIT_NODE`s here sit either side of two modifiers. If the modifiers consumed hurtbox
+    /// sites — or the hurtbox calls consumed modifier sites — an edit to the *second* `HIT_NODE`
+    /// would land on whatever the shifted ordinal pointed at. This is the failure `HURT_COMMANDS`
+    /// already carries a warning about, checked across the family boundary.
+    #[test]
+    fn the_two_families_number_their_sites_independently() {
+        let hurt_pristine = hurt_of(ATTACK_MODS_SRC);
+        let mut hurt_edited = hurt_pristine.clone();
+        hurt_edited.0[1].status = "HIT_STATUS_INVINCIBLE".into();
+        let (after, report) =
+            rewrite_hurtboxes(ATTACK_MODS_SRC, "t", &hurt_pristine, &hurt_edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains(
+                r#"macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_INVINCIBLE);"#
+            ),
+            "the second HIT_NODE should have been edited:\n{after}"
+        );
+        // And nothing in the modifier lines moved.
+        assert!(
+            after.contains("macros::ATK_POWER(agent, 1, 10);"),
+            "{after}"
+        );
+    }
+
+    /// Changing which macro a modifier is, is structure rather than value.
+    #[test]
+    fn changing_a_modifier_to_the_other_macro_is_reported_not_written() {
+        let pristine = mods_of(ATTACK_MODS_SRC);
+        let mut edited = pristine.clone();
+        edited[0].kind = crate::data::AttackModKind::Power;
+        let (after, report) =
+            rewrite_attack_mods(ATTACK_MODS_SRC, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 0);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("ATK_POWER")),
+            "{report:?}"
+        );
+        assert_eq!(after, ATTACK_MODS_SRC, "a reported edit changes nothing");
     }
 
     /// Turning a whole-body state into a per-bone one is a different macro, so it is reported

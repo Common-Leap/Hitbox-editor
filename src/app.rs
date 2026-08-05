@@ -2195,6 +2195,23 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            // And post-hoc modifiers get a third pass, for the same reason again: they share the
+            // function but are counted in their own numbering space and written through their
+            // own slots.
+            match crate::acmd_src::sync_attack_mods(
+                index,
+                &fighter,
+                &move_name,
+                &self.state.attack_mods_pristine,
+                &self.state.script.to_attack_mods(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
 
         if !ran {
@@ -4001,7 +4018,97 @@ impl VisionaryApp {
             }
 
             self.draw_hurtbox_section(ui);
+            self.draw_attack_mod_section(ui);
         });
+    }
+
+    /// Post-hoc tuning of hitboxes that are already out, below the hurtbox section.
+    ///
+    /// Its own section rather than fields on the hitbox it names, because the frame is the point:
+    /// the corpus writes these both in the parent `ATTACK`'s own block and several frames after
+    /// it, and folding the value into the hitbox would lose the second case entirely.
+    ///
+    /// Edits go straight into `state.script`, for the same reason the hurtbox section does —
+    /// these statements are carried through the script rather than rebuilt from a list.
+    fn draw_attack_mod_section(&mut self, ui: &mut Ui) {
+        use crate::data::ExcuteStmt;
+
+        let mods = self.state.script.to_attack_mods();
+        if mods.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Hitbox tuning");
+            ui.colored_label(egui::Color32::from_rgb(180, 220, 160), "Post-hoc");
+        })
+        .response
+        .on_hover_text(
+            "ATK_POWER and ATK_SET_SHIELD_SETOFF_MUL retune a hitbox that is already out. They \
+             run on their own frame, which is why they are listed here rather than as fields on \
+             the hitbox they name.",
+        );
+
+        // The ids this move actually opens, so a modifier naming one that was never created can
+        // say so. That is a real authoring mistake and the script itself gives no sign of it.
+        let live_ids: Vec<i64> = self
+            .state
+            .script
+            .to_hitboxes()
+            .iter()
+            .map(|hb| hb.id as i64)
+            .collect();
+
+        let mut edit: Option<(usize, ExcuteStmt)> = None;
+        for m in &mods {
+            ui.horizontal(|ui| {
+                let active = m.frame == self.state.current_frame;
+                ui.colored_label(
+                    if active {
+                        egui::Color32::from_rgb(180, 220, 160)
+                    } else {
+                        egui::Color32::from_gray(140)
+                    },
+                    if active { "◆" } else { "◇" },
+                );
+                ui.label(format!("f{} · hitbox", m.frame));
+
+                let mut id = m.id;
+                let mut value = m.value;
+                let mut changed = ui.add(egui::DragValue::new(&mut id)).changed();
+                if !live_ids.contains(&m.id) {
+                    ui.colored_label(egui::Color32::from_rgb(230, 170, 90), "?")
+                        .on_hover_text(
+                            "This move never opens a hitbox with that id, so this call retunes \
+                             nothing.",
+                        );
+                }
+                ui.label(m.kind.label());
+                changed |= ui
+                    .add(egui::DragValue::new(&mut value).speed(0.1))
+                    .changed();
+                if changed {
+                    edit = Some((
+                        m.site,
+                        ExcuteStmt::AttackMod {
+                            kind: m.kind,
+                            id,
+                            value,
+                        },
+                    ));
+                }
+            })
+            .response
+            .on_hover_text(m.kind.macro_name());
+        }
+
+        if let Some((site, replacement)) = edit {
+            if let Some(stmt) = self.state.script.attack_mod_stmt_mut(site) {
+                *stmt = replacement;
+                self.push_attack_mod_rules();
+            }
+        }
     }
 
     /// Intangibility and body-collision priority, below the collision list.
@@ -7071,6 +7178,18 @@ impl VisionaryApp {
                 "COL_PRI" => Some(ExcuteStmt::ColPri(line.args.first()?.as_i64()?)),
                 "HIT_RESET_ALL" => Some(ExcuteStmt::HitResetAll),
                 "COL_NORMAL" => Some(ExcuteStmt::ColNormal),
+                // Both post-hoc modifiers are `(id, value)`, so one arm reads either. The value
+                // arrives as an f32 on the wire because the slot is `ToF32`; the emitter puts
+                // the vanilla integer spelling back where the value is whole.
+                "ATK_POWER" | "ATK_SET_SHIELD_SETOFF_MUL" => Some(ExcuteStmt::AttackMod {
+                    kind: if line.func == "ATK_POWER" {
+                        crate::data::AttackModKind::Power
+                    } else {
+                        crate::data::AttackModKind::ShieldSetoffMul
+                    },
+                    id: line.args.first()?.as_i64()?,
+                    value: line.args.get(1)?.as_f32()?,
+                }),
                 _ => None,
             }
         }
@@ -7539,6 +7658,71 @@ impl VisionaryApp {
         self.game_link.send_hitbox_rules(&all);
     }
 
+    /// Send the post-hoc hitbox modifiers the editor has changed to the running game.
+    ///
+    /// Diffed by site against `attack_mods_pristine`, on the same terms as the hurtbox rules, and
+    /// stored under their own key in the shared hitbox rule store so that changing one family
+    /// does not wipe the other's rules on the way out.
+    fn push_attack_mod_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let was_mods = self.state.attack_mods_pristine.clone();
+        let mods = self.state.script.to_attack_mods();
+        let mut rules: Vec<crate::game_link::HitboxRuleWire> = Vec::new();
+
+        for now in &mods {
+            let Some(was) = was_mods.iter().find(|m| m.site == now.site) else {
+                // No baseline for this site: the list changed shape under us. The export path
+                // can add a call; this one only retunes, so it says nothing rather than
+                // guessing at a rule that would fire on the wrong line.
+                continue;
+            };
+            if was == now {
+                continue;
+            }
+            if was.kind != now.kind {
+                // A different macro is a different hook and a different category. Live editing
+                // rewrites arguments in place, so this one is left to the export.
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::attack_mod_category(was.kind),
+                // The rule has to match the call the GAME makes, so it keys on the pristine id —
+                // matching the edited one would never fire.
+                hitbox_id: Some(was.id as u64),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(crate::game_link::HbOverridesWire {
+                    atk_mod_id: (was.id != now.id).then_some(now.id),
+                    atk_mod_value: (was.value != now.value).then_some(now.value),
+                    ..Default::default()
+                }),
+                inject: None,
+            });
+        }
+
+        let key = format!("{mv_key}#atkmod");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+    }
+
     /// Rebuild live hitbox rules for every move in a loaded project, not just the move currently
     /// open in the UI. Projects written before `hitboxes_pristine` was added cannot safely
     /// derive suppress/retime rules; those moves are counted so the load status can tell the
@@ -7773,6 +7957,10 @@ impl VisionaryApp {
             hit_status: None,
             hit_target: None,
             col_pri: None,
+            // Nor is post-hoc tuning: `ATK_POWER` names a hitbox but is its own call at its own
+            // frame, so `push_attack_mod_rules` builds those and this override leaves them be.
+            atk_mod_id: None,
+            atk_mod_value: None,
         }
     }
 
@@ -12670,11 +12858,15 @@ fn rebuild_script_from_hitboxes(
                             | ExcuteStmt::ClearAll
                             | ExcuteStmt::GrabClearAll => false,
                             // Hurtbox state is not a collision and is not rebuilt, so it has to
-                            // survive this pass to reach the export at all.
+                            // survive this pass to reach the export at all. An attack modifier
+                            // is retained for the same reason and not as part of the hitbox it
+                            // names: it is carried in the script, not in the edited list, so
+                            // dropping it here would delete it on the first hitbox drag.
                             ExcuteStmt::HitStatus { .. }
                             | ExcuteStmt::HitResetAll
                             | ExcuteStmt::ColPri(_)
                             | ExcuteStmt::ColNormal
+                            | ExcuteStmt::AttackMod { .. }
                             | ExcuteStmt::Raw(_) => true,
                         })
                         .cloned()
@@ -13985,6 +14177,45 @@ mod live_effect_capture_tests {
         let exported = crate::acmd::export_acmd_source(&script, "kirby", "final_start");
         assert!(
             exported.contains("macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);"),
+            "{exported}"
+        );
+    }
+
+    /// A captured modifier keeps its id and value in the slots its signature declares.
+    ///
+    /// Captured into the same untagged stream as the hurtbox calls, so this also pins that the
+    /// two families do not read each other's lines: a `HIT_NODE` here must not become a modifier
+    /// naming a hitbox whose "id" is a truncated bone hash.
+    #[test]
+    fn a_captured_attack_modifier_keeps_its_id_and_value_apart() {
+        let bone = hash40::hash40("kneer").0;
+        let line = |func: &str, frame: f32, args: Vec<A>| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_lw4").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        };
+        let captures = vec![
+            line("ATK_POWER", 0.0, vec![A::Int(1), A::Num(14.0)]),
+            line("HIT_NODE", 0.0, vec![A::Hash(bone), A::Int(1)]),
+        ];
+        let bone_rev: HashMap<u64, String> = [(bone, "kneer".to_string())].into_iter().collect();
+
+        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let mods = script.to_attack_mods();
+        let [power] = &mods[..] else {
+            panic!("expected exactly the one modifier, got {mods:?}");
+        };
+        assert_eq!(power.kind, crate::data::AttackModKind::Power);
+        assert_eq!((power.id, power.value), (1, 14.0));
+        // The bone line stayed a hurtbox and did not leak into the modifier list above.
+        assert_eq!(script.to_hurtboxes().0.len(), 1);
+
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_lw4");
+        assert!(
+            exported.contains("macros::ATK_POWER(agent, 1, 14);"),
             "{exported}"
         );
     }

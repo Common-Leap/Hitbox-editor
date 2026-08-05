@@ -226,6 +226,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_attack_mod_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         // GrabModule and AttackModule clear different things, so they are different
         // statements. Matching `clear_all` alone re-emitted a grab clear as an attack clear.
         if line.contains("GrabModule::clear_all") {
@@ -1130,6 +1134,53 @@ fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
     None
 }
 
+/// Parse `ATK_POWER` / `ATK_SET_SHIELD_SETOFF_MUL`, or `None` if this is not one.
+///
+/// Both are `(agent, id: u64, value: ToF32)` in `smash-script`'s `macros.rs`, which is what
+/// places them together: `lua_const` has no `MA_MSC_CMD_*` constant for either, and the corpus
+/// alone could not have said which slot is which — all 9 `ATK_SET_SHIELD_SETOFF_MUL` calls are
+/// the identical `(agent, 0, 7)`. `ATK_POWER`'s two calls then confirm it from the other side,
+/// writing `(agent, 0, 10)` and `(agent, 1, 10)` for two hitboxes that share a value.
+///
+/// Kept out of [`parse_hurtbox_call`] because these are a different family that happens to be
+/// parsed nearby, and a call written at the wrong arity falls through to `Raw` by the same rule.
+fn parse_attack_mod_call(line: &str) -> Option<ExcuteStmt> {
+    for kind in crate::data::AttackModKind::ALL {
+        let needle = format!("macros::{}(", kind.macro_name());
+        if !line.contains(&needle) {
+            continue;
+        }
+        let start = line.find(&needle)? + needle.len();
+        let end = line[start..].rfind(')')? + start;
+        let tokens = tokenize_args(&line[start..end]);
+        // Drop the leading `agent`, then require exactly the two arguments the signature has.
+        let [id, value] = tokens.get(1..)? else {
+            return None;
+        };
+        return Some(ExcuteStmt::AttackMod {
+            kind,
+            id: id.trim().parse::<i64>().ok()?,
+            value: value.trim().parse::<f32>().ok()?,
+        });
+    }
+    None
+}
+
+/// Render an `ATK_POWER` / `ATK_SET_SHIELD_SETOFF_MUL` value the way the vanilla scripts spell it.
+///
+/// Deliberately *not* [`num`], and the difference is not an oversight. `num` appends a `.0` to
+/// whole numbers because most float arguments sit in slots declared `f32`, where a bare `6` is a
+/// type error. These two slots are declared `ToF32` instead, which `smash-script` implements for
+/// `i32`, so both spellings compile — and every one of the 11 vanilla calls writes the bare
+/// integer (`7`, `10`). Emitting `7.0` over a `7` the user never touched would be diff noise in
+/// an exported mod, so the integer form is kept when the value is whole.
+pub(crate) fn attack_mod_num(value: f32) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        return format!("{}", value as i64);
+    }
+    num(value)
+}
+
 fn parse_attack_clear(line: &str) -> Option<u32> {
     let start = line.find("AttackModule::clear(")? + "AttackModule::clear(".len();
     let end = line[start..].find(')')? + start;
@@ -1448,6 +1499,14 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 format!("{indent}macros::COL_PRI(agent, {pri});")
             }
             crate::data::ExcuteStmt::ColNormal => format!("{indent}macros::COL_NORMAL(agent);"),
+            // Re-emitted as its own call at its own frame, never folded into the `ATTACK` it
+            // retunes: the corpus writes it both in that call's own block and several frames
+            // later, and only the separate line can express the second.
+            crate::data::ExcuteStmt::AttackMod { kind, id, value } => format!(
+                "{indent}macros::{}(agent, {id}, {});",
+                kind.macro_name(),
+                attack_mod_num(*value)
+            ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -2758,6 +2817,116 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 ..
             })
         ));
+    }
+
+    /// kirby/AttackLw4 and kirby/Attack100Sub, spliced: the two placements the corpus uses.
+    ///
+    /// `ATK_SET_SHIELD_SETOFF_MUL` sits in the same `is_excute` block as the `ATTACK` it
+    /// retunes, and `ATK_POWER` lands five frames later on hitboxes that are already out. Both
+    /// have to survive as their own calls at their own frames, which is the whole reason these
+    /// are separate statements rather than fields folded into the parent `ATTACK`.
+    const ATTACK_MODS: &str = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ATK_SET_SHIELD_SETOFF_MUL(agent, 0, 7);
+    }
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::ATK_POWER(agent, 0, 10);
+        macros::ATK_POWER(agent, 1, 10);
+    }
+}
+"#;
+
+    /// The modifiers are typed, at their own frames, against the ids they name.
+    ///
+    /// Same caveat as the `WHOLE_HIT` test above: an unmodelled line exports verbatim as `Raw`
+    /// and round-trips perfectly, so the corpus oracles were green on these before the parse arm
+    /// existed. What has teeth is that they resolve at all — that is what reaches the panel.
+    #[test]
+    fn attack_modifiers_resolve_against_the_hitbox_id_they_name() {
+        use crate::data::AttackModKind;
+        let mods = parse_acmd_script(ATTACK_MODS).to_attack_mods();
+        let [setoff, power_0, power_1] = &mods[..] else {
+            panic!("expected three modifiers, got {}", mods.len());
+        };
+        assert_eq!(setoff.kind, AttackModKind::ShieldSetoffMul);
+        assert_eq!((setoff.id, setoff.value, setoff.frame), (0, 7.0, 1));
+        // Five frames after the ATTACK they retune, and telling the two ids apart is the whole
+        // point of reading slot 0 as the id: both calls carry the same value.
+        assert_eq!(power_0.kind, AttackModKind::Power);
+        assert_eq!((power_0.id, power_0.value, power_0.frame), (0, 10.0, 10));
+        assert_eq!((power_1.id, power_1.value, power_1.frame), (1, 10.0, 10));
+        // Own numbering space: these must not consume hurtbox sites, or every hurtbox edit in a
+        // script that also tunes a hitbox would land on the wrong line.
+        assert_eq!([setoff.site, power_0.site, power_1.site], [0, 1, 2]);
+    }
+
+    /// A modifier is not a collision, so it must not appear as one.
+    #[test]
+    fn an_attack_modifier_does_not_become_a_hitbox_of_its_own() {
+        assert!(parse_acmd_script(ATTACK_MODS).to_hitboxes().is_empty());
+    }
+
+    /// The value keeps the spelling the vanilla scripts use.
+    ///
+    /// All 11 corpus calls write a bare integer. These slots are `ToF32`-generic, so `7` and
+    /// `7.0` both compile — but exporting `7.0` over a `7` the user never touched is diff noise,
+    /// and `num` would do exactly that. A fractional value still has to keep its point.
+    #[test]
+    fn a_whole_modifier_value_is_emitted_as_the_integer_the_corpus_writes() {
+        let script = parse_acmd_script(ATTACK_MODS);
+        let exported = export_acmd_source(&script, "kirby", "attack_lw4");
+        assert!(
+            exported.contains("macros::ATK_SET_SHIELD_SETOFF_MUL(agent, 0, 7);"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("macros::ATK_POWER(agent, 0, 10);"),
+            "{exported}"
+        );
+        // Scoped to the modifier lines: the surrounding `frame(agent.lua_state_agent, 10.0);`
+        // is a slot declared `f32`, where `num`'s decimal point is exactly right.
+        let emitted: Vec<&str> = exported
+            .lines()
+            .filter(|l| l.contains("ATK_POWER(") || l.contains("ATK_SET_SHIELD_SETOFF_MUL("))
+            .collect();
+        assert!(
+            emitted.iter().all(|l| !l.contains('.')),
+            "a whole value must not gain a decimal point: {emitted:?}"
+        );
+        assert_eq!(attack_mod_num(2.5), "2.5", "a fraction keeps its point");
+        assert_eq!(
+            parse_acmd_script(&exported).to_attack_mods(),
+            script.to_attack_mods(),
+            "the export must resolve to the same modifiers as the source"
+        );
+    }
+
+    /// The id slot is not the value slot, and a wrong-arity call is left alone.
+    ///
+    /// The corpus could not have settled the first: all 9 `ATK_SET_SHIELD_SETOFF_MUL` calls are
+    /// the identical `(agent, 0, 7)`. `macros.rs` declares `id: u64, val: ToF32`, so an
+    /// asymmetric call is the test that would fail if the slots were ever swapped.
+    #[test]
+    fn the_id_slot_is_read_as_the_id_and_a_wrong_arity_call_falls_through() {
+        use crate::data::{AttackModKind, ExcuteStmt};
+        let asymmetric = "        macros::ATK_POWER(agent, 3, 12);";
+        assert!(matches!(
+            parse_attack_mod_call(asymmetric),
+            Some(ExcuteStmt::AttackMod {
+                kind: AttackModKind::Power,
+                id: 3,
+                value,
+            }) if value == 12.0
+        ));
+        // One argument short: the signature has two, so this is not a form the parser has seen
+        // and it stays `Raw` rather than being reinterpreted.
+        assert!(parse_attack_mod_call("        macros::ATK_POWER(agent, 3);").is_none());
+        // `ATK_HIT_ABS` takes no id and passes local variables. It must not be dragged in here
+        // by its shared prefix — see TODO.md B3 for why it is carried verbatim instead.
+        let hit_abs = r#"        macros::ATK_HIT_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, Hash40::new("throw"), target, target_group, target_no);"#;
+        assert!(parse_attack_mod_call(hit_abs).is_none());
     }
 
     /// The other three members, which carry no bone: two that reset and one that takes a

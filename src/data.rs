@@ -725,6 +725,68 @@ pub struct ColPriState {
 /// carries the same site — editing any is editing the one line, which is what the source says.
 pub type HurtSite = usize;
 
+/// Which post-hoc tuning macro an [`AttackModState`] came from.
+///
+/// The two members of the "hitbox already out" family that take a hitbox id. They share one
+/// argument layout — `(id: u64, value: ToF32)` — so they are one type with a discriminant
+/// rather than two `ExcuteStmt` variants: every surface treats them identically apart from the
+/// macro name and the label. `lua_const` has no `MA_MSC_CMD_*` constant for either, so the
+/// `macros.rs` signature is what places them here.
+///
+/// The other two macros that read like members are not: `ATK_HIT_ABS` and `ATK_LERP_RATIO` take
+/// no id, so there is no hitbox for them to modify. See `TODO.md` B3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AttackModKind {
+    /// `ATK_POWER` — re-set the damage of a hitbox that is already out.
+    Power,
+    /// `ATK_SET_SHIELD_SETOFF_MUL` — scale the shield push-off of a hitbox already out.
+    ShieldSetoffMul,
+}
+
+impl AttackModKind {
+    /// Every member, for the panel's picker and for exhaustive tests.
+    pub const ALL: [AttackModKind; 2] = [AttackModKind::Power, AttackModKind::ShieldSetoffMul];
+
+    pub fn macro_name(&self) -> &'static str {
+        match self {
+            AttackModKind::Power => "ATK_POWER",
+            AttackModKind::ShieldSetoffMul => "ATK_SET_SHIELD_SETOFF_MUL",
+        }
+    }
+
+    /// What the value means, for the panel row.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AttackModKind::Power => "damage",
+            AttackModKind::ShieldSetoffMul => "shield push-off ×",
+        }
+    }
+}
+
+/// One resolved post-hoc edit to a hitbox that is already out.
+///
+/// A point event, not a span: unlike a hurtbox state there is no macro that takes it back, so
+/// there is no end frame to resolve and inventing one would draw a range the script never wrote.
+/// It carries the id it retunes rather than being folded into the parent `ATTACK`, because the
+/// export has to re-emit it as its own call at its own frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AttackModState {
+    pub kind: AttackModKind,
+    /// The hitbox id this retunes. Not resolved to a hitbox here: a script may tune an id that
+    /// no longer has an open hitbox, and reporting that is the panel's job, not this walk's.
+    pub id: i64,
+    pub value: f32,
+    pub frame: u32,
+    pub site: AttackModSite,
+}
+
+/// Ordinal of an attack-modifier statement among all of them, in source order.
+///
+/// Deliberately its own numbering space rather than a share of [`HurtSite`]: the two families
+/// are scanned by different command tables on the write-back path, and folding them into one
+/// counter would make every hurtbox site shift the moment a script gained an `ATK_POWER`.
+pub type AttackModSite = usize;
+
 /// One statement inside an is_excute block.
 // AttackCall is intentionally inline: ATTACK statements dominate these short-lived syntax
 // trees, so boxing every normal statement would add allocations to optimize the rare Raw case.
@@ -768,6 +830,17 @@ pub enum ExcuteStmt {
     ColPri(i64),
     /// `COL_NORMAL` — clear the colour blend, ending an open `COL_PRI` or `FLASH`.
     ColNormal,
+    /// `ATK_POWER` / `ATK_SET_SHIELD_SETOFF_MUL` — retune a hitbox that is already out.
+    ///
+    /// Not a collision of its own, so it does not appear in [`AcmdScript::to_hitboxes`]: it
+    /// edits one the script already opened. The corpus writes it both in the same `is_excute`
+    /// block as its `ATTACK` and several frames later, so it is kept as a separate statement at
+    /// its own frame rather than folded into the call it modifies.
+    AttackMod {
+        kind: AttackModKind,
+        id: i64,
+        value: f32,
+    },
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -793,7 +866,7 @@ impl AcmdScript {
     /// Flatten the script into display hitboxes with computed frame ranges.
     pub fn to_hitboxes(&self) -> Vec<Hitbox> {
         let mut hitboxes: Vec<Hitbox> = Vec::new();
-        let mut hurt = HurtboxAccum::default();
+        let mut hurt = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
         for hb in hitboxes.iter_mut() {
             if hb.active_end == u32::MAX {
@@ -810,7 +883,7 @@ impl AcmdScript {
     /// just as much as where a hitbox does, and two implementations of that would drift.
     pub fn to_hurtboxes(&self) -> (Vec<HurtboxState>, Vec<ColPriState>) {
         let mut hitboxes: Vec<Hitbox> = Vec::new();
-        let mut hurt = HurtboxAccum::default();
+        let mut hurt = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
         // An unterminated span runs to the end of the move, the same `9999` sentinel an
         // uncleared hitbox gets. Scripts routinely set a state and never take it back — the
@@ -827,13 +900,23 @@ impl AcmdScript {
         }
         (hurt.states, hurt.pris)
     }
+
+    /// Flatten the script into post-hoc hitbox modifiers, each at the frame it runs on.
+    ///
+    /// No end-frame pass like the two above: these are point events. See [`AttackModState`].
+    pub fn to_attack_mods(&self) -> Vec<AttackModState> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.mods
+    }
 }
 
 impl AcmdScript {
     /// The hurtbox statement a span's [`site`](HurtboxState::site) refers to.
     ///
     /// Pre-order over the source with each `for` body entered exactly once, which is the
-    /// definition [`HurtboxAccum::next_site`] is written to reproduce. Editing through this is
+    /// definition [`WalkAccum::next_site`] is written to reproduce. Editing through this is
     /// what makes a panel change reach the export: these statements are carried through the
     /// script rather than rebuilt from a list, so the script *is* the model.
     pub fn hurt_stmt_mut(&mut self, site: HurtSite) -> Option<&mut ExcuteStmt> {
@@ -864,24 +947,62 @@ impl AcmdScript {
         }
         walk(&mut self.stmts, site, &mut 0)
     }
+
+    /// The statement an [`AttackModState::site`] refers to, by the same rule as
+    /// [`hurt_stmt_mut`](Self::hurt_stmt_mut) but over its own numbering space.
+    pub fn attack_mod_stmt_mut(&mut self, site: AttackModSite) -> Option<&mut ExcuteStmt> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: AttackModSite,
+            seen: &mut usize,
+        ) -> Option<&'a mut ExcuteStmt> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for s in inner.iter_mut().filter(|s| is_attack_mod_stmt(s)) {
+                            if *seen == site {
+                                return Some(s);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
 }
 
-/// Open hurtbox spans, accumulated across one walk of a script.
+/// Everything but hitboxes that one walk of a script resolves.
+///
+/// Named for the walk rather than for hurtboxes because it carries two independent families now.
+/// They are gathered together, and not by a second walk each, because `frame` / `wait` arithmetic
+/// and `for` unrolling decide where all of them land — two implementations of that would drift.
 #[derive(Default)]
-struct HurtboxAccum {
+struct WalkAccum {
     states: Vec<HurtboxState>,
     pris: Vec<ColPriState>,
+    mods: Vec<AttackModState>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
     /// every iteration of a looped `HIT_NODE` is the same line in the file, so all of them must
     /// come back with the same site or an edit would land on whichever iteration was clicked.
     next_site: usize,
+    /// Site for the next attack-modifier statement, counted separately — see [`AttackModSite`].
+    next_mod_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
 ///
-/// Used to step [`HurtboxAccum::next_site`] over a `for` body whose count is zero, so that a
+/// Used to step [`WalkAccum::next_site`] over a `for` body whose count is zero, so that a
 /// statement *after* an empty loop still gets the ordinal a plain pre-order walk of the source
 /// would give it. Without this the two definitions of "site" diverge exactly when a loop runs
 /// no iterations, and the editor would resolve a site to the wrong line.
@@ -911,7 +1032,27 @@ fn is_hurt_stmt(stmt: &ExcuteStmt) -> bool {
     )
 }
 
-impl HurtboxAccum {
+/// Does this statement consume an attack-modifier site?
+fn is_attack_mod_stmt(stmt: &ExcuteStmt) -> bool {
+    matches!(stmt, ExcuteStmt::AttackMod { .. })
+}
+
+/// Attack-modifier statements in a subtree, counted in source order.
+///
+/// The [`count_hurt_stmts`] argument applies unchanged: a zero-iteration `for` still has to step
+/// the cursor over its body, or a statement after it resolves to the wrong line.
+fn count_attack_mod_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_attack_mod_stmt(s)).count(),
+            AcmdStmt::Loop { body, .. } => count_attack_mod_stmts(body),
+            _ => 0,
+        })
+        .sum()
+}
+
+impl WalkAccum {
     fn take_site(&mut self) -> usize {
         let site = self.next_site;
         self.next_site += 1;
@@ -968,13 +1109,31 @@ impl HurtboxAccum {
             open.active_end = end.max(open.active_start);
         }
     }
+
+    fn take_mod_site(&mut self) -> usize {
+        let site = self.next_mod_site;
+        self.next_mod_site += 1;
+        site
+    }
+
+    /// Record a modifier. There is nothing to close: these are point events, and no macro takes
+    /// one back, so a span here would be invented rather than read.
+    fn add_mod(&mut self, kind: AttackModKind, id: i64, value: f32, frame: u32, site: usize) {
+        self.mods.push(AttackModState {
+            kind,
+            id,
+            value,
+            frame,
+            site,
+        });
+    }
 }
 
 fn eval_stmts(
     stmts: &[AcmdStmt],
     start_frame: f32,
     hitboxes: &mut Vec<Hitbox>,
-    hurt: &mut HurtboxAccum,
+    hurt: &mut WalkAccum,
 ) -> f32 {
     let mut frame = start_frame;
     for stmt in stmts {
@@ -1102,6 +1261,10 @@ fn eval_stmts(
                             hurt.take_site();
                             hurt.close_pri(script_frame(frame));
                         }
+                        ExcuteStmt::AttackMod { kind, id, value } => {
+                            let site = hurt.take_mod_site();
+                            hurt.add_mod(*kind, *id, *value, script_frame(frame), site);
+                        }
                         ExcuteStmt::Raw(_) => {}
                     }
                 }
@@ -1110,11 +1273,14 @@ fn eval_stmts(
                 // Rewind the site cursor for every iteration so all of them agree, then step it
                 // over the body once regardless of how many iterations actually ran.
                 let site_at_entry = hurt.next_site;
+                let mod_site_at_entry = hurt.next_mod_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
+                    hurt.next_mod_site = mod_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
+                hurt.next_mod_site = mod_site_at_entry + count_attack_mod_stmts(body);
             }
         }
     }
@@ -1279,6 +1445,9 @@ pub struct AppState {
     /// through [`script`](Self::script) rather than rebuilt from a list, so the script itself is
     /// the edited model and the current spans are always `script.to_hurtboxes()`.
     pub hurtboxes_pristine: (Vec<HurtboxState>, Vec<ColPriState>),
+    /// Post-hoc hitbox modifiers as loaded, on the same terms as `hurtboxes_pristine`: the
+    /// script is the edited model, so the current list is always `script.to_attack_mods()`.
+    pub attack_mods_pristine: Vec<AttackModState>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// User edits to effect calls, keyed by "fighter/move" (indices into pristine order).
@@ -1322,6 +1491,7 @@ impl Default for AppState {
             effects_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
+            attack_mods_pristine: Vec::new(),
             acmd_source: String::new(),
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
@@ -1340,6 +1510,7 @@ impl AppState {
     /// source syncing diff a move's hurtboxes against a different move's.
     pub fn set_script(&mut self, script: AcmdScript) {
         self.hurtboxes_pristine = script.to_hurtboxes();
+        self.attack_mods_pristine = script.to_attack_mods();
         self.script = script;
     }
 }

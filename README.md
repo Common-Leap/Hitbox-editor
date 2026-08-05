@@ -278,6 +278,23 @@ things, so one is never used to close the other. It appears among the hurtboxes
 because that is where a `game_` script's statements are edited; in an `effect_`
 script the pair is edited with the colour commands below.
 
+**Hitbox tuning** is the section below that, for the two commands that retune a
+hitbox which is *already out*. `ATK_POWER` re-sets a box's damage and
+`ATK_SET_SHIELD_SETOFF_MUL` scales the shield push-off it applies; each names the
+hitbox id it acts on, and each runs on its own frame. That frame is the reason
+they are their own rows rather than extra fields on the hitbox: a script may tune
+a box in the same breath as creating it, or five frames later once it is already
+hitting, and only a separate line can say the second. Editing the id or the value
+is written into your source; moving one to another frame, or turning it into the
+other command, is structure and lands in an export instead. A row shows a small
+amber marker if it names an id this move never opens — the call is then retuning
+nothing, which the script itself gives no sign of.
+
+Two commands that look like they belong here do not. `ATK_HIT_ABS` and
+`ATK_LERP_RATIO` name no hitbox id, so there is nothing for them to modify; every
+vanilla `ATK_HIT_ABS` also passes local variables rather than values, so there is
+nothing to edit either. Both are carried through an export exactly as written.
+
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour

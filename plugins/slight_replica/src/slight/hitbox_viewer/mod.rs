@@ -148,6 +148,18 @@ pub const CAT_ABS: u8 = 4;
 /// [`HURT_KEY_COL_PRI`].
 pub const CAT_HURT: u8 = 3;
 
+/// `ATK_POWER` — retune the damage of a hitbox that is already out. Keyed by that hitbox's id.
+///
+/// A category per macro rather than one shared "post-hoc tuning" category keyed by id: the two
+/// members can legally name the same id in the same frame window, and one category would then
+/// let an `ATK_POWER` rule fire on an `ATK_SET_SHIELD_SETOFF_MUL` call and write damage into a
+/// shield multiplier. **Must equal the editor's `game_link::CAT_ATK_POWER`.**
+pub const CAT_ATK_POWER: u8 = 5;
+
+/// `ATK_SET_SHIELD_SETOFF_MUL` — scale the shield push-off of a hitbox already out.
+/// **Must equal the editor's `game_link::CAT_ATK_SETOFF_MUL`.**
+pub const CAT_ATK_SETOFF_MUL: u8 = 6;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -665,6 +677,12 @@ pub struct HbOverrides {
     pub hit_target: Option<LuaArg>,
     /// `COL_PRI`'s priority number.
     pub col_pri: Option<i64>,
+    // ── Post-hoc hitbox tuning (CAT_ATK_POWER / CAT_ATK_SETOFF_MUL only) ──────
+    /// The hitbox id the modifier names — slot 0 for both members.
+    pub atk_mod_id: Option<i64>,
+    /// The modifier's value — slot 1 for both members. A float on the wire because the slot is
+    /// declared `ToF32`; the editor's exporter puts the vanilla integer spelling back.
+    pub atk_mod_value: Option<f32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -1378,6 +1396,88 @@ unsafe fn hook_whole_hit(lua_state: u64) {
     original!()(lua_state)
 }
 
+/// Capture one post-hoc tuning call and apply any rule matching it, returning `true` to suppress.
+///
+/// Both members are `(id, value)`, so one function serves both; `category` is what separates
+/// them, and the key is the hitbox id the call names. Not folded into [`hurt_action`] even
+/// though the shape work looks similar: these write different fields into different slots, and
+/// sharing that function is exactly how the `WHOLE_HIT` slot-0 corruption got in.
+unsafe fn attack_mod_action(
+    lua_state: u64,
+    func: &'static str,
+    args: &[LuaArg],
+    category: u8,
+) -> bool {
+    record(lua_state, func, args);
+    if !any_rules() {
+        return false;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return false;
+    }
+    let id = match args.first() {
+        Some(LuaArg::Int(n)) => *n as u64,
+        Some(LuaArg::Num(n)) => *n as u64,
+        _ => return false,
+    };
+    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let Some((suppress, overrides)) = action_for(category, motion, id, frame) else {
+        return false;
+    };
+    if suppress {
+        return true;
+    }
+    let Some(ov) = overrides else {
+        return false;
+    };
+    let mut vals = args.to_vec();
+    // Slot 0 is the id and slot 1 the value, for both members — the order `macros.rs` declares.
+    if let Some(new_id) = ov.atk_mod_id {
+        if !vals.is_empty() {
+            vals[0] = LuaArg::Int(new_id);
+        }
+    }
+    if let Some(value) = ov.atk_mod_value {
+        if vals.len() > 1 {
+            // Written as a number, not an int: the slot is `ToF32`, and a fractional multiplier
+            // is a value the editor can produce even though no vanilla call writes one.
+            vals[1] = LuaArg::Num(value);
+        }
+    }
+    if vals != args {
+        rewrite_args(lua_state, &vals);
+    }
+    false
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::ATK_POWER)]
+unsafe fn hook_atk_power(lua_state: u64) {
+    let args = read_args_exact(lua_state, 2);
+    if args.len() >= 2 && attack_mod_action(lua_state, "ATK_POWER", &args, CAT_ATK_POWER) {
+        return;
+    }
+    original!()(lua_state)
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::ATK_SET_SHIELD_SETOFF_MUL)]
+unsafe fn hook_atk_set_shield_setoff_mul(lua_state: u64) {
+    let args = read_args_exact(lua_state, 2);
+    if args.len() >= 2
+        && attack_mod_action(
+            lua_state,
+            "ATK_SET_SHIELD_SETOFF_MUL",
+            &args,
+            CAT_ATK_SETOFF_MUL,
+        )
+    {
+        return;
+    }
+    original!()(lua_state)
+}
+
 /// The two argument-less members. Recorded so the editor can see where a move gives its
 /// hurtboxes back — without them a captured state would run to the end of the timeline.
 #[skyline::hook(replace = smash::app::sv_animcmd::HIT_RESET_ALL)]
@@ -1558,9 +1658,11 @@ pub fn install() {
         hook_hit_no,
         hook_whole_hit,
         hook_col_pri,
-        hook_hit_reset_all
+        hook_hit_reset_all,
+        hook_atk_power,
+        hook_atk_set_shield_setoff_mul
     );
     skyline::println!(
-        "[SLight] ACMD ATTACK/CATCH/WIND/CLEAR/HURT hooks installed (capture + rules)"
+        "[SLight] ACMD ATTACK/CATCH/WIND/CLEAR/HURT/ATKMOD hooks installed (capture + rules)"
     );
 }
