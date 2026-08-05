@@ -2754,6 +2754,68 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         );
     }
 
+    /// The write-back matches a call to its line by counting spawn macros in source order, so
+    /// C6 teaching the parser to nest conditionals instead of flattening them could have shifted
+    /// every ordinal in a guarded script. It does not — the ordinal walk descends into a `Cond`
+    /// body in place — and this pins that on the shape that would break first.
+    ///
+    /// The costume tint matters for a second reason. It is carried through the *export*
+    /// verbatim, but the write-back edits the user's own file, which already contains it. So it
+    /// has to come out of this untouched: a sync that also wrote the carried copy would be
+    /// stacking the export's duplicate on top of the original.
+    #[test]
+    fn a_costume_guard_does_not_shift_the_write_backs_ordinals() {
+        const GUARDED: &str = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if get_value_float(agent.lua_state_agent, *SO_VAR_FLOAT_LR) < 0.0 {
+        if macros::is_excute(agent) {
+            macros::EFFECT_FOLLOW(agent, Hash40::new("dolly_roll_l"), Hash40::new("throw"), 0, 2.5, 0, 0, 0, 0, 1, true);
+        }
+    }
+    if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){
+        if macros::is_excute(agent) {
+            macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);
+        }
+    }
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("dolly_roll_r"), Hash40::new("throw"), 0, 2.5, 0, 0, 0, 0, 1, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(GUARDED).to_effect_calls();
+        assert_eq!(pristine.len(), 2, "both spawns are still resolved");
+        assert_eq!(
+            pristine[0].guard.as_deref(),
+            Some("if get_value_float(agent.lua_state_agent, *SO_VAR_FLOAT_LR) < 0.0 {"),
+            "the first spawn is the guarded one"
+        );
+
+        // Edit the SECOND spawn — the one past both the guard and the carried tint. Had the
+        // conditional shifted the ordinals, this would land on the first spawn's line instead.
+        let mut edited = pristine.clone();
+        edited[1].offset = [1.5, 2.5, 0.0];
+        let (after, report) = rewrite_effect_calls(GUARDED, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains(r#"Hash40::new("dolly_roll_r"), Hash40::new("throw"), 1.5, 2.5, 0"#),
+            "the edit must land on the spawn past the guard:\n{after}"
+        );
+        assert!(
+            after.contains(r#"Hash40::new("dolly_roll_l"), Hash40::new("throw"), 0, 2.5, 0"#),
+            "the guarded spawn must be untouched:\n{after}"
+        );
+        assert_eq!(
+            after.matches("LAST_EFFECT_SET_COLOR").count(),
+            1,
+            "the tint is already in the user's file; carrying it through the export must not \
+             also insert a second copy here:\n{after}"
+        );
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"),
+            "and its value must not move:\n{after}"
+        );
+    }
+
     #[test]
     fn a_tint_edit_rewrites_only_its_own_spawns_colour_line() {
         let pristine = crate::acmd::parse_effect_script(MODIFIERS).to_effect_calls();

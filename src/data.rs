@@ -1835,7 +1835,26 @@ pub enum EffectStmt {
     Frame(f32),
     Wait(f32),
     Excute(Vec<EffectMacro>),
-    Loop { count: usize, body: Vec<EffectStmt> },
+    Loop {
+        count: usize,
+        body: Vec<EffectStmt>,
+    },
+    /// A block this parser has no typed form for — in practice `if <costume check> {`,
+    /// `if !WorkModule::is_flag(…) {`, and `else {`.
+    ///
+    /// The body is nested rather than flattened into the enclosing list. Flattening is what
+    /// the parser used to do, and it had two costs: the header and its closing brace were
+    /// dropped on export, and both arms of an `if`/`else` came out as siblings, so a move that
+    /// spawned one graphic facing left and another facing right exported as spawning *both*.
+    ///
+    /// `header` is verbatim source, reproduced and never interpreted. It is not a condition
+    /// this code can evaluate — the dumps spell costume checks as raw addresses
+    /// (`if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 3)){`) — and it is not reliably
+    /// even the construct it looks like: see [`crate::acmd::parse_effect_stmts`] on `else`.
+    Cond {
+        header: String,
+        body: Vec<EffectStmt>,
+    },
     Raw(String),
 }
 
@@ -1919,6 +1938,30 @@ pub struct EffectCall {
     /// so nothing tries to close a colour command with an `EFFECT_OFF_KIND`.
     #[serde(default)]
     pub color: Option<ColorCall>,
+    /// Verbatim header of the conditional this spawn sat inside, or `None` at top level.
+    ///
+    /// The export re-wraps the spawn's `is_excute` block in this, which is the difference
+    /// between a directional move exporting as "spawn the left graphic when facing left" and
+    /// exporting as "spawn both". Reproduced, never parsed — see [`EffectStmt::Cond`].
+    #[serde(default)]
+    pub guard: Option<String>,
+    /// Lines that preceded this spawn inside its frame block and that no `EffectCall` could
+    /// represent, kept verbatim with their own `if`/`is_excute` wrapper already in place.
+    #[serde(default)]
+    pub leading: Vec<String>,
+    /// The same, for lines that *followed* this spawn.
+    ///
+    /// Position is load-bearing rather than cosmetic, which is why these hang off a call
+    /// instead of off the frame. Every one of the 64 costume tints in the corpus is a
+    /// `LAST_EFFECT_SET_COLOR` that recolours whatever spawned most recently, and dolly's
+    /// `SpecialHiCommand` puts three spawns and 24 such tints in one frame. Emitting the
+    /// spawns first and the tints after — the obvious thing, if residue were anchored to a
+    /// frame — would land all 24 on the third spawn and recolour it eight times.
+    ///
+    /// Deliberately not modelled into [`tint`](Self::tint): that is one field and these are
+    /// eight alternatives, so binding them would keep only costume 7's and apply it to all.
+    #[serde(default)]
+    pub trailing: Vec<String>,
 }
 
 fn default_effect_spawn_func() -> String {
@@ -1966,11 +2009,93 @@ impl EffectScript {
     ///
     /// Returned from the same walk that resolves the calls, rather than computed beside it, so
     /// there is exactly one implementation of the rule deciding what a modifier binds to.
+    ///
+    /// C6 narrowed what the second half contains without changing what it means. A modifier
+    /// that binds to no spawn but sits in the same frame block as one is now *carried* by that
+    /// call as [`EffectCall::leading`] or [`EffectCall::trailing`] and is no longer reported
+    /// here, because it does reach the export. What is left is the genuine residue: lines with
+    /// no call anywhere in their frame to hang from.
     pub fn to_effect_calls_reporting_losses(&self) -> (Vec<EffectCall>, Vec<String>) {
         let mut calls: Vec<EffectCall> = Vec::new();
-        let mut unbound: Vec<String> = Vec::new();
-        eval_effect_stmts(&self.stmts, 0.0, &mut calls, &mut unbound);
-        (calls, unbound)
+        let mut walk = EffectWalk::default();
+        eval_effect_stmts(&self.stmts, 0.0, &mut calls, &mut walk);
+        walk.end_frame();
+        (calls, walk.unbound)
+    }
+}
+
+/// Walk state for [`eval_effect_stmts`] that is not the frame cursor.
+#[derive(Default)]
+struct EffectWalk {
+    /// Verbatim header of the enclosing [`EffectStmt::Cond`].
+    ///
+    /// One value rather than a stack: no effect function in the corpus nests a non-`is_excute`
+    /// conditional more than one deep, so a stack would be untested machinery. A nested guard
+    /// would overwrite this and lose the outer one, so [`EffectStmt::Cond`] refuses to descend
+    /// into a second level and leaves it to be reported as unexportable instead — a named loss
+    /// beats a half-applied condition.
+    guard: Option<String>,
+    /// Residue seen since the last spawn in this frame, wrapped and waiting for a call to
+    /// attach to.
+    pending: Vec<String>,
+    /// The same lines as [`Self::pending`], but as they were written, for the loss report.
+    ///
+    /// Kept beside the wrapped form rather than derived from it because the two are needed in
+    /// different shapes: an export needs the regenerated `if`/`is_excute` scaffolding, and a
+    /// user reading "these lines will be deleted" needs the line they actually wrote, not four
+    /// braces around it.
+    pending_src: Vec<String>,
+    /// Index of the most recent spawn in this frame block, if any.
+    last_spawn: Option<usize>,
+    /// Residue that never found a call to attach to, reported rather than carried.
+    unbound: Vec<String>,
+}
+
+impl EffectWalk {
+    /// Record one line that no `EffectCall` can represent, wrapped so it can be re-emitted.
+    ///
+    /// Attaches to the spawn above it when there is one, because these lines are overwhelmingly
+    /// `LAST_EFFECT_SET_*` and those name "whatever spawned most recently" — see
+    /// [`EffectCall::trailing`] for what anchoring them to the frame instead would do.
+    /// The `is_excute` wrapper is regenerated here rather than carried from the source, because
+    /// the block is re-emitted standalone at frame level — outside the `is_excute` the emitter
+    /// writes for the spawns. Reusing the source's own wrapper would mean carrying the brace
+    /// that closes it too, and dropping the wrapper entirely would leave the line running on
+    /// every frame the coroutine sits on rather than once.
+    fn residue(&mut self, line: &str, calls: &mut [EffectCall]) {
+        let mut block = Vec::new();
+        if let Some(guard) = &self.guard {
+            block.push(guard.clone());
+        }
+        block.push("if macros::is_excute(agent) {".to_string());
+        block.push(line.to_string());
+        block.push("}".to_string());
+        if self.guard.is_some() {
+            block.push("}".to_string());
+        }
+        match self.last_spawn {
+            Some(index) => calls[index].trailing.extend(block),
+            None => {
+                self.pending.extend(block);
+                self.pending_src.push(line.to_string());
+            }
+        }
+    }
+
+    /// Hand the pending residue to the call about to be pushed, which is now its home.
+    fn take_pending(&mut self) -> Vec<String> {
+        self.pending_src.clear();
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Close the current frame block: nothing may attach across a frame boundary.
+    ///
+    /// Carrying residue to a spawn at a different frame would not preserve the line, it would
+    /// *retime* it — so anything still pending here is reported as dropped, which is what it is.
+    fn end_frame(&mut self) {
+        self.pending.clear();
+        self.unbound.append(&mut self.pending_src);
+        self.last_spawn = None;
     }
 }
 
@@ -1998,14 +2123,41 @@ fn eval_effect_stmts(
     stmts: &[EffectStmt],
     start_frame: f32,
     calls: &mut Vec<EffectCall>,
-    unbound: &mut Vec<String>,
+    walk: &mut EffectWalk,
 ) -> f32 {
     let mut frame = start_frame;
     for stmt in stmts {
         match stmt {
-            EffectStmt::Frame(f) => frame = *f,
-            EffectStmt::Wait(w) => frame += w,
+            EffectStmt::Frame(f) => {
+                walk.end_frame();
+                frame = *f;
+            }
+            EffectStmt::Wait(w) => {
+                walk.end_frame();
+                frame += w;
+            }
+            // Statement-level lines with no typed form: `wait_loop_sync_mot`, bare
+            // `EffectModule::` calls, `methodlib::L2CAgent::pop…`. Deliberately NOT carried.
+            //
+            // The regenerated function states every frame absolutely, with its own `frame()`
+            // calls computed from this walk. A carried `wait_loop_sync_mot` would advance the
+            // coroutine a second time on top of that and shift every effect after it — the
+            // export would compile and play wrong, which is worse than the current honest
+            // deletion. `unexportable_effect_lines` still names each one.
             EffectStmt::Raw(_) => {}
+            EffectStmt::Cond { header, body } => {
+                // One level only. A guard inside a guard would overwrite `walk.guard` and
+                // export the inner condition while silently discarding the outer, which is a
+                // wrong export rather than a lossy one. Nothing in the corpus nests, so this
+                // arm has no measured cost; the body is still walked so its spawns reach the
+                // timeline, they just carry the outer guard.
+                let outer = walk.guard.clone();
+                if outer.is_none() {
+                    walk.guard = Some(header.clone());
+                }
+                frame = eval_effect_stmts(body, frame, calls, walk);
+                walk.guard = outer;
+            }
             EffectStmt::Excute(macros) => {
                 // Which call, if any, the macro immediately above produced — the anchor a
                 // `LAST_EFFECT_SET_RATE` binds to. It is deliberately cleared by every macro
@@ -2055,8 +2207,12 @@ fn eval_effect_stmts(
                                 tint: None,
                                 alpha: None,
                                 color: None,
+                                guard: walk.guard.clone(),
+                                leading: walk.take_pending(),
+                                trailing: Vec::new(),
                             });
                             anchor = Some(calls.len() - 1);
+                            walk.last_spawn = anchor;
                         }
                         EffectMacro::EffectOffKind { effect_name } => {
                             // EffectModule::kill_kind closes every live instance of this kind.
@@ -2091,7 +2247,15 @@ fn eval_effect_stmts(
                                 tint: None,
                                 alpha: None,
                                 color: None,
+                                guard: walk.guard.clone(),
+                                leading: walk.take_pending(),
+                                trailing: Vec::new(),
                             });
+                            // A residue anchor even though it is not a rate anchor: the two
+                            // questions are different. `LAST_EFFECT_SET_RATE` must not bind to a
+                            // trail because it would not bind to one in game, but a carried line
+                            // only needs *a* call at this frame to keep its position relative to.
+                            walk.last_spawn = Some(calls.len() - 1);
                             // Deliberately NOT an anchor. A trail produces an `EffectCall` for
                             // the timeline, but it is drawn by the after-image system rather
                             // than spawned as an effect, so it is not what `LAST_EFFECT_SET_RATE`
@@ -2116,21 +2280,31 @@ fn eval_effect_stmts(
                             // arms clears it.
                             match anchor {
                                 Some(index) => calls[index].rate = Some(*rate),
-                                None => unbound
-                                    .push(format!("macros::LAST_EFFECT_SET_RATE(agent, {rate});")),
+                                None => walk.residue(
+                                    &format!("macros::LAST_EFFECT_SET_RATE(agent, {rate});"),
+                                    calls,
+                                ),
                             }
                         }
                         EffectMacro::LastEffectSetColor { rgb } => match anchor {
                             Some(index) => calls[index].tint = Some(*rgb),
-                            None => unbound.push(format!(
-                                "macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});",
-                                rgb[0], rgb[1], rgb[2]
-                            )),
+                            // The 64 costume tints land here, and carrying them verbatim is the
+                            // whole of C6's colour half. They cannot become `tint` — see
+                            // [`EffectCall::trailing`] — so they are reproduced as written.
+                            None => walk.residue(
+                                &format!(
+                                    "macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});",
+                                    rgb[0], rgb[1], rgb[2]
+                                ),
+                                calls,
+                            ),
                         },
                         EffectMacro::LastEffectSetAlpha { alpha } => match anchor {
                             Some(index) => calls[index].alpha = Some(*alpha),
-                            None => unbound
-                                .push(format!("macros::LAST_EFFECT_SET_ALPHA(agent, {alpha});")),
+                            None => walk.residue(
+                                &format!("macros::LAST_EFFECT_SET_ALPHA(agent, {alpha});"),
+                                calls,
+                            ),
                         },
                         EffectMacro::Color { command, color } => {
                             calls.push(EffectCall {
@@ -2155,19 +2329,42 @@ fn eval_effect_stmts(
                                 tint: None,
                                 alpha: None,
                                 color: Some(color.clone()),
+                                guard: walk.guard.clone(),
+                                leading: walk.take_pending(),
+                                trailing: Vec::new(),
                             });
                             // Not a spawn, so not a rate anchor — a `LAST_EFFECT_SET_RATE`
                             // below a `FLASH` still belongs to whatever spawned before it, and
-                            // the parser refuses to reach past this line to find it.
+                            // the parser refuses to reach past this line to find it. It *is* a
+                            // residue anchor, for the reason given on the after-image arm.
+                            walk.last_spawn = Some(calls.len() - 1);
                             anchor = None;
                         }
-                        EffectMacro::Raw(_) => anchor = None,
+                        // An effect macro with no typed form. Carried verbatim, unlike its
+                        // statement-level twin above, because inside an `is_excute` block a line
+                        // cannot be a timing primitive — everything here acts on effects.
+                        EffectMacro::Raw(line) => {
+                            walk.residue(line, calls);
+                            anchor = None;
+                        }
                     }
                 }
             }
             EffectStmt::Loop { count, body } => {
+                // Every iteration re-runs the SAME text, so the residue state is rewound to
+                // where the loop started and the loss report is truncated back each time. The
+                // calls are genuinely unrolled — four iterations spawn four effects, and each
+                // carries its own copy of the lines that followed it, which is right. The
+                // *report* is not: it names lines of source, and one line named four times is
+                // three lies. `call_macro_ordinals` rewinds for the same reason.
+                let pending_at_entry = walk.pending.clone();
+                let pending_src_at_entry = walk.pending_src.clone();
+                let reported_at_entry = walk.unbound.len();
                 for _ in 0..*count {
-                    frame = eval_effect_stmts(body, frame, calls, unbound);
+                    walk.pending.clone_from(&pending_at_entry);
+                    walk.pending_src.clone_from(&pending_src_at_entry);
+                    walk.unbound.truncate(reported_at_entry);
+                    frame = eval_effect_stmts(body, frame, calls, walk);
                 }
             }
         }
@@ -2213,6 +2410,10 @@ impl EffectScript {
                             walk(body, next, out);
                         }
                     }
+                    // Descended into, not skipped. `eval_effect_stmts` resolves the spawns
+                    // inside a conditional into real calls, so this walk has to number them or
+                    // every later call would be attributed to the wrong line of source.
+                    EffectStmt::Cond { body, .. } => walk(body, next, out),
                     EffectStmt::Frame(_) | EffectStmt::Wait(_) | EffectStmt::Raw(_) => {}
                 }
             }

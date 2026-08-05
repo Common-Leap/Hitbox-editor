@@ -541,7 +541,24 @@ fn color_macro_layout(line: &str) -> Option<(&'static str, bool, bool)> {
         .find(|(command, _, _)| line.contains(&format!("macros::{command}(")))
 }
 
+/// Whether this line opens a brace block it does not also close.
+///
+/// Counted rather than tested with `ends_with('{')` because the dumps write costume checks as
+/// `if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 3)){` — no space before the brace, and a
+/// closing paren in between. No effect line puts a brace inside a string literal, so counting
+/// characters is safe here.
+fn opens_block(line: &str) -> bool {
+    line.chars().filter(|c| *c == '{').count() > line.chars().filter(|c| *c == '}').count()
+}
+
 /// Parse statements from an effect_ function body, producing `EffectStmt`.
+///
+/// **On `else`.** These files are decompiler output, and the decompiler mis-scopes `else`: in
+/// [kirby/CapturePulledHi.txt]() the `else {` sits inside the `if macros::is_excute(agent) {`
+/// block it should be a sibling of, and the function only balances by accident. So an `else`
+/// header is captured as an opaque [`EffectStmt::Cond`] header exactly like an `if` — no attempt
+/// is made to pair it with anything. Anything that tried would be reasoning about a structure
+/// the input does not actually have, and would be wrong on real fighters.
 fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize) {
     let mut stmts = Vec::new();
 
@@ -572,7 +589,25 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             continue;
         }
 
-        if line.contains("frame(") && !line.contains("is_excute") {
+        // Any other block-opening line: `if <costume check> {`, `if !WorkModule::is_flag(…) {`,
+        // `else {`. Tested after `is_excute` and after the `for` header, both of which also open
+        // a block and both of which have typed forms above.
+        //
+        // This used to fall through to `EffectStmt::Raw` below, which kept the header as a
+        // dropped line and — worse — parsed the body as siblings of the conditional. Both arms
+        // of an `if`/`else` then resolved as unconditional spawns at the same frame.
+        if opens_block(line) {
+            let (body_end, _) = find_block_end(lines, pos);
+            let (body, _) = parse_effect_stmts(&lines[pos + 1..body_end], 0);
+            stmts.push(EffectStmt::Cond {
+                header: line.to_string(),
+                body,
+            });
+            pos = body_end + 1;
+            continue;
+        }
+
+        if line.contains("frame(") && !line.contains("is_excute") && !opens_block(line) {
             if let Some(f) = parse_frame_call(line) {
                 stmts.push(EffectStmt::Frame(f));
                 pos += 1;
@@ -1723,25 +1758,97 @@ fn emit_effect_move_fn(
     ));
     for (frame, (stops, starts)) in events {
         out.push_str(&format!("    frame(agent.lua_state_agent, {frame}.0);\n"));
-        out.push_str("    if macros::is_excute(agent) {\n");
+
+        // Split the frame's spawns into the runs that can share one `is_excute` block. A run
+        // ends where the guard changes or where a carried line has to come between two spawns,
+        // because those lines arrive already wrapped in their own `if`/`is_excute` and cannot
+        // be emitted inside somebody else's block.
+        //
+        // A frame with no guard and no carried lines produces exactly one run, which is the
+        // single block this emitter has always written — the shape below is a superset of the
+        // old one, not a replacement for it.
+        let mut chunks: Vec<Chunk> = Vec::new();
+        for call in &starts {
+            if !call.leading.is_empty() {
+                chunks.push(Chunk::Carried(&call.leading));
+            }
+            chunks.push(Chunk::Spawn(call));
+            if !call.trailing.is_empty() {
+                chunks.push(Chunk::Carried(&call.trailing));
+            }
+        }
+        let mut runs: Vec<Run> = Vec::new();
+        for chunk in chunks {
+            match chunk {
+                Chunk::Carried(lines) => runs.push(Run::Carried(lines)),
+                Chunk::Spawn(call) => match runs.last_mut() {
+                    Some(Run::Spawns { guard, calls }) if *guard == call.guard.as_deref() => {
+                        calls.push(call)
+                    }
+                    _ => runs.push(Run::Spawns {
+                        guard: call.guard.as_deref(),
+                        calls: vec![call],
+                    }),
+                },
+            }
+        }
+        // Stops still need a home when every spawn at this frame was disabled or retimed away.
+        if !runs.iter().any(|r| matches!(r, Run::Spawns { .. })) {
+            runs.push(Run::Spawns {
+                guard: None,
+                calls: Vec::new(),
+            });
+        }
+        let first_spawn_run = runs
+            .iter()
+            .position(|r| matches!(r, Run::Spawns { .. }))
+            .unwrap_or(0);
+        let last_spawn_run = runs
+            .iter()
+            .rposition(|r| matches!(r, Run::Spawns { .. }))
+            .unwrap_or(0);
 
         // Dedupe on the emitted line: `EFFECT_OFF_KIND` kills every live instance of a
         // kind at once, and `AFTER_IMAGE_OFF` takes no name to key on at all.
         let mut emitted_stops = std::collections::HashSet::new();
-        for call in stops
-            .iter()
-            .copied()
-            .filter(|call| call.active_start < frame)
-        {
-            let stop = emit_spawn_stop(call, "        ");
-            if emitted_stops.insert(stop.clone()) {
-                out.push_str(&stop);
-            }
-        }
 
-        for call in starts {
-            out.push_str(&emit_spawn_call(call, "        "));
-            let tweak = tweaks.get(&tweak_hash(&call.effect_name));
+        for (index, run) in runs.iter().enumerate() {
+            let (guard, run_calls) = match run {
+                Run::Carried(lines) => {
+                    push_carried(&mut out, lines, "    ");
+                    continue;
+                }
+                Run::Spawns { guard, calls } => (*guard, calls),
+            };
+            // Deliberately not guarding the stops with it. `EFFECT_OFF_KIND` is
+            // `EffectModule::kill_kind`, which is a no-op when nothing of that kind is live, so
+            // an unguarded stop for a guarded spawn is harmless; a *guarded* stop would leave
+            // the effect running forever on the branch that did not take the guard.
+            let inner = if let Some(header) = guard {
+                out.push_str(&format!("    {header}\n"));
+                "        "
+            } else {
+                "    "
+            };
+            out.push_str(&format!("{inner}if macros::is_excute(agent) {{\n"));
+            let body = format!("{inner}    ");
+
+            if index == first_spawn_run {
+                for call in stops
+                    .iter()
+                    .copied()
+                    .filter(|call| call.active_start < frame)
+                {
+                    let stop = emit_spawn_stop(call, &body);
+                    if emitted_stops.insert(stop.trim_start().to_string()) {
+                        out.push_str(&stop);
+                    }
+                }
+            }
+
+            for call in run_calls.iter().copied() {
+                out.push_str(&emit_spawn_call(call, &body));
+                let tweak = tweaks.get(&tweak_hash(&call.effect_name));
             // One tint line, never two, on exactly the terms the rate below uses: a live colour
             // multiplier is a deliberate replacement of this kind's tint, so it wins over the
             // spawn's own `LAST_EFFECT_SET_COLOR`. Before this the script's line was not in
@@ -1762,7 +1869,7 @@ fn emit_effect_move_fn(
                 // are whole numbers. Matching each macro's own spelling is what keeps a
                 // re-exported vanilla script textually identical to the one it came from.
                 out.push_str(&format!(
-                    "        macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
+                    "{body}macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
                     num(r),
                     num(g),
                     num(b)
@@ -1772,7 +1879,7 @@ fn emit_effect_move_fn(
                 // No tweak counterpart to reconcile with: the live override has no opacity
                 // control, so a spawn's alpha can only ever come from its own script line.
                 out.push_str(&format!(
-                    "        macros::LAST_EFFECT_SET_ALPHA(agent, {});\n",
+                    "{body}macros::LAST_EFFECT_SET_ALPHA(agent, {});\n",
                     num(alpha)
                 ));
             }
@@ -1789,25 +1896,70 @@ fn emit_effect_move_fn(
                 // wrote different text for the same value. `check_effect_values` refuses a
                 // non-finite rate, which is the one thing `to_string` cannot spell as Rust.
                 out.push_str(&format!(
-                    "        macros::LAST_EFFECT_SET_RATE(agent, {rate});\n"
+                    "{body}macros::LAST_EFFECT_SET_RATE(agent, {rate});\n"
                 ));
+                }
             }
-        }
 
-        for call in stops
-            .iter()
-            .copied()
-            .filter(|call| call.active_start >= frame)
-        {
-            let stop = emit_spawn_stop(call, "        ");
-            if emitted_stops.insert(stop.clone()) {
-                out.push_str(&stop);
+            if index == last_spawn_run {
+                for call in stops
+                    .iter()
+                    .copied()
+                    .filter(|call| call.active_start >= frame)
+                {
+                    let stop = emit_spawn_stop(call, &body);
+                    if emitted_stops.insert(stop.trim_start().to_string()) {
+                        out.push_str(&stop);
+                    }
+                }
+            }
+            out.push_str(&format!("{inner}}}\n"));
+            if guard.is_some() {
+                out.push_str("    }\n");
             }
         }
-        out.push_str("    }\n");
     }
     out.push_str("}\n");
     (fn_name, out)
+}
+
+/// One piece of a frame block, before consecutive spawns are merged into shared `is_excute`s.
+enum Chunk<'a> {
+    Spawn(&'a crate::data::EffectCall),
+    Carried(&'a [String]),
+}
+
+/// One emitted unit inside a frame block: either an `is_excute` block full of spawns that share
+/// a guard, or a run of carried lines that arrive with their own wrapper already on them.
+enum Run<'a> {
+    Spawns {
+        guard: Option<&'a str>,
+        calls: Vec<&'a crate::data::EffectCall>,
+    },
+    Carried(&'a [String]),
+}
+
+/// Write carried lines, re-indenting them to sit under `base`.
+///
+/// The stored lines are unindented and brace-balanced as a group, so the nesting is recomputed
+/// here rather than saved. Saving it would freeze one indentation into the project file and
+/// leave a reloaded move mis-aligned the moment the surrounding block changed depth.
+fn push_carried(out: &mut String, lines: &[String], base: &str) {
+    let mut depth: i32 = 0;
+    for line in lines {
+        let opens = line.matches('{').count() as i32;
+        let closes = line.matches('}').count() as i32;
+        // A line that closes more than it opens dedents itself before printing, so `}` lines
+        // up with the header that opened it rather than with the body.
+        let at = if closes > opens { depth - (closes - opens) } else { depth };
+        out.push_str(base);
+        for _ in 0..at.max(0) {
+            out.push_str("    ");
+        }
+        out.push_str(line);
+        out.push('\n');
+        depth += opens - closes;
+    }
 }
 
 // ── Export preview ────────────────────────────────────────────────────────────
@@ -1868,11 +2020,21 @@ pub fn export_spawn_downgrades(calls: &[crate::data::EffectCall]) -> Vec<(String
 
 /// The lines of an effect script that an export would not write back.
 ///
-/// [`emit_effect_move_fn`] rebuilds the whole function out of `EffectCall`s, so a line the
-/// parser left as `Raw` — a macro with no typed variant, an `if` the editor does not model, a
-/// `sv_kinetic_energy` call — is not reproduced anywhere in the output. It is deleted, and
-/// until this existed nothing anywhere said so. Modelling a family at a time closes one hole
-/// each; this names whatever is still open.
+/// [`emit_effect_move_fn`] rebuilds the whole function out of `EffectCall`s, so a line that
+/// became no call and rode along on no call is not reproduced anywhere in the output. It is
+/// deleted, and until C5 nothing anywhere said so.
+///
+/// C6 moved most of this list into the export rather than shortening the report artificially,
+/// so what is named here is what is genuinely still lost. Three things reach it:
+///
+/// - **Statement-level `Raw`.** `wait_loop_sync_mot`, bare `EffectModule::` calls, script
+///   plumbing. Deliberately never carried — see the `EffectStmt::Raw` arm of
+///   `eval_effect_stmts` for why re-emitting a timing primitive would be worse than dropping it.
+/// - **Residue with no call to ride on**, from `to_effect_calls_reporting_losses`. A carried
+///   line attaches to a spawn in its own frame block; one whose frame has no spawn at all has
+///   nowhere to go that would not also retime it.
+/// - **A nested conditional's header.** One guard per spawn is modelled; an inner one would
+///   have to overwrite the outer, so it is reported instead.
 ///
 /// Lines carrying no letters or digits are left out. The emitter regenerates every brace it
 /// needs, so a bare `}` is not a loss, and listing one per block would bury the lines that are.
@@ -1883,24 +2045,28 @@ pub fn unexportable_effect_lines(script: &crate::data::EffectScript) -> Vec<Stri
             out.push(line.to_string());
         }
     }
-    fn walk(stmts: &[EffectStmt], out: &mut Vec<String>) {
+    fn walk(stmts: &[EffectStmt], depth: usize, out: &mut Vec<String>) {
         for stmt in stmts {
             match stmt {
                 EffectStmt::Raw(line) => keep(line, out),
-                EffectStmt::Excute(macros) => {
-                    for entry in macros {
-                        if let EffectMacro::Raw(line) = entry {
-                            keep(line, out);
-                        }
+                // Not reported from the tree. Whether an untyped macro survives depends on
+                // whether a spawn shares its frame block, which only the resolving walk knows;
+                // reporting from here would name lines the export does write.
+                EffectStmt::Excute(_) => {}
+                EffectStmt::Loop { body, .. } => walk(body, depth, out),
+                EffectStmt::Cond { header, body } => {
+                    if depth > 0 {
+                        keep(header, out);
                     }
+                    walk(body, depth + 1, out);
                 }
-                EffectStmt::Loop { body, .. } => walk(body, out),
                 EffectStmt::Frame(_) | EffectStmt::Wait(_) => {}
             }
         }
     }
     let mut out = Vec::new();
-    walk(&script.stmts, &mut out);
+    walk(&script.stmts, 0, &mut out);
+    out.extend(script.to_effect_calls_reporting_losses().1);
     out
 }
 
@@ -2882,6 +3048,9 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 tint: None,
                 alpha: None,
                 color: None,
+                guard: None,
+                leading: Vec::new(),
+                trailing: Vec::new(),
             },
             crate::data::EffectCall {
                 effect_name: "sys_flash".into(),
@@ -2901,6 +3070,9 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 tint: None,
                 alpha: None,
                 color: None,
+                guard: None,
+                leading: Vec::new(),
+                trailing: Vec::new(),
             },
         ];
         let tweaks = vec![crate::mod_project::LiveTweak {
@@ -3308,11 +3480,13 @@ unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
     ///
     /// The tint is real at runtime — the game's "last effect" survives the block boundary — but
     /// it only runs on one costume. Binding it would export a costume-specific colour as an
-    /// unconditional one. So it binds to nothing, and the point of this test is that refusing
-    /// it is not the same as forgetting it: the line comes back from
-    /// `to_effect_calls_reporting_losses` so the export report can still name it.
+    /// unconditional one, so it still binds to nothing.
+    ///
+    /// C1 left it there and reported it as a loss. C6 carries it: the line rides on the spawn
+    /// it followed, wrapped in the guard it was written in, and comes back out of the export
+    /// meaning what it meant going in.
     #[test]
-    fn a_tint_cut_off_from_its_spawn_by_a_branch_is_refused_but_not_forgotten() {
+    fn a_tint_cut_off_from_its_spawn_by_a_branch_is_carried_with_its_costume_check() {
         let src = r#"
 unsafe extern "C" fn effect_specialhicommand(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 9.0);
@@ -3332,16 +3506,94 @@ unsafe extern "C" fn effect_specialhicommand(agent: &mut L2CAgentBase) {
             calls[0].tint, None,
             "a costume-gated tint must not be exported onto every costume"
         );
+        assert!(
+            unbound.is_empty(),
+            "the export keeps this line now, so it is no longer a loss to report: {unbound:?}"
+        );
         assert_eq!(
-            unbound,
-            vec!["macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"],
-            "refusing to bind the line must not make it vanish from the export report"
+            calls[0].trailing,
+            vec![
+                "if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){",
+                "if macros::is_excute(agent) {",
+                "macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);",
+                "}",
+                "}",
+            ],
+            "the line rides on the spawn it followed, keeping its costume check"
         );
 
         let (_, emitted) = emit_effect_move_fn(&calls, "specialhicommand", &Default::default());
+        // Both halves matter and they pull against each other. The tint must come back — that
+        // is C6 — but only inside the costume check it was written in. Emitting the bare macro
+        // would recolour all eight costumes, which is exactly what C1 refused to do and the
+        // reason the line went unbound to begin with.
         assert!(
-            !emitted.contains("LAST_EFFECT_SET_COLOR"),
-            "a tint that could not be attached must not be invented onto a spawn:\n{emitted}"
+            emitted.contains("if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){"),
+            "the costume check must survive the export:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"),
+            "the tint must survive the export:\n{emitted}"
+        );
+        let spawn_at = emitted.find("EFFECT_FOLLOW_ALPHA").unwrap();
+        let tint_at = emitted.find("LAST_EFFECT_SET_COLOR").unwrap();
+        assert!(
+            spawn_at < tint_at,
+            "LAST_EFFECT_SET_COLOR recolours whatever spawned last, so carrying it above its \
+             own spawn would land it on someone else's:\n{emitted}"
+        );
+    }
+
+    /// Two spawns at one frame, each with its own costume tint — dolly's up special stripped to
+    /// its shape. The real one has three spawns and 24 tints in a single block.
+    ///
+    /// This is the case that decides whether carried lines hang off a call or off a frame, and
+    /// it is why they hang off a call. `LAST_EFFECT_SET_COLOR` recolours whatever spawned most
+    /// recently, so an export that wrote both spawns and then both tints — the natural shape if
+    /// residue were anchored to a frame — would leave `dolly_roll_l_color1` its original colour
+    /// and paint `dolly_roll_l_color2` twice. Every line would be present and the move would
+    /// still be wrong, which is the failure hardest to notice by reading the output.
+    #[test]
+    fn each_costume_tint_stays_with_the_spawn_it_recolours() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_ALPHA(agent, Hash40::new("dolly_roll_l_color1"), Hash40::new("throw"), 0, 2.5, 0, 0, 0, 0, 1, true, 0.8);
+    }
+    if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){
+        if macros::is_excute(agent) {
+            macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);
+        }
+    }
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_ALPHA(agent, Hash40::new("dolly_roll_l_color2"), Hash40::new("throw"), 0, 2.5, 0, 0, 0, 0, 1, true, 0.8);
+    }
+    if(0x2508e0(*FIGHTER_INSTANCE_WORK_ID_INT_COLOR, 0)){
+        if macros::is_excute(agent) {
+            macros::LAST_EFFECT_SET_COLOR(agent, 0.587, 0.126, 0.169);
+        }
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 2);
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+
+        let first_spawn = emitted.find("dolly_roll_l_color1").unwrap();
+        let first_tint = emitted.find("0.146").unwrap();
+        let second_spawn = emitted.find("dolly_roll_l_color2").unwrap();
+        let second_tint = emitted.find("0.587").unwrap();
+        assert!(
+            first_spawn < first_tint && first_tint < second_spawn && second_spawn < second_tint,
+            "each tint must sit between its own spawn and the next one:\n{emitted}"
+        );
+        // The two spawns cannot share one `is_excute` block, because a tint has to come between
+        // them — so the emitter must have split the frame rather than merging the run.
+        assert_eq!(
+            emitted.matches("if macros::is_excute(agent) {").count(),
+            4,
+            "one block per spawn and one per carried tint:\n{emitted}"
         );
     }
 
@@ -3386,6 +3638,16 @@ unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
     /// The rate macro names no effect, so binding it to anything but the spawn directly above
     /// it is a guess. A line this parser does not model could itself be a spawn, and then the
     /// rate would be written onto an effect it was never meant to touch.
+    ///
+    /// C6 made the export faithful here rather than merely cautious. The unmodelled spawn and
+    /// the rate are both carried, in order, below `sys_atk_smoke` — so the rate still lands on
+    /// whatever `SOME_UNMODELLED_SPAWN` spawns, exactly as it did in the original. The refusal
+    /// to *bind* is unchanged and still the thing under test; what changed is that refusing no
+    /// longer means deleting.
+    ///
+    /// This is also the answer to C6's stated doubling trap. A line only becomes carried
+    /// residue if it produced no `EffectCall`, so a preserved line and a regenerated call can
+    /// never be the same spawn — asserted below.
     #[test]
     fn a_rate_with_no_spawn_directly_above_it_attaches_to_nothing() {
         let src = r#"
@@ -3405,9 +3667,18 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "the rate belongs to the unmodelled line above it, not to sys_atk_smoke"
         );
         let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        assert_eq!(
+            emitted.matches("SOME_UNMODELLED_SPAWN").count(),
+            1,
+            "a carried line must not be emitted alongside a call regenerated from it:\n{emitted}"
+        );
+        let unmodelled_at = emitted.find("SOME_UNMODELLED_SPAWN").unwrap();
+        let rate_at = emitted.find("LAST_EFFECT_SET_RATE").unwrap();
+        let smoke_at = emitted.find("sys_atk_smoke").unwrap();
         assert!(
-            !emitted.contains("LAST_EFFECT_SET_RATE"),
-            "a rate that could not be attached must not be invented onto a spawn:\n{emitted}"
+            smoke_at < unmodelled_at && unmodelled_at < rate_at,
+            "the rate must stay below the unmodelled spawn it names, and both below \
+             sys_atk_smoke:\n{emitted}"
         );
     }
 
@@ -3703,6 +3974,9 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             tint: None,
             alpha: None,
             color: None,
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
         };
         let (_, emitted) = emit_effect_move_fn(&[call], "test", &Default::default());
         assert!(
@@ -3808,6 +4082,68 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .join("\n")
         );
         eprintln!("[audit] {spawns} spawns across {} scripts", bodies.len());
+    }
+
+    /// C6's own corpus oracle: how much of a real effect script an export still deletes.
+    ///
+    /// C5 measured this and could only report it — 32 of the 132 effect scripts that produce
+    /// calls lost at least one line. This asserts the number rather than printing it, because
+    /// the whole family of tasks is a ratchet: every macro modelled and every line carried
+    /// should move it down, and nothing should move it back up. A change that regresses this
+    /// is a change that started silently deleting user code again.
+    ///
+    /// Two things are checked past the count. Braces must balance, or the carried lines have
+    /// produced a function that will not compile; and the output must re-parse to the same
+    /// spawns, which is what stops "preserve the line" from turning into "spawn it twice".
+    #[test]
+    fn the_effect_export_still_loses_no_more_of_the_corpus_than_it_did() {
+        let cache = crate::scratch_dirs::app_storage_root().join("script-cache");
+        if !cache.is_dir() {
+            return;
+        }
+        let mut lossy = 0usize;
+        let mut with_calls = 0usize;
+        let mut unbalanced: Vec<String> = Vec::new();
+        for fighter in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
+            for entry in std::fs::read_dir(fighter.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let Ok(body) = std::fs::read_to_string(entry.path()) else {
+                    continue;
+                };
+                let script = parse_effect_script(&body);
+                let calls = script.to_effect_calls();
+                if calls.is_empty() {
+                    continue;
+                }
+                with_calls += 1;
+                if !unexportable_effect_lines(&script).is_empty() {
+                    lossy += 1;
+                }
+                let (_, emitted) = emit_effect_move_fn(&calls, "audit", &Default::default());
+                let opens = emitted.matches('{').count();
+                let closes = emitted.matches('}').count();
+                if opens != closes {
+                    unbalanced.push(format!("{:?}: {opens} vs {closes}", entry.path()));
+                }
+            }
+        }
+        if with_calls == 0 {
+            return;
+        }
+        assert!(
+            unbalanced.is_empty(),
+            "carried lines left the output unbalanced:\n{}",
+            unbalanced.join("\n")
+        );
+        eprintln!("[audit] {lossy} of {with_calls} effect scripts still lose a line");
+        assert!(
+            lossy <= 19,
+            "the export deletes lines from {lossy} of {with_calls} effect scripts; C5 measured \
+             28 and C6 brought it to 19. Something started dropping user code again."
+        );
     }
 
     // ═══ Export preview ═════════════════════════════════════════════════════

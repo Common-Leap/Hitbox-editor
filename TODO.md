@@ -54,6 +54,15 @@ Two export paths, different rules — do not conflate them:
   nothing clears. The *parser* was safe only because it matches `macros::NAME(` with the paren.
   Before adding such a family, grep for `starts_with(` on the prefix you are extending and fix
   every hit; then add the exact-name arm **above** the prefix one.
+- **A walk that unrolls loops will count a line once per iteration.** `eval_effect_stmts` and
+  `eval_stmts` both run a `for` body `count` times, which is right for the calls they produce
+  and wrong for anything that names a *line of source*: a report, a site ordinal, a residue
+  buffer. C6 read `COL_NORMAL` as 16 losses against a true 8 this way, and B4 hit the same
+  thing with hurtbox site ordinals. The fix both times was to rewind the per-line state at the
+  top of each iteration and step it once for the whole body — `call_macro_ordinals` and
+  `EffectStmt::Loop` in `eval_effect_stmts` are the two worked examples. **The tell is a count
+  that is an exact multiple of the truth**, so check a new number against `main` in a worktree
+  before believing it; a plausible number is the easiest kind to ship.
 - **Two sources of truth for arity, and they disagree. You need both.**
   `/home/leap/.cargo/git/checkouts/smash-script-*/*/src/macros.rs` tells you what *compiles*,
   which is what an export must emit. The vanilla archive tells you what you must *parse* — and
@@ -101,11 +110,20 @@ Two export paths, different rules — do not conflate them:
   `cached_scripts_round_trip_through_the_emitter` only compares `(spawn_func, effect_name)`
   pairs, so it will not catch a dropped field for you.
 
-  The general form of this is **C6**: a line with no typed variant is not merely unmodelled,
-  it is *deleted* by the export. C3 found 69 more of them after A3 found 27, and C5 measured
-  the rest — 24% of vanilla effect scripts lose a line. You no longer have to assume: open the
-  move in the editor and read the generated-source pane, which now names every line the export
-  will not write. C5's table lists what is still going.
+  The general form of this was **C6**: a line with no typed variant is not merely unmodelled,
+  it is *deleted* by the export. C3 found 69 more of them after A3 found 27, C5 measured the
+  rest, and C6 fixed most of it — the export now copies unmodelled lines through in position,
+  and 19 of 132 effect scripts still lose one rather than 28. You no longer have to assume:
+  open the move in the editor and read the generated-source pane, which names both what the
+  export will not write and what it copies through without understanding. C6b lists what is
+  still going.
+
+  **The root cause is worth remembering, because the other three categories do not have it.**
+  A `game_` script is emitted from its statement tree, so anything in the tree survives whether
+  or not the emitter understands it. The effect export is regenerated from a flat call list, so
+  only what became a typed call could come out. When a new category is added (`sound_`,
+  `expression_` — D1 and D2), pick the tree, not the list, and this whole family of bugs never
+  starts.
 
   **The sharp edge: modelling a macro can make its loss quieter instead of fixing it.** C1
   gave `LAST_EFFECT_SET_COLOR` a typed variant, and 32 corpus lines promptly *stopped* being
@@ -152,12 +170,15 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**302 green after B1**), including the two corpus oracles — run them
-      by name with `cargo test cached_script`:
-      `acmd_verify::tests::every_cached_script_survives_its_own_export` and
-      `acmd::tests::cached_scripts_round_trip_through_the_emitter`. They run the new code over
-      every script the app has ever fetched (currently 461 files under
-      `~/.cache/visionary/script-cache`, ~1000 functions).
+- [ ] `cargo test` passes (**305 green after C6**), including the three corpus oracles — run
+      them by name with `cargo test cached_script` and `cargo test still_loses`:
+      `acmd_verify::tests::every_cached_script_survives_its_own_export`,
+      `acmd::tests::cached_scripts_round_trip_through_the_emitter`, and
+      `acmd::tests::the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`. They run
+      the new code over every script the app has ever fetched (currently 461 files under
+      `~/.cache/visionary/script-cache`, ~1000 functions). The third asserts a *number* — how
+      many effect scripts still lose a line — so it fails on a regression rather than only on a
+      crash.
       **Both return early and pass vacuously if that cache directory is missing.** The first
       then asserts `checked > 100`, so a *thin* cache fails loudly — but an *absent* one is
       silently green. Confirm the directory exists before trusting either. `ls` shows only 3
@@ -695,8 +716,8 @@ scripts produce calls, and **32 of them (24%) lose at least one line.** By head 
 
 | Count | Line | Note |
 |---|---|---|
-| 33 | `macros::LAST_EFFECT_SET_COLOR` | The biggest single loss. **C1 modelled it and this barely moved:** all but one of these are cut off from their spawn by a costume `if`, so they now bind to nothing and are reported as unbound rather than as unparsed. Still deleted, still named, now C6's. |
-| 62 | `if` / `if !WorkModule::is_flag` / `if get_value_float` / `else {` | Conditional effects export as unconditional. Bigger than C5 and bigger than C6 — see E2's neighbourhood, and note `has_unmodelled_flow` already gates the *timing* checks on this but nothing gates the export. |
+| 33 | `macros::LAST_EFFECT_SET_COLOR` | The biggest single loss. **C1 modelled it and this barely moved:** all but one of these are cut off from their spawn by a costume `if`, so they now bind to nothing and are reported as unbound rather than as unparsed. **C6 closed this to 0** — carried verbatim under its own costume check. |
+| 62 | `if` / `if !WorkModule::is_flag` / `if get_value_float` / `else {` | Conditional effects export as unconditional. **C6 closed this to 5**, all of them nested guards. It also fixed a second bug hiding underneath: the parser flattened `if A { X } else { Y }` into sibling spawns, so a move exported as doing *both*. |
 | 7 | `wait_loop_sync_mot` | A timing primitive with no `EffectStmt` variant. |
 | 4 | `macros::LAST_EFFECT_SET_ALPHA` | **Fixed by C1** — all four bind and survive an export. |
 | 4 | `methodlib::L2CAgent::pop…` | Not a call to model; genuinely script plumbing. |
@@ -708,64 +729,160 @@ scripts produce calls, and **32 of them (24%) lose at least one line.** By head 
 loss of the user's code arguably belongs in classes 1–3, which refuse the export. It is a
 warning because 24% of vanilla scripts carry such a line: blocking would swap a lossy export
 for no export, which helps nobody, and the message a user acts on is identical either way.
-Reconsider once C6 lands and the residue is small.
+**C6 has since landed and the residue is 19 of 132, not 32.** The arithmetic behind this
+paragraph is therefore out of date; C6b carries the re-decision. Do not re-quote the 24% figure.
 
 - **Known gap, deliberate:** the **Export Mod Folder** path passes `None` and does not run this
   check. A saved project stores `effect_calls_full` — resolved `EffectCall`s and nothing else —
   so by export time the dropped lines are already gone from the data. Making the project carry
   them is the same plumbing C6 needs, so it lands there rather than being done twice. The
   generated-source pane, which is where a user looks before exporting, does have the script and
-  does check.
+  does check. **Half closed by C6:** carried lines ride on the calls a project saves, so those
+  do report here. The dropped half is C6c.
 - **Also deliberate:** punctuation-only lines are filtered out. The emitter regenerates every
   brace it needs, so reporting one `}` per block would bury the lines that are a loss. The
   filter is "contains a letter or digit", which keeps `if … {` and `else {` in.
 
-### [~] C6 — Carry unmodelled effect lines through the export
+### [x] C6 — Carry unmodelled effect lines through the export (done 2026-08-04)
 
-The other half of C5, which named the problem without fixing it. C5's table is the measured
-target list; read it first.
+Done. `cargo test` 305 green, both corpus oracles run for real plus a new third one, clippy
+clean, `build_check.sh` exit 0. Plugin untouched — see the live gap below.
+
+**Result: the export drops lines from 19 of 132 effect scripts, down from 28.** Measured, not
+estimated, and now asserted by `the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`
+so the number can only go down. C5's table said 32; the true baseline on `main` was 28, because
+C1 and C3 had already moved some. What the remaining 19 lose:
+
+| Was | Now | Line |
+|---|---|---|
+| 64 | **0** | costume `if(0x2508e0(…)){` headers |
+| 33 | **0** | `LAST_EFFECT_SET_COLOR` — every one now carried under its own costume check |
+| 12 | **0** | `if !WorkModule::is_flag(…) {` |
+| 9 | **0** | `if get_value_float(… LR) < 0.0 {` |
+| 8 | **0** | `FLASH_SET_DIRECTION` |
+| 9 | 5 | `else {` — the survivors are inside a second conditional, reported by design |
+| 8 | 8 | `COL_NORMAL` — in blocks with no spawn to ride on |
+| 7 | 7 | `wait_loop_sync_mot` — **deliberate**, see below |
+| 4 | 2 | `methodlib::L2CAgent::pop()` |
 
 **The root cause, which C5 did not name.** The two exports are not built the same way.
 [`emit_move_fn`](src/acmd.rs) emits a `game_` script from `script.stmts` — it walks the
 statement tree, so anything in the tree survives whether or not the emitter understands it.
-[`emit_effect_move_fn`](src/acmd.rs) regenerates an `effect_` script from a flat `Vec<EffectCall>`
-grouped by frame, so **only what became a typed call can come out**. Every loss in C5's table
-follows from that one asymmetry. Fixing it means either making the effect export
-structure-preserving too, or teaching the flat form to carry what it cannot type.
+[`emit_effect_move_fn`](src/acmd.rs) regenerated an `effect_` script from a flat
+`Vec<EffectCall>` grouped by frame, so **only what became a typed call could come out**. Every
+loss in C5's table followed from that one asymmetry.
 
-**Measured over the cache before designing** (`137` effect functions), because the shape of the
-residue decides which of those two is right:
+**Measured the corpus before designing** (`137` effect functions), because the shape of the
+residue decides whether to fix the asymmetry or work around it:
 
-| Measurement | Result | What it rules out |
+| Measurement | Result | What it ruled out |
 |---|---|---|
-| Functions with a non-`is_excute` conditional | **13 of 137** | This is a narrow feature, not a pervasive one. Not worth rewriting the emitter for. |
-| Maximum conditional nesting depth | **1** | No recursion needed. A guard is a single string, not a stack. |
-| `frame()` / `wait()` inside a conditional | **1 occurrence** | Frame arithmetic does not meaningfully branch, so frame-grouping survives. Name the one exception. |
-| Statements inside a guard | **only `if is_excute { … }` and effect macros** | A guard always wraps whole `is_excute` blocks, so it can be re-emitted around one. |
-| Brace-balanced function bodies | **137 of 137** | Verbatim passthrough of a whole block is safe. |
+| Functions with a non-`is_excute` conditional | **13 of 137** | A narrow feature. Not worth rewriting the emitter for. |
+| Maximum conditional nesting depth | **1** | No recursion. A guard is one string, not a stack. |
+| `frame()` / `wait()` inside a conditional | **1** | Frame arithmetic does not branch, so frame-grouping survives. |
+| Statements inside a guard | **only `is_excute` blocks and effect macros** | A guard always wraps whole blocks, so it can be re-emitted around one. |
+| Brace-balanced function bodies | **137 of 137** | Verbatim passthrough of a block is safe. |
 
-So: **keep the frame-grouped emitter and teach it to carry residue.** A full
-structure-preserving rewrite would put the editor's own strengths — add, delete, retime — at
-risk to serve 13 functions.
+So the frame-grouped emitter stayed and learned to carry residue. A structure-preserving rewrite
+would have put add, delete and retime — the editor's actual value — at risk to serve 13 files.
 
-- **Confirmed trap, now with a reason.** Do not try to bind the costume tints to their spawn.
-  There are 64 of them across 8 costumes, `EffectCall::tint` is one field, and the last one
-  would win — the export would recolour every costume to costume 7. The TODO said "those tints
-  are real on one costume only"; the field shape is *why* that matters.
-- **`else` is not `else`.** In the dumps it attaches to `if macros::is_excute(agent)`, not to
-  the outer conditional — see [kirby/CapturePulledHi.txt:6](). The decompiler mis-scopes it and
-  the result is balanced only by accident. Treat a guard header as **opaque text to reproduce**,
-  never as a construct to interpret; anything that tries to pair an `else` with its `if` will be
-  wrong on real input.
-- **Trap:** a preserved line may be a spawn this parser does not recognise, in which case
-  re-emitting it and *also* emitting the call it produced would double the spawn.
-- **Also carry the unbound modifiers.** `to_effect_calls_reporting_losses` already returns the
-  `LAST_EFFECT_SET_*` lines that bound to no spawn. Those are lines with a typed variant that
-  still do not reach the export, and they need the same treatment as the untyped ones.
-- **Do this alongside:** once the lines are carried in the IR, make `ModProject` carry them too
-  and pass `Some(script)` at [acmd_verify.rs:161](src/acmd_verify.rs:161), closing C5's one
-  known gap.
-- **Then reconsider** whether the C5 warning should become a blocker for whatever is left.
+**What landed.** `EffectStmt::Cond` (the parser stops flattening conditionals),
+`EffectCall::guard` (a spawn re-exports inside its own condition), and
+`EffectCall::leading` / `trailing` (verbatim lines, wrapper regenerated). Panel shows them under
+**Kept as written**; `check_carried_lines` warns that a copied line is not an understood one.
+
+**Findings worth keeping:**
+
+- **Position is load-bearing, so residue hangs off a call and not off a frame.**
+  `LAST_EFFECT_SET_COLOR` recolours whatever spawned most recently, and dolly's `SpecialHiCommand`
+  puts three spawns and 24 tints in one frame block. Anchoring residue to the frame would have
+  emitted the spawns then the tints and landed all 24 on the third spawn — every line present,
+  move wrong. Pinned by `each_costume_tint_stays_with_the_spawn_it_recolours`.
+- **Flattening was hiding a second bug.** The parser turned `if A { spawn X } else { spawn Y }`
+  into two sibling spawns, so a move that spawned one graphic facing left and another facing
+  right exported as spawning *both*. `Cond` fixes that as a side effect of keeping the header.
+- **`else` is not `else`.** In the dumps it attaches to `if macros::is_excute(agent)`, not to the
+  outer conditional — [kirby/CapturePulledHi.txt:6](). The decompiler mis-scopes it and the
+  function balances only by accident. A guard header is reproduced as opaque text and never
+  interpreted; anything pairing an `else` with its `if` would be wrong on real input.
+- **Loop unrolling duplicated the loss report** — `eval_effect_stmts` runs a `for` body once per
+  iteration, so a line inside one was named four times. `COL_NORMAL` read 16 against a true 8
+  until the walk started rewinding its residue state per iteration, exactly as
+  `call_macro_ordinals` already did. Caught by comparing against a worktree at `main` rather than
+  trusting the new number.
+- **The doubling trap cannot fire.** C6's entry warned that re-emitting a preserved line that is
+  itself an unrecognised spawn would double it. It cannot: a line only becomes residue if it
+  produced no `EffectCall`, so a carried line and a regenerated call are never the same spawn.
+  Asserted in `a_rate_with_no_spawn_directly_above_it_attaches_to_nothing`.
+- **Timing primitives are deliberately still dropped.** `wait_loop_sync_mot` advances the
+  coroutine, and the regenerated function states every frame absolutely with its own `frame()`
+  calls. Carrying it would shift every effect after it — an export that compiles and plays wrong,
+  which is worse than an honest deletion. All 7 stay reported.
+- **Faithful preservation means preserving invalid Rust.** The dumps are decompiler output:
+  `if(0x2508e0(…)){` will not compile. Carrying it through is still the right trade — a user can
+  fix a line they can see, not one that was deleted — but it turns a silent wrong export into a
+  build error, so `check_carried_lines` says so up front rather than letting `cargo` say it.
+
+**Known gaps, deliberately left:**
+
+- **Live preview does not carry these.** A carried line is text whose condition only the game can
+  evaluate; the plugin replays captured calls and a capture already reflects the branch that ran.
+  Export and the generated-source pane are the surfaces this task touches. The plugin is
+  unchanged, and not by oversight.
+- **C5's export-path gap is now half closed rather than closed.** Carried lines travel *on* the
+  calls, so a saved project reports them without needing the script. Dropped lines still do not:
+  that would need `FighterEdits` to store the loss list beside `effect_calls_full` — a schema
+  change for a report, not for behaviour. See [acmd_verify.rs:161](src/acmd_verify.rs:161).
+- **One guard deep.** A conditional inside a conditional would have to overwrite the outer one,
+  and neither choice is right — keeping the outer is too permissive, keeping the inner is wrong
+  in a different direction. Nothing in the corpus nests, so the outer is kept and the inner is
+  reported as a loss. That is the 5 remaining `else {`.
+- **Guarded spawns are stopped unguarded.** `EFFECT_OFF_KIND` is `kill_kind`, a no-op when
+  nothing of that kind is live, so an unguarded stop for a guarded spawn is harmless — whereas a
+  guarded stop would leave the effect running forever on the branch that skipped the guard.
+
+### [ ] C6b — The 19 effect scripts the export still loses a line from
+
+C6 took the corpus from 28 lossy scripts to 19 and asserted the number, so this is what is
+left. Read C6's result table first — it says exactly which lines these are. Nothing here is
+large; the point of the entry is that the remainder has been *identified*, so it can be closed
+deliberately rather than discovered again.
+
+- **`COL_NORMAL`, 8 occurrences — the biggest item, and the cheapest.** These sit in `is_excute`
+  blocks that contain no spawn, so there is no call for them to ride on. B4 already modelled
+  `COL_NORMAL` and `COL_PRI` as `ExcuteStmt` for `game_` scripts; the same macros in an
+  `effect_` script have no typed form at all. Giving them one is the fix, and it is the same
+  shape as C3 — a non-spawn entry that shares the effect list. Note the two scripts are not the
+  same surface: do not assume the `game_` variant's panel work carries over.
+- **`else {`, 5 occurrences — nested guards.** C6 keeps one guard per spawn and reports an inner
+  one rather than overwriting the outer. Closing this means `EffectWalk::guard` becoming a stack
+  and `EffectCall::guard` a `Vec<String>`. Cheap, but there is **no corpus case that exercises
+  it correctly** — these 5 are all the mis-scoped `else` described in C6, so a test would be
+  pinning decompiler noise. Do it only alongside a real nested example.
+- **`wait_loop_sync_mot`, 7 — do not "fix" this.** It is dropped by decision, not by omission:
+  it advances the coroutine while the regenerated function states every frame absolutely, so
+  carrying it shifts every effect after it. The honest close is to *model* it as a timing
+  statement that the frame walk understands, which is E2's neighbourhood (`FT_MOTION_RATE`),
+  not this one.
+- **`methodlib::L2CAgent::pop()`, 2, and the bare `EffectModule::` calls, ~4.** Genuine script
+  plumbing with no editor meaning. Worth leaving reported.
+- **Then reconsider** whether the C5 warning should become a blocker. C6 changed the arithmetic
+  behind that decision: it was a warning because a quarter of vanilla scripts tripped it, and
+  now one in seven does, of which half are the deliberate `wait_loop_sync_mot`. Still probably a
+  warning — but the reasoning in C5's entry is now out of date and should be re-derived rather
+  than re-quoted.
+
+### [ ] C6c — Close C5's export-path gap
+
+Carried lines already report on the export path, because they travel on the `EffectCall`s a
+project saves. Dropped lines do not: nothing in a saved project remembers them.
+
+- Store the loss list beside `effect_calls_full` in `FighterEdits`, populate it where the script
+  is still in hand, and pass it at [acmd_verify.rs:161](src/acmd_verify.rs:161).
+- **This is a schema change for a report, not for behaviour** — which is why C6 left it. Weigh
+  that before starting: the generated-source pane, which is where a user looks before exporting,
+  already has the script and already checks. The gap only bites someone who exports a saved
+  project without opening the pane.
 
 ### [ ] C4 — Effect lifetime control
 

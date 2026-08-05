@@ -4246,6 +4246,9 @@ impl VisionaryApp {
                         transition: None,
                         rgba: Some([1.0, 1.0, 1.0, 0.5]),
                     }),
+                    guard: None,
+                    leading: Vec::new(),
+                    trailing: Vec::new(),
                 };
                 self.state.effects.push(call.clone());
                 let idx = self.state.effects.len() - 1;
@@ -4290,6 +4293,9 @@ impl VisionaryApp {
                     // This button adds a spawn. Colour commands are added by their own button
                     // below, because the two share a list but nothing else.
                     color: None,
+                    guard: None,
+                    leading: Vec::new(),
+                    trailing: Vec::new(),
                 };
                 self.state.effects.push(call.clone());
                 let idx = self.state.effects.len() - 1;
@@ -4914,6 +4920,44 @@ impl VisionaryApp {
                             changed |= ui.checkbox(&mut ec.disabled, "don't spawn").changed();
                             ui.label("");
                             ui.end_row();
+
+                            // Lines this call carries but the editor does not understand. Read
+                            // only, and shown rather than hidden because the alternative is
+                            // worse in both directions: before C6 they were deleted on export
+                            // without appearing anywhere, and simply carrying them silently
+                            // would leave a user editing a tint here while a costume-gated
+                            // `LAST_EFFECT_SET_COLOR` further down the block overrode it in
+                            // game with no hint of where that came from.
+                            let carried: Vec<&String> = ec
+                                .leading
+                                .iter()
+                                .chain(&ec.trailing)
+                                .filter(|line| {
+                                    !line.contains("is_excute")
+                                        && line.chars().any(|c| c.is_alphanumeric())
+                                })
+                                .collect();
+                            if !carried.is_empty() {
+                                ui.label("Kept as written");
+                                ui.vertical(|ui| {
+                                    for line in &carried {
+                                        ui.label(
+                                            egui::RichText::new(line.as_str())
+                                                .small()
+                                                .monospace()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Copied into the export unchanged. Editing this call will \
+                                     not update these lines, and they have to be valid Rust on \
+                                     their own — the decompiled dumps often are not.",
+                                );
+                                ui.label("");
+                                ui.end_row();
+                            }
                         });
                 }
 
@@ -6771,6 +6815,13 @@ impl VisionaryApp {
             // `effect_capture_layout` above only matches spawn families, so nothing that
             // reaches here is a colour command; those are built by `color_call_from_capture`.
             color: None,
+            // A live capture sees the calls the game actually made, which is the far side of
+            // every conditional — the branch not taken produced no call to capture. So there is
+            // no guard to record, and recording one would be worse than recording none: it
+            // would re-gate a spawn that this capture proves already ran.
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
         })
     }
 
@@ -6824,6 +6875,9 @@ impl VisionaryApp {
             tint: None,
             alpha: None,
             color: Some(crate::data::ColorCall { transition, rgba }),
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
         })
     }
 

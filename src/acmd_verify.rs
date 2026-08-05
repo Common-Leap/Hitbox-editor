@@ -153,11 +153,16 @@ pub fn verify_export(
     for (fighter, move_name, calls) in effect_edits {
         let subject = format!("{fighter} / {move_name}");
         let emitted = crate::acmd::preview_effect_fn(calls, move_name, tweaks);
-        // No source to hand over: a saved project stores the resolved call list and nothing
-        // else, so by the time an export runs, the lines that were dropped are already gone
-        // from the data. Naming them here needs the project to carry them, which is the same
-        // plumbing that would let the export keep them — so it lands with that half, not this
-        // one. The generated-source pane in the editor does have the script, and does check.
+        // Still no source to hand over, but this gap is now half the size C5 described. A
+        // saved project stores the resolved call list, and C6 put the *carried* lines on the
+        // calls themselves — so `check_carried_lines` runs here in full, and an exported mod
+        // does warn about the lines it copied through verbatim.
+        //
+        // What is still missing is the dropped half: a line that reached no call left no trace
+        // in the project, so naming it here would need `FighterEdits` to store the loss list
+        // beside `effect_calls_full`. That is a schema change for a report, not for behaviour,
+        // and the generated-source pane — where a user looks before exporting — does have the
+        // script and does check.
         verify_effect_move(&subject, calls, &emitted, tweaks, None, &mut report);
         if !sources.iter().any(|text| text.contains(&emitted)) {
             report.blocker(
@@ -197,6 +202,11 @@ pub fn verify_effect_move(
 ) {
     check_effect_fidelity(subject, calls, emitted, tweaks, report);
     check_effect_values(subject, calls, report);
+    // Unlike the dropped-line check, this one needs no source: the carried lines travel on the
+    // calls themselves, so a project saved and reloaded still reports them. That is the point —
+    // a user who opens a saved mod and exports it gets the same warning as the one who parsed
+    // the script this session.
+    check_carried_lines(subject, calls, report);
     if let Some(source) = source {
         check_dropped_lines(subject, source, report);
     }
@@ -690,14 +700,10 @@ fn check_effect_fidelity(
 /// export at all — worse for every user who does not care about the dropped line, and no better
 /// for the ones who do, since the message is the same either way.
 fn check_dropped_lines(subject: &str, source: &EffectScript, report: &mut Report) {
-    // Two ways to lose a line, and they must be reported together or modelling a macro would
-    // *shrink* this report without shrinking the loss. The first is a line with no typed
-    // variant. The second is a `LAST_EFFECT_SET_*` that parses perfectly and then binds to no
-    // spawn — 32 of the corpus's 65 colour calls sit inside costume-gated `if` blocks that cut
-    // them off from the spawn above, and before this they moved out of the first list and into
-    // silence. See `EffectScript::to_effect_calls_reporting_losses`.
-    let mut lost = crate::acmd::unexportable_effect_lines(source);
-    lost.extend(source.to_effect_calls_reporting_losses().1);
+    // Both ways of losing a line — no typed variant, and a typed one that binds to no spawn —
+    // are inside `unexportable_effect_lines` now. This used to append the second list here as
+    // well; once C6 folded it into the first, doing that reported every unbound modifier twice.
+    let lost = crate::acmd::unexportable_effect_lines(source);
 
     // Grouped by text and kept in first-seen order: a line inside a `for` body is genuinely
     // lost once per iteration, but saying so five times reads as five different problems.
@@ -719,6 +725,51 @@ fn check_dropped_lines(subject: &str, source: &EffectScript, report: &mut Report
             format!(
                 "the generated script does not include this line{times}, and nothing in it \
                  does the same job: {line}"
+            ),
+        );
+    }
+}
+
+/// Name the lines the export reproduces verbatim without understanding them.
+///
+/// The counterpart to [`check_dropped_lines`], and it exists because C6 turned one kind of
+/// surprise into another. A line the editor cannot model is no longer deleted — it is copied
+/// through — and a copied line is not the same as a supported one. Two things follow that a
+/// user should hear before they build:
+///
+/// - The editor does not know what it does, so editing the move around it will not update it.
+///   A carried spawn keeps its original graphic no matter what the panel says.
+/// - It is copied from the decompiled dump *as written*, and those dumps are not valid Rust.
+///   Costume checks come through as `if(0x2508e0(…)){`, which will not compile until the user
+///   spells the condition properly. Before C6 the same script exported cleanly and silently
+///   wrong; this is the better failure, but it is still a failure and it should not arrive as
+///   a mystery from `cargo build`.
+///
+/// A warning, on the same reasoning as the dropped-line check: refusing the export helps nobody
+/// who can read the message and fix the line.
+fn check_carried_lines(subject: &str, calls: &[EffectCall], report: &mut Report) {
+    let mut seen: Vec<String> = Vec::new();
+    for line in calls
+        .iter()
+        .filter(|call| !call.disabled)
+        .flat_map(|call| call.leading.iter().chain(&call.trailing))
+    {
+        // Braces and the regenerated `is_excute` header are this module's own scaffolding, not
+        // the user's code, so naming them would bury the lines that are actually theirs.
+        let text = line.trim();
+        if text.contains("is_excute") || !text.chars().any(|c| c.is_alphanumeric()) {
+            continue;
+        }
+        if !seen.iter().any(|s| s == text) {
+            seen.push(text.to_string());
+        }
+    }
+    for line in seen {
+        report.warn(
+            subject,
+            format!(
+                "the generated script copies this line through as written — editing the move \
+                 will not update it, and it must be valid Rust on its own: {line}"
             ),
         );
     }
@@ -1394,29 +1445,35 @@ mod tests {
         );
     }
 
-    /// The whole point of C5: an effect script's unmodelled lines do not survive an export, and
-    /// before this nothing said which ones. `FILL_SCREEN_MODEL_COLOR` is a real corpus line with
-    /// no typed variant, and its `CANCEL_FILL_SCREEN` partner makes the pair worth pinning — a
-    /// move exported today loses a full-screen tint and the call that ends it.
+    /// The whole point of C5: a line the export cannot reproduce must be named rather than
+    /// silently deleted.
     ///
-    /// This test was written against `LAST_EFFECT_SET_COLOR` and had to be moved off it when C1
-    /// modelled that macro — which is exactly what the premise assertion below is for. Move it
-    /// again rather than deleting it when this line is modelled too.
+    /// This test has now been repointed twice, and the premise assertion below is what forced
+    /// it both times. It was written against `LAST_EFFECT_SET_COLOR` until C1 modelled that
+    /// macro, then against `FILL_SCREEN_MODEL_COLOR` until C6 began carrying untyped macros
+    /// through. Move it again rather than deleting it — the check it guards outlives any one
+    /// example of a loss.
+    ///
+    /// `wait_loop_sync_mot` is the current example and a more durable one, because it is not
+    /// merely waiting to be modelled: it is dropped *by decision*. It advances the ACMD
+    /// coroutine, while the regenerated function states every frame absolutely with its own
+    /// `frame()` calls — so carrying it would shift every effect after it. Seven sit in the
+    /// corpus and each is a real loss the user should hear about.
     #[test]
     fn a_line_the_export_cannot_reproduce_is_named_rather_than_silently_deleted() {
         let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 5.0);
     if macros::is_excute(agent) {
         macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
-        macros::FILL_SCREEN_MODEL_COLOR(agent, 1, 0.5, 0, 0.7);
     }
+    wait_loop_sync_mot(agent.lua_state_agent, false, 3.0);
 }
 "#;
         let source = crate::acmd::parse_effect_script(src);
         let calls = source.to_effect_calls();
         let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
         assert!(
-            !emitted.contains("FILL_SCREEN_MODEL_COLOR"),
+            !emitted.contains("wait_loop_sync_mot"),
             "the premise no longer holds — the export now keeps this line, so this test is \
              checking nothing:\n{emitted}"
         );
@@ -1424,7 +1481,7 @@ mod tests {
         let mut report = Report::default();
         verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
         assert!(
-            messages(&report).contains("macros::FILL_SCREEN_MODEL_COLOR(agent, 1, 0.5, 0, 0.7);"),
+            messages(&report).contains("wait_loop_sync_mot(agent.lua_state_agent, false, 3.0);"),
             "the dropped line was not named:\n{}",
             messages(&report)
         );
@@ -1444,16 +1501,19 @@ mod tests {
         );
     }
 
-    /// Modelling a macro must not quietly *shrink* this report.
+    /// The report must track what the export actually does, in both directions.
     ///
-    /// C1 nearly did exactly that. Before it, a `LAST_EFFECT_SET_COLOR` parsed as `Raw` and was
-    /// named here as a dropped line. After it, the same line parses into a typed variant — and
-    /// when it sits inside a costume-gated `if`, as 64 of the corpus's 65 do, it binds to no
-    /// spawn and is discarded on the way to `EffectCall`. It is still deleted from the export;
-    /// it had simply stopped being mentioned, which is worse than either state alone.
+    /// C1 nearly broke it one way: modelling `LAST_EFFECT_SET_COLOR` stopped the costume-gated
+    /// tints from being *named* without making them survive, so a real loss went quiet. C6 can
+    /// break it the other way — it makes those tints survive, and a report still calling them
+    /// deleted would send a user hunting for a line that is sitting in the file.
+    ///
+    /// Both halves are asserted here on one script, because the failure mode is the report and
+    /// the export disagreeing rather than either being wrong alone. Dolly's up special supplies
+    /// the carried case verbatim; the second frame supplies a modifier with no spawn anywhere in
+    /// its block, which is the residue C6 genuinely cannot place.
     #[test]
-    fn a_modelled_modifier_that_binds_to_no_spawn_is_still_named_as_a_loss() {
-        // Dolly's up special, verbatim — the branch cuts the tint off from its spawn.
+    fn the_loss_report_names_what_the_export_drops_and_only_that() {
         let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 9.0);
     if macros::is_excute(agent) {
@@ -1464,22 +1524,59 @@ mod tests {
             macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);
         }
     }
+    frame(agent.lua_state_agent, 20.0);
+    if macros::is_excute(agent) {
+        macros::LAST_EFFECT_SET_ALPHA(agent, 0.25);
+    }
 }
 "#;
         let source = crate::acmd::parse_effect_script(src);
         let calls = source.to_effect_calls();
-        assert_eq!(calls[0].tint, None, "the premise: the tint binds to nothing");
+        assert_eq!(
+            calls[0].tint, None,
+            "the premise: a costume-gated tint still binds to no spawn"
+        );
         let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
-        assert!(!emitted.contains("LAST_EFFECT_SET_COLOR"), "{emitted}");
 
         let mut report = Report::default();
         verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        let said = messages(&report);
+        // The two reports use different wording on purpose, and the difference is the whole
+        // point of this test — "does not include" is a deletion, "copies this line through" is
+        // a preservation. Matching on the line text alone would pass either way.
+        let deleted = |line: &str| {
+            said.lines()
+                .any(|m| m.contains("does not include this line") && m.contains(line))
+        };
+
+        // Carried: in the file, so out of the deletion report.
         assert!(
-            messages(&report).contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"),
-            "a modelled-but-unattached modifier is still a deleted line:\n{}",
-            messages(&report)
+            emitted.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"),
+            "the costume tint must reach the export:\n{emitted}"
         );
-        assert!(!report.has_blockers(), "{}", messages(&report));
+        assert!(
+            !deleted("LAST_EFFECT_SET_COLOR"),
+            "a line the export keeps must not be reported as deleted:\n{said}"
+        );
+        // ...but it must still be flagged as copied through rather than understood, or a user
+        // will edit the move and wonder why the tint never changes.
+        assert!(
+            said.contains("copies this line through as written")
+                && said.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.146, 0.205, 0.333);"),
+            "a carried line must be named as carried:\n{said}"
+        );
+
+        // Dropped: no spawn shares frame 20, so there is nothing for the alpha to ride on, and
+        // attaching it to frame 9's spawn would retime it rather than preserve it.
+        assert!(
+            !emitted.contains("LAST_EFFECT_SET_ALPHA"),
+            "an alpha with no spawn in its own block cannot be placed:\n{emitted}"
+        );
+        assert!(
+            deleted("macros::LAST_EFFECT_SET_ALPHA(agent, 0.25);"),
+            "residue the export really does drop must still be named:\n{said}"
+        );
+        assert!(!report.has_blockers(), "{said}");
     }
 
     /// The emitter writes its own braces and `is_excute` headers, so reporting the ones it threw

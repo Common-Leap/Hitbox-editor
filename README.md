@@ -175,11 +175,13 @@ the ones you set, is worse than no mod:
 - **It is not wasteful.** A call issued twice in one block, an empty block, a
   `wait(0)`, a collision cleared before it comes out. These only inform.
 - **It does not lose anything.** An effect script is regenerated from the calls
-  Visionary understands, so a line it has no editor field for is not written out
-  at all. Every one is now named against the move it came from — the exact line,
-  and how many times it goes. This informs rather than refusing, because about a
-  quarter of the vanilla effect scripts carry such a line and blocking them would
-  swap a lossy export for no export.
+  Visionary understands, so a line it has no editor field for used to be dropped.
+  Most are now copied through instead, in position, still inside whatever `if`
+  they were written in — a costume-specific recolour stays specific to that
+  costume. What is copied is listed too, because a copied line is not an
+  understood one: editing the move around it will not update it, and it has to be
+  valid Rust on its own. The few lines that genuinely cannot be kept are named
+  individually, with the exact text and how many times it goes.
 
 The timing checks are skipped for a script carrying branches of its own — an
 `if(WorkModule::is_flag(…)){`, an `FT_MOTION_RATE`. Those decide at runtime what
@@ -277,6 +279,15 @@ export and is reported when syncing.
 Before this they were dropped: the effect export regenerates the whole function
 from the calls it knows about, so every exported move lost its colouring without
 saying so.
+
+A spawn written inside a condition keeps it. Several fighters spawn one graphic
+facing left and a different one facing right, or recolour an effect once per
+costume; the export reproduces the check around the call rather than flattening
+it, so the move still does one thing at a time instead of all of them at once.
+Lines the editor has no field for ride along beside the call they followed, which
+matters because a `LAST_EFFECT_SET_COLOR` recolours whatever spawned last — moved
+even a little, it lands on the wrong effect. The effect panel shows these under
+**Kept as written**.
 
 Anything that cannot be written as a value change to an existing argument is
 reported instead of guessed at: a spawn you added or removed, a graphic you
