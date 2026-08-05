@@ -1282,6 +1282,9 @@ entry is still open.
   report was built and discarded, so "warning" meant silence there until C6c gave it a channel.
   Re-derive against what the two now actually do, not against what the words imply.
 
+  **[~] In progress 2026-08-05.** Checking "what the two now actually do" first, as instructed,
+  rather than reasoning from the words.
+
 **Measured remainder after `COL_NORMAL`, 15 of 132 scripts:** `wait_loop_sync_mot` 7, `else {` 5,
 `methodlib::L2CAgent::pop()` 2, `CANCEL_FILL_SCREEN` 2, `EffectModule::remove_screen` 2.
 
