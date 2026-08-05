@@ -1022,6 +1022,18 @@ pub struct SoundCall {
 pub struct SoundEvent {
     pub frame: u32,
     pub call: SoundCall,
+    /// Which sound call in the script's *source order* this event came from.
+    ///
+    /// A looped `PLAY_SE` produces one event per iteration and every one of them carries the
+    /// same site, because all of them are the one line in the file. Write-back resolves a site
+    /// against a textual scan of the source, so this has to be the ordinal a pre-order read of
+    /// the text would give — see [`WalkAccum::next_sound_site`].
+    ///
+    /// Counted separately from the hurtbox and attack-modifier ordinals. They are three
+    /// independent spaces over three different sets of macros; sharing a counter would make
+    /// every sound site shift the moment a script gained a `HIT_NODE`.
+    #[serde(default)]
+    pub site: usize,
 }
 
 /// A timing statement in the script.
@@ -1201,6 +1213,48 @@ impl AcmdScript {
         }
         walk(&mut self.stmts, site, &mut 0)
     }
+
+    /// The sound call a [`SoundEvent::site`] refers to, for writing an edit back into the IR.
+    ///
+    /// Walks the same shapes [`count_sound_stmts`] counts, in the same order — including
+    /// `Bare` and `RawBlock`, which the two functions above do not have to handle. If these two
+    /// ever disagree about what takes a site, an edit lands on the wrong call and produces a
+    /// script that is still perfectly well-formed, which is why the corpus oracle checks the
+    /// macro name at the resolved site rather than only that a site resolves.
+    pub fn sound_stmt_mut(&mut self, site: usize) -> Option<&mut ExcuteStmt> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut ExcuteStmt> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for s in inner.iter_mut().filter(|s| is_sound_stmt(s)) {
+                            if *seen == site {
+                                return Some(s);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if is_sound_stmt(inner) => {
+                        if *seen == site {
+                            return Some(inner.as_mut());
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
 }
 
 /// Everything but hitboxes that one walk of a script resolves.
@@ -1222,6 +1276,8 @@ struct WalkAccum {
     next_site: usize,
     /// Site for the next attack-modifier statement, counted separately — see [`AttackModSite`].
     next_mod_site: usize,
+    /// Site for the next sound call, counted separately again — see [`SoundEvent::site`].
+    next_sound_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -1259,6 +1315,36 @@ fn is_hurt_stmt(stmt: &ExcuteStmt) -> bool {
 /// Does this statement consume an attack-modifier site?
 fn is_attack_mod_stmt(stmt: &ExcuteStmt) -> bool {
     matches!(stmt, ExcuteStmt::AttackMod { .. })
+}
+
+/// Sound calls in a subtree, counted in source order.
+///
+/// Serves [`WalkAccum::next_sound_site`] the way [`count_hurt_stmts`] serves `next_site`, with
+/// one difference that is not cosmetic: it counts [`AcmdStmt::Bare`] as well as
+/// [`AcmdStmt::Excute`]. Fifteen corpus scripts write a sound outside every `is_excute` block,
+/// so a count that saw only wrapped calls would under-count a body and mis-number every site
+/// after the loop containing it.
+///
+/// [`AcmdStmt::RawBlock`] is counted for the same reason: [`eval_stmts`] walks a raw block's
+/// body, so a sound inside one takes a site, and a count that disagreed with the walk is the
+/// bug this function exists to prevent.
+fn count_sound_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_sound_stmt(s)).count(),
+            AcmdStmt::Bare(inner) => usize::from(is_sound_stmt(inner)),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_sound_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Does this statement consume a sound site?
+fn is_sound_stmt(stmt: &ExcuteStmt) -> bool {
+    matches!(stmt, ExcuteStmt::Sound(_))
 }
 
 /// Attack-modifier statements in a subtree, counted in source order.
@@ -1337,6 +1423,12 @@ impl WalkAccum {
     fn take_mod_site(&mut self) -> usize {
         let site = self.next_mod_site;
         self.next_mod_site += 1;
+        site
+    }
+
+    fn take_sound_site(&mut self) -> usize {
+        let site = self.next_sound_site;
+        self.next_sound_site += 1;
         site
     }
 
@@ -1495,14 +1587,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
             let site = hurt.take_mod_site();
             hurt.add_mod(*kind, *id, *value, script_frame(frame), site);
         }
-        // No site counter, because nothing edits a sound yet. Adding one now
-        // would be a third ordinal space with no consumer to keep it honest,
-        // and the one thing this codebase has learned about site counters is
-        // that an untested one silently retargets somebody else's edit.
-        ExcuteStmt::Sound(call) => hurt.sounds.push(SoundEvent {
-            frame: script_frame(frame),
-            call: call.clone(),
-        }),
+        ExcuteStmt::Sound(call) => {
+            let site = hurt.take_sound_site();
+            hurt.sounds.push(SoundEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -1532,13 +1624,16 @@ fn eval_stmts(
                 // over the body once regardless of how many iterations actually ran.
                 let site_at_entry = hurt.next_site;
                 let mod_site_at_entry = hurt.next_mod_site;
+                let sound_site_at_entry = hurt.next_sound_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
+                    hurt.next_sound_site = sound_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
                 hurt.next_mod_site = mod_site_at_entry + count_attack_mod_stmts(body);
+                hurt.next_sound_site = sound_site_at_entry + count_sound_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -1704,12 +1799,23 @@ pub struct AppState {
     pub effects: Vec<EffectCall>,
     /// Pristine copy of `effects` as parsed from ACMD, before user edits — "orig" ghosts.
     pub effects_pristine: Vec<EffectCall>,
-    /// The current move's `sound_` script, flattened to one event per call.
+    /// The current move's `sound_` function, kept whole.
     ///
-    /// No pristine copy beside it, and deliberately: nothing edits a sound yet. D1's work order
-    /// gives live playback its own step and the export the step after that, so this list is
-    /// read from the script and only ever displayed.
+    /// Held apart from [`script`](Self::script), which is the `game_` function: they are two
+    /// different functions in the file, and an edit to one must not re-emit the other. An edit
+    /// goes through [`AcmdScript::sound_stmt_mut`] into this, exactly as a hurtbox edit goes
+    /// into `script` — so the script stays the one source of truth and the list below is only
+    /// ever a view of it.
+    pub sound_script: AcmdScript,
+    /// The current move's sounds: one event per call, at the frame it fires.
+    ///
+    /// A *view* of [`sound_script`](Self::sound_script), refreshed from it after every edit
+    /// rather than mutated in place — nothing writes here that did not write to the script
+    /// first. Cached rather than re-derived per frame because five call sites on the draw path
+    /// read it, and each walk unrolls the script's loops.
     pub sounds: Vec<SoundEvent>,
+    /// The same list as loaded, before any edit — what write-back diffs against.
+    pub sounds_pristine: Vec<SoundEvent>,
     /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
     pub hitboxes_pristine: Vec<Hitbox>,
     /// Hurtbox spans as loaded, for source syncing to diff against.
@@ -1728,6 +1834,10 @@ pub struct AppState {
     /// Full edited call list snapshot per "fighter/move" — what the mod exporter emits
     /// (a generated effect script replaces the whole move's spawn list).
     pub effect_call_full: HashMap<String, Vec<EffectCall>>,
+    /// Edited `sound_` script per "fighter/move" — what the mod exporter emits, on the same
+    /// terms as `effect_call_full`: whole scripts, because an installed one replaces the
+    /// fighter's own. A move is in here only once its sounds have actually been changed.
+    pub sound_script_edits: HashMap<String, AcmdScript>,
     pub selected_effect_call: Option<usize>,
     /// Effects panel: show every call, not just the ones active on the current frame.
     pub show_all_effect_calls: bool,
@@ -1762,13 +1872,16 @@ impl Default for AppState {
             effect_script: EffectScript::default(),
             effects: Vec::new(),
             effects_pristine: Vec::new(),
+            sound_script: AcmdScript::default(),
             sounds: Vec::new(),
+            sounds_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),
             acmd_source: String::new(),
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
+            sound_script_edits: HashMap::new(),
             selected_effect_call: None,
             show_all_effect_calls: false,
             show_effects_panel: false,

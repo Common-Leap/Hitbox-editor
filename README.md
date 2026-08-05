@@ -346,9 +346,24 @@ last one rather than cutting it off. `STOP_SE` is drawn in a colder colour,
 because it silences a sound rather than playing one.
 
 A sound is a tick and not a bar on purpose: the script says when one starts and
-nothing in ACMD says when it ends. Sounds are shown but not yet editable, and
-nothing about them is written or played back — reading them changes only what
-you can see.
+nothing in ACMD says when it ends.
+
+A **Sounds** section below the hurtboxes lists the same calls with the sound name
+editable, so you can give a punch a heavier impact or swap a fighter's footsteps
+for someone else's. The name is a label in the fighter's own sound bank; one the
+bank does not have plays nothing rather than reporting an error, so a typo is
+silent in game as well as here. An edit reaches both the exported plugin and, if
+you have a project linked, your own `sound_` function.
+
+Only the name. Moving a sound to another frame would mean moving the call between
+`frame` blocks, which is a change of structure rather than of a value — the same
+limit hurtbox states have — so no widget offers it. `SET_PLAY_INHIVIT`'s
+suppression window is shown beside its call and is not editable either.
+
+Sound is not previewed live yet: an edit is written and exported, but a running
+game keeps playing the original until the mod is built and installed. A move
+whose sounds you have not touched is left out of the export entirely, so the
+fighter's own `sound_` script keeps playing exactly as it did.
 
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:

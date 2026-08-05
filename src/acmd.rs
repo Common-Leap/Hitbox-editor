@@ -325,9 +325,13 @@ pub(crate) const SCRIPT_PREFIXES: [&str; 4] = ["game_", "effect_", "sound_", "ex
 /// free. This shorter list decides the other question: whether a partial project override is
 /// worth a network round trip. Pulling vanilla's `sound_` for text nothing displays would make
 /// an offline user with a perfectly good `game_`+`effect_` project sit out the HTTP timeout
-/// before seeing their own move. `sound_` joins this list when D1 gives it a lane, and
-/// `expression_` when D2 does.
-pub(crate) const DISPLAYED_PREFIXES: [&str; 2] = ["game_", "effect_"];
+/// before seeing their own move. `expression_` joins this list when D2 gives it a lane.
+///
+/// `sound_` joined it at D1d, which is where sounds became editable rather than merely drawn.
+/// The cost the paragraph above describes is now the right trade: a project that overrides only
+/// `game_` needs the mirror's `sound_` to show what the move plays, and without it the sound
+/// section is empty for exactly the projects most likely to want it.
+pub(crate) const DISPLAYED_PREFIXES: [&str; 3] = ["game_", "effect_", "sound_"];
 
 /// Fill the categories a project does not define with the mirror's, and return one body.
 ///
@@ -1329,7 +1333,7 @@ fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
 /// `contains` would read a two-hash call through the one-hash layout and drop its second
 /// sound. This is the same collision `ATTACK` and `ATTACK_ABS` have, and the paren is the
 /// same fix.
-const SOUND_FUNCS: &[(&str, usize, bool)] = &[
+pub(crate) const SOUND_FUNCS: &[(&str, usize, bool)] = &[
     ("PLAY_SE", 1, false),
     ("PLAY_SE_NO_3D", 1, false),
     ("PLAY_SE_REMAIN", 1, false),
@@ -1941,6 +1945,23 @@ fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, S
     (fn_name, out)
 }
 
+/// Emit one `sound_` function: its name and its full source.
+///
+/// Shares [`emit_stmts`] with [`emit_move_fn`] rather than wrapping [`emit_sound_body`], so the
+/// two categories cannot drift in how they spell a statement. The only difference between them
+/// is the prefix on the function name — which is the whole of what the game uses to decide
+/// which of a fighter's four scripts this one replaces.
+fn emit_sound_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, String) {
+    let fn_name = script_function_name("sound", move_name);
+    let mut out = format!("unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n");
+    for line in emit_stmts(&script.stmts, "    ") {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    (fn_name, out)
+}
+
 /// hash40 of an effect name (or parse a hex "0x…" placeholder) — the id live tweaks are
 /// keyed by. Mirrors app::effect_name_hash.
 fn tweak_hash(name: &str) -> u64 {
@@ -2399,6 +2420,11 @@ pub fn preview_excute_stmts(stmts: &[crate::data::ExcuteStmt]) -> Vec<String> {
     emit_excute_stmts(stmts, "")
 }
 
+/// The exact `sound_*` function an export would write for this move.
+pub fn preview_sound_fn(script: &crate::data::AcmdScript, move_name: &str) -> String {
+    emit_sound_move_fn(script, move_name).1
+}
+
 /// The exact `effect_*` function an export would write for this move.
 pub fn preview_effect_fn(
     calls: &[crate::data::EffectCall],
@@ -2497,17 +2523,23 @@ pub fn build_mod_project(
     edits: &[(String, String, crate::data::AcmdScript)],
     plugin_name: &str,
 ) -> ModProject {
-    build_mod_project_full(edits, &[], &[], plugin_name)
+    build_mod_project_full(edits, &[], &[], &[], plugin_name)
 }
 
-/// Like [`build_mod_project`] but also generates `effect_*` ACMD scripts.
+/// Like [`build_mod_project`] but also generates `effect_*` and `sound_*` ACMD scripts.
 ///
 /// `effect_edits` — `(fighter, move, full edited call list)`; the generated effect script
 /// REPLACES the move's original effect script, so the list must be the complete set of
 /// calls (pristine + user edits applied), not just the changed ones.
+///
+/// `sound_edits` — `(fighter, move, whole sound script)`, on the same terms and for the same
+/// reason: a `sound_` function the plugin installs replaces the fighter's own, so a partial one
+/// would delete every call it left out. Passing only *changed* moves is correct and passing
+/// only *changed calls* is not.
 pub fn build_mod_project_full(
     edits: &[(String, String, crate::data::AcmdScript)],
     effect_edits: &[(String, String, Vec<crate::data::EffectCall>)],
+    sound_edits: &[(String, String, crate::data::AcmdScript)],
     live_tweaks: &[crate::mod_project::LiveTweak],
     plugin_name: &str,
 ) -> ModProject {
@@ -2534,6 +2566,14 @@ pub fn build_mod_project_full(
             .or_default()
             .push((move_name.as_str(), calls));
         // Ensure the fighter appears even with no hitbox edits.
+        by_fighter.entry(fighter.as_str()).or_default();
+    }
+    let mut sfx_by_fighter: HashMap<&str, Vec<(&str, &crate::data::AcmdScript)>> = HashMap::new();
+    for (fighter, move_name, script) in sound_edits {
+        sfx_by_fighter
+            .entry(fighter.as_str())
+            .or_default()
+            .push((move_name.as_str(), script));
         by_fighter.entry(fighter.as_str()).or_default();
     }
 
@@ -2691,6 +2731,18 @@ pub fn install() {{
             }
         }
 
+        // Sound scripts for this fighter.
+        if let Some(sfx_moves) = sfx_by_fighter.get(fighter) {
+            let mut sorted_sfx = sfx_moves.clone();
+            sorted_sfx.sort_by_key(|(m, _)| *m);
+            for (move_name, script) in &sorted_sfx {
+                let (fn_name, fn_src) = emit_sound_move_fn(script, move_name);
+                acmd_src.push_str(&fn_src);
+                acmd_src.push('\n');
+                fn_entries.push((fn_name.clone(), fn_name));
+            }
+        }
+
         // install fn
         acmd_src.push_str("pub fn install(agent: &mut smashline::Agent) {\n");
         for (fn_name, acmd_name) in &fn_entries {
@@ -2714,6 +2766,11 @@ pub fn install() {{
             effect_edits
                 .iter()
                 .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (effect spawns)")),
+        )
+        .chain(
+            sound_edits
+                .iter()
+                .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (sounds)")),
         )
         .collect();
     script_list.sort();
@@ -3767,14 +3824,16 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
     type SampleEdits = (
         crate::data::AcmdScript,
         Vec<crate::data::EffectCall>,
+        crate::data::AcmdScript,
         Vec<crate::mod_project::LiveTweak>,
     );
 
     fn sample_project() -> ModProject {
-        let (script, fx, tweaks) = sample_edits();
+        let (script, fx, sfx, tweaks) = sample_edits();
         build_mod_project_full(
             &[("mario".into(), "attack_air_n".into(), script)],
             &[("mario".into(), "attack_air_n".into(), fx)],
+            &[("mario".into(), "attack_air_n".into(), sfx)],
             &tweaks,
             "sample_plugin",
         )
@@ -3884,7 +3943,25 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             color: Some([0.2, 0.4, 2.0, 1.0]),
             speed: Some(1.5),
         }];
-        (script, fx, tweaks)
+        // `kirby/TurnDash` verbatim, parsed rather than hand-built, so the sound half of the
+        // compile golden is a script the game actually ships. It carries a wrapped call, a
+        // two-hash member, and the one member with a trailing non-hash argument — the three
+        // shapes the emitter can get wrong.
+        let sfx = parse_sound_script(
+            r#"unsafe extern "C" fn sound_turndash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+        macros::SET_PLAY_INHIVIT(agent, Hash40::new("se_kirby_dash_start"), 20);
+    }
+    wait(agent.lua_state_agent, 13.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+}
+"#,
+        );
+        (script, fx, sfx, tweaks)
     }
 
     /// Always materializes the generated project under the editor cache dir; with
@@ -5209,6 +5286,142 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             ),
             "the bare call did not come back at the function's own indent:\n{emitted}"
         );
+
+        // And it is *editable*. Resolving a site has to walk the same shapes the site counter
+        // counts, `Bare` included — drop it from either one and this move's second footstep is
+        // either silently uneditable or, worse, edited by writing to the first.
+        let mut edited = script;
+        let events = edited.to_sound_events();
+        assert_eq!(events[1].site, 1, "the bare call is the second site");
+        let mut call = events[1].call.clone();
+        call.sounds[0] = "se_common_step_right_m".into();
+        *edited
+            .sound_stmt_mut(events[1].site)
+            .expect("the bare call must resolve to a statement") =
+            crate::data::ExcuteStmt::Sound(call);
+
+        let after = emit_sound_body(&edited);
+        assert!(
+            after.contains(
+                "macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new(\"se_common_step_right_m\"), \
+                 Hash40::new(\"se_kirby_step_left_m\"));"
+            ),
+            "the edit did not reach the bare call:\n{after}"
+        );
+        assert!(
+            after.contains(
+                "macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new(\"se_kirby_step_left_m\"), \
+                 Hash40::new(\"se_kirby_step_right_m\"));"
+            ),
+            "the edit landed in the wrapped call instead:\n{after}"
+        );
+    }
+
+    /// Every iteration of a looped sound comes back as the *same* site, and the call after the
+    /// loop gets the next one.
+    ///
+    /// **Composed rather than lifted, and that needs saying.** Not one of the 301 corpus sound
+    /// scripts contains a `for`, which the corpus oracle records as measured fact — so there is
+    /// no vanilla script to lift this from. What is here is two corpus-verified shapes joined:
+    /// the `for _ in 0..3 {` header is written verbatim by real `effect_` scripts, and the calls
+    /// inside it are `kirby/TurnDash`'s own lines. Neither half is invented, which is the part
+    /// [[hand-written-fixtures-are-evidence-of-nothing]] is actually about — a *signature* nobody
+    /// checked, not a control-flow shape the parser already handles.
+    ///
+    /// The property under test is the one that makes an edit land on the right line: three
+    /// iterations of one `PLAY_SE` are three events, all of site 0, because all three are the
+    /// one line in the file. Get this wrong and the site cursor runs ahead, so retuning the
+    /// footstep after the loop rewrites something else — and the result still parses, still
+    /// compiles, and still round-trips.
+    #[test]
+    fn a_looped_sound_reports_the_same_site_every_time_round() {
+        const LOOPED: &str = r#"unsafe extern "C" fn sound_looped(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    for _ in 0..3 {
+    wait(agent.lua_state_agent, 2.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+    }
+    }
+    wait(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+}
+"#;
+        let events = parse_sound_script(LOOPED).to_sound_events();
+        let seen: Vec<(u32, usize, &str)> = events
+            .iter()
+            .map(|e| (e.frame, e.site, e.call.func.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (8, 0, "PLAY_SE"),
+                (10, 0, "PLAY_SE"),
+                (12, 0, "PLAY_SE"),
+                (16, 1, "PLAY_STEP_FLIPPABLE"),
+            ],
+            "the site cursor did not rewind for each iteration"
+        );
+
+        // And the other half of the join: those ordinals index the textual scan write-back uses.
+        // Checking only that they are `0, 0, 0, 1` would pass just as well if the scan happened
+        // to list the two calls the other way round.
+        let sites = crate::acmd_src::sound_sites(LOOPED);
+        for event in &events {
+            assert_eq!(
+                sites[event.site].name, event.call.func,
+                "site {} is not the `{}` it was resolved for",
+                event.site, event.call.func
+            );
+        }
+    }
+
+    /// A loop that runs no iterations still steps the site cursor over its body.
+    ///
+    /// This is the one thing `count_sound_stmts` is for, and it is reachable only through a
+    /// zero-count `for`: at one iteration or more the cursor arrives at the right place on its
+    /// own. So the function is untestable through any realistic script, and a mutation deleting
+    /// its `Bare` arm passed every other test in this file — including the corpus oracle, which
+    /// cannot help, because no vanilla sound script loops anything.
+    ///
+    /// Both statement shapes go inside the loop deliberately. A count that saw only the wrapped
+    /// call would leave the trailing footstep resolving to site 1, which is the *bare* call
+    /// inside the loop that never ran — an edit written to a line the game skipped.
+    #[test]
+    fn a_loop_that_never_runs_still_advances_the_site_cursor() {
+        const EMPTY_LOOP: &str = r#"unsafe extern "C" fn sound_emptyloop(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    for _ in 0..0 {
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+    }
+    macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_stop"));
+    }
+    wait(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+}
+"#;
+        let events = parse_sound_script(EMPTY_LOOP).to_sound_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "a loop with no iterations played a sound anyway"
+        );
+        let sites = crate::acmd_src::sound_sites(EMPTY_LOOP);
+        assert_eq!(
+            sites.len(),
+            3,
+            "the scan should still see all three calls — the text has them either way"
+        );
+        assert_eq!(
+            events[0].site, 2,
+            "the surviving footstep resolved to `{}`, a call inside the loop that never ran",
+            sites[events[0].site].name
+        );
     }
 
     /// Every sound call the corpus writes is *typed*, not left as `Raw`.
@@ -5281,6 +5494,83 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             total > 500,
             "only {total} sound calls found — the corpus is too thin to be a gate"
         );
+    }
+
+    /// Every sound event's site resolves to a call of its own macro, in every corpus script.
+    ///
+    /// This is the assertion no round trip can make. A site is the join between the walked IR
+    /// and a textual scan of the source, and the two are counted by different code: the walk
+    /// unrolls `for` bodies and steps over empty ones, while the scan just reads the file. When
+    /// they disagree, an edit is written to a *different call* — and the result is a perfectly
+    /// well-formed script, so parsing it back proves nothing. Comparing the macro name at the
+    /// resolved site is what turns a silent retarget into a failure.
+    ///
+    /// The corpus is the right place for it because the shapes that break a site counter are
+    /// the ones nobody writes by hand: a sound inside a `for`, a sound after a `for`, and a
+    /// sound outside every `is_excute` block.
+    #[test]
+    fn every_corpus_sound_site_lands_on_a_call_of_its_own_macro() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        let mut checked = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for (path, body) in &bodies {
+            let Some(interior) = function_interior(body, "sound_") else {
+                continue;
+            };
+            let sites = crate::acmd_src::sound_sites(&interior);
+            let events = parse_sound_script(body).to_sound_events();
+            // Every call in the text is reached by at least one event. A call the walk never
+            // visits is invisible in the panel and unreachable by an edit, and the typed-count
+            // oracle beside this one cannot see that: it counts *parsed* statements, so one
+            // that is parsed and then skipped by `eval_stmts` passes it.
+            let mut reached: Vec<usize> = events.iter().map(|e| e.site).collect();
+            reached.sort_unstable();
+            reached.dedup();
+            if reached.len() != sites.len() {
+                problems.push(format!(
+                    "{path}: {} calls in the text, {} reached by the walk",
+                    sites.len(),
+                    reached.len()
+                ));
+            }
+            for event in &events {
+                match sites.get(event.site) {
+                    Some(site) if site.name == event.call.func => {}
+                    Some(site) => problems.push(format!(
+                        "{path}: the `{}` on frame {} resolved to site {}, which is a `{}`",
+                        event.call.func, event.frame, event.site, site.name
+                    )),
+                    None => problems.push(format!(
+                        "{path}: the `{}` on frame {} has site {}, past the {} calls in the text",
+                        event.call.func,
+                        event.frame,
+                        event.site,
+                        sites.len()
+                    )),
+                }
+            }
+            checked += events.len();
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} sound events resolved to the wrong call:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+        assert!(
+            checked > 500,
+            "only {checked} sound events resolved — the corpus is too thin to be a gate"
+        );
+        // **Measured, not assumed: not one of the 301 corpus sound scripts contains a `for`.**
+        // A guard asserting otherwise was written here first and failed, which is how this is
+        // known. So the corpus cannot exercise the loop rewind at all, and the case is covered
+        // by `a_looped_sound_reports_the_same_site_every_time_round` instead — do not read a
+        // green run here as saying anything about a looped call.
     }
 
     /// The same brace property over every `game_` script in the corpus, which is where the bug
@@ -5715,13 +6005,28 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             acmd.contains(&game),
             "the previewed game_* function is not what was exported:\n{game}\n---\n{acmd}"
         );
-        let effect = preview_effect_fn(&sample.1, "attack_air_n", &sample.2);
+        let effect = preview_effect_fn(&sample.1, "attack_air_n", &sample.3);
         assert!(
             acmd.contains(&effect),
             "the previewed effect_* function is not what was exported:\n{effect}\n---\n{acmd}"
         );
         // And the preview really is showing the user's macro, not a substitute.
         assert!(effect.contains("macros::EFFECT_FOLLOW(agent, Hash40::new(\"sys_flash\")"));
+
+        let sound = preview_sound_fn(&sample.2, "attack_air_n");
+        assert!(
+            acmd.contains(&sound),
+            "the previewed sound_* function is not what was exported:\n{sound}\n---\n{acmd}"
+        );
+        // The function is named for the category, not for the move alone. Get this wrong and
+        // the plugin installs the move's sounds over its `game_` script, which does compile.
+        assert!(sound.starts_with("unsafe extern \"C\" fn sound_attackairn("));
+        assert!(
+            sound.contains(
+                "macros::SET_PLAY_INHIVIT(agent, Hash40::new(\"se_kirby_dash_start\"), 20);"
+            ),
+            "the one member with a non-hash tail lost it:\n{sound}"
+        );
     }
 
     /// A call with no recorded tail is the one case the export still cannot reproduce, so the

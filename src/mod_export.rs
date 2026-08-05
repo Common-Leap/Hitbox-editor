@@ -56,6 +56,7 @@ pub fn base_eff_has_content(eff: &EffMod) -> bool {
 pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
     let mut acmd_edits = Vec::new();
     let mut effect_edits = Vec::new();
+    let mut sound_edits = Vec::new();
     let mut tweaks: Vec<LiveTweak> = Vec::new();
     let mut incomplete = Vec::new();
     let mut exported_effect_names = HashSet::new();
@@ -79,6 +80,18 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
             );
             effect_edits.push((fighter.clone(), move_name.clone(), calls.clone()));
         }
+        // Sound scripts. A move whose sound script parsed to nothing is skipped rather than
+        // exported: emitting an empty `sound_` function would install silence over the
+        // fighter's own, which is a deletion the user never asked for.
+        let mut sound_moves: Vec<_> = edits.sound_scripts.iter().collect();
+        sound_moves.sort_by(|a, b| a.0.cmp(b.0));
+        for (move_name, script) in sound_moves {
+            if script.stmts.is_empty() {
+                continue;
+            }
+            sound_edits.push((fighter.clone(), move_name.clone(), script.clone()));
+        }
+
         for (move_name, deltas) in &edits.effect_calls {
             if !deltas.is_empty() && !edits.effect_calls_full.contains_key(move_name) {
                 incomplete.push(format!("{fighter}/{move_name}"));
@@ -113,15 +126,27 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
             uncovered_tweaks.join(", ")
         );
     }
-    if acmd_edits.is_empty() && effect_edits.is_empty() {
+    if acmd_edits.is_empty() && effect_edits.is_empty() && sound_edits.is_empty() {
         return Ok(None);
     }
-    let built = build_mod_project_full(&acmd_edits, &effect_edits, &tweaks, &plugin_name(project));
+    let built = build_mod_project_full(
+        &acmd_edits,
+        &effect_edits,
+        &sound_edits,
+        &tweaks,
+        &plugin_name(project),
+    );
 
     // Nothing reaches disk until the generated code has been read back and matched against the
     // edits it came from. A mod that will not compile, or that ships numbers other than the
     // ones on screen, is worse than an export that stops and says why.
-    let report = crate::acmd_verify::verify_export(&built, &acmd_edits, &effect_edits, &tweaks);
+    let report = crate::acmd_verify::verify_export(
+        &built,
+        &acmd_edits,
+        &effect_edits,
+        &sound_edits,
+        &tweaks,
+    );
     if report.has_blockers() {
         bail!(
             "the generated mod source did not pass verification:\n{}",

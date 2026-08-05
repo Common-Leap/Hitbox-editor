@@ -2432,6 +2432,129 @@ pub fn sync_attack_mods(
     })
 }
 
+// ── Sound write-back ─────────────────────────────────────────────────────────
+
+/// The sound calls in `text`, in document order — index `n` is site `n`.
+///
+/// The arity filter is load-bearing for the same reason it is in [`hurt_sites`]: the parser
+/// refuses a family member written with the wrong number of arguments and leaves it `Raw`, so
+/// counting it here would number every later site one too high and retune the wrong call.
+///
+/// `SOUND_FUNCS` carries `(name, hash args, has tail)`, and the total after `agent` is the sum
+/// of the last two.
+pub(crate) fn sound_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            crate::acmd::SOUND_FUNCS.iter().any(|(name, hashes, tail)| {
+                site.name == *name && site.args.len() == hashes + usize::from(*tail) + 1
+            })
+        })
+        .collect()
+}
+
+/// Rewrite edited sound names into the user's own source.
+///
+/// Value edits only, as everywhere on this path — and for sound the value is the `Hash40` naming
+/// which sound plays. A retime is reported rather than performed, for the reason
+/// [`rewrite_hurtboxes`] gives: the frame is the block the call sits in, not an argument. So is
+/// a change of macro, which is a different call taking different arguments rather than a
+/// different value in the same one.
+pub fn rewrite_sounds(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::SoundEvent],
+    edited: &[crate::data::SoundEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = sound_sites(text);
+    let mut report = SyncReport::default();
+    let mut edits: Vec<Replacement> = Vec::new();
+
+    for (before, now) in pristine.iter().zip(edited.iter()) {
+        if before == now {
+            continue;
+        }
+        let Some(site) = sites.get(now.site) else {
+            report.skipped.push(format!(
+                "{label}: a sound has no matching call in the source — it was added in the \
+                 editor, and source syncing only retunes existing calls"
+            ));
+            continue;
+        };
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: the `{}` on frame {} was retimed — its frame is the block it sits in, \
+                 not an argument, so source syncing cannot move it",
+                site.name, before.frame
+            ));
+            continue;
+        }
+        if before.call.func != now.call.func || before.call.sounds.len() != now.call.sounds.len() {
+            report.skipped.push(format!(
+                "{label}: the `{}` on frame {} became a `{}` — a different macro takes different \
+                 arguments, so that is structure rather than a value",
+                before.call.func, before.frame, now.call.func
+            ));
+            continue;
+        }
+        if before.call.tail != now.call.tail {
+            report.skipped.push(format!(
+                "{label}: the suppression window on the `{}` at frame {} changed — only the \
+                 sound name is editable here",
+                before.call.func, before.frame
+            ));
+        }
+        for (index, (was, is)) in before
+            .call
+            .sounds
+            .iter()
+            .zip(now.call.sounds.iter())
+            .enumerate()
+        {
+            if was == is {
+                continue;
+            }
+            // `+ 1` to step over `agent`, which every one of these macros takes first.
+            let Some(span) = site.args.get(index + 1) else {
+                continue;
+            };
+            let Some(edit) = text_edit(text, span, &format!("Hash40::new(\"{is}\")")) else {
+                continue;
+            };
+            // One looped `PLAY_SE` yields one event per iteration, all carrying the same site,
+            // so the same span can be reached more than once. Writing it twice would hand
+            // `apply` two overlapping edits; a *disagreement* between the two is a real conflict
+            // and is reported rather than resolved by whichever iteration happened to be last.
+            match edits.iter().find(|e| e.span == edit.span) {
+                Some(existing) if existing.value == edit.value => {}
+                Some(_) => report.skipped.push(format!(
+                    "{label}: the looped `{}` at frame {} was given two different sounds in the \
+                     same line — every iteration is the one call in the file",
+                    before.call.func, before.frame
+                )),
+                None => edits.push(edit),
+            }
+        }
+    }
+
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Write edited sound names back into the project's own `sound_` function.
+pub fn sync_sounds(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::SoundEvent],
+    edited: &[crate::data::SoundEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("sound", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_sounds(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// Sync edited hurtbox state for one move back into the project source on disk.
 pub fn sync_hurtboxes(
     index: &SourceIndex,
@@ -2529,9 +2652,13 @@ pub fn install(agent: &mut smashline::Agent) {
         let (_tmp, index) = mario_project();
         let both = index.script_source("mario", "attack_air_n").unwrap();
         assert_eq!(both.covers, ["game_", "effect_"]);
+        // **Changed at D1d, and it is the change rather than a regression.** This project has
+        // hitboxes and effects but writes no `sound_`, and until sounds were editable that was
+        // "everything shown" and no reason to touch the network. Now the sound section would sit
+        // empty for it, so the mirror is worth asking for.
         assert!(
-            !both.needs_mirror(),
-            "a project covering everything shown must resolve without the network"
+            both.needs_mirror(),
+            "a project with no sound script of its own needs the mirror's to show one"
         );
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3318,6 +3445,203 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(
             after.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_OFF);"#),
             "the value edit is still worth writing:\n{after}"
+        );
+    }
+
+    /// `kirby/TurnDash` verbatim — the sound write-back's fixture.
+    ///
+    /// Chosen because it holds all three shapes in one function: a one-hash call, the one
+    /// member with a trailing non-hash argument, and two `PLAY_STEP_FLIPPABLE`s that name the
+    /// same two sounds in opposite order. That last pair is what a write-back keyed on the
+    /// *sound name* rather than on the site would get wrong.
+    const SOUNDS: &str = r#"unsafe extern "C" fn sound_turndash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+        macros::SET_PLAY_INHIVIT(agent, Hash40::new("se_kirby_dash_start"), 20);
+    }
+    wait(agent.lua_state_agent, 13.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+    wait(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_right_m"), Hash40::new("se_kirby_step_left_m"));
+    }
+}
+"#;
+
+    fn sounds_of(text: &str) -> Vec<crate::data::SoundEvent> {
+        crate::acmd::parse_sound_script(text).to_sound_events()
+    }
+
+    /// Renaming a sound rewrites that one argument and leaves the rest of the file alone.
+    ///
+    /// The second footstep is the interesting one: it names the same two sounds as the first,
+    /// swapped. Editing only its left channel has to leave three other spans holding those very
+    /// strings untouched, which is what says the edit was placed by site.
+    #[test]
+    fn renaming_one_sound_rewrites_only_that_argument() {
+        let pristine = sounds_of(SOUNDS);
+        let mut edited = pristine.clone();
+        edited[3].call.sounds[0] = "se_common_step_left_m".into();
+        let (after, report) = rewrite_sounds(SOUNDS, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains(
+                r#"macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_common_step_left_m"), Hash40::new("se_kirby_step_left_m"));"#
+            ),
+            "{after}"
+        );
+        // The first footstep names the same two sounds the other way round and must be intact.
+        assert!(
+            after.contains(
+                r#"macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));"#
+            ),
+            "the edit landed in the wrong footstep:\n{after}"
+        );
+        // And exactly one line differs — an argument rewrite, not a re-emission of the function.
+        let changed_lines = SOUNDS
+            .lines()
+            .zip(after.lines())
+            .filter(|(before, now)| before != now)
+            .count();
+        assert_eq!(changed_lines, 1, "the write-back reformatted the file");
+    }
+
+    /// A sound in one macro moved to another is structure, not a value, and is reported.
+    ///
+    /// `PLAY_SE` and `PLAY_STEP_FLIPPABLE` do not even take the same number of arguments, so
+    /// writing one over the other produces a call that does not compile. The report names the
+    /// macro because that is the part the user has to undo.
+    #[test]
+    fn changing_which_sound_macro_is_called_is_reported_rather_than_written() {
+        let pristine = sounds_of(SOUNDS);
+        let mut edited = pristine.clone();
+        edited[0].call.func = "PLAY_STEP_FLIPPABLE".into();
+        let (after, report) = rewrite_sounds(SOUNDS, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, SOUNDS, "nothing may be written");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("PLAY_SE") && s.contains("PLAY_STEP_FLIPPABLE")),
+            "the report must name both macros: {report:?}"
+        );
+    }
+
+    /// Moving a sound to another frame is reported, and a rename in the same pass still lands.
+    #[test]
+    fn retiming_a_sound_is_reported_and_other_edits_still_land() {
+        let pristine = sounds_of(SOUNDS);
+        let mut edited = pristine.clone();
+        edited[0].frame = 9;
+        edited[0].call.sounds[0] = "se_common_dash_start".into();
+        edited[1].call.sounds[0] = "se_common_dash_start".into();
+        let (after, report) = rewrite_sounds(SOUNDS, "t", &pristine, &edited).unwrap();
+        assert!(
+            report.skipped.iter().any(|s| s.contains("retimed")),
+            "{report:?}"
+        );
+        assert!(
+            !after.contains(r#"macros::PLAY_SE(agent, Hash40::new("se_common_dash_start"));"#),
+            "a retimed call must not also be rewritten:\n{after}"
+        );
+        assert!(
+            after.contains(
+                r#"macros::SET_PLAY_INHIVIT(agent, Hash40::new("se_common_dash_start"), 20);"#
+            ),
+            "the untouched call's own rename is still worth writing:\n{after}"
+        );
+    }
+
+    /// A sound call written with the wrong number of arguments is not a site.
+    ///
+    /// The parser refuses one and leaves the line `Raw`, so the IR never numbers it. A scan
+    /// matching on the macro name alone would number it anyway, and every site after it would
+    /// resolve one line too early — here, renaming the footstep would rewrite the broken call
+    /// above it and leave the footstep untouched.
+    ///
+    /// Nothing in the 301-script corpus is written this way, so the corpus oracle cannot reach
+    /// it, and a mutation removing the arity filter passed every other test in this file. Hand
+    /// authoring is exactly where it would come from: it is a mistake a person makes and the
+    /// game's own scripts do not.
+    #[test]
+    fn a_malformed_sound_call_does_not_take_a_site() {
+        const MALFORMED: &str = r#"unsafe extern "C" fn sound_typo(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent);
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+    }
+}
+"#;
+        assert_eq!(
+            sound_sites(MALFORMED).len(),
+            1,
+            "the argument-less call must not be scanned as a site"
+        );
+
+        let pristine = sounds_of(MALFORMED);
+        assert_eq!(pristine.len(), 1, "only the well-formed call is an event");
+        let mut edited = pristine.clone();
+        edited[0].call.sounds[0] = "se_common_dash_start".into();
+        let (after, report) = rewrite_sounds(MALFORMED, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains(r#"macros::PLAY_SE(agent, Hash40::new("se_common_dash_start"));"#),
+            "the rename did not land on the call it named:\n{after}"
+        );
+        assert!(
+            after.contains("macros::PLAY_SE(agent);"),
+            "the broken call was rewritten instead:\n{after}"
+        );
+    }
+
+    /// A looped call is one line and several events, so the same span is reached more than once.
+    ///
+    /// Writing it twice would hand `apply` two edits over the same bytes. Agreeing edits collapse
+    /// to one; disagreeing ones are a genuine conflict the user has to resolve, and are reported
+    /// rather than decided by whichever iteration happened to be last in the list.
+    #[test]
+    fn a_looped_sound_edited_once_is_written_once() {
+        const LOOPED: &str = r#"unsafe extern "C" fn sound_looped(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    for _ in 0..3 {
+    wait(agent.lua_state_agent, 2.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+    }
+    }
+}
+"#;
+        let pristine = sounds_of(LOOPED);
+        assert_eq!(pristine.len(), 3, "the loop should unroll to three events");
+
+        let mut edited = pristine.clone();
+        for event in &mut edited {
+            event.call.sounds[0] = "se_common_dash_start".into();
+        }
+        let (after, report) = rewrite_sounds(LOOPED, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1, "one line, one edit");
+        assert_eq!(
+            after.matches("se_common_dash_start").count(),
+            1,
+            "the loop body was written three times:\n{after}"
+        );
+
+        // Two iterations disagreeing is not something the panel can produce today — it edits the
+        // statement, so every event moves together. It is asserted anyway because the *next*
+        // thing to touch this, a per-event editor, would produce it silently.
+        let mut split = pristine.clone();
+        split[0].call.sounds[0] = "se_common_dash_start".into();
+        split[1].call.sounds[0] = "se_common_dash_stop".into();
+        let (_, report) = rewrite_sounds(LOOPED, "t", &pristine, &split).unwrap();
+        assert!(
+            report.skipped.iter().any(|s| s.contains("two different")),
+            "a conflict must be reported, not resolved: {report:?}"
         );
     }
 

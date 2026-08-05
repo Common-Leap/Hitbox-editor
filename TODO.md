@@ -243,23 +243,24 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**352 green after D1c**), including the seven corpus
+- [ ] `cargo test` passes (**361 green after D1d**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
-      `cargo test unbalanced`, `cargo test survives_a_round_trip` and
-      `cargo test is_typed_rather_than`:
+      `cargo test unbalanced`, `cargo test survives_a_round_trip`,
+      `cargo test is_typed_rather_than` and `cargo test lands_on_a_call`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`,
       `acmd::tests::the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`,
       `acmd::tests::no_game_script_in_the_corpus_exports_an_unbalanced_function`,
       `acmd::tests::every_sound_script_in_the_corpus_survives_a_round_trip`,
-      `acmd::tests::a_partial_project_override_keeps_every_category_it_does_not_define` and
-      `acmd::tests::every_sound_call_in_the_corpus_is_typed_rather_than_left_raw`. They run
+      `acmd::tests::a_partial_project_override_keeps_every_category_it_does_not_define`,
+      `acmd::tests::every_sound_call_in_the_corpus_is_typed_rather_than_left_raw` and
+      `acmd::tests::every_corpus_sound_site_lands_on_a_call_of_its_own_macro`. They run
       the new code over every script the app has ever fetched (currently 461 files under
       `~/.cache/visionary/script-cache`, ~1000 functions). The third asserts a *number* — how
       many effect scripts still lose a line — so it fails on a regression rather than only on a
       crash, and the fifth pins the byte-exact count for the same reason.
-      **All seven return early and pass vacuously if that cache directory is missing**, and each
+      **All eight return early and pass vacuously if that cache directory is missing**, and each
       carries its own guard against a corpus too thin to mean anything: `checked > 100` on three
       of them, `branching >= 30` on the unbalanced-function one, which would otherwise stay
       green if branches simply stopped being recognised, `132 with effects / 78 with
@@ -282,6 +283,13 @@ paraphrase it from memory.
       typed, so a member that is not recognised fails instead of falling back to `Raw`. It found
       15 scripts on its first run whose sound sat outside an `is_excute` block and had been
       invisible since D1a.
+      **The eighth is the shape to copy when adding an *edit*** rather than a family: it checks
+      that each resolved site lands on a call of its own macro, and that every call in the text
+      is reached by the walk. A mis-sited edit is invisible to every other check here, because it
+      writes a script that parses, compiles and round-trips — it is simply the wrong line.
+      **It also records a measured absence**: zero of the 301 corpus sound scripts contain a
+      `for`, so it says nothing whatever about looped calls, and a green run there must not be
+      read as covering the site cursor's rewind.
 - [ ] A round-trip test for the new family: parse a real vanilla call → emit → parse again →
       identical IR. Put the real call in the test, not a synthetic one.
 - [ ] A write-back test asserting that a value edit rewrites *only* that argument span, and
@@ -1344,7 +1352,8 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   2. **[x] D1b (done 2026-08-05)** — Merge project and mirror *per category*, which is what
      D1a named as step 2's own first move.
   3. **[x] D1c (done 2026-08-05)** — Type the `PLAY_SE` family and give sound a timeline lane.
-  4. **[~] D1d** — Make a sound editable, and carry that edit through export and write-back.
+  4. **[x] D1d (done 2026-08-05)** — Make a sound editable, and carry that edit through
+     export and write-back.
      Note the generated plugin installs per category, so a `sound_` script it does not emit
      still plays vanilla — nothing is lost by sound being absent until here.
   5. Plugin hooks for the sound primitives, capture, then live.
@@ -1519,7 +1528,7 @@ Five mutations run, all caught — including the two that motivated their own as
 write-back. Sounds are displayed and nothing else — `sound_` is still not written by
 any export, so nothing can be lost.
 
-#### [~] D1d — Make a sound editable, and persist it
+#### [x] D1d — Make a sound editable, and persist it (done 2026-08-05)
 
 D1c put sounds on screen and stopped there. This makes one editable and carries the edit to the
 two places an edit has to reach: the generated plugin, and the user's own source.
@@ -1545,9 +1554,51 @@ retime instead of performing one, and an added call has no site to write to.
   counter needs the same treatment — but it must also count `AcmdStmt::Bare`, which the hurtbox
   one never had to. Fifteen corpus scripts put a sound outside every `is_excute` block, so a
   counter that ignores `Bare` mis-numbers every site after one.
+
+  **That last sentence was wrong when this entry was written, and the mutation pass caught it.**
+  `count_sound_stmts` runs only for a loop body, so ignoring `Bare` there matters only for a bare
+  sound inside a `for` that runs *zero* times — which no corpus script contains. The place `Bare`
+  is genuinely load-bearing is `sound_stmt_mut`, which resolves a site for editing: drop it there
+  and `kirby/WalkMiddle`'s second footstep is uneditable, and a wrapped call after a bare one is
+  edited by writing to the wrong line. Both are pinned now, by
+  `a_loop_that_never_runs_still_advances_the_site_cursor` and by the edit half of
+  `a_sound_written_outside_an_excute_block_still_fires`.
 - **Test bar:** a corpus oracle asserting that every event's site indexes into the *textual*
   scan and lands on a call of the same macro. That is the assertion that catches a retargeted
   edit, which no round trip can see: a mis-sited edit writes a perfectly well-formed script.
+
+**Result:** `SoundEvent.site` on `WalkAccum::next_sound_site`, its own counter;
+`AcmdScript::sound_stmt_mut` resolves one for editing. A Sounds section under the hurtboxes edits
+the name; `resolve_sound_state` decides what a reopened move shows. `rewrite_sounds` +
+`sound_sites` write it back, `build_mod_project_full` takes a fourth list and emits `sound_`
+functions, `verify_sound_move` reads each one back before it reaches disk, and `sound_` joined
+`DISPLAYED_PREFIXES`. 361 green.
+
+**The site oracle found the corpus cannot test loops at all.** A guard asserting some corpus
+sound script loops a call failed on its first run: **zero of 301 contain a `for`**. So the loop
+rewind — the whole reason a site is a source ordinal rather than an execution counter — has no
+vanilla script to prove it. `a_looped_sound_reports_the_same_site_every_time_round` composes the
+`for _ in 0..3 {` header real `effect_` scripts write with `kirby/TurnDash`'s own calls, which is
+a join of two corpus-verified shapes rather than an invention; the entry says so in its own
+doc comment so a later reader does not mistake it for lifted evidence.
+
+**Ten mutations run, and three of them exposed missing assertions rather than confirming
+existing ones**, which is the part worth carrying forward:
+- Dropping `sound_sites`' arity filter passed everything. A `macros::PLAY_SE(agent)` typed by
+  hand parses to `Raw` but a name-only scan counts it, so every later site resolves one line
+  early — the rename lands on the broken call. No corpus script is malformed, so only a
+  deliberate fixture reaches it: `a_malformed_sound_call_does_not_take_a_site`.
+- `sound_stmt_mut` ignoring `Bare` passed everything, per the correction above.
+- Folding the saved edit into `sounds_pristine` passed everything, and it is the worst of the
+  three: write-back would diff an edit against itself, find nothing, and report zero changes with
+  no error anywhere. Untestable as written, because it lived in a method needing a whole `App`
+  — so the decision moved into the free function `resolve_sound_state`, which returns the
+  baseline *and* the shown list so a caller cannot use one for both.
+
+**Named exceptions.** Live is step 5 and was not exercised: this machine has no Switch and no
+emulator, and the plugin was not touched. Retiming, adding and deleting a sound are out of scope
+by the entry's own scope line, and the panel offers no widget for them rather than offering one
+whose change comes back reported as skipped.
 
 ### [ ] D2 — `expression_` scripts
 

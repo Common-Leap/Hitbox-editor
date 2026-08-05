@@ -105,6 +105,35 @@ fn merge_fetched_body(
     }
 }
 
+/// Pick the sound script to show: the saved edit if there is one, otherwise the parse.
+///
+/// A free function for the reason [`merge_fetched_body`] is one — the state it decides cannot be
+/// reached without building an app, and the decision is worth a test on its own. What it does
+/// *not* touch is the point: `sounds_pristine` stays whatever the file parsed to. Fold the saved
+/// edits into the pristine list and the write-back diff comes out empty, so reopening a move
+/// silently stops its sound edits from ever reaching the user's source — a loss with no error
+/// and no visible symptom, because the panel still shows the edit.
+///
+/// The saved script is used as-is rather than replayed call by call. It was written by this
+/// editor from a parse of the same move, and the sites its calls are keyed by are ordinals into
+/// a source text it no longer carries.
+/// Returns `(script, shown, baseline)`. The baseline is derived from `parsed` here rather than
+/// left to the caller precisely so that the mutation above is not available to it: a caller that
+/// only ever assigns all three from this cannot accidentally use the edited list for both.
+fn resolve_sound_state(
+    parsed: &crate::data::AcmdScript,
+    saved: Option<crate::data::AcmdScript>,
+) -> (
+    crate::data::AcmdScript,
+    Vec<crate::data::SoundEvent>,
+    Vec<crate::data::SoundEvent>,
+) {
+    let baseline = parsed.to_sound_events();
+    let script = saved.unwrap_or_else(|| parsed.clone());
+    let shown = script.to_sound_events();
+    (script, shown, baseline)
+}
+
 fn timeline_frame_extent(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
@@ -2018,6 +2047,27 @@ impl VisionaryApp {
             );
             out.push_str(&emitted);
         }
+
+        // Sounds, but only once one has been edited. An unedited script is not exported — the
+        // plugin installs per category, so the fighter's own `sound_` keeps playing — and
+        // showing a function the export will not write is exactly the drift this pane exists
+        // to rule out.
+        let sound_edited = self
+            .current_move_key()
+            .is_some_and(|key| self.state.sound_script_edits.contains_key(&key));
+        if only_game != Some(true) && sound_edited && !self.state.sound_script.stmts.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let emitted = crate::acmd::preview_sound_fn(&self.state.sound_script, &move_name);
+            crate::acmd_verify::verify_sound_move(
+                &move_name,
+                &self.state.sound_script,
+                &emitted,
+                &mut report,
+            );
+            out.push_str(&emitted);
+        }
         (out, report)
     }
 
@@ -2283,6 +2333,26 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            // Sounds get a fourth pass, and unlike the three above it writes a *different
+            // function*: `sound_`, not `game_`. A project with hitboxes and no sound script is
+            // ordinary, so a missing one is silence rather than a note — the same reason the
+            // three passes above each run independently of the others' success.
+            if self.state.sounds != self.state.sounds_pristine {
+                match crate::acmd_src::sync_sounds(
+                    index,
+                    &fighter,
+                    &move_name,
+                    &self.state.sounds_pristine,
+                    &self.state.sounds,
+                ) {
+                    Ok(report) => {
+                        changed += report.changed;
+                        files.extend(report.files);
+                        notes.extend(report.skipped);
+                    }
+                    Err(e) => notes.push(e.to_string()),
+                }
+            }
         }
 
         if !ran {
@@ -2458,14 +2528,19 @@ impl VisionaryApp {
                 // Read before the hitbox check below, and kept even when that check fails: a
                 // move with sounds but no hitboxes is a real script, the same argument that
                 // stopped effects being thrown away for an effect-only mod.
-                let sounds = crate::acmd::parse_sound_script(&body).to_sound_events();
+                let sound_script = crate::acmd::parse_sound_script(&body);
 
                 let mut hitboxes = script.to_hitboxes();
                 // A move with effects but no hitboxes is a real script, not a failed load.
                 // Throwing its effects away used to make a linked source project that only
                 // carries `effect_*` functions — the common shape for a VFX-only mod — look
                 // like it had loaded nothing at all.
-                self.state.sounds = sounds;
+                // The parse first, because the call below reads it to set the baseline that
+                // write-back diffs against. A saved edit replaces what is *shown*, never that
+                // baseline: it has to keep meaning "what the file says" rather than "what was on
+                // screen last time".
+                self.state.sound_script = sound_script;
+                self.apply_saved_sound_edits_to_current();
                 let effects_only = hitboxes.is_empty() && !effect_script.stmts.is_empty();
                 if hitboxes.is_empty() && !effects_only {
                     self.acmd_error = Some(format!(
@@ -2528,6 +2603,8 @@ impl VisionaryApp {
                 self.state.effect_script = crate::data::EffectScript::default();
                 self.state.effects = Vec::new();
                 self.state.sounds = Vec::new();
+                self.state.sounds_pristine = Vec::new();
+                self.state.sound_script = crate::data::AcmdScript::default();
             }
         }
         self.fetching_acmd = false;
@@ -4149,7 +4226,97 @@ impl VisionaryApp {
 
             self.draw_hurtbox_section(ui);
             self.draw_attack_mod_section(ui);
+            self.draw_sound_section(ui);
         });
+    }
+
+    /// Which sound each call in the move's `sound_` script plays.
+    ///
+    /// Its own section below the others because it is a different *function*: hurtboxes and
+    /// hitbox tuning share the `game_` script, and these live in `sound_`. That is also why the
+    /// edit goes into `state.sound_script` rather than `state.script` — writing it to the game
+    /// script would put a `PLAY_SE` in a function that never had one.
+    ///
+    /// The name only. A sound's frame is the block it sits in rather than an argument, so moving
+    /// one is a structural edit the write-back path cannot express — the same limit the hurtbox
+    /// section has, and it is better to not offer the widget than to offer one whose change is
+    /// reported as skipped.
+    fn draw_sound_section(&mut self, ui: &mut Ui) {
+        use crate::data::ExcuteStmt;
+
+        if self.state.sounds.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Sounds");
+            ui.colored_label(egui::Color32::from_rgb(150, 210, 150), "sound_ script");
+        })
+        .response
+        .on_hover_text(
+            "The PLAY_SE family names a sound label from the fighter's own sound bank. A label \
+             the bank does not have is silent rather than an error, so a typo here plays nothing \
+             and the game says nothing about it.",
+        );
+
+        // Collected and applied after the loop, so the mutable borrow of the script does not
+        // overlap the event list it was derived from — the hurtbox section's reason exactly.
+        let mut edit: Option<(usize, ExcuteStmt)> = None;
+
+        for event in &self.state.sounds {
+            let active = event.frame == self.state.current_frame;
+            ui.horizontal(|ui| {
+                // `STOP_SE` silences rather than plays, and reads colder for it — the same
+                // distinction the timeline band draws.
+                let color = if event.call.func.starts_with("STOP") {
+                    egui::Color32::from_rgb(120, 140, 160)
+                } else if active {
+                    egui::Color32::from_rgb(150, 210, 150)
+                } else {
+                    egui::Color32::from_rgb(100, 150, 100)
+                };
+                ui.colored_label(color, if active { "◆" } else { "◇" });
+                ui.label(format!("[{}] {}", event.frame, event.call.func));
+
+                let mut call = event.call.clone();
+                let mut changed = false;
+                for (index, name) in call.sounds.iter_mut().enumerate() {
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(name)
+                                .id_salt(("sound_name", event.site, index))
+                                .desired_width(200.0),
+                        )
+                        .changed();
+                }
+                // Shown, not editable: the suppression window is the one non-hash argument in
+                // the family and nothing has measured what a sensible range for it is.
+                if let Some(tail) = &event.call.tail {
+                    ui.weak(format!("for {tail} frames"));
+                }
+                if changed {
+                    edit = Some((event.site, ExcuteStmt::Sound(call)));
+                }
+            });
+        }
+
+        if let Some((site, replacement)) = edit {
+            if let Some(stmt) = self.state.sound_script.sound_stmt_mut(site) {
+                *stmt = replacement;
+                // Re-read the whole list rather than patching the row that changed: a looped
+                // call is one line and several events, so editing it has to update all of them.
+                self.state.sounds = self.state.sound_script.to_sound_events();
+                // Snapshot the whole script for the export, keyed by move — the same shape
+                // `effect_call_full` uses, and for the same reason: what gets installed is the
+                // function, so what has to be remembered is the function.
+                if let Some(key) = self.current_move_key() {
+                    self.state
+                        .sound_script_edits
+                        .insert(key, self.state.sound_script.clone());
+                }
+            }
+        }
     }
 
     /// Post-hoc tuning of hitboxes that are already out, below the hurtbox section.
@@ -5515,6 +5682,22 @@ impl VisionaryApp {
         Some(format!("{fighter}/{mv}"))
     }
 
+    /// Put this move's saved sound script back over the freshly parsed one, if there is one.
+    ///
+    /// **Call this with `state.sound_script` holding the parse**, which is what makes the
+    /// baseline it sets meaningful — [`resolve_sound_state`] derives that from what it is given.
+    /// Move load is the only caller, and it assigns the parse immediately before.
+    fn apply_saved_sound_edits_to_current(&mut self) {
+        let saved = self
+            .current_move_key()
+            .and_then(|key| self.state.sound_script_edits.get(&key))
+            .cloned();
+        let (script, shown, baseline) = resolve_sound_state(&self.state.sound_script, saved);
+        self.state.sound_script = script;
+        self.state.sounds = shown;
+        self.state.sounds_pristine = baseline;
+    }
+
     /// Rebuild `state.effects` from the pristine parse + this move's saved edits.
     /// Idempotent — used at move load and after loading a project.
     fn apply_effect_call_edits_to_current(&mut self) {
@@ -5621,6 +5804,18 @@ impl VisionaryApp {
             if let Some(full) = self.state.effect_call_full.get(key) {
                 fm.effect_calls_full.insert(mv.to_string(), full.clone());
             }
+        }
+        for (key, script) in &self.state.sound_script_edits {
+            if script.stmts.is_empty() {
+                continue;
+            }
+            let (fighter, mv) = key.split_once('/').unwrap_or(("unknown", key.as_str()));
+            project
+                .fighters
+                .entry(fighter.to_string())
+                .or_default()
+                .sound_scripts
+                .insert(mv.to_string(), script.clone());
         }
         for (fighter, eff) in &self.eff_mods {
             if eff.is_empty() {
@@ -6093,6 +6288,7 @@ impl VisionaryApp {
         self.state.edit_log.entries.clear();
         self.state.effect_call_edits.clear();
         self.state.effect_call_full.clear();
+        self.state.sound_script_edits.clear();
         self.eff_mods.clear();
         self.live_overrides = crate::game_link::LiveOverrides::default();
         self.state.hitboxes = self.state.hitboxes_pristine.clone();
@@ -6134,6 +6330,11 @@ impl VisionaryApp {
                 self.state
                     .effect_call_full
                     .insert(format!("{fighter}/{mv}"), full);
+            }
+            for (mv, script) in fm.sound_scripts {
+                self.state
+                    .sound_script_edits
+                    .insert(format!("{fighter}/{mv}"), script);
             }
             if let Some(mut eff) = fm.eff {
                 // Older saves recorded mixed-case names ("SYS_ICE_os"); entry names are
@@ -15704,6 +15905,48 @@ mod live_effect_capture_tests {
         );
     }
 
+    /// Reopening a move restores its saved sound edits without disturbing what the file said.
+    ///
+    /// The two halves are separate on purpose and the second is the one that breaks quietly.
+    /// `sounds_pristine` is the *file's* reading, and write-back diffs the edited list against
+    /// it; fold the saved edit into both and the diff is empty, so a reopened move's sound edits
+    /// never reach the user's source. Nothing errors and the panel still shows the edit — the
+    /// only symptom is a sync that reports zero changes.
+    #[test]
+    fn reopening_a_move_restores_its_sound_edit_without_moving_the_baseline() {
+        const TURN_DASH: &str = r#"unsafe extern "C" fn sound_turndash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+    }
+}
+"#;
+        let parsed = crate::acmd::parse_sound_script(TURN_DASH);
+        let pristine = parsed.to_sound_events();
+
+        // Nothing saved: the parse is what is shown, and it is its own baseline.
+        let (script, shown, baseline) = resolve_sound_state(&parsed, None);
+        assert_eq!(shown, pristine);
+        assert_eq!(baseline, pristine);
+        assert_eq!(script.to_sound_events(), pristine);
+
+        // Saved: the edit is shown, and the baseline is still the file's own reading.
+        let mut saved = parsed.clone();
+        let mut call = pristine[0].call.clone();
+        call.sounds[0] = "se_common_dash_start".into();
+        *saved.sound_stmt_mut(0).unwrap() = crate::data::ExcuteStmt::Sound(call);
+        let (_, shown, baseline) = resolve_sound_state(&parsed, Some(saved));
+        assert_eq!(shown[0].call.sounds[0], "se_common_dash_start");
+        assert_eq!(
+            baseline, pristine,
+            "the baseline must still be the file's own reading, not the saved edit"
+        );
+        assert_ne!(
+            shown, baseline,
+            "with the baseline moved onto the edit, write-back would see no change to sync"
+        );
+    }
+
     /// Renumbering a hitbox is an ordinary edit made from the ID drag box. The rebuild used to
     /// look the collision back up by its *new* id, miss, and silently emit the untouched original
     /// call — so an export carried none of the move's edits.
@@ -16110,6 +16353,7 @@ mod live_effect_capture_tests {
                 sounds: vec!["se_kirby_landing02".into()],
                 tail: None,
             },
+            site: 0,
         };
         let hitbox = vec![Hitbox {
             active_start: 5,

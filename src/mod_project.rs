@@ -43,6 +43,7 @@ impl ModProjectFile {
             f.acmd.is_empty()
                 && f.effect_calls.values().all(|v| v.is_empty())
                 && f.effect_calls_full.values().all(|v| v.is_empty())
+                && f.sound_scripts.values().all(|s| s.stmts.is_empty())
                 && f.eff.as_ref().map(|e| e.is_empty()).unwrap_or(true)
                 && f.live_tweaks.is_empty()
         })
@@ -62,6 +63,14 @@ pub struct FighterMod {
     /// move name → full edited spawn list (what the exported effect script emits)
     #[serde(default)]
     pub effect_calls_full: HashMap<String, Vec<crate::data::EffectCall>>,
+    /// move name → the whole edited `sound_` script (what the exported sound script emits)
+    ///
+    /// The whole script, not the changed calls, for the reason `effect_calls_full` is whole:
+    /// an installed `sound_` function replaces the fighter's own, so a partial one would
+    /// silence every call it left out. `#[serde(default)]` keeps projects saved before D1d
+    /// loadable — they simply have no sounds, which is what was true when they were written.
+    #[serde(default)]
+    pub sound_scripts: HashMap<String, crate::data::AcmdScript>,
     /// authored .eff edits for this fighter's effect file
     #[serde(default)]
     pub eff: Option<EffMod>,

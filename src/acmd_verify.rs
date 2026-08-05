@@ -124,6 +124,7 @@ pub fn verify_export(
     project: &ModProject,
     acmd_edits: &[(String, String, AcmdScript)],
     effect_edits: &[(String, String, Vec<EffectCall>)],
+    sound_edits: &[(String, String, AcmdScript)],
     tweaks: &[LiveTweak],
 ) -> Report {
     let mut report = Report::default();
@@ -172,7 +173,50 @@ pub fn verify_export(
         }
     }
 
+    for (fighter, move_name, script) in sound_edits {
+        let subject = format!("{fighter} / {move_name}");
+        let emitted = crate::acmd::preview_sound_fn(script, move_name);
+        verify_sound_move(&subject, script, &emitted, &mut report);
+        if !sources.iter().any(|text| text.contains(&emitted)) {
+            report.blocker(
+                &subject,
+                "the generated sound script is missing from the exported project",
+            );
+        }
+    }
+
     report
+}
+
+/// Verify one move's sound script: read the emitted function back and compare what it plays.
+///
+/// The comparison is on the *resolved events* rather than on the statements, because that is
+/// what the user was shown and what the game will do. An emitter that moved a call into a
+/// different `frame` block, or dropped a member it no longer recognised, changes the events and
+/// is caught; one that merely re-indented does not, and should not be.
+pub fn verify_sound_move(subject: &str, script: &AcmdScript, emitted: &str, report: &mut Report) {
+    let expected = script.to_sound_events();
+    let round_tripped = crate::acmd::parse_sound_script(emitted).to_sound_events();
+    if expected == round_tripped {
+        return;
+    }
+    // Named rather than counted: "3 sounds became 2" does not say which move went quiet.
+    let lost: Vec<String> = expected
+        .iter()
+        .filter(|event| !round_tripped.contains(event))
+        .map(|event| format!("{} on frame {}", event.call.func, event.frame))
+        .collect();
+    report.blocker(
+        subject,
+        &if lost.is_empty() {
+            "the generated sound script plays something the editor did not show".into()
+        } else {
+            format!(
+                "the generated sound script does not play {}",
+                lost.join(", ")
+            )
+        },
+    );
 }
 
 /// Verify one move's hitbox script on its own, for the editor's generated-source preview.
@@ -1290,7 +1334,7 @@ mod tests {
                 contents: "pub fn main() { let x = ;\n".into(),
             }],
         };
-        let report = verify_export(&project, &[], &[], &[]);
+        let report = verify_export(&project, &[], &[], &[], &[]);
         assert!(report.has_blockers(), "{}", messages(&report));
         assert!(
             messages(&report).contains("does not parse at line"),
@@ -1309,7 +1353,7 @@ mod tests {
             ("mario".into(), "attackairn".into(), script(&body)),
         ];
         let project = build_mod_project(&edits, "collide_plugin");
-        let report = verify_export(&project, &edits, &[], &[]);
+        let report = verify_export(&project, &edits, &[], &[], &[]);
         assert!(
             messages(&report).contains("both generate `game_attackairn`"),
             "{}",
@@ -1327,7 +1371,7 @@ mod tests {
         project
             .files
             .retain(|file| !file.rel_path.ends_with("/acmd.rs"));
-        let report = verify_export(&project, &edits, &[], &[]);
+        let report = verify_export(&project, &edits, &[], &[], &[]);
         assert!(
             messages(&report).contains("missing from the exported project"),
             "{}",
