@@ -1334,10 +1334,10 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   1. **[x] D1a (done 2026-08-05)** — Load `sound_` in `script_body` and parse it to `Raw` only,
      with a corpus round-trip gate.
   2. **[x] D1b (done 2026-08-05)** — Merge project and mirror *per category*, which is what
-     D1a named as step 2's own first move. Still open: type the `PLAY_SE` family and give
-     sound a timeline lane.
-  3. Plugin hooks for the sound primitives, capture, then live.
-  4. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
+     D1a named as step 2's own first move.
+  3. **[~] D1c** — Type the `PLAY_SE` family and give sound a timeline lane.
+  4. Plugin hooks for the sound primitives, capture, then live.
+  5. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
      it does not emit still plays vanilla — nothing is lost by sound being absent until here.
 - **Trap:** the moment a *write* path lands, a file that was previously never rewritten becomes
   rewritable. The corpus round-trip is the gate for that, not a spot check.
@@ -1428,6 +1428,39 @@ the corpus as the mirror, guarding on **132 moves with effects and 78 with hitbo
 sharpest assertion is the one that nearly was not written: two `game_` functions in a body
 parse *fine*, first one wins, so a merge appending vanilla's copy underneath the project's
 would go unnoticed until an export wrote both out. Four mutations run, all caught.
+
+#### [~] D1c — Type the sound family and give sound a timeline lane
+
+D1a reads a `sound_` function and writes it back unchanged; every line inside it is `Raw`, so
+nothing knows a sound from a comment. This types the calls and puts them on screen.
+
+**Measured 2026-08-05, before deciding the shape.** All **610** calls sit inside a `sound_`
+function — not one is in a `game_` or `effect_` one — so this family cannot collide with the
+`game_` parser the way `COL_PRI` collided with the pushbox one. Every call in the corpus is
+written `macros::NAME(agent, Hash40::new("…")…)`; there are zero calls that pass anything but
+a string literal, and zero written without the `macros::` prefix. Density is low: the median
+sound script has **1** call and the busiest has 18, so one timeline row per call is affordable.
+
+Arities, read off `macros.rs` rather than guessed — `PLAY_SE`, `PLAY_SE_NO_3D`,
+`PLAY_SE_REMAIN`, `STOP_SE`, `PLAY_STEP`, `PLAY_SEQUENCE`, `PLAY_STATUS`, `PLAY_LANDING_SE`,
+`PLAY_DOWN_SE` take one `Hash40`; `PLAY_STEP_FLIPPABLE` and `PLAY_FLY_VOICE` take two;
+`SET_PLAY_INHIVIT` takes a `Hash40` and an `f32`.
+
+- **Parse+IR:** `ExcuteStmt::Sound(SoundCall)`, resolved to frames by the *same* `eval_stmts`
+  walk the hitboxes use, for the reason `to_hurtboxes` gives: `frame`/`wait` arithmetic and
+  `for` unrolling decide when a sound fires just as much as when a hitbox opens.
+- **Panel:** a sound band under the hurtbox band, and sound frames counted in the timeline's
+  extent so a sound after the last hitbox is not cut off.
+- **Named exception — Live and Export are out of scope, by this entry's own work order.**
+  Steps 4 and 5 own them. Nothing here is editable, so nothing can be lost: the panel is a
+  display of a script the export still writes back verbatim as `Raw`.
+- **Trap:** match on `macros::NAME(` with the paren, never the bare name. `PLAY_SE` is a prefix
+  of `PLAY_SE_NO_3D` and `PLAY_SE_REMAIN`, and `PLAY_STEP` of `PLAY_STEP_FLIPPABLE` — the same
+  shape as the `ATTACK`/`ATTACK_ABS` collision this file already warns about.
+- **Test bar:** the existing corpus round trip must stay byte-exact with the calls typed —
+  that is the whole gate, because a typed call is now *regenerated* rather than copied. Plus a
+  count of how many corpus sound calls are typed rather than left `Raw`, so a family member
+  that stops being recognised fails instead of quietly falling back.
 
 ### [ ] D2 — `expression_` scripts
 
