@@ -1344,9 +1344,21 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   2. **[x] D1b (done 2026-08-05)** — Merge project and mirror *per category*, which is what
      D1a named as step 2's own first move.
   3. **[x] D1c (done 2026-08-05)** — Type the `PLAY_SE` family and give sound a timeline lane.
-  4. Plugin hooks for the sound primitives, capture, then live.
-  5. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
-     it does not emit still plays vanilla — nothing is lost by sound being absent until here.
+  4. **[~] D1d** — Make a sound editable, and carry that edit through export and write-back.
+     Note the generated plugin installs per category, so a `sound_` script it does not emit
+     still plays vanilla — nothing is lost by sound being absent until here.
+  5. Plugin hooks for the sound primitives, capture, then live.
+
+**Work order revised 2026-08-05, and this is the correction Rule 5 asks for.** The old steps 4
+and 5 were "plugin hooks, capture, then live" followed by "export + write-back", and *both
+presume a sound can be edited*. Nothing in steps 1–3 makes one editable, and no step said it
+would: the order jumped from a read-only timeline lane straight to previewing and persisting an
+edit that cannot exist. The editing step is now step 4 and carries the two persistence surfaces
+with it, because an edit that reaches neither the export nor the user's source is not an edit.
+
+Live moved behind it for a second reason the DoD already states: it cannot be verified from this
+machine at all. Shipping a live path before a durable one would mean a change you can hear once
+and cannot save.
 - **Trap:** the moment a *write* path lands, a file that was previously never rewritten becomes
   rewritable. The corpus round-trip is the gate for that, not a spot check.
 
@@ -1503,9 +1515,39 @@ Five mutations run, all caught — including the two that motivated their own as
 `kirby/WalkMiddle` event test sees it) and a needle matched without its paren, which reads
 `PLAY_STEP_FLIPPABLE` through `PLAY_STEP`'s one-hash layout.
 
-**Still out of scope, per this entry's own work order:** live playback (step 4) and export plus
-write-back (step 5). Sounds are displayed and nothing else — `sound_` is still not written by
+**Still out of scope, per this entry's own work order:** live playback and export plus
+write-back. Sounds are displayed and nothing else — `sound_` is still not written by
 any export, so nothing can be lost.
+
+#### [~] D1d — Make a sound editable, and persist it
+
+D1c put sounds on screen and stopped there. This makes one editable and carries the edit to the
+two places an edit has to reach: the generated plugin, and the user's own source.
+
+**Scope: which sound a call plays, and nothing else.** Changing `se_kirby_swing_l` to
+`se_common_swing_m` is one argument in one call, which is exactly what the write-back path is
+built to do. Retiming, adding and deleting are deliberately excluded — a sound's frame is the
+block it sits in rather than an argument, which is the same reason `rewrite_hurtboxes` reports a
+retime instead of performing one, and an added call has no site to write to.
+
+- **Parse+IR:** `SoundEvent.site`, on its own counter. **Not shared with `next_site` or
+  `next_mod_site`** — sharing one is the trap this file has already paid for, where a later
+  family's edits silently retarget and every per-family test still passes.
+- **Panel:** the sound rows become editable fields. `sounds_pristine` beside `sounds`, because
+  every write-back path here diffs against the pristine parse rather than tracking dirtiness.
+- **Export:** `sound_` joins `DISPLAYED_PREFIXES` and `build_mod_project_full` emits the
+  function. The D1a round trip already measured what this writes: 295 of 301 byte-exact, the
+  other six differing only in an indentation their source got wrong.
+- **Write-back:** `sound_sites` + `rewrite_sounds`, matching the `rewrite_hurtboxes` shape.
+- **Named exception — Live is out of scope**, and is now step 5. It needs hardware this machine
+  does not have; see the DoD's own wording on not implying the live surface was exercised.
+- **Trap:** `count_hurt_stmts` steps the site cursor over a zero-iteration `for`, and the sound
+  counter needs the same treatment — but it must also count `AcmdStmt::Bare`, which the hurtbox
+  one never had to. Fifteen corpus scripts put a sound outside every `is_excute` block, so a
+  counter that ignores `Bare` mis-numbers every site after one.
+- **Test bar:** a corpus oracle asserting that every event's site indexes into the *textual*
+  scan and lands on a call of the same macro. That is the assertion that catches a retargeted
+  edit, which no round trip can see: a mis-sited edit writes a perfectly well-formed script.
 
 ### [ ] D2 — `expression_` scripts
 
