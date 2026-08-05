@@ -1331,11 +1331,9 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
 - **Work order, in this order, each landing on its own:**
   1. **[x] D1a (done 2026-08-05)** — Load `sound_` in `script_body` and parse it to `Raw` only,
      with a corpus round-trip gate.
-  2. Type the `PLAY_SE` family; sound timeline lane. **Start by fixing what D1a named:** a
-     project holding only a `sound_` override still falls back to the vanilla mirror, because
-     `script_body` returning `Some` suppresses the fetch outright and a sound-only `Some` would
-     show the move with no hitboxes and no effects. Merging project and mirror per category is
-     the fix, and it has to land before anything rewrites a sound line.
+  2. **[~] D1b (in progress)** — Merge project and mirror *per category*, which is what D1a
+     named as step 2's own first move. Then type the `PLAY_SE` family and give sound a
+     timeline lane.
   3. Plugin hooks for the sound primitives, capture, then live.
   4. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
      it does not emit still plays vanilla — nothing is lost by sound being absent until here.
@@ -1374,6 +1372,30 @@ neither about sound:**
 runs, which is what happened when branches were flattened. 18 corpus `game_` scripts place an
 `ATTACK` this way and would lose it from the editor otherwise. The fix here was to the *brace*,
 not to the condition; pinned by `a_hitbox_inside_a_branch_is_still_seen_by_the_frame_walk`.
+
+#### [~] D1b — Merge the project and the mirror per category
+
+D1a named this as a sound problem. It is not: it is an *every category* problem, and it is
+already live for the most common mod shape there is.
+
+`script_body` ([acmd_src.rs:312](src/acmd_src.rs:312)) concatenates whatever categories the
+project defines and returns `Some`. `fetch_acmd` ([app.rs:1723](src/app.rs:1723)) treats
+`Some` as the whole answer and drops the mirror fetch on the floor — including any fetch
+already in flight. So a project that overrides only `game_attackairn`, which is what most
+hitbox mods are, displays the move **with no effects at all**, and the editor cannot tell
+that from a move that genuinely has none. The sound-only case is the same bug seen from a
+different side.
+
+- **The fix:** resolve each of the four categories independently — project's if it has one,
+  mirror's otherwise — and concatenate the result.
+- **The thing to get right is not the merge, it is the fetch.** The project path is
+  deliberately inline and synchronous ("it is a local file read"). A partial override now
+  needs the mirror too, so: use the disk cache when it is warm, spawn the existing worker
+  when it is not, and carry the project's own parts through to the poll site so they still
+  win on arrival. **A mirror fetch that fails must fall back to project-only** — offline
+  must not be worse than today.
+- **Test bar:** a project defining only `game_` keeps vanilla's effects; only `effect_` keeps
+  vanilla's hitboxes; only `sound_` keeps both. A project category always beats the mirror's.
 
 ### [ ] D2 — `expression_` scripts
 
