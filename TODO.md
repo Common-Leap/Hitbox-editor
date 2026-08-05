@@ -1286,7 +1286,7 @@ editor meaning (`pop()`, `remove_screen`), or another entry's work (`CANCEL_FILL
 C6b should be closed at 15 rather than kept open for a cheap win that does not exist — the only
 thing still owed is the warning-vs-blocker re-derivation below, which is a decision, not code.
 
-### [ ] C6c — Close C5's export-path gap
+### [~] C6c — Close C5's export-path gap
 
 Carried lines already report on the export path, because they travel on the `EffectCall`s a
 project saves. Dropped lines do not: nothing in a saved project remembers them.
