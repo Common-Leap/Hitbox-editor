@@ -264,6 +264,21 @@ pub struct CaptureLine {
     pub run: u32,
 }
 
+/// Rule key for `COL_PRI`, which is per fighter rather than per target.
+///
+/// The hurtbox category matches a rule on motion + key + frame, and this call has no target to
+/// build a key from. `u64::MAX` is safe as a stand-in because no bone hash and no group number
+/// reaches it. **Must equal the plugin's value** — see `hitbox_viewer::HURT_KEY_COL_PRI`.
+pub const HURT_KEY_COL_PRI: u64 = u64::MAX;
+
+/// Rule key for `WHOLE_HIT`, the other targetless member of the hurtbox category.
+///
+/// Deliberately *not* [`HURT_KEY_COL_PRI`]. Sharing one sentinel across two targetless macros
+/// would let a `COL_PRI` rule fire on a `WHOLE_HIT` in the same frame window and write a
+/// priority into a status slot — the cross-family corruption this codebase keeps rediscovering,
+/// arrived at from the other direction. **Must equal the plugin's value.**
+pub const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
+
 /// Sparse ATTACK-arg overrides (plugin `HbOverrides`).
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HbOverridesWire {

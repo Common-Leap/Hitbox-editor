@@ -135,15 +135,17 @@ pub const CAT_WIND: u8 = 2;
 /// layout shares nothing positionally with `ATTACK`, and its rule key is the absolute kind
 /// rather than the id, which every vanilla call writes as 0.
 pub const CAT_ABS: u8 = 4;
-/// Hurtbox state (`HIT_NODE` / `HIT_NO`), which is not a collision at all — it changes how the
-/// fighter *receives* hits. It rides the same rule pipeline because the matching key is the
-/// same shape (motion + target + frame window), but it is deliberately absent from
+/// Hurtbox state (`HIT_NODE` / `HIT_NO` / `WHOLE_HIT`), which is not a collision at all — it
+/// changes how the fighter *receives* hits. It rides the same rule pipeline because the matching
+/// key is the same shape (motion + target + frame window), but it is deliberately absent from
 /// [`is_collision_func`]: that gate exists to note when something is out to be cleared, and a
 /// hurtbox state is never ended by `AttackModule::clear_all`.
 ///
 /// The rule's `hitbox_id` carries the bone hash for `HIT_NODE` and the group number for
 /// `HIT_NO`, which cannot collide: a hash40 of a real bone name never lands in the low integers
-/// the group form uses.
+/// the group form uses. The two members with no target of their own — `WHOLE_HIT` and `COL_PRI`
+/// — take the top of the range instead, one sentinel each: [`HURT_KEY_WHOLE`] and
+/// [`HURT_KEY_COL_PRI`].
 pub const CAT_HURT: u8 = 3;
 
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
@@ -1207,11 +1209,45 @@ unsafe fn rewrite_args(lua_state: u64, args: &[LuaArg]) {
     }
 }
 
+/// Rule key for `COL_PRI`, which is per fighter rather than per target.
+///
+/// Not a value any bone hash or group number reaches. Must equal the editor's
+/// `game_link::HURT_KEY_COL_PRI`.
+const HURT_KEY_COL_PRI: u64 = u64::MAX;
+
+/// Rule key for `WHOLE_HIT`, the other member with no target of its own.
+///
+/// Distinct from [`HURT_KEY_COL_PRI`] on purpose: one shared sentinel would let a rule written
+/// for either macro match the other in the same frame window. Must equal the editor's
+/// `game_link::HURT_KEY_WHOLE`.
+const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
+
+/// Which slots a hurtbox macro's arguments occupy.
+///
+/// The three shapes in [`CAT_HURT`] do not agree, and the override application below is
+/// positional, so the shape is passed in rather than re-derived from `func` at each use.
+#[derive(Clone, Copy)]
+enum HurtShape {
+    /// `HIT_NODE` / `HIT_NO` — target in slot 0, status in slot 1.
+    Targeted,
+    /// `WHOLE_HIT` — status in slot 0 and no target slot at all.
+    WholeBody,
+    /// `COL_PRI` — priority in slot 0 and no status.
+    Priority,
+}
+
 /// Capture one hurtbox call and apply any rule matching it, returning `true` to suppress.
 ///
 /// `target_key` is what the rule matches on — the bone hash or the group number — so a move
 /// that makes four bones intangible can have one of them changed without touching the rest.
-unsafe fn hurt_action(lua_state: u64, func: &'static str, args: &[LuaArg], target_key: u64) -> bool {
+/// The targetless members pass a sentinel instead, one each.
+unsafe fn hurt_action(
+    lua_state: u64,
+    func: &'static str,
+    args: &[LuaArg],
+    target_key: u64,
+    shape: HurtShape,
+) -> bool {
     record(lua_state, func, args);
     if !any_rules() {
         return false;
@@ -1233,22 +1269,36 @@ unsafe fn hurt_action(lua_state: u64, func: &'static str, args: &[LuaArg], targe
         return false;
     };
     let mut vals = args.to_vec();
-    // Slot 0 is the target and slot 1 the status for both `HIT_NODE` and `HIT_NO`; `COL_PRI`
-    // has only slot 0. Each override is applied only where that slot exists, so a rule meant
-    // for one macro can never lengthen a call of another.
-    if let Some(target) = ov.hit_target.clone() {
-        if !vals.is_empty() {
-            vals[0] = target;
+    // Each override is applied only to the slot its own shape puts it in, and only where that
+    // slot exists — so a rule meant for one macro can never lengthen a call of another, nor
+    // write into a slot that means something else here. `WHOLE_HIT` is why this is a match
+    // rather than three independent bounds checks: its status is in slot 0, which is the
+    // *target* slot for the targeted pair and the *priority* slot for `COL_PRI`.
+    let slot = |vals: &mut Vec<LuaArg>, i: usize, v: LuaArg| {
+        if i < vals.len() {
+            vals[i] = v;
         }
-    }
-    if let Some(status) = ov.hit_status {
-        if vals.len() > 1 {
-            vals[1] = LuaArg::Int(status);
+    };
+    match shape {
+        HurtShape::Targeted => {
+            if let Some(target) = ov.hit_target.clone() {
+                slot(&mut vals, 0, target);
+            }
+            if let Some(status) = ov.hit_status {
+                slot(&mut vals, 1, LuaArg::Int(status));
+            }
         }
-    }
-    if let Some(pri) = ov.col_pri {
-        if !vals.is_empty() {
-            vals[0] = LuaArg::Int(pri);
+        HurtShape::WholeBody => {
+            // No `hit_target` arm: this macro has no target argument, and the editor does not
+            // send one for it.
+            if let Some(status) = ov.hit_status {
+                slot(&mut vals, 0, LuaArg::Int(status));
+            }
+        }
+        HurtShape::Priority => {
+            if let Some(pri) = ov.col_pri {
+                slot(&mut vals, 0, LuaArg::Int(pri));
+            }
         }
     }
     if vals != args {
@@ -1265,7 +1315,7 @@ unsafe fn hook_hit_node(lua_state: u64) {
             Some(LuaArg::Hash(h)) => *h,
             _ => u64::MAX,
         };
-        if hurt_action(lua_state, "HIT_NODE", &args, bone) {
+        if hurt_action(lua_state, "HIT_NODE", &args, bone, HurtShape::Targeted) {
             return;
         }
     }
@@ -1281,7 +1331,7 @@ unsafe fn hook_hit_no(lua_state: u64) {
             Some(LuaArg::Num(n)) => *n as u64,
             _ => u64::MAX,
         };
-        if hurt_action(lua_state, "HIT_NO", &args, group) {
+        if hurt_action(lua_state, "HIT_NO", &args, group, HurtShape::Targeted) {
             return;
         }
     }
@@ -1292,9 +1342,36 @@ unsafe fn hook_hit_no(lua_state: u64) {
 unsafe fn hook_col_pri(lua_state: u64) {
     let args = read_args_exact(lua_state, 1);
     if !args.is_empty() {
-        // `COL_PRI` is per fighter rather than per target, so every rule for it shares one
-        // key. `u64::MAX` is used because it is not a value any bone hash or group takes.
-        if hurt_action(lua_state, "COL_PRI", &args, u64::MAX) {
+        // `COL_PRI` is per fighter rather than per target, so every rule for it shares one key.
+        if hurt_action(
+            lua_state,
+            "COL_PRI",
+            &args,
+            HURT_KEY_COL_PRI,
+            HurtShape::Priority,
+        ) {
+            return;
+        }
+    }
+    original!()(lua_state)
+}
+
+/// `WHOLE_HIT(status)` — every bone's hurtbox state at once.
+///
+/// Belongs to this family rather than to the attack hooks despite the `HIT` in its name: the
+/// single argument is a `HIT_STATUS_*`, so it changes how the fighter *receives* hits. Like
+/// `COL_PRI` it has no target of its own and so matches on a sentinel key.
+#[skyline::hook(replace = smash::app::sv_animcmd::WHOLE_HIT)]
+unsafe fn hook_whole_hit(lua_state: u64) {
+    let args = read_args_exact(lua_state, 1);
+    if !args.is_empty() {
+        if hurt_action(
+            lua_state,
+            "WHOLE_HIT",
+            &args,
+            HURT_KEY_WHOLE,
+            HurtShape::WholeBody,
+        ) {
             return;
         }
     }
@@ -1479,6 +1556,7 @@ pub fn install() {
         hook_attack_abs,
         hook_hit_node,
         hook_hit_no,
+        hook_whole_hit,
         hook_col_pri,
         hook_hit_reset_all
     );

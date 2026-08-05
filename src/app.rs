@@ -4096,6 +4096,14 @@ impl VisionaryApp {
                     HurtTarget::Group(group) => {
                         changed |= ui.add(egui::DragValue::new(group)).changed();
                     }
+                    // No target widget: `WHOLE_HIT` covers every bone, so the status combo above
+                    // is the whole of this row's editing. The label says which macro it is,
+                    // because "whole body" alone would read like a bone this fighter happens to
+                    // have.
+                    HurtTarget::Whole => {
+                        ui.label("all bones")
+                            .on_hover_text("WHOLE_HIT — sets every bone's hurtbox state at once.");
+                    }
                 }
 
                 if changed {
@@ -7033,8 +7041,11 @@ impl VisionaryApp {
             // An unknown number is kept as the number. Substituting a name this build does not
             // have would be inventing one, and the emitter writes a bare number back without a
             // `*` so it still compiles.
-            let status = || -> Option<String> {
-                let raw = line.args.get(1)?.as_i64()?;
+            // The slot is a parameter because the three macros do not agree on it: `HIT_NODE`
+            // and `HIT_NO` put the status after their target, `WHOLE_HIT` has no target and puts
+            // it first.
+            let status = |slot: usize| -> Option<String> {
+                let raw = line.args.get(slot)?.as_i64()?;
                 Some(
                     crate::param_labels::const_name(crate::param_labels::HIT_STATUS, raw)
                         .map(str::to_string)
@@ -7047,11 +7058,15 @@ impl VisionaryApp {
                     // `Hash40::new("…")`, so the call is dropped rather than exported against
                     // the wrong bone.
                     target: HurtTarget::Bone(bone_rev.get(&line.args.first()?.as_hash()?)?.clone()),
-                    status: status()?,
+                    status: status(1)?,
                 }),
                 "HIT_NO" => Some(ExcuteStmt::HitStatus {
                     target: HurtTarget::Group(line.args.first()?.as_i64()?),
-                    status: status()?,
+                    status: status(1)?,
+                }),
+                "WHOLE_HIT" => Some(ExcuteStmt::HitStatus {
+                    target: HurtTarget::Whole,
+                    status: status(0)?,
                 }),
                 "COL_PRI" => Some(ExcuteStmt::ColPri(line.args.first()?.as_i64()?)),
                 "HIT_RESET_ALL" => Some(ExcuteStmt::HitResetAll),
@@ -7458,13 +7473,20 @@ impl VisionaryApp {
             let key = match &was.target {
                 HurtTarget::Bone(bone) => effect_name_hash(bone),
                 HurtTarget::Group(n) => *n as u64,
+                HurtTarget::Whole => crate::game_link::HURT_KEY_WHOLE,
             };
-            let hit_target = (was.target != now.target).then(|| match &now.target {
-                HurtTarget::Bone(bone) => {
-                    crate::game_link::LuaArgWire::Hash(effect_name_hash(bone))
-                }
-                HurtTarget::Group(n) => crate::game_link::LuaArgWire::Int(*n),
-            });
+            // A `WHOLE_HIT` has no target argument to rewrite, so it never carries one. Sending
+            // it would be worse than useless: the plugin writes the target into slot 0, which for
+            // this macro is the status.
+            let hit_target = (was.target != now.target)
+                .then(|| match &now.target {
+                    HurtTarget::Bone(bone) => {
+                        Some(crate::game_link::LuaArgWire::Hash(effect_name_hash(bone)))
+                    }
+                    HurtTarget::Group(n) => Some(crate::game_link::LuaArgWire::Int(*n)),
+                    HurtTarget::Whole => None,
+                })
+                .flatten();
             rules.push(rule(
                 key,
                 was.active_start,
@@ -7493,7 +7515,7 @@ impl VisionaryApp {
             // Every `COL_PRI` shares one key, matching the plugin: the call is per fighter,
             // not per target, so there is nothing else to tell two of them apart but the frame.
             rules.push(rule(
-                u64::MAX,
+                crate::game_link::HURT_KEY_COL_PRI,
                 was.active_start,
                 crate::game_link::HbOverridesWire {
                     col_pri: Some(now.pri),
@@ -13918,6 +13940,51 @@ mod live_effect_capture_tests {
         let exported = crate::acmd::export_acmd_source(&script, "dolly", "special_air_hi");
         assert!(
             exported.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
+            "{exported}"
+        );
+    }
+
+    /// A captured `WHOLE_HIT` reads its status from slot 0, where the targeted pair keeps a
+    /// target.
+    ///
+    /// The two shapes are captured into one untagged stream, so the slot cannot be a constant.
+    /// Reading slot 1 for all three would find nothing here and drop the call; reading slot 0
+    /// for all three would turn a `HIT_NODE`'s bone hash into a status number. Both are captured
+    /// at once so the fix cannot be to move the constant.
+    #[test]
+    fn a_captured_whole_body_status_is_read_from_the_slot_its_own_macro_uses() {
+        let bone = hash40::hash40("kneer").0;
+        let line = |func: &str, frame: f32, args: Vec<A>| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("final_start").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        };
+        let captures = vec![
+            line("WHOLE_HIT", 0.0, vec![A::Int(2)]),
+            line("HIT_NODE", 0.0, vec![A::Hash(bone), A::Int(1)]),
+        ];
+        let bone_rev: HashMap<u64, String> = [(bone, "kneer".to_string())].into_iter().collect();
+
+        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let (states, _) = script.to_hurtboxes();
+
+        let whole = states
+            .iter()
+            .find(|s| s.target == crate::data::HurtTarget::Whole)
+            .unwrap_or_else(|| panic!("the whole-body capture was dropped: {states:?}"));
+        assert_eq!(whole.status, "HIT_STATUS_XLU", "read from slot 0");
+        let knee = states
+            .iter()
+            .find(|s| s.target == crate::data::HurtTarget::Bone("kneer".into()))
+            .unwrap_or_else(|| panic!("the per-bone capture was dropped: {states:?}"));
+        assert_eq!(knee.status, "HIT_STATUS_INVINCIBLE", "read from slot 1");
+
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "final_start");
+        assert!(
+            exported.contains("macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);"),
             "{exported}"
         );
     }

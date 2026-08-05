@@ -631,12 +631,31 @@ impl Hitbox {
 /// target then status — but they are not the same family and a bone hash must never be
 /// written into a group slot, so the two are distinguished here rather than flattened into
 /// one string that the write-back would have to guess the type of.
+///
+/// [`Whole`](Self::Whole) is the third, and it is the one that does *not* share that shape: see
+/// [`takes_target_argument`](Self::takes_target_argument).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HurtTarget {
     /// `HIT_NODE(agent, Hash40::new("legr"), …)` — one named bone.
     Bone(String),
     /// `HIT_NO(agent, 8, …)` — one numbered hurtbox group.
     Group(i64),
+    /// `WHOLE_HIT(agent, *HIT_STATUS_XLU)` — every bone at once, with no target argument.
+    ///
+    /// Filed under "post-hoc hitbox tuning" in the backlog until 2026-08-04, on the strength of
+    /// the word *HIT* in the name. Its argument is a `HIT_STATUS_*`, the same four-state
+    /// [`param_labels::HIT_STATUS`](crate::param_labels::HIT_STATUS) the other two take, so it
+    /// changes how the fighter *receives* hits and belongs here. Unlike `COL_PRI` there is no
+    /// `lua_const` constant to appeal to — no `MA_MSC_CMD_*` name exists for it — so the
+    /// signature is what settles it.
+    ///
+    /// **The all-bones reach is deliberately not modelled.** In the game this call covers the
+    /// bones a `HIT_NODE` names, so a later `WHOLE_HIT` arguably ends an open per-bone span.
+    /// Spans here end on a later call to the *same* target or on `HIT_RESET_ALL`, and `Whole` is
+    /// simply a third target. No vanilla script mixes `WHOLE_HIT` with `HIT_NODE`, `HIT_NO` or
+    /// `HIT_RESET_ALL` — all 6 occurrences stand alone — so there is nothing to calibrate a
+    /// cross-target rule against, and guessing one would put invented spans on the timeline.
+    Whole,
 }
 
 impl HurtTarget {
@@ -645,7 +664,18 @@ impl HurtTarget {
         match self {
             HurtTarget::Bone(_) => "HIT_NODE",
             HurtTarget::Group(_) => "HIT_NO",
+            HurtTarget::Whole => "WHOLE_HIT",
         }
+    }
+
+    /// Whether this target is written as an argument, or is implied by the macro name.
+    ///
+    /// The one place the three targets differ in *shape*: `HIT_NODE` and `HIT_NO` are
+    /// `(target, status)` and `WHOLE_HIT` is `(status)`. Every surface that formats or parses a
+    /// hurtbox call has to branch here, so the question is asked once, by name, rather than
+    /// spelled as a bare `matches!` at each site.
+    pub fn takes_target_argument(&self) -> bool {
+        !matches!(self, HurtTarget::Whole)
     }
 
     /// How the target reads in the panel and the timeline lane label.
@@ -653,6 +683,7 @@ impl HurtTarget {
         match self {
             HurtTarget::Bone(bone) => bone.clone(),
             HurtTarget::Group(n) => format!("group {n}"),
+            HurtTarget::Whole => "whole body".to_string(),
         }
     }
 }

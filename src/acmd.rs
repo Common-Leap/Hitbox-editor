@@ -1058,14 +1058,14 @@ fn parse_attack_abs_call(line: &str) -> Option<crate::data::AttackAbsCall> {
     })
 }
 
-/// Parse one hurtbox-state or body-collision line, or `None` if this is not one.
+/// Parse one hurtbox-state or colour-blend line, or `None` if this is not one.
 ///
 /// Every member has exactly one arity in the vanilla archive — `HIT_NODE` 30 calls of
-/// `(bone, status)`, `HIT_NO` 2 of `(group, status)`, `COL_PRI` 2 of `(pri)`, and `COL_NORMAL`
-/// and `HIT_RESET_ALL` 8 and 3 of `()` — and each is declared with that same arity in
-/// `smash-script`'s `macros.rs`. There is no shape to discriminate on, so per this file's own
-/// rule the command name *is* the layout: a call whose argument count disagrees with its name
-/// falls through to `Raw` rather than being reinterpreted.
+/// `(bone, status)`, `HIT_NO` 2 of `(group, status)`, `WHOLE_HIT` 6 of `(status)`, `COL_PRI` 2
+/// of `(pri)`, and `COL_NORMAL` and `HIT_RESET_ALL` 8 and 3 of `()` — and each is declared with
+/// that same arity in `smash-script`'s `macros.rs`. There is no shape to discriminate on, so per
+/// this file's own rule the command name *is* the layout: a call whose argument count disagrees
+/// with its name falls through to `Raw` rather than being reinterpreted.
 fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
     // `HIT_NODE` before `HIT_NO`: the shorter name is a prefix of the longer one, so testing
     // it first would read every `HIT_NODE` as a `HIT_NO` with an unparseable group.
@@ -1096,6 +1096,19 @@ fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
         };
         return Some(ExcuteStmt::HitStatus {
             target: crate::data::HurtTarget::Group(group.trim().parse::<i64>().ok()?),
+            status: strip_deref(status),
+        });
+    }
+    // `WHOLE_HIT` carries its status in the first slot, because its target is the macro name.
+    // No prefix hazard: it shares no leading substring with the other four, and the `macros::`
+    // prefix keeps it clear of `ATK_HIT_ABS` and the rest of B3's genuinely-hitbox family.
+    if line.contains("macros::WHOLE_HIT(") {
+        let a = args("WHOLE_HIT")?;
+        let [status] = a.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::HitStatus {
+            target: crate::data::HurtTarget::Whole,
             status: strip_deref(status),
         });
     }
@@ -1423,6 +1436,10 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                     "{indent}macros::HIT_NO(agent, {group}, {});",
                     emit_status(status)
                 ),
+                // The status moves into the first slot: this macro's target is its name.
+                crate::data::HurtTarget::Whole => {
+                    format!("{indent}macros::WHOLE_HIT(agent, {});", emit_status(status))
+                }
             },
             crate::data::ExcuteStmt::HitResetAll => {
                 format!("{indent}macros::HIT_RESET_ALL(agent);")
@@ -2651,6 +2668,96 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             script.to_hurtboxes(),
             "the export must resolve to the same spans as the source"
         );
+    }
+
+    /// kirby/FinalStart and kirby/ThrownHi, trimmed to the hurtbox lines. Kirby's final smash
+    /// makes the whole body translucent for the cinematic; `ThrownHi` puts it back.
+    ///
+    /// The two are separate functions in the corpus and are spliced here because no vanilla
+    /// script contains both a set and a reset of the whole body — which is worth knowing, and is
+    /// why [`HurtTarget::Whole`](crate::data::HurtTarget::Whole) does not model the reach of the
+    /// call across the per-bone targets.
+    const HURT_WHOLE_BODY: &str = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);
+    }
+    frame(agent.lua_state_agent, 46.0);
+    if macros::is_excute(agent) {
+        macros::WHOLE_HIT(agent, *HIT_STATUS_NORMAL);
+    }
+}
+"#;
+
+    /// `WHOLE_HIT` is a hurtbox state, not a hitbox one, and it is typed rather than carried.
+    ///
+    /// The corpus oracles cannot tell these apart on their own: an unparsed line survives an
+    /// export as `Raw`, byte for byte, so a `WHOLE_HIT` that this parser did not recognise would
+    /// round-trip just as cleanly as one it did. The assertion that matters is therefore that
+    /// spans come out at all — that is what puts the call on the timeline and in the panel.
+    #[test]
+    fn a_whole_body_hit_status_is_a_hurtbox_span_and_not_a_raw_line() {
+        let script = parse_acmd_script(HURT_WHOLE_BODY);
+        let (states, pris) = script.to_hurtboxes();
+        assert!(pris.is_empty(), "nothing here is a colour blend");
+        let [xlu, normal] = &states[..] else {
+            panic!("expected two whole-body states, got {}", states.len());
+        };
+        assert_eq!(xlu.target, crate::data::HurtTarget::Whole);
+        assert_eq!(xlu.status, "HIT_STATUS_XLU");
+        // Ends where the reset begins, exactly like a per-bone span: `Whole` is a third target
+        // and not a special case in the span walk.
+        assert_eq!((xlu.active_start, xlu.active_end), (1, 45));
+        assert_eq!(normal.target, crate::data::HurtTarget::Whole);
+        assert_eq!(normal.status, "HIT_STATUS_NORMAL");
+        assert_eq!((normal.active_start, normal.active_end), (46, 9999));
+    }
+
+    /// The status moves to the first slot because the target is the macro name. An emitter that
+    /// kept the two-argument layout would write `WHOLE_HIT(agent, Hash40::new(…), status)`,
+    /// which does not compile — but only against a fighter nobody had exported yet.
+    #[test]
+    fn a_whole_body_status_is_emitted_into_the_slot_the_target_vacated() {
+        let script = parse_acmd_script(HURT_WHOLE_BODY);
+        let exported = export_acmd_source(&script, "kirby", "final_start");
+        assert!(
+            exported.contains("macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);"),
+            "{exported}"
+        );
+        assert!(
+            !exported.contains("WHOLE_HIT(agent, Hash40"),
+            "the target slot must not come back: {exported}"
+        );
+        assert_eq!(
+            parse_acmd_script(&exported).to_hurtboxes(),
+            script.to_hurtboxes(),
+            "the export must resolve to the same spans as the source"
+        );
+    }
+
+    /// `WHOLE_HIT` must not be read as one of the targeted pair, whose status sits a slot later.
+    ///
+    /// Written the wrong way round, `HIT_NODE`'s parse would take `*HIT_STATUS_XLU` for a bone
+    /// and find no status at all. The arity check is what separates them, so this pins that a
+    /// call with the *other* family's argument count falls through to `Raw` rather than being
+    /// reinterpreted — the rule this function's doc comment states.
+    #[test]
+    fn a_whole_hit_written_with_the_targeted_arity_is_left_alone() {
+        let two_args =
+            r#"        macros::WHOLE_HIT(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#;
+        assert!(
+            parse_hurtbox_call(two_args).is_none(),
+            "a WHOLE_HIT with a target slot is not a form this parser has seen"
+        );
+        let one_arg = r#"        macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);"#;
+        assert!(matches!(
+            parse_hurtbox_call(one_arg),
+            Some(crate::data::ExcuteStmt::HitStatus {
+                target: crate::data::HurtTarget::Whole,
+                ..
+            })
+        ));
     }
 
     /// The other three members, which carry no bone: two that reset and one that takes a

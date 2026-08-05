@@ -194,7 +194,8 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**310 green after C6b**), including the three corpus oracles — run
+- [ ] `cargo test` passes (**316 green after B3's `WHOLE_HIT`**), including the three corpus
+      oracles — run
       them by name with `cargo test cached_script` and `cargo test still_loses`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`, and
@@ -213,6 +214,10 @@ paraphrase it from memory.
       for as long as the bug existed. The per-field comparison lives in
       `check_effect_fidelity` / `check_hitbox_fidelity`; a new field must be added *there* or
       nothing is checking it.
+      **They are also blind to a macro you have not modelled yet**, which is the trap when
+      *adding* a family rather than changing one. An unparsed line exports verbatim as `Raw`, so
+      it round-trips perfectly; all three were green on `WHOLE_HIT` before and after it was
+      modelled. A green oracle says "nothing broke", never "the new thing works".
 - [ ] A round-trip test for the new family: parse a real vanilla call → emit → parse again →
       identical IR. Put the real call in the test, not a synthetic one.
 - [ ] A write-back test asserting that a value edit rewrites *only* that argument span, and
@@ -474,21 +479,40 @@ new collisions.
 `ATK_SET_SHIELD_SETOFF_MUL` 9, `ATK_HIT_ABS` 6, `WHOLE_HIT` 6, `ATK_POWER` 2,
 `ATK_LERP_RATIO` 0. B4's "take that first" deferral is discharged — B4 shipped 2026-08-04.
 
-**`WHOLE_HIT` is not one of these and is being done first, as B4's family (2026-08-04).** It
-takes a single `hit_status: i32` and the corpus writes `*HIT_STATUS_XLU` (5) and
-`*HIT_STATUS_NORMAL` (1) — that is how the fighter *receives* hits, not an edit to a hitbox
-already out. It is the all-bones sibling of `HIT_NODE`/`HIT_NO`, sharing the four-state
-`HIT_STATUS` `ConstTable` B4 already built, and `HIT_RESET_ALL` is already the "reset every
-target" statement next to it. So it needs **no new `ExcuteStmt` variant** — a third
-`HurtTarget` alongside `Bone` and `Group`.
+**[x] `WHOLE_HIT` was not one of these and is done, as B4's family (2026-08-04).** It takes a
+single `hit_status: i32` and the corpus writes `*HIT_STATUS_XLU` (5) and `*HIT_STATUS_NORMAL`
+(1) — that is how the fighter *receives* hits, not an edit to a hitbox already out. It is the
+all-bones sibling of `HIT_NODE`/`HIT_NO`, sharing the four-state `HIT_STATUS` `ConstTable` B4
+already built. So it needed **no new `ExcuteStmt` variant** — a third `HurtTarget` alongside
+`Bone` and `Group`, and all five surfaces followed from that.
 
-- **The one asymmetry:** `HIT_NODE`/`HIT_NO` take *(target, status)*; `WHOLE_HIT` takes
-  *(status)* only, because its target is implied. Every place that writes a hurtbox call is
-  formatting two arguments and must be taught the one-argument form.
 - **This is the second macro filed by its name rather than its signature** (after
   `COL_PRI`/`COL_NORMAL` in B4 — see the traps section). `WHOLE_HIT` reads like a hitbox word.
   The `lua_const` oracle is **silent** for all five of B3's macros — no `MA_MSC_CMD_*`
-  constants exist for them — so here the signature and the corpus context are the evidence.
+  constants exist for them — so here the signature and the corpus context were the evidence.
+- **The whole cost was one asymmetry, and it recurs on every surface.** `HIT_NODE`/`HIT_NO` are
+  *(target, status)*; `WHOLE_HIT` is *(status)*, its target being the macro name. So the status
+  slot index is 2 in the write-back and 1 in the capture reader for the pair, and one less for
+  this one. `HurtTarget::takes_target_argument` asks it once by name. Five places needed it: the
+  arity table in `HURT_COMMANDS` (listing it at 2 would have excluded every real call from
+  `hurt_sites` and shifted every later site ordinal), the emitter, the source write-back, the
+  capture reader, and the plugin's override application.
+- **The corpus oracles cannot see this class of bug, which is worth remembering.** An unparsed
+  line survives an export verbatim as `Raw`, so a `WHOLE_HIT` the parser ignored would
+  round-trip exactly as cleanly as one it understood — all three oracles passed *before* the
+  parse arm was added. The assertion that has teeth is that a span comes out at all.
+- **The plugin had a live corruption waiting.** `hurt_action` applied `hit_target` to slot 0 and
+  `hit_status` to slot 1 unconditionally, bounds-checked only. Slot 0 is the *status* for
+  `WHOLE_HIT` and the *priority* for `COL_PRI`, so a rule aimed at one macro could write into
+  another's meaning. It now matches on a `HurtShape` per macro. Relatedly, `COL_PRI` keyed its
+  rules on a bare `u64::MAX` as "the targetless one"; there are now two targetless members, so
+  the sentinels are named constants (`HURT_KEY_COL_PRI`, `HURT_KEY_WHOLE`) mirrored on both
+  sides of the wire.
+- **The all-bones reach is deliberately not modelled**, and the README says so. In the game a
+  `WHOLE_HIT` covers the bones a `HIT_NODE` names, so it arguably ends an open per-bone span.
+  No vanilla script mixes them — all 6 occurrences stand alone — so there is nothing to
+  calibrate a cross-target rule against, and inventing one would draw spans the script does not
+  describe. Revisit if a real mixed example turns up.
 
 That leaves B3 proper at **17 occurrences**, still the thinnest of the hitbox tasks.
 

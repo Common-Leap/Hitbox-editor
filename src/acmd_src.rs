@@ -1972,6 +1972,9 @@ fn text_edit(text: &str, span: &Range<usize>, new: &str) -> Option<Replacement> 
 const HURT_COMMANDS: &[(&str, usize)] = &[
     ("HIT_NODE", 2),
     ("HIT_NO", 2),
+    // One argument, not two: `WHOLE_HIT`'s target is the macro name. Listing it at 2 here would
+    // exclude every real call from `hurt_sites` and shift every later site's ordinal.
+    ("WHOLE_HIT", 1),
     ("HIT_RESET_ALL", 0),
     ("COL_PRI", 1),
     ("COL_NORMAL", 0),
@@ -2076,7 +2079,15 @@ pub fn rewrite_hurtboxes(
             _ => {}
         }
         if before.status != now.status {
-            if let Some(span) = site.args.get(2) {
+            // Slot 1 is `agent`, so the status is slot 2 for the two targeted macros and slot 1
+            // for `WHOLE_HIT`, whose target is its name. Writing 2 unconditionally would put the
+            // new status past the end of a `WHOLE_HIT`'s arguments and silently drop the edit.
+            let slot = if now.target.takes_target_argument() {
+                2
+            } else {
+                1
+            };
+            if let Some(span) = site.args.get(slot) {
                 edits.extend(text_edit(
                     text,
                     span,
@@ -2711,6 +2722,65 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         ] {
             assert!(after.contains(line), "{line} was disturbed:\n{after}");
         }
+    }
+
+    /// A `WHOLE_HIT` between two `HIT_NODE`s, so a status edit has to pick the right slot *and*
+    /// the site ordinals either side of it have to stay put.
+    const HURTBOXES_WHOLE: &str = r#"unsafe extern "C" fn game_finalstart(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);
+        macros::WHOLE_HIT(agent, *HIT_STATUS_XLU);
+        macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_XLU);
+    }
+}
+"#;
+
+    /// The status of a `WHOLE_HIT` lives one slot earlier than the other two members', and this
+    /// path writes by slot index into the user's own text.
+    ///
+    /// Writing slot 2 unconditionally would land past the end of this call's arguments and drop
+    /// the edit silently — the user changes a value, the panel shows the change, and their file
+    /// keeps the old status. Both neighbours share the edited status, so a write to the wrong
+    /// site shows up here rather than being masked.
+    #[test]
+    fn a_whole_body_status_edit_lands_in_the_call_and_not_past_its_arguments() {
+        let pristine = hurt_of(HURTBOXES_WHOLE);
+        assert_eq!(pristine.0.len(), 3, "two bones and the whole body");
+        assert_eq!(pristine.0[1].target, crate::data::HurtTarget::Whole);
+
+        let mut edited = pristine.clone();
+        edited.0[1].status = "HIT_STATUS_INVINCIBLE".into();
+        let (after, report) = rewrite_hurtboxes(HURTBOXES_WHOLE, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains("macros::WHOLE_HIT(agent, *HIT_STATUS_INVINCIBLE);"),
+            "{after}"
+        );
+        for line in [
+            r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#,
+            r#"macros::HIT_NODE(agent, Hash40::new("legl"), *HIT_STATUS_XLU);"#,
+        ] {
+            assert!(after.contains(line), "{line} was disturbed:\n{after}");
+        }
+    }
+
+    /// Turning a whole-body state into a per-bone one is a different macro, so it is reported
+    /// rather than written — the same rule `HIT_NODE` ↔ `HIT_NO` already follows, and the reason
+    /// is sharper here: the target it would need has no slot to go in.
+    #[test]
+    fn retargeting_a_whole_body_state_to_a_bone_is_reported_not_written() {
+        let pristine = hurt_of(HURTBOXES_WHOLE);
+        let mut edited = pristine.clone();
+        edited.0[1].target = crate::data::HurtTarget::Bone("kneer".into());
+        let (after, report) = rewrite_hurtboxes(HURTBOXES_WHOLE, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 0);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("WHOLE_HIT")),
+            "{report:?}"
+        );
+        assert_eq!(after, HURTBOXES_WHOLE, "a reported edit changes nothing");
     }
 
     #[test]

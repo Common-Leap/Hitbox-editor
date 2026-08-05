@@ -253,13 +253,22 @@ the kind and never on the id.
 
 Intangibility is the **Hurtboxes** section under the collision list. `HIT_NODE`
 and `HIT_NO` set how one bone or one numbered hurtbox group receives hits, and
-the game holds that setting until something takes it back — so a state is shown
-as the span between the call that sets it and the call that restores it, rather
-than as two unrelated lines you have to pair up by eye. `HIT_RESET_ALL` ends
-every one of them at once. Changing a status or a bone is a value edit and is
-written into your source; adding or removing a call, or moving one to a
-different frame, is structure and so lands in an export and is reported when
-syncing.
+`WHOLE_HIT` sets every bone at once — shown as **all bones**, with no target to
+pick because the macro has none. The game holds that setting until something
+takes it back, so a state is shown as the span between the call that sets it and
+the call that restores it, rather than as two unrelated lines you have to pair up
+by eye. `HIT_RESET_ALL` ends every one of them at once. Changing a status or a
+bone is a value edit and is written into your source; adding or removing a call,
+or moving one to a different frame, is structure and so lands in an export and is
+reported when syncing.
+
+A `WHOLE_HIT` span is tracked separately from the per-bone ones, so setting the
+whole body translucent will not appear to end a `HIT_NODE` state that is open at
+the same time. In the game it does cover those bones. No vanilla script mixes the
+two — every use of `WHOLE_HIT` in the archive stands alone, in final-smash and
+thrown states — so there was nothing to calibrate the interaction against, and
+showing a span the script does not describe would be a worse guess than showing
+none. If you mix them yourself, read the two as independent.
 
 `COL_PRI` sits in the same section, and is the odd one out there. It ranks a
 fighter's colour blend against the others applied at the same moment — it is a
