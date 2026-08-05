@@ -841,7 +841,7 @@ would have put add, delete and retime — the editor's actual value — at risk 
   nothing of that kind is live, so an unguarded stop for a guarded spawn is harmless — whereas a
   guarded stop would leave the effect running forever on the branch that skipped the guard.
 
-### [ ] C6b — The 19 effect scripts the export still loses a line from
+### [~] C6b — The 19 effect scripts the export still loses a line from
 
 C6 took the corpus from 28 lossy scripts to 19 and asserted the number, so this is what is
 left. Read C6's result table first — it says exactly which lines these are. Nothing here is
@@ -854,6 +854,24 @@ deliberately rather than discovered again.
   `effect_` script have no typed form at all. Giving them one is the fix, and it is the same
   shape as C3 — a non-spawn entry that shares the effect list. Note the two scripts are not the
   same surface: do not assume the `game_` variant's panel work carries over.
+
+  **Measured 2026-08-04, and it changes the fix.** `COL_PRI` and `COL_NORMAL` are *colour-blend*
+  commands, not body collision. `lua_const.rs` names them `MA_MSC_CMD_COLOR_BLEND_COL_PRI` and
+  `MA_MSC_CMD_COLOR_BLEND_COL_NORMAL`, in a family of exactly six alongside `FLASH`,
+  `FLASH_FRM` and `FLASH_OFF`. So they are not merely "the same shape as C3" — they are C3's
+  family, and `COL_NORMAL` is the direct sibling of the `BURN_COLOR_NORMAL` already in
+  `COLOR_COMMANDS`. The fix is one row in that table, not a new type.
+
+  Two consequences worth carrying:
+  - All 10 occurrences are in `effect_` functions and **none in a `game_` function**, so B4's
+    `ExcuteStmt::ColPri` / `ColNormal` path has zero corpus backing. Its plumbing is fine — the
+    panel, the wire field and the plugin hook all move an `i64` correctly — but it calls the
+    value a *pushbox* priority and files it under hurtboxes, where it does not belong.
+  - `COL_PRI` is **not** in the loss list: both occurrences share an `is_excute` block with a
+    `FLASH`, so C6 already carries them as that call's `leading`. Folding it into
+    `COLOR_COMMANDS` too would need a third payload shape — it takes one integer, not a
+    transition and not an RGBA — so it is deliberately left carried. Do it only if something
+    else forces a `ColorCall` field anyway.
 - **`else {`, 5 occurrences — nested guards.** C6 keeps one guard per spawn and reports an inner
   one rather than overwriting the outer. Closing this means `EffectWalk::guard` becoming a stack
   and `EffectCall::guard` a `Vec<String>`. Cheap, but there is **no corpus case that exercises
