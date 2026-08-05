@@ -1829,6 +1829,13 @@ pub struct AppState {
     pub attack_mods_pristine: Vec<AttackModState>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
+    /// The text every panel above was built from: the project's own functions where it has
+    /// them, the mirror's for the categories it does not.
+    ///
+    /// Kept because write-back needs it to *create* a category the project lacks. The function
+    /// it writes has to be the mirror's own text rather than something regenerated from the IR,
+    /// so the text has to survive the parse that produced the IR.
+    pub loaded_body: String,
     /// User edits to effect calls, keyed by "fighter/move" (indices into pristine order).
     pub effect_call_edits: HashMap<String, Vec<EffectCallEdit>>,
     /// Full edited call list snapshot per "fighter/move" — what the mod exporter emits
@@ -1879,6 +1886,7 @@ impl Default for AppState {
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),
             acmd_source: String::new(),
+            loaded_body: String::new(),
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
             sound_script_edits: HashMap::new(),

@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**361 green after D1d**), including the eight corpus
+- [ ] `cargo test` passes (**372 green after D1e**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -1356,7 +1356,7 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
      export and write-back.
      Note the generated plugin installs per category, so a `sound_` script it does not emit
      still plays vanilla — nothing is lost by sound being absent until here.
-  5. **[~] D1e (started 2026-08-05)** — Let write-back *create* the category function a
+  5. **[x] D1e (done 2026-08-05)** — Let write-back *create* the category function a
      project does not have. This is the one surface D1b left open, and D1d turned it from an
      edge case into the ordinary one.
   6. Plugin hooks for the sound primitives, capture, then live.
@@ -1454,6 +1454,8 @@ project with no `effect_` of its own now *reachable*, and `sync_script` bails wi
 has no effect_attackairn to sync into". Refusing is the honest answer until something can
 create the missing function; pinned by
 `syncing_a_category_the_project_does_not_define_refuses_instead_of_guessing`.
+**Closed by D1e (2026-08-05)**, which added the creating pre-pass rather than teaching this
+function to guess — that test still passes, and is now the assertion that it never learned to.
 
 `a_partial_project_override_keeps_every_category_it_does_not_define` runs all three shapes over
 the corpus as the mirror, guarding on **132 moves with effects and 78 with hitboxes**. Its
@@ -1603,7 +1605,7 @@ emulator, and the plugin was not touched. Retiming, adding and deleting a sound 
 by the entry's own scope line, and the panel offers no widget for them rather than offering one
 whose change comes back reported as skipped.
 
-#### [~] D1e — Create the category function the project does not have (started 2026-08-05)
+#### [x] D1e — Create the category function the project does not have (done 2026-08-05)
 
 **This is not a sound task, and it only lives under D1 because that is where the debt was
 incurred.** It is surface 5 for every category at once.
@@ -1646,6 +1648,52 @@ says nothing about the character is still out of scope, and still an error.
   sibling is still refused with a message naming what is missing.
 - **The trap this shares with D1d:** a created function that is registered under the wrong script
   name parses, compiles, and round-trips. Assert the *re-indexed* name, not the file's contents.
+
+**Result:** `create_script` ([acmd_src.rs:711](src/acmd_src.rs:711)) writes the function and its
+registration; `VisionaryApp::create_missing_scripts` runs it as a pre-pass before the value syncs.
+
+**Creation and the value write stayed separate, and that is the design decision here.** The
+created function is vanilla *verbatim* — not the edit — and the ordinary sync writes the values
+into it a moment later, through the same code every other edit goes through. Threading a "create
+from this text" seed down into `sync_script` was the first shape tried and it is worse: three of
+the five sync passes share the `game_` function, so the first would create it and the second and
+third would then be resolving spans against an index a write had already invalidated. Splitting
+them means creation never learns what an edit is, the value write never learns the function is
+new, and `syncing_a_category_the_project_does_not_define_refuses_instead_of_guessing` still
+passes — a sync never gained the power to invent a destination.
+
+**Registration is the half that can silently do nothing**, and it drove every refusal here.
+A function smashline never installs is dead text that compiles, and that is worse than an error
+because it looks like it worked. Three shapes:
+- `agent.acmd("…", fn, …)` — copied with both names respelled from the arg spans, so a script
+  name that is a prefix of the function name cannot be substituted into the wrong slot.
+- `#[acmd_script(...)]` — copied with `script` respelled and `category` *derived*. There is no
+  copy of that macro on this machine, so `ACMD_SOUND` is a name read off the project rather than
+  looked up: it is only emitted when the sibling's own token is exactly the `ACMD_<CATEGORY>` its
+  own prefix implies. A project spelling it `Acmd::Game` is refused, and writes nothing.
+- Neither — created under the conventional name and *said out loud* in the status line.
+
+**A gap found on the way, not part of the entry.** The sound sync pass sat inside the `game_`
+guard, so a project defining only a `sound_` function had its sound edits silently skipped: the
+pass that would have written them was gated on a function that project has no reason to define.
+It is now its own pass, guarded on its own script.
+
+**Six mutations run, three of which exposed missing assertions:**
+- Sorting the two insertions ascending instead of descending — caught, twice over.
+- Deriving the category unconditionally — caught.
+- Dropping the "already exists" guard **survived**. Creating a duplicate function is not a wasted
+  write, it is two definitions with one name and a project that stops compiling.
+- Dropping the same-move anchor preference **survived**. Both files produce a working script, so
+  nothing downstream can tell them apart — which is exactly why the choice needed its own test.
+  The symptom is a sound for the aerial written into the specials file, for the user to undo.
+- Reading *any* `#[...]` above a sibling as its registration **survived**, and it is the worst of
+  the three: an `#[allow]` gets copied above the new function, the real `agent.acmd` line is never
+  looked for, and the result compiles, installs nothing, and plays vanilla. Exactly the failure
+  the whole registration path exists to prevent, and it passed every test in the file.
+
+**Named exceptions.** Live is untouched and unaffected — this is a disk surface. Creating a
+*fighter* is still out of scope and still an error: a project that mentions the character nowhere
+has no file to write into and nothing to attribute a new function to.
 
 ### [ ] D2 — `expression_` scripts
 

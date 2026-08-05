@@ -552,6 +552,16 @@ fn attribute_values(text: &str, line_start: usize) -> (Option<String>, Option<St
 /// the substring `script` inside its own name, and matching that read the agent as the
 /// script name.
 fn attr_string_value(line: &str, key: &str) -> Option<String> {
+    let (span, quoted) = attr_value_span(line, key)?;
+    quoted.then(|| line[span].to_string())
+}
+
+/// The span of `key`'s value inside an attribute line, and whether it was quoted.
+///
+/// A quoted span covers the text *between* the quotes, so splicing over it leaves them in
+/// place. A bare one covers a path-shaped token — `category = ACMD_GAME`, and the `::` so a
+/// fully-qualified spelling comes back whole rather than truncated at its first colon.
+fn attr_value_span(line: &str, key: &str) -> Option<(Range<usize>, bool)> {
     let mut search = 0;
     while let Some(rel) = line[search..].find(key) {
         let at = search + rel;
@@ -563,15 +573,23 @@ fn attr_string_value(line: &str, key: &str) -> Option<String> {
         if preceded_by_word {
             continue;
         }
-        let Some(rest) = line[search..].trim_start().strip_prefix('=') else {
+        let after_key = line[search..].trim_start();
+        let Some(rest) = after_key.strip_prefix('=') else {
             continue;
         };
-        let Some(rest) = rest.trim_start().strip_prefix('"') else {
-            continue;
-        };
-        if let Some(end) = rest.find('"') {
-            return Some(rest[..end].to_string());
+        let value_at = line.len() - rest.trim_start().len();
+        let rest = rest.trim_start();
+        if let Some(quoted) = rest.strip_prefix('"') {
+            let end = quoted.find('"')?;
+            return Some((value_at + 1..value_at + 1 + end, true));
         }
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            .unwrap_or(rest.len());
+        if end == 0 {
+            continue;
+        }
+        return Some((value_at..value_at + end, false));
     }
     None
 }
@@ -647,6 +665,323 @@ fn is_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !value.starts_with(|c: char| c.is_ascii_digit())
+}
+
+// ── Creating a script the project does not have ───────────────────────────────
+
+/// A script written into the user's project, and how it was registered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatedScript {
+    pub file: PathBuf,
+    /// One sentence for the sync report: what was written, beside what, and installed how.
+    /// Registration is the half that can silently do nothing, so it is always named.
+    pub note: String,
+}
+
+/// How a project binds one Rust function to one ACMD script name.
+#[derive(Debug, Clone, PartialEq)]
+enum Binding {
+    /// An `#[acmd_script(...)]` attribute line, verbatim.
+    Attribute(String),
+    /// An `agent.acmd("…", fn, …);` statement, verbatim, with the script-name and
+    /// function-name spans *relative to that text* and the file offset just past it.
+    Call {
+        text: String,
+        script: Range<usize>,
+        function: Range<usize>,
+        end: usize,
+    },
+    /// Nothing explicit — the function is reached by its conventional name alone.
+    Convention,
+}
+
+/// A sibling script to copy a registration from, and where to put the new function.
+#[derive(Debug, Clone)]
+struct Anchor {
+    file: PathBuf,
+    /// Offset just past the sibling function, where the new one is inserted.
+    after: usize,
+    /// The sibling's ACMD script name. Its Rust function name is not kept: it is needed only to
+    /// *find* the registration, and the new function's own name comes from the text being written.
+    script: String,
+    binding: Binding,
+}
+
+/// Write `source` into the user's project as `script_name`, registered the way its siblings are.
+///
+/// `source` is a whole `unsafe extern "C" fn …` block. It is expected to be the *mirror's* text
+/// for this category rather than something regenerated from the IR: the effect emitter drops
+/// lines it could not type, and creating a function that way would write a lossy copy of vanilla
+/// into the user's project under their name. Copying the text and letting the ordinary value
+/// sync edit it afterwards keeps creation under the same rule as every other write.
+///
+/// The caller must rebuild its [`SourceIndex`] afterwards. Every span in the anchor's file past
+/// the insertion point has moved, and patching them by arithmetic across two insertions is the
+/// kind of thing that works until it does not.
+pub fn create_script(
+    index: &SourceIndex,
+    fighter: &str,
+    script_name: &str,
+    source: &str,
+) -> Result<CreatedScript> {
+    if index.script(fighter, script_name).is_some() {
+        bail!("{fighter}: the project already has a {script_name}");
+    }
+    let Some(anchor) = find_anchor(index, fighter, script_name) else {
+        bail!(
+            "{fighter}: the project has no script to put {script_name} beside — \
+             it needs at least one ACMD function for this fighter first"
+        );
+    };
+    let Some(function) = function_name_of(source) else {
+        bail!("{script_name}: no `fn` to write — the source for it is not a function");
+    };
+    let text = std::fs::read_to_string(&anchor.file)
+        .with_context(|| format!("reading {}", anchor.file.display()))?;
+    if anchor.after > text.len() {
+        bail!(
+            "{} changed on disk since it was indexed — rescan and try again",
+            anchor.file.display()
+        );
+    }
+    let where_at = anchor
+        .file
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+
+    // Highest offset first, so an earlier insertion cannot move a later one's index.
+    let mut inserts: Vec<(usize, String)> = Vec::new();
+    let body = source.trim_end();
+    let note = match &anchor.binding {
+        Binding::Attribute(line) => {
+            let attribute = rebuild_attribute(line, &anchor.script, script_name)?;
+            inserts.push((anchor.after, format!("\n\n{attribute}\n{body}\n")));
+            format!(
+                "created {script_name} in {where_at}, after {}, with its own \
+                 #[acmd_script] attribute",
+                anchor.script
+            )
+        }
+        Binding::Call {
+            text: statement,
+            script,
+            function: function_span,
+            end,
+        } => {
+            let mut registration = statement.clone();
+            // Later span first, for the same reason the insertions are ordered.
+            let (first, second) = if script.start < function_span.start {
+                (function_span, script)
+            } else {
+                (script, function_span)
+            };
+            registration.replace_range(first.clone(), &function);
+            registration.replace_range(second.clone(), script_name);
+            inserts.push((*end, format!("\n{registration}")));
+            inserts.push((anchor.after, format!("\n\n{body}\n")));
+            format!(
+                "created {script_name} in {where_at}, and registered it beside {}",
+                anchor.script
+            )
+        }
+        Binding::Convention => {
+            inserts.push((anchor.after, format!("\n\n{body}\n")));
+            format!(
+                "created {script_name} in {where_at}, named the same conventional way as {} — \
+                 which this project registers nowhere Visionary can see, so check it installs",
+                anchor.script
+            )
+        }
+    };
+
+    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    let mut updated = text;
+    for (at, insert) in inserts {
+        if at > updated.len() || !updated.is_char_boundary(at) {
+            bail!(
+                "{} changed on disk since it was indexed — rescan and try again",
+                anchor.file.display()
+            );
+        }
+        updated.insert_str(at, &insert);
+    }
+    std::fs::write(&anchor.file, &updated)
+        .with_context(|| format!("writing {}", anchor.file.display()))?;
+    Ok(CreatedScript {
+        file: anchor.file,
+        note,
+    })
+}
+
+/// The sibling to write next to: this move's other categories first, then anything else.
+///
+/// The same move is preferred because its function is where a reader expects the new one to
+/// appear. The fallback matters more than it looks: a project that defines the move in no
+/// category at all still has *somewhere* for this fighter, and that is enough to know the file,
+/// the fighter attribution and the registration style.
+fn find_anchor(index: &SourceIndex, fighter: &str, script_name: &str) -> Option<Anchor> {
+    let scripts = &index.fighters.get(&normalize_fighter(fighter))?.scripts;
+    let mut order: Vec<String> = Vec::new();
+    if let Some((_, suffix)) = script_name.split_once('_') {
+        for prefix in crate::acmd::SCRIPT_PREFIXES {
+            order.push(format!("{prefix}{suffix}"));
+        }
+    }
+    let mut rest: Vec<String> = scripts.keys().cloned().collect();
+    rest.sort();
+    order.extend(rest);
+
+    for name in order {
+        if name == script_name {
+            continue;
+        }
+        let Some(site) = scripts.get(&name) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&site.file) else {
+            continue;
+        };
+        let Some(function) = text.get(site.span.clone()).and_then(function_name_of) else {
+            continue;
+        };
+        let binding = if let Some(line) = attribute_line(&text, site.span.start) {
+            Binding::Attribute(line)
+        } else if let Some(call) = registration_statement(&text, &name, &function) {
+            call
+        } else {
+            Binding::Convention
+        };
+        return Some(Anchor {
+            file: site.file.clone(),
+            after: site.span.end,
+            script: name,
+            binding,
+        });
+    }
+    None
+}
+
+/// The name declared by the first `fn` in a function block.
+fn function_name_of(source: &str) -> Option<String> {
+    let at = source.find("fn ")? + 3;
+    let end = at + source[at..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+    (end > at).then(|| source[at..end].to_string())
+}
+
+/// The `#[acmd_script(...)]` line above a function declaration, verbatim.
+fn attribute_line(text: &str, line_start: usize) -> Option<String> {
+    let mut cursor = line_start;
+    for _ in 0..8 {
+        let prev_start = text[..cursor]
+            .trim_end_matches('\n')
+            .rfind('\n')
+            .map_or(0, |n| n + 1);
+        let line = text[prev_start..cursor].trim();
+        if line.starts_with("#[") {
+            if line.contains("acmd_script") {
+                return Some(line.to_string());
+            }
+        } else if !line.is_empty() {
+            return None;
+        }
+        if prev_start == 0 {
+            return None;
+        }
+        cursor = prev_start;
+    }
+    None
+}
+
+/// The same attribute, respelled for `target` instead of `sibling`.
+///
+/// `script = "…"` is substituted when present; when it is absent the attribute names only the
+/// agent and the function's own conventional name carries the binding, which is already true of
+/// the text being written.
+fn rebuild_attribute(line: &str, sibling: &str, target: &str) -> Result<String> {
+    let mut out = line.to_string();
+    if let Some((span, quoted)) = attr_value_span(line, "category") {
+        if !quoted {
+            let Some(token) = derive_category(sibling, &line[span.clone()], target) else {
+                bail!(
+                    "cannot tell what `category` a {target} should carry: {sibling} is \
+                     declared `{}`, which is not the name its own category implies, so there \
+                     is nothing here to derive the other one from",
+                    &line[span]
+                );
+            };
+            out.replace_range(span, &token);
+        }
+    }
+    let script = attr_value_span(&out, "script").filter(|(_, quoted)| *quoted);
+    if let Some((span, _)) = script {
+        out.replace_range(span, target);
+    }
+    Ok(out)
+}
+
+/// The `category = …` token a `target` script should carry, read off the sibling's own.
+///
+/// Derives only when the sibling's token is exactly the `ACMD_<CATEGORY>` its *own* prefix
+/// implies. There is no copy of the `#[acmd_script]` macro on this machine to check a spelling
+/// against, so the project's file is the only oracle available — and it is an oracle only while
+/// it agrees with itself. Anything else is refused rather than guessed, because a function
+/// installed under the wrong category compiles and then replaces the wrong script.
+fn derive_category(sibling_script: &str, token: &str, target_script: &str) -> Option<String> {
+    let category_of = |script: &str| {
+        crate::acmd::SCRIPT_PREFIXES
+            .iter()
+            .find(|prefix| script.starts_with(*prefix))
+            .map(|prefix| prefix.trim_end_matches('_').to_ascii_uppercase())
+    };
+    let sibling = category_of(sibling_script)?;
+    let target = category_of(target_script)?;
+    (token.trim() == format!("ACMD_{sibling}")).then(|| format!("ACMD_{target}"))
+}
+
+/// The `agent.acmd("…", fn, …);` statement that installs `script`, ready to be respelled.
+///
+/// Only the general `.acmd(` form is matched, deliberately. `.game_acmd(` and `.effect_acmd(`
+/// name the category in the *method*, so mirroring one for a different category would spell a
+/// method this project may not have — and there is no smashline on this machine to ask. A
+/// project registering that way falls through to [`Binding::Convention`], which writes the
+/// function and says plainly that it could not be registered.
+fn registration_statement(text: &str, script: &str, function: &str) -> Option<Binding> {
+    const MARKER: &str = ".acmd(";
+    let mut search = 0;
+    while let Some(rel) = text[search..].find(MARKER) {
+        let open = search + rel + MARKER.len() - 1;
+        search = open + 1;
+        let Some((args, close)) = split_call_args(text, open + 1, text.len()) else {
+            continue;
+        };
+        if args.len() < 2 {
+            continue;
+        }
+        // A literal, not a constant: the span arithmetic below steps over the quotes, and a
+        // `const NAME` in that slot has none to step over.
+        let named = &text[args[0].clone()];
+        if !(named.starts_with('"') && named.ends_with('"') && named.len() >= 2) {
+            continue;
+        }
+        if named.trim_matches('"') != script || text[args[1].clone()] != *function {
+            continue;
+        }
+        let start = text[..open].rfind('\n').map_or(0, |n| n + 1);
+        let mut end = close + 1;
+        if text[end..].starts_with(';') {
+            end += 1;
+        }
+        // Inside the quotes, so respelling the script leaves them in place.
+        let quoted = args[0].start + 1..args[0].end - 1;
+        return Some(Binding::Call {
+            text: text[start..end].to_string(),
+            script: quoted.start - start..quoted.end - start,
+            function: args[1].start - start..args[1].end - start,
+            end,
+        });
+    }
+    None
 }
 
 // ── Writing edits back ────────────────────────────────────────────────────────
@@ -2687,8 +3022,10 @@ pub fn install(agent: &mut smashline::Agent) {
     /// The merge makes a mirror-sourced effect editable in a project that has no `effect_` of
     /// its own, so write-back has to say so rather than guess where to put it.
     ///
-    /// This is the one surface D1b does not complete: the fix belongs with whoever teaches the
-    /// sync to *create* a missing function, and until then refusing is the honest answer.
+    /// **Still true after D1e, and deliberately so.** Creating the missing function is a
+    /// separate step ([`create_script`]) that the caller runs *first*; the value sync's own job
+    /// never became "write wherever looks plausible". If this test ever starts passing by
+    /// writing something, a sync has grown the power to invent a destination.
     #[test]
     fn syncing_a_category_the_project_does_not_define_refuses_instead_of_guessing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2712,6 +3049,275 @@ pub fn install(agent: &mut smashline::Agent) {
             error.contains("effect_attackairn"),
             "the message has to name what is missing: {error}"
         );
+    }
+
+    /// A sound the project does not define is created beside the scripts it does, registered the
+    /// same way, and comes back under exactly the name it was asked for.
+    ///
+    /// **The re-index is the assertion that matters**, not the file's text. A function installed
+    /// under the wrong script name is still valid Rust that compiles and runs — it simply
+    /// replaces a move nobody edited. Only asking the indexer what it now sees catches that.
+    #[test]
+    fn a_missing_sound_script_is_created_beside_its_siblings_and_registered_with_them() {
+        let (tmp, index) = mario_project();
+        let source = SOUNDS.replace("sound_turndash", "sound_attackairn");
+
+        let created = create_script(&index, "mario", "sound_attackairn", &source).unwrap();
+        assert!(
+            created.note.contains("registered it beside"),
+            "{}",
+            created.note
+        );
+
+        let after = SourceIndex::build(tmp.path()).unwrap();
+        let site = after
+            .script("mario", "sound_attackairn")
+            .expect("the created script has to index under the name it was created as");
+        let text = std::fs::read_to_string(&created.file).unwrap();
+        assert_eq!(
+            &text[site.span.clone()],
+            source.trim_end(),
+            "the function is the mirror's text verbatim — creation writes no edit of its own"
+        );
+        assert!(
+            text.contains(
+                "agent.acmd(\"sound_attackairn\", sound_attackairn, smashline::Priority::Default);"
+            ),
+            "the registration copies the sibling's tail as well as its shape:\n{text}"
+        );
+        // The siblings still resolve: an insertion moves spans, and a rescan is what makes that
+        // safe. This is the assertion that fails if creation ever patches spans by hand instead.
+        assert!(after.script("mario", "game_attackairn").is_some());
+        assert!(after.script("mario", "effect_attackairn").is_some());
+        assert_eq!(after.script_count(), 3);
+    }
+
+    /// With no sibling for this move, any script of the same fighter is anchor enough.
+    #[test]
+    fn a_move_the_project_says_nothing_about_still_has_somewhere_to_be_created() {
+        let (tmp, index) = mario_project();
+        create_script(&index, "mario", "sound_turndash", SOUNDS).unwrap();
+
+        let after = SourceIndex::build(tmp.path()).unwrap();
+        assert!(after.script("mario", "sound_turndash").is_some());
+        assert!(
+            after.script_source("mario", "turn_dash").is_some(),
+            "and the move now reads back out of the project"
+        );
+    }
+
+    /// An attribute-registered project gets an attribute, with the category derived from how it
+    /// spells its own.
+    #[test]
+    fn creating_into_an_attribute_project_respells_the_attribute_for_the_new_category() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/lib.rs",
+            "#[acmd_script(agent = \"fighter_lucina\", script = \"game_turndash\", \
+             category = ACMD_GAME)]\nunsafe extern \"C\" fn my_custom_name(agent: &mut \
+             L2CAgentBase) {\n    frame(agent.lua_state_agent, 1.0);\n}\n",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+
+        let created = create_script(&index, "lucina", "sound_turndash", SOUNDS).unwrap();
+        let text = std::fs::read_to_string(&created.file).unwrap();
+        assert!(
+            text.contains(
+                "#[acmd_script(agent = \"fighter_lucina\", script = \"sound_turndash\", \
+                 category = ACMD_SOUND)]"
+            ),
+            "the agent is carried, the script renamed, the category derived:\n{text}"
+        );
+        let after = SourceIndex::build(tmp.path()).unwrap();
+        assert!(after.script("lucina", "sound_turndash").is_some());
+        assert!(after.script("lucina", "game_turndash").is_some());
+    }
+
+    /// The category is only derivable while the project agrees with itself about its own.
+    ///
+    /// There is no copy of the `#[acmd_script]` macro on this machine, so `ACMD_SOUND` is a
+    /// name read off the project rather than one looked up. A project that spells its `game_`
+    /// script something else has told us the rule does not hold there, and inventing the token
+    /// anyway would install the function under the wrong category — which compiles.
+    #[test]
+    fn an_unfamiliar_category_token_is_refused_rather_than_guessed_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/lib.rs",
+            "#[acmd_script(agent = \"fighter_lucina\", script = \"game_turndash\", \
+             category = Acmd::Game)]\nunsafe extern \"C\" fn my_custom_name(agent: &mut \
+             L2CAgentBase) {\n    frame(agent.lua_state_agent, 1.0);\n}\n",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        let before = std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap();
+
+        let error = create_script(&index, "lucina", "sound_turndash", SOUNDS)
+            .expect_err("an unrecognised category token must not be extrapolated")
+            .to_string();
+        assert!(error.contains("Acmd::Game"), "say what it saw: {error}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("src/lib.rs")).unwrap(),
+            before,
+            "and a refusal writes nothing at all"
+        );
+    }
+
+    /// A project that registers nothing Visionary can see gets a function named the same
+    /// conventional way — and is told so, because that is the case where creating one could
+    /// silently do nothing.
+    #[test]
+    fn creating_beside_a_conventionally_named_script_says_it_could_not_register_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/kirby/acmd.rs",
+            "unsafe extern \"C\" fn game_turndash(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n",
+        );
+        write(
+            tmp.path(),
+            "src/kirby/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"kirby\"); }",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+
+        let created = create_script(&index, "kirby", "sound_turndash", SOUNDS).unwrap();
+        assert!(
+            created.note.contains("check it installs"),
+            "a registration that could not be copied has to be said out loud: {}",
+            created.note
+        );
+        let after = SourceIndex::build(tmp.path()).unwrap();
+        assert!(after.script("kirby", "sound_turndash").is_some());
+    }
+
+    /// Creating a script that already exists is refused, because the failure is not a wasted
+    /// write — it is two functions with one name, and a project that stops compiling.
+    #[test]
+    fn creating_a_script_the_project_already_has_is_refused() {
+        let (tmp, index) = mario_project();
+        let before = std::fs::read_to_string(tmp.path().join("src/mario/acmd.rs")).unwrap();
+        let error = create_script(&index, "mario", "game_attackairn", SOUNDS)
+            .expect_err("a second copy of a function is a duplicate definition, not an edit")
+            .to_string();
+        assert!(error.contains("game_attackairn"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("src/mario/acmd.rs")).unwrap(),
+            before
+        );
+    }
+
+    /// The new function goes beside the same *move*, not beside whatever sorts first.
+    ///
+    /// Both files here would produce a script that works, so nothing downstream can tell them
+    /// apart — which is exactly why the choice needs its own assertion. A project keeps its
+    /// moves in separate files for its own reasons, and dropping the aerial's sound into the
+    /// specials file is a change the user did not ask for and has to go and undo.
+    #[test]
+    fn a_created_script_lands_in_the_file_that_holds_the_rest_of_its_move() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/mario/aerials.rs",
+            "unsafe extern \"C\" fn game_attackairn(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n",
+        );
+        // Sorts before `game_attackairn`, so an anchor chosen by name alone picks this one.
+        write(
+            tmp.path(),
+            "src/mario/specials.rs",
+            "unsafe extern \"C\" fn effect_specialn(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n",
+        );
+        write(
+            tmp.path(),
+            "src/mario/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"mario\"); }",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+
+        let created = create_script(&index, "mario", "sound_attackairn", SOUNDS).unwrap();
+        assert_eq!(created.file.file_name().unwrap(), "aerials.rs");
+    }
+
+    /// An attribute that is not `#[acmd_script]` is not a registration.
+    ///
+    /// Mistaking one for a registration is the quiet failure this whole path exists to avoid:
+    /// the function is written with an `#[allow]` copied above it, the real registration is
+    /// never looked for, and the result compiles, installs nothing, and plays vanilla.
+    #[test]
+    fn an_unrelated_attribute_above_a_sibling_is_not_read_as_its_registration() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/mario/acmd.rs",
+            "#[allow(unused_variables)]\nunsafe extern \"C\" fn game_turndash(agent: &mut \
+             L2CAgentBase) {\n    frame(agent.lua_state_agent, 3.0);\n}\n\npub fn \
+             install(agent: &mut smashline::Agent) {\n    agent.acmd(\"game_turndash\", \
+             game_turndash, smashline::Priority::Default);\n}\n",
+        );
+        write(
+            tmp.path(),
+            "src/mario/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"mario\"); }",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+
+        let created = create_script(&index, "mario", "sound_turndash", SOUNDS).unwrap();
+        let text = std::fs::read_to_string(&created.file).unwrap();
+        assert!(
+            !text.contains("#[allow(unused_variables)]\nunsafe extern \"C\" fn sound_turndash"),
+            "an #[allow] is not a registration:\n{text}"
+        );
+        assert!(
+            text.contains("agent.acmd(\"sound_turndash\", sound_turndash,"),
+            "the real registration is the one below it:\n{text}"
+        );
+    }
+
+    /// No script for this fighter at all is still a refusal: there is no file to write into, no
+    /// fighter attribution to inherit, and no registration style to copy.
+    #[test]
+    fn creating_for_a_fighter_the_project_never_mentions_is_refused() {
+        let (_tmp, index) = mario_project();
+        let error = create_script(&index, "kirby", "sound_turndash", SOUNDS)
+            .expect_err("a fighter the project says nothing about is out of scope")
+            .to_string();
+        assert!(error.contains("sound_turndash"), "{error}");
+    }
+
+    /// Creation writes vanilla, the ordinary sync writes the edit, and the two together leave a
+    /// function that differs from the mirror's on exactly one line.
+    ///
+    /// This is the whole point of splitting them: creation never learns what an edit is, and the
+    /// value write never learns the function is new. A regenerating creator would have rewritten
+    /// every line here and passed a round-trip while doing it.
+    #[test]
+    fn a_created_script_then_synced_differs_from_the_mirror_only_where_it_was_edited() {
+        let (tmp, index) = mario_project();
+        let source = SOUNDS.replace("sound_turndash", "sound_attackairn");
+        create_script(&index, "mario", "sound_attackairn", &source).unwrap();
+        let index = SourceIndex::build(tmp.path()).unwrap();
+
+        let pristine = sounds_of(&source);
+        let mut edited = pristine.clone();
+        edited[0].call.sounds[0] = "se_mario_dash_start".into();
+        let report = sync_sounds(&index, "mario", "attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+
+        let site = index.script("mario", "sound_attackairn").unwrap();
+        let written = std::fs::read_to_string(&site.file).unwrap();
+        let written = &written[site.span.clone()];
+        let differing: Vec<_> = written
+            .lines()
+            .zip(source.lines())
+            .filter(|(now, was)| now != was)
+            .collect();
+        assert_eq!(differing.len(), 1, "{differing:?}");
+        assert!(differing[0].0.contains("se_mario_dash_start"));
     }
 
     #[test]

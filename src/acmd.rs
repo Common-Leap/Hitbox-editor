@@ -376,7 +376,7 @@ fn holds_acmd_function(source: &str) -> bool {
 }
 
 /// Extract one category's function body from a source that may hold all four.
-fn extract_function(source: &str, prefix: &str) -> Option<String> {
+pub(crate) fn extract_function(source: &str, prefix: &str) -> Option<String> {
     let mut result = String::new();
     let mut in_fn = false;
     let mut depth: i32 = 0;

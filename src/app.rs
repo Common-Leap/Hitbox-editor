@@ -2240,9 +2240,9 @@ impl VisionaryApp {
 
     /// Write the editor's hitbox and effect-spawn edits for the open move back into source.
     fn sync_edits_to_source(&mut self) {
-        let Some(index) = self.acmd_src.as_ref() else {
+        if self.acmd_src.is_none() {
             return;
-        };
+        }
         let (Some(fighter), Some(move_entry)) = (
             self.state
                 .selected_fighter
@@ -2257,6 +2257,16 @@ impl VisionaryApp {
         let mut files: Vec<PathBuf> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         let mut ran = false;
+
+        // A category the user has edited but the project does not define is created first, from
+        // the mirror's own text, so the value passes below have somewhere of the user's own to
+        // write into. Before D1b that could not happen; since D1d it is the ordinary case, because
+        // a hitbox-only project still shows — and now edits — vanilla's sounds.
+        ran |= self.create_missing_scripts(&fighter, &move_name, &mut files, &mut notes);
+
+        let Some(index) = self.acmd_src.as_ref() else {
+            return;
+        };
 
         if index
             .script(
@@ -2333,10 +2343,19 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
-            // Sounds get a fourth pass, and unlike the three above it writes a *different
-            // function*: `sound_`, not `game_`. A project with hitboxes and no sound script is
-            // ordinary, so a missing one is silence rather than a note — the same reason the
-            // three passes above each run independently of the others' success.
+        }
+        // Sounds get a pass of their own, and unlike the three above it writes a *different
+        // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
+        // why a sound-only project's edits went nowhere — the pass that would have written them
+        // was gated on a function that project has no reason to define.
+        if index
+            .script(
+                &fighter,
+                &crate::acmd::acmd_script_name("sound", &move_name),
+            )
+            .is_some()
+        {
+            ran = true;
             if self.state.sounds != self.state.sounds_pristine {
                 match crate::acmd_src::sync_sounds(
                     index,
@@ -2377,6 +2396,84 @@ impl VisionaryApp {
             // The written values are now the pristine ones; re-reading also refreshes the
             // spans the next sync will target.
             self.rescan_acmd_source();
+        }
+    }
+
+    /// Which categories this move has been edited in, in the order a script file writes them.
+    ///
+    /// A free function taking the three baselines rather than a method, so the "has this been
+    /// edited" question is answered once and cannot drift between the pass that creates a
+    /// function and the pass that writes into it.
+    fn edited_prefixes(state: &crate::data::AppState) -> Vec<&'static str> {
+        let mut edited: Vec<&'static str> = Vec::new();
+        if state.hitboxes != state.hitboxes_pristine
+            || state.script.to_hurtboxes() != state.hurtboxes_pristine
+            || state.script.to_attack_mods() != state.attack_mods_pristine
+        {
+            edited.push("game_");
+        }
+        if state.effects != state.effects_pristine {
+            edited.push("effect_");
+        }
+        if state.sounds != state.sounds_pristine {
+            edited.push("sound_");
+        }
+        edited
+    }
+
+    /// Create, from the mirror's own text, every category this move was edited in that the
+    /// linked project does not define. Returns whether anything was written.
+    ///
+    /// The created function is vanilla verbatim, *not* the edit: the ordinary sync passes write
+    /// the values immediately afterwards, through the same code every other edit goes through.
+    /// Splitting it that way means creation never has to know what an edit is, and the value
+    /// write never has to know the function is new.
+    fn create_missing_scripts(
+        &mut self,
+        fighter: &str,
+        move_name: &str,
+        files: &mut Vec<PathBuf>,
+        notes: &mut Vec<String>,
+    ) -> bool {
+        let wanted = Self::edited_prefixes(&self.state);
+        let mut created = false;
+        for prefix in wanted {
+            let script_name =
+                crate::acmd::acmd_script_name(prefix.trim_end_matches('_'), move_name);
+            let Some(index) = self.acmd_src.as_ref() else {
+                return created;
+            };
+            if index.script(fighter, &script_name).is_some() {
+                continue;
+            }
+            let Some(source) = crate::acmd::extract_function(&self.state.loaded_body, prefix)
+            else {
+                continue;
+            };
+            match crate::acmd_src::create_script(index, fighter, &script_name, &source) {
+                Ok(new) => {
+                    files.push(new.file);
+                    notes.push(new.note);
+                    created = true;
+                    // Re-index before the next category. Every span in that file past the
+                    // insertion has moved, and the next category may want the function just
+                    // written as its own anchor.
+                    self.rebuild_acmd_index();
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+        }
+        created
+    }
+
+    /// Re-index the linked project in place, without the status message or the move reload that
+    /// [`Self::rescan_acmd_source`] carries — this runs mid-sync, and both would fight it.
+    fn rebuild_acmd_index(&mut self) {
+        let Some(root) = self.acmd_src.as_ref().map(|index| index.root.clone()) else {
+            return;
+        };
+        if let Ok(index) = crate::acmd_src::SourceIndex::build(&root) {
+            self.acmd_src = Some(index);
         }
     }
 
@@ -2540,6 +2637,7 @@ impl VisionaryApp {
                 // baseline: it has to keep meaning "what the file says" rather than "what was on
                 // screen last time".
                 self.state.sound_script = sound_script;
+                self.state.loaded_body = body.clone();
                 self.apply_saved_sound_edits_to_current();
                 let effects_only = hitboxes.is_empty() && !effect_script.stmts.is_empty();
                 if hitboxes.is_empty() && !effects_only {
@@ -2605,6 +2703,7 @@ impl VisionaryApp {
                 self.state.sounds = Vec::new();
                 self.state.sounds_pristine = Vec::new();
                 self.state.sound_script = crate::data::AcmdScript::default();
+                self.state.loaded_body = String::new();
             }
         }
         self.fetching_acmd = false;
@@ -15945,6 +16044,36 @@ mod live_effect_capture_tests {
             shown, baseline,
             "with the baseline moved onto the edit, write-back would see no change to sync"
         );
+    }
+
+    /// A move nobody has touched asks for no scripts to be created.
+    ///
+    /// This is the whole guard on a write that would otherwise be constant and unasked-for: a
+    /// hitbox-only project now *shows* vanilla's sounds, so a creator that ran on "the project
+    /// has no sound_" alone would copy a vanilla function into that project every time anything
+    /// synced. Nothing would look wrong — the sounds are correct — but the user's source would
+    /// grow functions they never edited, and each one silently pins that move's sound against
+    /// future game updates.
+    #[test]
+    fn creating_a_missing_script_is_asked_for_by_an_edit_and_by_nothing_else() {
+        const BODY: &str = r#"unsafe extern "C" fn sound_turndash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+    }
+}
+"#;
+        let mut state = crate::data::AppState::default();
+        state.sound_script = crate::acmd::parse_sound_script(BODY);
+        state.sounds = state.sound_script.to_sound_events();
+        state.sounds_pristine = state.sounds.clone();
+        assert!(
+            VisionaryApp::edited_prefixes(&state).is_empty(),
+            "a freshly loaded move has been edited in no category"
+        );
+
+        state.sounds[0].call.sounds[0] = "se_common_dash_start".into();
+        assert_eq!(VisionaryApp::edited_prefixes(&state), ["sound_"]);
     }
 
     /// Renumbering a hitbox is an ordinary edit made from the ID drag box. The rebuild used to

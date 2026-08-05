@@ -402,6 +402,23 @@ transform arguments at all. **Sync Edits Into Source**, in the **Mod** menu,
 applies the same write-back to the file directly, for when the source window is
 not open.
 
+A category your project does not have yet is created the first time you edit it.
+Most projects define only what they change — a hitbox mod has a `game_` function
+and nothing else — but the editor shows you all four categories, filling the
+missing ones from vanilla, so it is easy to edit a sound or an effect in a move
+whose file has nowhere to put it. That function is now written for you, next to
+the rest of the move, and registered the way the project registers its own
+scripts. What gets written is vanilla's own text with your edit applied to it,
+not a regenerated copy, so the rest of the function is byte for byte what the
+game shipped.
+
+A move you have not edited is never written this way, and a project that says
+nothing at all about the fighter is still left alone — there is no file to add to
+and no way to tell which character it would belong to. If the project registers
+its scripts in some way Visionary cannot read, the function is still written and
+the status line says it could not be registered, because a script the game never
+installs looks exactly like one that does nothing.
+
 ## Projects and mod exports
 
 The **Mod** menu keeps hitbox, effect-spawn, authored effect, texture, and
