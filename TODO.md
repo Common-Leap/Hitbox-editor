@@ -243,23 +243,25 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**343 green after D1a**), including the five corpus
+- [ ] `cargo test` passes (**347 green after D1b**), including the six corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced` and `cargo test survives_a_round_trip`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`,
       `acmd::tests::the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`,
-      `acmd::tests::no_game_script_in_the_corpus_exports_an_unbalanced_function` and
-      `acmd::tests::every_sound_script_in_the_corpus_survives_a_round_trip`. They run
+      `acmd::tests::no_game_script_in_the_corpus_exports_an_unbalanced_function`,
+      `acmd::tests::every_sound_script_in_the_corpus_survives_a_round_trip` and
+      `acmd::tests::a_partial_project_override_keeps_every_category_it_does_not_define`. They run
       the new code over every script the app has ever fetched (currently 461 files under
       `~/.cache/visionary/script-cache`, ~1000 functions). The third asserts a *number* — how
       many effect scripts still lose a line — so it fails on a regression rather than only on a
       crash, and the fifth pins the byte-exact count for the same reason.
-      **All five return early and pass vacuously if that cache directory is missing**, and each
+      **All six return early and pass vacuously if that cache directory is missing**, and each
       carries its own guard against a corpus too thin to mean anything: `checked > 100` on three
-      of them, and `branching >= 30` on the unbalanced-function one, which would otherwise stay
-      green if branches simply stopped being recognised. Confirm the directory exists before
+      of them, `branching >= 30` on the unbalanced-function one, which would otherwise stay
+      green if branches simply stopped being recognised, and `132 with effects / 78 with
+      hitboxes` on the merge one. Confirm the directory exists before
       trusting any of them. `ls` shows only 3
       entries; the files are nested per fighter, so count with
       `find ~/.cache/visionary/script-cache -type f | wc -l`.
@@ -1331,9 +1333,9 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
 - **Work order, in this order, each landing on its own:**
   1. **[x] D1a (done 2026-08-05)** — Load `sound_` in `script_body` and parse it to `Raw` only,
      with a corpus round-trip gate.
-  2. **[~] D1b (in progress)** — Merge project and mirror *per category*, which is what D1a
-     named as step 2's own first move. Then type the `PLAY_SE` family and give sound a
-     timeline lane.
+  2. **[x] D1b (done 2026-08-05)** — Merge project and mirror *per category*, which is what
+     D1a named as step 2's own first move. Still open: type the `PLAY_SE` family and give
+     sound a timeline lane.
   3. Plugin hooks for the sound primitives, capture, then live.
   4. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
      it does not emit still plays vanilla — nothing is lost by sound being absent until here.
@@ -1373,9 +1375,9 @@ runs, which is what happened when branches were flattened. 18 corpus `game_` scr
 `ATTACK` this way and would lose it from the editor otherwise. The fix here was to the *brace*,
 not to the condition; pinned by `a_hitbox_inside_a_branch_is_still_seen_by_the_frame_walk`.
 
-#### [~] D1b — Merge the project and the mirror per category
+#### [x] D1b — Merge the project and the mirror per category (done 2026-08-05)
 
-D1a named this as a sound problem. It is not: it is an *every category* problem, and it is
+D1a named this as a sound problem. It is not: it is an *every category* problem, and it was
 already live for the most common mod shape there is.
 
 `script_body` ([acmd_src.rs:312](src/acmd_src.rs:312)) concatenates whatever categories the
@@ -1396,6 +1398,36 @@ different side.
   must not be worse than today.
 - **Test bar:** a project defining only `game_` keeps vanilla's effects; only `effect_` keeps
   vanilla's hitboxes; only `sound_` keeps both. A project category always beats the mirror's.
+
+**Result:** `script_body` became `script_source`, returning `ProjectScript { body, covers }` —
+the text and the categories it speaks for. `merge_project_over_mirror(project, covered, mirror)`
+appends the mirror's functions for the categories `covered` does not name.
+
+**The merge is asymmetric on purpose.** The project's text is carried verbatim and never
+re-extracted per category, because a project function can be called anything and bound to a
+script by attribute (`#[acmd_script(script = "game_attacks4")] fn my_custom_name`) — splitting
+it by prefix would silently drop it. Only the mirror is safe to take apart that way.
+
+**The fetch, which was the actual risk.** `needs_mirror()` consults `DISPLAYED_PREFIXES`
+(`game_`, `effect_`) rather than all four. Requiring the mirror for a `sound_` nothing reads
+yet would make an offline user with a complete `game_`+`effect_` project sit out the 20 s HTTP
+timeout before seeing their own move. `sound_` joins that list at step 4, `expression_` at D2 —
+the merge already fills them whenever a mirror body happens to be in hand, which is free.
+Cold cache plus a partial override parks the project in `pending_project_script` and merges it
+back in `merge_fetched_body`, extracted as a free function so the offline path is testable
+without an app.
+
+**Surface not completed, deliberately:** write-back. Editing a mirror-sourced effect in a
+project with no `effect_` of its own now *reachable*, and `sync_script` bails with "the project
+has no effect_attackairn to sync into". Refusing is the honest answer until something can
+create the missing function; pinned by
+`syncing_a_category_the_project_does_not_define_refuses_instead_of_guessing`.
+
+`a_partial_project_override_keeps_every_category_it_does_not_define` runs all three shapes over
+the corpus as the mirror, guarding on **132 moves with effects and 78 with hitboxes**. Its
+sharpest assertion is the one that nearly was not written: two `game_` functions in a body
+parse *fine*, first one wins, so a merge appending vanilla's copy underneath the project's
+would go unnoticed until an export wrote both out. Four mutations run, all caught.
 
 ### [ ] D2 — `expression_` scripts
 

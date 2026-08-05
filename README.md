@@ -124,8 +124,16 @@ move from there instead, so the editor shows the macros you actually called.
 Both the smashline layout (`Agent::new("mario")` beside the scripts) and the
 older `#[acmd_script(agent = "…", script = "…")]` attributes are recognised.
 
+A project rarely overrides everything, and it does not have to. Each category is
+resolved on its own: your `game_attackairn` is used for the hitboxes, and the
+move's stock effects and sounds still come from the vanilla scripts, so a mod
+that only retimes a hitbox does not make the move look silent and effectless.
+Anything your project does define always wins over the vanilla copy.
+
 The same window edits a script in place: pick **Hitboxes** or **Effects** to
-open that function in a small text editor.
+open that function in a small text editor. Saving needs the function to exist in
+your project — Visionary will not invent a place to put an effect you edited but
+never wrote.
 
 The editor and the rest of the app stay in sync both ways while you work:
 

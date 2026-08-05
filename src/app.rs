@@ -78,6 +78,28 @@ fn timeline_content_height(hitboxes: usize, effects: usize, hurtboxes: usize) ->
     (24.0 + hitbox_band + band(effects) + band(hurtboxes)).max(24.0)
 }
 
+/// Merge a finished mirror fetch with the project scripts that were waiting on it, and say
+/// which source the result should be labelled with.
+///
+/// A free function so the offline case is testable without an app: a fetch that *failed* must
+/// still display the project's own scripts rather than an error, because showing the project
+/// alone is precisely what happened before the mirror was ever consulted. The mirror fills
+/// gaps; it cannot take anything away, including by not arriving.
+fn merge_fetched_body(
+    project: Option<crate::acmd_src::ProjectScript>,
+    body: Result<String, String>,
+) -> (Result<String, String>, &'static str) {
+    match project {
+        Some(project) => {
+            let mirror = body.unwrap_or_default();
+            let merged =
+                crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror);
+            (Ok(merged), "Project source")
+        }
+        None => (body, "GitHub"),
+    }
+}
+
 fn timeline_frame_extent(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
@@ -866,6 +888,10 @@ pub struct VisionaryApp {
     /// In-flight "Fetch ACMD" result: `(fighter, move, body or error)`. The fetch used to run
     /// inline and blocked the UI thread for a whole GitHub round trip on every click.
     acmd_receiver: Option<std::sync::mpsc::Receiver<AcmdFetchResult>>,
+    /// The linked project's own scripts for the move whose mirror fetch is in flight, waiting
+    /// to be merged back over it. `None` whenever no project defines the move, or when the
+    /// project defines enough of it that no fetch was needed.
+    pending_project_script: Option<crate::acmd_src::ProjectScript>,
     // Cached bone names for dropdown
     bone_names: Vec<String>,
     show_debug: bool,
@@ -1165,6 +1191,7 @@ impl VisionaryApp {
             last_frame_time: std::time::Instant::now(),
             move_list_receiver: None,
             acmd_receiver: None,
+            pending_project_script: None,
             bone_names: Vec::new(),
             show_debug: false,
             credits: crate::credits::CreditsWindow::default(),
@@ -1716,20 +1743,39 @@ impl VisionaryApp {
         };
 
         self.acmd_error = None;
+        self.pending_project_script = None;
 
         // A linked project is the authoritative script for anyone who has already modded the
-        // move — the mirror only ever holds vanilla. It is a local file read, so it resolves
-        // inline instead of paying for a thread and a repaint.
-        if let Some(body) = self
+        // move — but only for the categories it actually defines. The mirror still supplies
+        // the rest: a project overriding just `game_attackairn`, which is what most hitbox
+        // mods are, used to display the move with no effects at all, and nothing on screen
+        // distinguished that from a move that genuinely has none.
+        let project = self
             .acmd_src
             .as_ref()
-            .and_then(|index| index.script_body(&fighter_name, &move_name))
-        {
-            // Drop any mirror fetch still in flight for this same move, or it would land
-            // afterwards and overwrite the source-loaded script with the vanilla one.
-            self.acmd_receiver = None;
-            self.apply_acmd_body(&fighter_name, &move_name, Ok(body), "Project source");
-            return;
+            .and_then(|index| index.script_source(&fighter_name, &move_name));
+
+        if let Some(project) = project {
+            // A complete override needs nothing else, and a warm disk cache is a local file
+            // read — either way this resolves inline instead of paying for a thread and a
+            // repaint.
+            let mirror = if project.needs_mirror() {
+                crate::acmd::cached_script_body(&fighter_name, &move_name)
+            } else {
+                Some(String::new())
+            };
+            if let Some(mirror) = mirror {
+                // Drop any mirror fetch still in flight for this same move, or it would land
+                // afterwards and overwrite the source-loaded script with the vanilla one.
+                self.acmd_receiver = None;
+                let body =
+                    crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror);
+                self.apply_acmd_body(&fighter_name, &move_name, Ok(body), "Project source");
+                return;
+            }
+            // Cold cache and a partial override: the fetch below runs as it would for an
+            // unmodded move, and [`Self::poll_acmd_fetch`] merges the project back over it.
+            self.pending_project_script = Some(project);
         }
 
         self.fetching_acmd = true;
@@ -2326,7 +2372,9 @@ impl VisionaryApp {
         if !still_current {
             return;
         }
-        self.apply_acmd_body(&fighter_name, &move_name, body, "GitHub");
+
+        let (body, label) = merge_fetched_body(self.pending_project_script.take(), body);
+        self.apply_acmd_body(&fighter_name, &move_name, body, label);
     }
 
     /// Put both fetch paths on the first frame where the move actually shows something.
@@ -15415,6 +15463,51 @@ mod live_effect_capture_tests {
         assert_eq!(hitboxes.len(), 2);
         assert_eq!((hitboxes[0].damage, hitboxes[0].angle), (4.0, 361));
         assert_eq!((hitboxes[1].damage, hitboxes[1].angle), (19.0, 80));
+    }
+
+    /// The mirror fills the categories a project left out — but a mirror that never arrived
+    /// fills none of them, and must not take the project down with it.
+    ///
+    /// Before D1b a project override skipped the fetch entirely, so it could not be affected
+    /// by the network at all. Now that a partial override waits on one, being offline is a new
+    /// way to lose the user's own scripts, and this is the test that says it does not happen.
+    #[test]
+    fn a_mirror_fetch_that_failed_still_shows_the_projects_own_scripts() {
+        const PROJECT_GAME: &str =
+            "unsafe extern \"C\" fn game_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n\n";
+        const MIRROR: &str = "unsafe extern \"C\" fn game_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 9.0);\n}\n\n\
+             unsafe extern \"C\" fn effect_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 9.0);\n}\n";
+        let project = crate::acmd_src::ProjectScript {
+            body: PROJECT_GAME.to_string(),
+            covers: vec!["game_"],
+        };
+
+        let (body, label) = merge_fetched_body(Some(project.clone()), Err("offline".into()));
+        let body = body.expect("a failed fetch must not surface as an error over a project");
+        assert!(body.contains("fn game_x"), "{body}");
+        assert_eq!(label, "Project source");
+
+        // With the mirror in hand, the category the project left out arrives — and the one it
+        // did not leave out is still the project's.
+        let (merged, _) = merge_fetched_body(Some(project), Ok(MIRROR.into()));
+        let merged = merged.unwrap();
+        assert!(merged.contains("fn effect_x"), "{merged}");
+        assert!(merged.contains("3.0"), "{merged}");
+        assert!(
+            !merged.contains(
+                "frame(agent.lua_state_agent, 9.0);\n}\n\nunsafe extern \"C\" fn \
+                              effect_x"
+            ),
+            "vanilla's game_ came back in alongside the project's:\n{merged}"
+        );
+
+        // With no project, the fetch's own error is the answer.
+        let (body, label) = merge_fetched_body(None, Err("offline".into()));
+        assert!(body.is_err());
+        assert_eq!(label, "GitHub");
     }
 
     /// Dragging a hitbox rebuilds the whole script, and a runtime branch has to come through

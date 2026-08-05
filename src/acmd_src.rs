@@ -217,6 +217,28 @@ pub struct FighterScripts {
     pub scripts: HashMap<String, ScriptSite>,
 }
 
+/// What a linked project has to say about one move, and what it leaves to the mirror.
+#[derive(Debug, Clone)]
+pub struct ProjectScript {
+    /// The project's own functions, concatenated, verbatim.
+    pub body: String,
+    /// The [`crate::acmd::SCRIPT_PREFIXES`] entries `body` covers.
+    pub covers: Vec<&'static str>,
+}
+
+impl ProjectScript {
+    /// Whether a category the editor displays is missing, and so worth fetching the mirror for.
+    ///
+    /// Only the displayed categories count. Waiting on the network to fill in a `sound_`
+    /// nothing reads yet would be a straight regression for anyone working offline; see
+    /// [`crate::acmd::DISPLAYED_PREFIXES`].
+    pub fn needs_mirror(&self) -> bool {
+        crate::acmd::DISPLAYED_PREFIXES
+            .iter()
+            .any(|prefix| !self.covers.contains(prefix))
+    }
+}
+
 /// An indexed smashline/smash-script project.
 #[derive(Debug, Default, Clone)]
 pub struct SourceIndex {
@@ -296,36 +318,31 @@ impl SourceIndex {
         self.fighters.contains_key(&normalize_fighter(fighter))
     }
 
-    /// The `game_*`, `effect_*` and `sound_*` functions for a move, concatenated into one body
-    /// the existing `acmd::parse_*` functions can read — the same shape the dumped scripts have.
+    /// The functions this project defines for a move, concatenated into one body the existing
+    /// `acmd::parse_*` functions can read — the same shape the dumped scripts have — together
+    /// with the list of categories that body actually covers.
     ///
-    /// `None` when the project defines no `game_` and no `effect_`, so callers can fall back to
-    /// the mirror.
-    ///
-    /// **A `sound_` on its own does not count as defining the move**, and that is a deliberate
-    /// gap rather than an oversight. Returning `Some` here suppresses the mirror fetch outright
-    /// ([app.rs](src/app.rs)), so a project that overrides only the sounds would show the move
-    /// with no hitboxes and no effects at all. Falling back means such a project's own sound
-    /// script is not what gets displayed — the vanilla one is. Nothing rewrites sound lines yet,
-    /// so that costs only accuracy of display; it has to be fixed by merging project and mirror
-    /// per category before anything does.
-    pub fn script_body(&self, fighter: &str, move_name: &str) -> Option<String> {
+    /// `None` when the project defines nothing at all for the move, so the caller uses the
+    /// mirror alone. Any single category is enough for `Some`: what the project does not
+    /// define is filled from the mirror by [`crate::acmd::merge_project_over_mirror`], which
+    /// is why the coverage list has to come back with the text.
+    pub fn script_source(&self, fighter: &str, move_name: &str) -> Option<ProjectScript> {
         let mut body = String::new();
-        let mut defines_move = false;
-        for prefix in ["game", "effect", "sound"] {
-            let name = crate::acmd::acmd_script_name(prefix, move_name);
+        let mut covers: Vec<&'static str> = Vec::new();
+        for prefix in crate::acmd::SCRIPT_PREFIXES {
+            let name = crate::acmd::acmd_script_name(prefix.trim_end_matches('_'), move_name);
             if let Some(site) = self.script(fighter, &name) {
                 if let Ok(text) = std::fs::read_to_string(&site.file) {
                     // The span came from this file's text; a concurrent edit can shrink it.
                     if let Some(source) = text.get(site.span.clone()) {
                         body.push_str(source);
                         body.push_str("\n\n");
-                        defines_move |= prefix != "sound";
+                        covers.push(prefix);
                     }
                 }
             }
         }
-        defines_move.then_some(body)
+        (!covers.is_empty()).then_some(ProjectScript { body, covers })
     }
 
     fn index_file(
@@ -2492,13 +2509,82 @@ pub fn install(agent: &mut smashline::Agent) {
         assert!(index.script("mario", "effect_attackairn").is_some());
         assert_eq!(index.script_count(), 2, "target/ must not be indexed");
 
-        let body = index.script_body("mario", "attack_air_n").unwrap();
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
         assert!(body.contains("fn game_attackairn") && body.contains("fn effect_attackairn"));
         // The whole point: the parsers see the user's macro, not vanilla's.
         let calls = crate::acmd::parse_effect_script(&body).to_effect_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].spawn_func, "EFFECT_FOLLOW_FLIP");
         assert_eq!(calls[0].effect_name_alt.as_deref(), Some("sys_hit_r"));
+    }
+
+    /// A project says which categories it speaks for, and only asks for the mirror when one
+    /// the editor displays is missing.
+    ///
+    /// The sound-only case is the one D1a wrote down and could not fix: `script_body` returned
+    /// `None` for it, so the project's own sounds were the single thing that did not survive
+    /// loading them.
+    #[test]
+    fn a_project_reports_the_categories_it_covers_and_asks_for_the_rest() {
+        let (_tmp, index) = mario_project();
+        let both = index.script_source("mario", "attack_air_n").unwrap();
+        assert_eq!(both.covers, ["game_", "effect_"]);
+        assert!(
+            !both.needs_mirror(),
+            "a project covering everything shown must resolve without the network"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/kirby/acmd.rs",
+            "unsafe extern \"C\" fn sound_attackairn(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n",
+        );
+        write(
+            tmp.path(),
+            "src/kirby/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"kirby\"); }",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        let sound_only = index.script_source("kirby", "attack_air_n").unwrap();
+        assert_eq!(sound_only.covers, ["sound_"]);
+        assert!(sound_only.needs_mirror());
+
+        assert!(
+            index.script_source("kirby", "attack_air_f").is_none(),
+            "a move the project says nothing about is the mirror's alone"
+        );
+    }
+
+    /// The merge makes a mirror-sourced effect editable in a project that has no `effect_` of
+    /// its own, so write-back has to say so rather than guess where to put it.
+    ///
+    /// This is the one surface D1b does not complete: the fix belongs with whoever teaches the
+    /// sync to *create* a missing function, and until then refusing is the honest answer.
+    #[test]
+    fn syncing_a_category_the_project_does_not_define_refuses_instead_of_guessing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/kirby/acmd.rs",
+            "unsafe extern \"C\" fn game_attackairn(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n",
+        );
+        write(
+            tmp.path(),
+            "src/kirby/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"kirby\"); }",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+
+        let error = sync_effect_calls(&index, "kirby", "attack_air_n", &[], &[])
+            .expect_err("a project with no effect_ must not be written into")
+            .to_string();
+        assert!(
+            error.contains("effect_attackairn"),
+            "the message has to name what is missing: {error}"
+        );
     }
 
     #[test]
@@ -2558,7 +2644,7 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
     #[test]
     fn syncing_a_spawn_rewrites_only_the_values_it_changed() {
         let (tmp, index) = mario_project();
-        let body = index.script_body("mario", "attack_air_n").unwrap();
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
         let pristine = crate::acmd::parse_effect_script(&body).to_effect_calls();
 
         let mut edited = pristine.clone();
@@ -2591,7 +2677,7 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
     #[test]
     fn a_panel_edit_written_to_source_parses_back_unchanged() {
         let (_tmp, index) = mario_project();
-        let body = index.script_body("mario", "attack_air_n").unwrap();
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
         let effect_fn = body[body.find("unsafe extern \"C\" fn effect_").unwrap()..].to_string();
         let pristine = crate::acmd::parse_effect_script(&effect_fn).to_effect_calls();
 
@@ -2631,7 +2717,7 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
     #[test]
     fn a_hitbox_edit_written_to_source_parses_back_unchanged() {
         let (_tmp, index) = mario_project();
-        let body = index.script_body("mario", "attack_air_n").unwrap();
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
         let game_fn = body[..body.find("unsafe extern \"C\" fn effect_").unwrap()].to_string();
         let pristine = crate::acmd::parse_acmd_script(&game_fn).to_hitboxes();
 
@@ -2663,7 +2749,7 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
     fn syncing_refuses_to_invent_structure() {
         let (tmp, index) = mario_project();
         let before = std::fs::read_to_string(tmp.path().join("src/mario/acmd.rs")).unwrap();
-        let body = index.script_body("mario", "attack_air_n").unwrap();
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
         let pristine = crate::acmd::parse_effect_script(&body).to_effect_calls();
 
         // Renaming the graphic is not a value change to this line.
@@ -2713,7 +2799,7 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
 "#,
         );
         let index = SourceIndex::build(tmp.path()).unwrap();
-        let body = index.script_body("test_fighter", "test").unwrap();
+        let body = index.script_source("test_fighter", "test").unwrap().body;
         let pristine = crate::acmd::parse_effect_script(&body).to_effect_calls();
         assert_eq!(pristine.len(), 3, "one line, three iterations");
 
@@ -2739,7 +2825,7 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
     #[test]
     fn syncing_a_hitbox_retunes_its_attack_arguments() {
         let (tmp, index) = mario_project();
-        let body = index.script_body("mario", "attack_air_n").unwrap();
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
         let pristine = crate::acmd::parse_acmd_script(&body).to_hitboxes();
         assert_eq!(pristine.len(), 1);
 

@@ -303,6 +303,38 @@ fn find_block_end(lines: &[&str], start: usize) -> (usize, i32) {
 /// exactly one of these, so the other three appearing in the same line is what rules it out.
 pub(crate) const SCRIPT_PREFIXES: [&str; 4] = ["game_", "effect_", "sound_", "expression_"];
 
+/// The categories the editor actually puts on screen, and so the only ones worth *waiting* on
+/// the mirror for.
+///
+/// [`merge_project_over_mirror`] fills all four when a mirror body is already in hand — that is
+/// free. This shorter list decides the other question: whether a partial project override is
+/// worth a network round trip. Pulling vanilla's `sound_` for text nothing displays would make
+/// an offline user with a perfectly good `game_`+`effect_` project sit out the HTTP timeout
+/// before seeing their own move. `sound_` joins this list when D1 gives it a lane, and
+/// `expression_` when D2 does.
+pub(crate) const DISPLAYED_PREFIXES: [&str; 2] = ["game_", "effect_"];
+
+/// Fill the categories a project does not define with the mirror's, and return one body.
+///
+/// `project` is carried verbatim instead of being re-extracted category by category, and that
+/// asymmetry is deliberate. A project's function can be called anything and bound to a script
+/// by attribute — `#[acmd_script(script = "game_attacks4")] fn my_custom_name` — so pulling it
+/// apart by prefix would silently drop it on the floor. Only the mirror is safe to take apart
+/// that way, because it is always dumped vanilla and always plainly named.
+pub fn merge_project_over_mirror(project: &str, covered: &[&str], mirror: &str) -> String {
+    let mut body = project.to_string();
+    for prefix in SCRIPT_PREFIXES {
+        if covered.contains(&prefix) {
+            continue;
+        }
+        if let Some(function) = extract_function(mirror, prefix) {
+            body.push_str(&function);
+            body.push_str("\n\n");
+        }
+    }
+    body
+}
+
 /// Whether `trimmed` opens the function for `prefix` and no other category.
 fn is_function_header(trimmed: &str, prefix: &str) -> bool {
     SCRIPT_PREFIXES
@@ -5020,6 +5052,112 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             branching >= 30,
             "only {branching} of {checked} game scripts have a top-level branch — this test \
              passes vacuously if branches stop being recognised"
+        );
+    }
+
+    /// The bug D1b fixes, stated over real vanilla text.
+    ///
+    /// Only the project half is hand-written, and deliberately so: it is a stand-in for
+    /// arbitrary user source, and what is under test is which *category* survives the merge,
+    /// not what the user wrote. The mirror is the corpus, because the thing that must not
+    /// disappear — a move's real effects, a move's real hitboxes — only exists there.
+    #[test]
+    fn a_partial_project_override_keeps_every_category_it_does_not_define() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        const GAME_ONLY: &str = "unsafe extern \"C\" fn game_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n\n";
+        const EFFECT_ONLY: &str =
+            "unsafe extern \"C\" fn effect_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n\n";
+        const SOUND_ONLY: &str = "unsafe extern \"C\" fn sound_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n}\n\n";
+
+        // A category must arrive from exactly one side. Two `game_` functions in one body
+        // parse fine — the first one wins — so nothing above would notice the merge appending
+        // vanilla's copy underneath the project's, right up until an export wrote both out.
+        let single_headers = |path: &str, merged: &str| {
+            for prefix in SCRIPT_PREFIXES {
+                let headers = merged
+                    .lines()
+                    .filter(|line| is_function_header(line.trim(), prefix))
+                    .count();
+                assert!(
+                    headers <= 1,
+                    "{path}: {headers} `{prefix}` functions in the merge"
+                );
+            }
+        };
+
+        // Counted separately, because a move only proves a category can be lost if it has one
+        // to lose. Requiring both at once would have run this over 52 of the 460 corpus files.
+        let (mut with_effects, mut with_hitboxes) = (0usize, 0usize);
+        for (path, mirror) in &bodies {
+            let hitboxes = parse_acmd_script(mirror).to_hitboxes().len();
+            let effects = parse_effect_script(mirror).to_effect_calls().len();
+
+            if effects > 0 {
+                with_effects += 1;
+                // Overriding the hitboxes must not take the effects with it — the shape of
+                // most hitbox mods, and what used to display as a move with no effects at all.
+                let merged = merge_project_over_mirror(GAME_ONLY, &["game_"], mirror);
+                assert_eq!(
+                    parse_effect_script(&merged).to_effect_calls().len(),
+                    effects,
+                    "{path}: a game-only override lost the mirror's effects"
+                );
+                // …and the override still wins where it was made: vanilla's `game_` must not
+                // come back alongside it, or the move shows hitboxes the project deleted.
+                assert!(
+                    parse_acmd_script(&merged).to_hitboxes().is_empty(),
+                    "{path}: the mirror's hitboxes outlived the project's own game_"
+                );
+                single_headers(path, &merged);
+            }
+
+            if hitboxes > 0 {
+                with_hitboxes += 1;
+                let merged = merge_project_over_mirror(EFFECT_ONLY, &["effect_"], mirror);
+                assert_eq!(
+                    parse_acmd_script(&merged).to_hitboxes().len(),
+                    hitboxes,
+                    "{path}: an effect-only override lost the mirror's hitboxes"
+                );
+                assert!(
+                    parse_effect_script(&merged).to_effect_calls().is_empty(),
+                    "{path}: the mirror's effects outlived the project's own effect_"
+                );
+                single_headers(path, &merged);
+            }
+
+            // The case D1a named. A sound-only project used to fall back to the mirror whole,
+            // so its own sounds were the one thing that did not survive being loaded.
+            let merged = merge_project_over_mirror(SOUND_ONLY, &["sound_"], mirror);
+            assert_eq!(
+                parse_acmd_script(&merged).to_hitboxes().len(),
+                hitboxes,
+                "{path}: a sound-only override lost the mirror's hitboxes"
+            );
+            assert_eq!(
+                parse_effect_script(&merged).to_effect_calls().len(),
+                effects,
+                "{path}: a sound-only override lost the mirror's effects"
+            );
+            assert_eq!(
+                parse_sound_script(&merged).stmts.len(),
+                1,
+                "{path}: the mirror's sounds outlived the project's own sound_"
+            );
+            single_headers(path, &merged);
+        }
+
+        assert!(
+            with_effects > 100 && with_hitboxes > 60,
+            "only {with_effects} corpus moves have effects and {with_hitboxes} have hitboxes — \
+             this test passes vacuously below that"
         );
     }
 
