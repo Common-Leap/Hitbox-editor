@@ -1423,7 +1423,7 @@ in it is a matter of time** — treat it as a notification, never as the record.
 the source pane. Anything new reaching only `verify_export` is invisible unless it is a blocker
 or it goes through `warning_summary`.
 
-### [ ] C6d — A blocked export leaves a half-written mod folder
+### [~] C6d — A blocked export leaves a half-written mod folder
 
 Found by C6b's warning-vs-blocker re-derivation, which had to establish what a blocker actually
 does. It does not do what its own comment says.
