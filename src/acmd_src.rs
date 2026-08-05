@@ -1742,6 +1742,13 @@ fn attack_abs_edits(
 /// `CATCH` numbers its arguments differently from `ATTACK` and has no `part`, no damage, and
 /// no knockback — a grab box's editable properties are its joint, its size, its offsets, and
 /// its capsule endpoint. Status and situation are not editable, so they are never written.
+///
+/// Slots 0..=6 mean the same thing in both of `CATCH`'s written shapes, so only the capsule
+/// needs the form test — see [`crate::acmd::is_capsule_slot`]. In a call written without the
+/// capsule arguments, slots 7 and 8 hold the status kind and the situation mask, and writing
+/// `Some(1.0)` into them would both destroy the grab's behaviour and produce a file that does
+/// not compile. Adding a capsule there needs three arguments *inserted*, which a slot rewrite
+/// cannot do, so the change is reported instead — the same choice retimes get.
 fn catch_edits(
     text: &str,
     site: &MacroSite,
@@ -1753,6 +1760,9 @@ fn catch_edits(
         Some(end) => format!("Some({:.1})", end[axis]),
         None => "None".to_string(),
     };
+    let has_capsule_slots = site.arg(text, 7).is_some_and(crate::acmd::is_capsule_slot);
+    let capsule_changed = before.capsule_end != after.capsule_end;
+    let capsule_writable = capsule_changed && has_capsule_slots;
     // agent, id, bone, size, x, y, z, x2, y2, z2, status, situation.
     let slots: [(usize, &'static str, bool, ArgValue); 8] = [
         (
@@ -1788,23 +1798,27 @@ fn catch_edits(
         (
             7,
             "capsule end",
-            before.capsule_end != after.capsule_end,
+            capsule_writable,
             ArgValue::Text(capsule(0)),
         ),
         (
             8,
             "capsule end",
-            before.capsule_end != after.capsule_end,
+            capsule_writable,
             ArgValue::Text(capsule(1)),
         ),
         (
             9,
             "capsule end",
-            before.capsule_end != after.capsule_end,
+            capsule_writable,
             ArgValue::Text(capsule(2)),
         ),
     ];
-    apply_slots(text, site, &slots)
+    let (edits, mut missing) = apply_slots(text, site, &slots);
+    if capsule_changed && !has_capsule_slots && !missing.contains(&"capsule end") {
+        missing.push("capsule end");
+    }
+    (edits, missing)
 }
 
 /// Match one wind area to its `AREA_WIND_2ND*` call and retune the arguments that changed.
@@ -3779,6 +3793,47 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         // The two arguments no panel exposes are never touched.
         assert!(after.contains("*FIGHTER_STATUS_KIND_SWALLOWED"), "{after}");
         assert!(after.contains("*COLLISION_SITUATION_MASK_A"), "{after}");
+    }
+
+    /// Giving a capsule to a grab that has no capsule slots is reported, never written.
+    ///
+    /// In the Lua-shaped form the three endpoint arguments are absent, so slots 7 and 8 hold
+    /// the status kind and the situation mask. Writing `Some(1.0)` over them would silently
+    /// turn Kirby's inhale into a grab that neither swallows nor compiles. Adding the capsule
+    /// needs three arguments *inserted*, which a slot rewrite cannot do — so it is refused.
+    ///
+    /// The edits that do fit the call still land: refusing one property must not cost the rest.
+    #[test]
+    fn adding_a_capsule_to_a_grab_written_without_the_slots_is_refused() {
+        // Verbatim from kirby/SpecialNStart.
+        let text = r#"unsafe extern "C" fn game_catch(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        macros::CATCH(agent, 0, Hash40::new("top"), 6.0, 0.0, 6.0, 5.0, *FIGHTER_STATUS_KIND_SWALLOWED, *COLLISION_SITUATION_MASK_GA);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        assert_eq!(pristine.len(), 1, "{pristine:#?}");
+        assert_eq!(pristine[0].capsule_end, None);
+
+        let mut edited = pristine.clone();
+        edited[0].capsule_end = Some([1.0, 2.0, 3.0]);
+        edited[0].size = 7.25;
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert!(
+            after.contains("*FIGHTER_STATUS_KIND_SWALLOWED")
+                && after.contains("*COLLISION_SITUATION_MASK_GA"),
+            "the grab's own behaviour must survive a refused capsule edit\n{after}"
+        );
+        assert!(!after.contains("Some(1.0)"), "{after}");
+        assert!(
+            report.skipped.iter().any(|s| s.contains("capsule end")),
+            "the refusal has to be visible, not silent: {report:?}"
+        );
+        // The size still lands.
+        assert!(after.contains("Hash40::new(\"top\"), 7.25,"), "{after}");
     }
 
     /// A grab box carries attack-only fields that `CATCH` has no argument for. Editing one

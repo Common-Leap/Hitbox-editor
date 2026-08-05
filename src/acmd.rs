@@ -948,18 +948,20 @@ fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
     }
 
     // [0]=agent [1]=id [2]=bone [3]=size [4]=x [5]=y [6]=z
-    // [7]=x2 [8]=y2 [9]=z2 [10]=status [11]=situation
+    // [7]=x2 [8]=y2 [9]=z2 [10]=status [11]=situation — but the Lua-shaped dumps omit 7..=9
+    // outright, which moves status and situation up to 7 and 8. See [`is_capsule_slot`].
     let num = |i: usize, default: f32| {
         t.get(i)
             .and_then(|value| value.trim().parse::<f32>().ok())
             .unwrap_or(default)
     };
+    let has_capsule_slots = t.get(7).is_some_and(|v| is_capsule_slot(v));
     let capsule_end = match (
         t.get(7).and_then(|v| parse_option_f32(v.trim())),
         t.get(8).and_then(|v| parse_option_f32(v.trim())),
         t.get(9).and_then(|v| parse_option_f32(v.trim())),
     ) {
-        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+        (Some(x), Some(y), Some(z)) if has_capsule_slots => Some([x, y, z]),
         _ => None,
     };
     let konst = |i: usize, default: &str| {
@@ -968,6 +970,7 @@ fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| default.to_string())
     };
+    let tail = if has_capsule_slots { 10 } else { 7 };
     Some(crate::data::CatchCall {
         id: t[1].trim().parse().ok()?,
         bone_name: extract_hash40_string(&t[2]).unwrap_or_else(|| t[2].trim().to_string()),
@@ -976,8 +979,8 @@ fn parse_catch_call(line: &str) -> Option<crate::data::CatchCall> {
         offset_y: num(5, 0.0),
         offset_z: num(6, 0.0),
         capsule_end,
-        status: konst(10, crate::data::CATCH_DEFAULT_STATUS),
-        situation: konst(11, crate::data::CATCH_DEFAULT_SITUATION),
+        status: konst(tail, crate::data::CATCH_DEFAULT_STATUS),
+        situation: konst(tail + 1, crate::data::CATCH_DEFAULT_SITUATION),
     })
 }
 
@@ -1212,6 +1215,26 @@ pub fn emit_status(status: &str) -> String {
 }
 
 /// Parse `Some(3.0)` → `Some(3.0)`, `None` → `None`.
+/// Does the token at the head of a collision's capsule slots actually hold a coordinate?
+///
+/// `CATCH` and `SEARCH` are both dumped in two shapes. The smashline signature is fixed-arity
+/// and spells an absent capsule `None`, but the vanilla dumps this parser is calibrated against
+/// come from Lua, where the three endpoint arguments are simply **not written at all** — so the
+/// slot that holds `x2` in one call holds the next *constant* in another.
+///
+/// Reading it positionally is therefore wrong, and wrong in the quiet direction: the arguments
+/// after the capsule get read one slot short, run off the end of the token list, and fall back
+/// to defaults. That is how every short-form `CATCH` in the corpus lost its status kind.
+///
+/// A coordinate is a bare float, `Some(..)`, or `None`; anything else — `*COLLISION_KIND_MASK_*`,
+/// `*FIGHTER_STATUS_KIND_*` — is the short form's next argument and means the capsule was
+/// omitted. Deliberately not a token *count* test: a call with a trailing comment or a spliced
+/// argument would change the count without changing which slot holds what.
+pub(crate) fn is_capsule_slot(token: &str) -> bool {
+    let token = token.trim();
+    token == "None" || token.starts_with("Some(") || token.parse::<f32>().is_ok()
+}
+
 fn parse_option_f32(s: &str) -> Option<f32> {
     let s = s.trim();
     if s == "None" {
@@ -3182,6 +3205,50 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         assert_eq!(
             parse_acmd_script(&exported).to_hitboxes(),
             boxes,
+            "{exported}"
+        );
+    }
+
+    /// A grab written without the capsule slots keeps its own status and situation.
+    ///
+    /// The vanilla dumps come from Lua, which omits the three capsule arguments rather than
+    /// spelling them `None`, so `status` and `situation` sit at slots 7 and 8 instead of 10 and
+    /// 11. Reading them positionally ran off the end of the token list and silently substituted
+    /// the defaults — which turned all four of the corpus's short-form calls, every one of them
+    /// Kirby's inhale, from a swallow into an ordinary grab.
+    ///
+    /// The round-trip oracle cannot catch this class of bug on its own: it compares the export
+    /// against the *parsed* model, and a value lost on the way in agrees with itself on the way
+    /// out. So this asserts against the original text, not against a re-parse.
+    #[test]
+    fn a_grab_written_without_capsule_slots_keeps_its_status() {
+        // Verbatim from kirby/SpecialNStart.
+        let src = r#"unsafe extern "C" fn game_catch(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::CATCH(agent, 0, Hash40::new("top"), 6.0, 0.0, 6.0, 5.0, *FIGHTER_STATUS_KIND_SWALLOWED, *COLLISION_SITUATION_MASK_GA);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let boxes = script.to_hitboxes();
+        assert_eq!(boxes.len(), 1, "{boxes:#?}");
+        let grab = &boxes[0];
+        let extras = grab.catch.as_ref().expect("a CATCH carries its extras");
+        assert_eq!(extras.status, "FIGHTER_STATUS_KIND_SWALLOWED");
+        assert_eq!(extras.situation, "COLLISION_SITUATION_MASK_GA");
+
+        // The geometry is still read from the slots it really occupies, and the absent capsule
+        // is absent rather than being assembled out of the constants that follow it.
+        assert_eq!(grab.size, 6.0);
+        assert_eq!(
+            (grab.offset_x, grab.offset_y, grab.offset_z),
+            (0.0, 6.0, 5.0)
+        );
+        assert_eq!(grab.capsule_end, None);
+
+        let exported = preview_game_fn(&script, "catch");
+        assert!(
+            exported.contains("*FIGHTER_STATUS_KIND_SWALLOWED"),
             "{exported}"
         );
     }
