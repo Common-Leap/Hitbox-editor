@@ -71,7 +71,16 @@ Two export paths, different rules — do not conflate them:
   files it under; that prefix is the answer to "which existing table does this belong in", and
   it is usually a table you already have. The cost of guessing is not just a wrong doc comment:
   it puts the control in the wrong panel and sends the fix down a new-type path when a one-row
-  path existed.
+  path existed. **When `lua_const` is silent, the signature is the next-best oracle** — it has
+  no constant for any of B3's five macros, and it was `WHOLE_HIT`'s `(hit_status)` argument that
+  showed it to be B4's family rather than the hitbox tuner its name and its entry both claimed.
+- **A bullet written from memory is not a measurement, even when you wrote it.** C6b's
+  `CANCEL_FILL_SCREEN` item claimed C3 modelled `FILL_SCREEN_MODEL_COLOR` and that the reset was
+  a `COLOR_COMMANDS`-shaped row. C3 does not, and it is not — C6's own result table three
+  hundred lines up had already recorded "a different family", and the real arities are 12 and 2.
+  Both errors were caught by the arity check the bullet itself told the next reader to run, so
+  **run the check on the entry you are about to implement before trusting its framing**,
+  especially when the entry cites a *conclusion* about another entry rather than a measurement.
 - **Two builders that accept the same macro name export it twice.** A `CaptureLine` records no
   source function, so every capture builder filters the one stream by name. While the name
   tables are disjoint this is invisible; the moment a macro joins a second table, one live call
@@ -456,22 +465,46 @@ first and re-measure, or take it deliberately as an unverifiable convenience for
 who write `ATTACK_FP` by hand — and say which in the entry, since the second is a real choice
 and not a default.
 
-### [ ] B3 — Post-hoc hitbox tuning
+### [~] B3 — Post-hoc hitbox tuning
 
 These modify hitboxes *already out*, so they are edits to an existing collision rather than
 new collisions.
 
 **Measured after A3** — all have `macros.rs` wrappers, so no export trap:
 `ATK_SET_SHIELD_SETOFF_MUL` 9, `ATK_HIT_ABS` 6, `WHOLE_HIT` 6, `ATK_POWER` 2,
-`ATK_LERP_RATIO` 0. Twenty-three occurrences total, which is the thinnest of the hitbox
-tasks — B4 has twice the usage for comparable work. Take that first unless something specific
-wants these.
+`ATK_LERP_RATIO` 0. B4's "take that first" deferral is discharged — B4 shipped 2026-08-04.
+
+**`WHOLE_HIT` is not one of these and is being done first, as B4's family (2026-08-04).** It
+takes a single `hit_status: i32` and the corpus writes `*HIT_STATUS_XLU` (5) and
+`*HIT_STATUS_NORMAL` (1) — that is how the fighter *receives* hits, not an edit to a hitbox
+already out. It is the all-bones sibling of `HIT_NODE`/`HIT_NO`, sharing the four-state
+`HIT_STATUS` `ConstTable` B4 already built, and `HIT_RESET_ALL` is already the "reset every
+target" statement next to it. So it needs **no new `ExcuteStmt` variant** — a third
+`HurtTarget` alongside `Bone` and `Group`.
+
+- **The one asymmetry:** `HIT_NODE`/`HIT_NO` take *(target, status)*; `WHOLE_HIT` takes
+  *(status)* only, because its target is implied. Every place that writes a hurtbox call is
+  formatting two arguments and must be taught the one-argument form.
+- **This is the second macro filed by its name rather than its signature** (after
+  `COL_PRI`/`COL_NORMAL` in B4 — see the traps section). `WHOLE_HIT` reads like a hitbox word.
+  The `lua_const` oracle is **silent** for all five of B3's macros — no `MA_MSC_CMD_*`
+  constants exist for them — so here the signature and the corpus context are the evidence.
+
+That leaves B3 proper at **17 occurrences**, still the thinnest of the hitbox tasks.
 
 - **Work order:** model them as modifiers attached to the hitbox id they target, shown on the
   timeline at their own frame. Do not fold their values into the parent `ATTACK` — the export
   must re-emit them as separate calls at their own frames.
 - **Trap:** the `_argN` suffixes are different arities of the same idea, exactly like the wind
   family. One table each.
+- **Trap — `ATK_HIT_ABS`'s 6 occurrences are not literals.** All six are the identical line
+  `ATK_HIT_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, Hash40::new("throw"), target,
+  target_group, target_no)`, where the last three are **local variables**, not values. A parser
+  that expects numbers will drop them, and an emitter that writes numbers back would break the
+  throw. Check what B1 did for `ATTACK_ABS` before assuming these can be typed at all; carrying
+  them verbatim may be the honest answer.
+- **`ATK_SET_SHIELD_SETOFF_MUL`'s 9 are all byte-identical** (`(agent, 0, 7)`), so the corpus
+  proves the arity and nothing else. It cannot distinguish the id slot from the value slot.
 
 ### [x] B4 — Hurtbox control (done 2026-08-04)
 
@@ -737,7 +770,7 @@ scripts produce calls, and **32 of them (24%) lose at least one line.** By head 
 | 4 | `macros::LAST_EFFECT_SET_ALPHA` | **Fixed by C1** — all four bind and survive an export. |
 | 4 | `methodlib::L2CAgent::pop…` | Not a call to model; genuinely script plumbing. |
 | 3 | `EffectModule::req_screen…` | Direct module calls, no macro wrapper involved. |
-| 2 ea | `FILL_SCREEN_MODEL_COLOR`, `CANCEL_FILL_SCREEN` | Screen-wide colour, adjacent to C3 but a different family. |
+| 2 ea | `FILL_SCREEN_MODEL_COLOR`, `CANCEL_FILL_SCREEN` | Screen-wide colour, adjacent to C3 but a different family — **this line was right and C6b's later bullet contradicted it**; both are E3's, at arity 12 and 2. |
 | 1 ea | `LAST_EFFECT_SET_WORK_INT`, `COL_NORMAL`, two `EffectModule` calls | `LAST_EFFECT_SET_WORK_INT` is the A1 trap again (see C7). |
 
 **Warning, not blocker — and that is the decision to revisit if it ever looks wrong.** A real
@@ -913,10 +946,23 @@ entry is still open.
   not this one.
 - **`methodlib::L2CAgent::pop()`, 2, and the bare `EffectModule::remove_screen` calls, 2.**
   Genuine script plumbing with no editor meaning. Worth leaving reported.
-- **`CANCEL_FILL_SCREEN`, 2 — the only one here with a real fix.** Unlike the plumbing above it
-  *is* wrapped in smash-script's `macros.rs`, so it is emittable, and it is the reset for the
-  `FILL_SCREEN_MODEL_COLOR` family C3 already models. Likely another `COLOR_COMMANDS`-shaped
-  row; check its arity against `macros.rs` before assuming it takes none.
+- **`CANCEL_FILL_SCREEN`, 2 — belongs to E3, not here. This bullet was wrong on both counts**
+  (written 2026-08-04, corrected the same day by the arity check it told itself to do).
+  It *is* wrapped in `macros.rs`, so it is emittable — that part held. But:
+  - **C3 does not model `FILL_SCREEN_MODEL_COLOR`.** C6's own result table already said
+    "adjacent to C3 but a different family", and this bullet contradicted it from memory.
+    Nothing under `src/` touches the name. There is no family here to add a reset to.
+  - **It is not `COLOR_COMMANDS`-shaped.** `CANCEL_FILL_SCREEN` takes `(i32, f32)` and
+    `FILL_SCREEN_MODEL_COLOR` takes **twelve** arguments including an `EffectScreenLayer` and a
+    screen priority. Neither is a transition-plus-RGBA, so a row in that table cannot hold them.
+  - **The `lua_const` oracle is silent here.** There is no `MA_MSC_CMD_*_FILL_SCREEN` constant at
+    all — only an unrelated `MA_MSC_EFFECT_FILL_SCREEN_LEGACY`. Worth knowing that the oracle
+    answers for some macros and not others; when it does not, the signature plus the corpus
+    context is the evidence.
+
+  All 4 occurrences are in dolly's `FinalAirStart` / `FinalAirEnd` — full-screen final-smash
+  staging, which is exactly what E3 describes, and E3 already lists both macros by name. Do it
+  there, with the camera work, or not at all.
 - **Then reconsider** whether the C5 warning should become a blocker. C6 and C6b both changed the
   arithmetic behind that decision: it was a warning because a quarter of vanilla scripts tripped
   it, and now under one in eight does, of which half are the deliberate `wait_loop_sync_mot`.
@@ -925,6 +971,12 @@ entry is still open.
 
 **Measured remainder after `COL_NORMAL`, 15 of 132 scripts:** `wait_loop_sync_mot` 7, `else {` 5,
 `methodlib::L2CAgent::pop()` 2, `CANCEL_FILL_SCREEN` 2, `EffectModule::remove_screen` 2.
+
+**Nothing cheap is left in this entry.** Every remaining line is now either deliberate
+(`wait_loop_sync_mot`), untestable against this corpus (`else {`), genuine plumbing with no
+editor meaning (`pop()`, `remove_screen`), or another entry's work (`CANCEL_FILL_SCREEN` → E3).
+C6b should be closed at 15 rather than kept open for a cheap win that does not exist — the only
+thing still owed is the warning-vs-blocker re-derivation below, which is a decision, not code.
 
 ### [ ] C6c — Close C5's export-path gap
 
