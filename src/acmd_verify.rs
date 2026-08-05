@@ -1127,6 +1127,10 @@ fn check_shape(subject: &str, stmts: &[AcmdStmt], clock: &mut f32, report: &mut 
                 // the same statement once per iteration would say nothing new.
                 check_shape(subject, body, clock, report);
             }
+            // A bare command is a single statement, so the duplicate-call check the `Excute`
+            // arm runs has nothing to compare it against. `Bare` is only produced for `sound_`
+            // scripts, which this pass does not verify at all.
+            AcmdStmt::Bare(_) => {}
             // Unreachable: a branch makes `has_unmodelled_flow` true and this pass never runs.
             AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) | AcmdStmt::RawBlock { .. } => {}
         }

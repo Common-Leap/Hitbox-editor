@@ -983,8 +983,45 @@ pub enum ExcuteStmt {
         id: i64,
         value: f32,
     },
+    /// One call from the `PLAY_SE` family — a sound the script starts or stops.
+    ///
+    /// Not a collision and not a spawn: it fires on one frame and the script never takes it
+    /// back, so it has no span for [`AcmdScript::to_hitboxes`] to end. `STOP_SE` looks like it
+    /// would end one, but it silences a sound started somewhere else entirely — usually by a
+    /// different script — so pairing the two inside one move would be guesswork.
+    ///
+    /// Every one of the corpus's 610 calls lives in a `sound_` function; not one is in a
+    /// `game_` or `effect_` one. It is parsed here anyway because a `sound_` script is read by
+    /// the same walker a `game_` script is, and this is where that walker's statements live.
+    Sound(SoundCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
+}
+
+/// A call from the `PLAY_SE` family, as written.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SoundCall {
+    /// The macro name without the `macros::` path — `PLAY_SE`, `STOP_SE`, `PLAY_SEQUENCE`, …
+    pub func: String,
+    /// The `Hash40::new("…")` arguments in order, unwrapped to the bare name.
+    ///
+    /// A list rather than one name because two members take a pair: `PLAY_STEP_FLIPPABLE`
+    /// names the left and right footstep, and `PLAY_FLY_VOICE` two alternative voice clips.
+    pub sounds: Vec<String>,
+    /// The trailing non-hash argument, verbatim. Only `SET_PLAY_INHIVIT` has one — the frames
+    /// for which the named sound is suppressed — and it is kept as text so a `5` stays a `5`
+    /// rather than being re-emitted as `5.0`.
+    pub tail: Option<String>,
+}
+
+/// A resolved sound with the frame it fires on.
+///
+/// One-shot by construction: unlike a hitbox or a following effect there is no end frame to
+/// compute, because nothing in a `game_` or `sound_` script closes a sound it started.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SoundEvent {
+    pub frame: u32,
+    pub call: SoundCall,
 }
 
 /// A timing statement in the script.
@@ -1009,6 +1046,18 @@ pub enum AcmdStmt {
         header: String,
         body: Vec<AcmdStmt>,
     },
+    /// A typed command written at the function's top level, outside any `is_excute` block.
+    ///
+    /// Fifteen corpus `sound_` scripts end this way — `kirby/WalkMiddle` plays its second
+    /// footstep bare — and before D1c every one of those calls was [`Raw`](Self::Raw) and
+    /// invisible. It cannot be modelled as a one-statement [`Excute`](Self::Excute) because
+    /// emitting that would *add* an `if macros::is_excute(agent) {` the source never wrote,
+    /// which is both a behaviour change and a round-trip failure.
+    ///
+    /// Only sound calls are parsed into this today. A bare `ATTACK` in a `game_` script stays
+    /// `Raw`, exactly as it did before, because nothing has measured whether one exists or what
+    /// the timeline should do with it.
+    Bare(Box<ExcuteStmt>),
     Raw(String),
 }
 
@@ -1065,6 +1114,24 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.mods
+    }
+
+    /// Flatten the script into the sounds it plays, each at the frame it fires on.
+    ///
+    /// Resolved by the same walk as the three above, for the reason [`to_hurtboxes`] gives:
+    /// `frame`/`wait` arithmetic and `for` unrolling decide when a sound fires exactly as much
+    /// as when a hitbox opens, and a second implementation of that would drift from this one.
+    ///
+    /// A `for` body is unrolled, so a looped `PLAY_SE` yields one event per iteration. That is
+    /// what the game does — each pass plays the sound again — and it is the same treatment a
+    /// looped hitbox gets.
+    ///
+    /// [`to_hurtboxes`]: Self::to_hurtboxes
+    pub fn to_sound_events(&self) -> Vec<SoundEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.sounds
     }
 }
 
@@ -1146,6 +1213,7 @@ struct WalkAccum {
     states: Vec<HurtboxState>,
     pris: Vec<ColPriState>,
     mods: Vec<AttackModState>,
+    sounds: Vec<SoundEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -1285,6 +1353,160 @@ impl WalkAccum {
     }
 }
 
+/// Run one statement from inside an `is_excute` block, or one written bare beside it.
+///
+/// Split out of [`eval_stmts`] when [`AcmdStmt::Bare`] arrived so both routes share one
+/// implementation. A second copy for the bare case would be a rule about what a command does
+/// that depends on whether the author wrapped it, which is not a rule the game has.
+fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt: &mut WalkAccum) {
+    match s {
+        ExcuteStmt::Attack(call) => {
+            if let Some(existing) = hitboxes
+                .iter_mut()
+                .find(|h| h.id == call.id && h.active_end == u32::MAX)
+            {
+                existing.active_end = (script_frame(frame)).saturating_sub(1);
+            }
+            hitboxes.push(call.to_hitbox(script_frame(frame)));
+        }
+        ExcuteStmt::Wind(wind) => {
+            let spawn = script_frame(frame);
+            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
+                hitbox.category == 2 && hitbox.id == wind.id() && hitbox.active_end >= spawn
+            }) {
+                existing.active_end = spawn.saturating_sub(1).max(existing.active_start);
+            }
+            hitboxes.push(wind.to_hitbox(spawn));
+        }
+        ExcuteStmt::EraseWind(id) => {
+            let end = script_frame(frame).saturating_sub(1);
+            for hitbox in hitboxes.iter_mut().filter(|hitbox| {
+                hitbox.category == 2
+                    && hitbox.id == *id
+                    && hitbox.active_start <= end.saturating_add(1)
+                    && hitbox.active_end >= end
+            }) {
+                hitbox.active_end = end.max(hitbox.active_start);
+            }
+        }
+        ExcuteStmt::Catch(call) => {
+            let spawn = script_frame(frame);
+            // Reusing a grab id replaces the open one, the same way ATTACK does.
+            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
+                hitbox.category == 1 && hitbox.id == call.id && hitbox.active_end == u32::MAX
+            }) {
+                existing.active_end = spawn.saturating_sub(1);
+            }
+            hitboxes.push(call.to_hitbox(spawn));
+        }
+        // AttackModule clears attack hitboxes only — a grab box survives it and
+        // is ended by GrabModule::clear_all instead.
+        ExcuteStmt::Clear(id) => {
+            let end = script_frame(frame).saturating_sub(1);
+            for hitbox in hitboxes.iter_mut().filter(|hitbox| {
+                hitbox.category == 0 && hitbox.id == *id && hitbox.active_end == u32::MAX
+            }) {
+                hitbox.active_end = end.max(hitbox.active_start);
+            }
+        }
+        // `.max(active_start)` for the same reason the id-scoped clear does it:
+        // a collision that comes out and is cleared on the next `wait` is out
+        // for that one frame, not for none. Without the clamp a hitbox spawned
+        // before any `frame()` call ends up ending the frame before it starts,
+        // and the timeline draws nothing at all.
+        ExcuteStmt::ClearAll => {
+            let end = script_frame(frame).saturating_sub(1);
+            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 0) {
+                if hb.active_end == u32::MAX {
+                    hb.active_end = end.max(hb.active_start);
+                }
+            }
+        }
+        ExcuteStmt::GrabClearAll => {
+            let end = script_frame(frame).saturating_sub(1);
+            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 1) {
+                if hb.active_end == u32::MAX {
+                    hb.active_end = end.max(hb.active_start);
+                }
+            }
+        }
+        // Identity is (id, kind), NOT id alone. Every one of the corpus's 32
+        // calls writes id `0`, and kirby/ThrowF puts two in a single block —
+        // one `..._THROW` and one `..._CATCH` — which are both live at once and
+        // say what happens on two different outcomes. Matching on id would
+        // have ended the first the instant the second was read.
+        //
+        // Deliberately not ended by `AttackModule::clear_all`: only 2 of the 24
+        // scripts using this macro contain one at all, and there is no evidence
+        // it applies. An uncleared call runs to the end of the move, which is
+        // the same `9999` an uncleared hitbox gets — better than inventing a
+        // frame the script never wrote.
+        ExcuteStmt::AttackAbs(call) => {
+            let spawn = script_frame(frame);
+            if let Some(existing) = hitboxes.iter_mut().find(|h| {
+                h.category == CAT_ABS
+                    && h.id == call.id
+                    && h.abs.as_ref().is_some_and(|a| a.kind == call.kind)
+                    && h.active_end == u32::MAX
+            }) {
+                existing.active_end = spawn.saturating_sub(1).max(existing.active_start);
+            }
+            hitboxes.push(call.to_hitbox(spawn));
+        }
+        // Deliberately not ended by any clear. `AttackModule::clear_all` does
+        // not touch a search volume, and none of the 7 corpus scripts contains
+        // a clear of any kind for one — the two that do end (kirby's inhale)
+        // end it from the status code, which no ACMD script can see. So an
+        // unclosed search runs to the end of the move, the same `9999` an
+        // unclosed `ATTACK_ABS` gets, rather than a frame nothing ever wrote.
+        //
+        // Reusing an id still replaces the open box, matching every other
+        // family. Scoped to `CAT_SEARCH`: kirby/SpecialNStart opens a `CATCH`,
+        // a `SEARCH` and an `ATTACK_ABS` that all three carry id 0 in one
+        // block, so a match on id alone would close two of them here.
+        ExcuteStmt::Search(call) => {
+            let spawn = script_frame(frame);
+            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
+                hitbox.category == CAT_SEARCH
+                    && hitbox.id == call.id
+                    && hitbox.active_end == u32::MAX
+            }) {
+                existing.active_end = spawn.saturating_sub(1).max(existing.active_start);
+            }
+            hitboxes.push(call.to_hitbox(spawn));
+        }
+        ExcuteStmt::HitStatus { target, status } => {
+            let site = hurt.take_site();
+            hurt.set_status(target, status, script_frame(frame), site);
+        }
+        ExcuteStmt::HitResetAll => {
+            hurt.take_site();
+            hurt.reset_all(script_frame(frame));
+        }
+        ExcuteStmt::ColPri(pri) => {
+            let site = hurt.take_site();
+            hurt.set_pri(*pri, script_frame(frame), site);
+        }
+        ExcuteStmt::ColNormal => {
+            hurt.take_site();
+            hurt.close_pri(script_frame(frame));
+        }
+        ExcuteStmt::AttackMod { kind, id, value } => {
+            let site = hurt.take_mod_site();
+            hurt.add_mod(*kind, *id, *value, script_frame(frame), site);
+        }
+        // No site counter, because nothing edits a sound yet. Adding one now
+        // would be a third ordinal space with no consumer to keep it honest,
+        // and the one thing this codebase has learned about site counters is
+        // that an untested one silently retargets somebody else's edit.
+        ExcuteStmt::Sound(call) => hurt.sounds.push(SoundEvent {
+            frame: script_frame(frame),
+            call: call.clone(),
+        }),
+        ExcuteStmt::Raw(_) => {}
+    }
+}
+
 fn eval_stmts(
     stmts: &[AcmdStmt],
     start_frame: f32,
@@ -1299,155 +1521,12 @@ fn eval_stmts(
             AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {}
             AcmdStmt::Excute(stmts) => {
                 for s in stmts {
-                    match s {
-                        ExcuteStmt::Attack(call) => {
-                            if let Some(existing) = hitboxes
-                                .iter_mut()
-                                .find(|h| h.id == call.id && h.active_end == u32::MAX)
-                            {
-                                existing.active_end = (script_frame(frame)).saturating_sub(1);
-                            }
-                            hitboxes.push(call.to_hitbox(script_frame(frame)));
-                        }
-                        ExcuteStmt::Wind(wind) => {
-                            let spawn = script_frame(frame);
-                            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
-                                hitbox.category == 2
-                                    && hitbox.id == wind.id()
-                                    && hitbox.active_end >= spawn
-                            }) {
-                                existing.active_end =
-                                    spawn.saturating_sub(1).max(existing.active_start);
-                            }
-                            hitboxes.push(wind.to_hitbox(spawn));
-                        }
-                        ExcuteStmt::EraseWind(id) => {
-                            let end = script_frame(frame).saturating_sub(1);
-                            for hitbox in hitboxes.iter_mut().filter(|hitbox| {
-                                hitbox.category == 2
-                                    && hitbox.id == *id
-                                    && hitbox.active_start <= end.saturating_add(1)
-                                    && hitbox.active_end >= end
-                            }) {
-                                hitbox.active_end = end.max(hitbox.active_start);
-                            }
-                        }
-                        ExcuteStmt::Catch(call) => {
-                            let spawn = script_frame(frame);
-                            // Reusing a grab id replaces the open one, the same way ATTACK does.
-                            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
-                                hitbox.category == 1
-                                    && hitbox.id == call.id
-                                    && hitbox.active_end == u32::MAX
-                            }) {
-                                existing.active_end = spawn.saturating_sub(1);
-                            }
-                            hitboxes.push(call.to_hitbox(spawn));
-                        }
-                        // AttackModule clears attack hitboxes only — a grab box survives it and
-                        // is ended by GrabModule::clear_all instead.
-                        ExcuteStmt::Clear(id) => {
-                            let end = script_frame(frame).saturating_sub(1);
-                            for hitbox in hitboxes.iter_mut().filter(|hitbox| {
-                                hitbox.category == 0
-                                    && hitbox.id == *id
-                                    && hitbox.active_end == u32::MAX
-                            }) {
-                                hitbox.active_end = end.max(hitbox.active_start);
-                            }
-                        }
-                        // `.max(active_start)` for the same reason the id-scoped clear does it:
-                        // a collision that comes out and is cleared on the next `wait` is out
-                        // for that one frame, not for none. Without the clamp a hitbox spawned
-                        // before any `frame()` call ends up ending the frame before it starts,
-                        // and the timeline draws nothing at all.
-                        ExcuteStmt::ClearAll => {
-                            let end = script_frame(frame).saturating_sub(1);
-                            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 0) {
-                                if hb.active_end == u32::MAX {
-                                    hb.active_end = end.max(hb.active_start);
-                                }
-                            }
-                        }
-                        ExcuteStmt::GrabClearAll => {
-                            let end = script_frame(frame).saturating_sub(1);
-                            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 1) {
-                                if hb.active_end == u32::MAX {
-                                    hb.active_end = end.max(hb.active_start);
-                                }
-                            }
-                        }
-                        // Identity is (id, kind), NOT id alone. Every one of the corpus's 32
-                        // calls writes id `0`, and kirby/ThrowF puts two in a single block —
-                        // one `..._THROW` and one `..._CATCH` — which are both live at once and
-                        // say what happens on two different outcomes. Matching on id would
-                        // have ended the first the instant the second was read.
-                        //
-                        // Deliberately not ended by `AttackModule::clear_all`: only 2 of the 24
-                        // scripts using this macro contain one at all, and there is no evidence
-                        // it applies. An uncleared call runs to the end of the move, which is
-                        // the same `9999` an uncleared hitbox gets — better than inventing a
-                        // frame the script never wrote.
-                        ExcuteStmt::AttackAbs(call) => {
-                            let spawn = script_frame(frame);
-                            if let Some(existing) = hitboxes.iter_mut().find(|h| {
-                                h.category == CAT_ABS
-                                    && h.id == call.id
-                                    && h.abs.as_ref().is_some_and(|a| a.kind == call.kind)
-                                    && h.active_end == u32::MAX
-                            }) {
-                                existing.active_end =
-                                    spawn.saturating_sub(1).max(existing.active_start);
-                            }
-                            hitboxes.push(call.to_hitbox(spawn));
-                        }
-                        // Deliberately not ended by any clear. `AttackModule::clear_all` does
-                        // not touch a search volume, and none of the 7 corpus scripts contains
-                        // a clear of any kind for one — the two that do end (kirby's inhale)
-                        // end it from the status code, which no ACMD script can see. So an
-                        // unclosed search runs to the end of the move, the same `9999` an
-                        // unclosed `ATTACK_ABS` gets, rather than a frame nothing ever wrote.
-                        //
-                        // Reusing an id still replaces the open box, matching every other
-                        // family. Scoped to `CAT_SEARCH`: kirby/SpecialNStart opens a `CATCH`,
-                        // a `SEARCH` and an `ATTACK_ABS` that all three carry id 0 in one
-                        // block, so a match on id alone would close two of them here.
-                        ExcuteStmt::Search(call) => {
-                            let spawn = script_frame(frame);
-                            if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
-                                hitbox.category == CAT_SEARCH
-                                    && hitbox.id == call.id
-                                    && hitbox.active_end == u32::MAX
-                            }) {
-                                existing.active_end =
-                                    spawn.saturating_sub(1).max(existing.active_start);
-                            }
-                            hitboxes.push(call.to_hitbox(spawn));
-                        }
-                        ExcuteStmt::HitStatus { target, status } => {
-                            let site = hurt.take_site();
-                            hurt.set_status(target, status, script_frame(frame), site);
-                        }
-                        ExcuteStmt::HitResetAll => {
-                            hurt.take_site();
-                            hurt.reset_all(script_frame(frame));
-                        }
-                        ExcuteStmt::ColPri(pri) => {
-                            let site = hurt.take_site();
-                            hurt.set_pri(*pri, script_frame(frame), site);
-                        }
-                        ExcuteStmt::ColNormal => {
-                            hurt.take_site();
-                            hurt.close_pri(script_frame(frame));
-                        }
-                        ExcuteStmt::AttackMod { kind, id, value } => {
-                            let site = hurt.take_mod_site();
-                            hurt.add_mod(*kind, *id, *value, script_frame(frame), site);
-                        }
-                        ExcuteStmt::Raw(_) => {}
-                    }
+                    eval_excute_stmt(s, frame, hitboxes, hurt);
                 }
             }
+            // A bare command runs where it is written, on the frame the cursor is on — the
+            // `is_excute` wrapper decides whether a command runs at all, never when.
+            AcmdStmt::Bare(s) => eval_excute_stmt(s, frame, hitboxes, hurt),
             AcmdStmt::Loop { count, body } => {
                 // Rewind the site cursor for every iteration so all of them agree, then step it
                 // over the body once regardless of how many iterations actually ran.
@@ -1625,6 +1704,12 @@ pub struct AppState {
     pub effects: Vec<EffectCall>,
     /// Pristine copy of `effects` as parsed from ACMD, before user edits — "orig" ghosts.
     pub effects_pristine: Vec<EffectCall>,
+    /// The current move's `sound_` script, flattened to one event per call.
+    ///
+    /// No pristine copy beside it, and deliberately: nothing edits a sound yet. D1's work order
+    /// gives live playback its own step and the export the step after that, so this list is
+    /// read from the script and only ever displayed.
+    pub sounds: Vec<SoundEvent>,
     /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
     pub hitboxes_pristine: Vec<Hitbox>,
     /// Hurtbox spans as loaded, for source syncing to diff against.
@@ -1677,6 +1762,7 @@ impl Default for AppState {
             effect_script: EffectScript::default(),
             effects: Vec::new(),
             effects_pristine: Vec::new(),
+            sounds: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),

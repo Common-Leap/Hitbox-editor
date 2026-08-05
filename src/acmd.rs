@@ -185,6 +185,17 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
             continue;
         }
 
+        // A sound played outside every `is_excute` block. Fifteen corpus `sound_` scripts end
+        // this way, and the D1c oracle found them: they parsed as `Raw`, so a move whose last
+        // footstep is written bare showed one fewer sound than it plays. Only this family is
+        // routed here — a bare collision would need the timeline to decide what an unwrapped
+        // hitbox means, which nothing has measured.
+        if let Some(sound) = parse_sound_call(line) {
+            stmts.push(AcmdStmt::Bare(Box::new(sound)));
+            pos += 1;
+            continue;
+        }
+
         // Everything else — preserve verbatim
         if !line.is_empty() {
             stmts.push(AcmdStmt::Raw(line.to_string()));
@@ -260,6 +271,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             continue;
         }
         if let Some(stmt) = parse_attack_mod_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_sound_call(line) {
             stmts.push(stmt);
             continue;
         }
@@ -1300,6 +1315,79 @@ fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
 ///
 /// Kept out of [`parse_hurtbox_call`] because these are a different family that happens to be
 /// parsed nearby, and a call written at the wrong arity falls through to `Raw` by the same rule.
+/// The `PLAY_SE` family: macro name, how many `Hash40` arguments it takes, and whether one
+/// more argument follows them.
+///
+/// Arities are read off `smash-script`'s `macros.rs`, not inferred from the call sites — a
+/// member whose corpus calls all happen to be the same length would otherwise pin the wrong
+/// signature. `SET_PLAY_INHIVIT` is here rather than with the effect-lifetime commands for
+/// that reason: its second argument is a `ToF32` suppression window, and all ten of its corpus
+/// calls are in `sound_` functions.
+///
+/// Matched with the trailing paren, never on the bare name. `PLAY_SE` is a prefix of
+/// `PLAY_SE_NO_3D` and `PLAY_SE_REMAIN`, and `PLAY_STEP` of `PLAY_STEP_FLIPPABLE`; a bare
+/// `contains` would read a two-hash call through the one-hash layout and drop its second
+/// sound. This is the same collision `ATTACK` and `ATTACK_ABS` have, and the paren is the
+/// same fix.
+const SOUND_FUNCS: &[(&str, usize, bool)] = &[
+    ("PLAY_SE", 1, false),
+    ("PLAY_SE_NO_3D", 1, false),
+    ("PLAY_SE_REMAIN", 1, false),
+    ("STOP_SE", 1, false),
+    ("PLAY_STEP", 1, false),
+    ("PLAY_STEP_FLIPPABLE", 2, false),
+    ("PLAY_SEQUENCE", 1, false),
+    ("PLAY_STATUS", 1, false),
+    ("PLAY_LANDING_SE", 1, false),
+    ("PLAY_DOWN_SE", 1, false),
+    ("PLAY_FLY_VOICE", 2, false),
+    ("SET_PLAY_INHIVIT", 1, true),
+];
+
+/// Read one `PLAY_SE`-family call, or `None` to leave the line as `Raw`.
+///
+/// Refuses anything it could not write back byte for byte: a hash argument that is not a
+/// literal `Hash40::new("…")`, or an argument count the signature does not have. Every one of
+/// the corpus's 610 calls passes a literal, but a hand-written project is free to pass a
+/// variable, and a typed call is *regenerated* on export rather than copied — so a form this
+/// emitter cannot spell has to stay verbatim text instead.
+fn parse_sound_call(line: &str) -> Option<ExcuteStmt> {
+    let (func, hashes, has_tail) = SOUND_FUNCS
+        .iter()
+        .copied()
+        .find(|(name, _, _)| line.contains(&format!("macros::{name}(")))?;
+    let needle = format!("macros::{func}(");
+    let start = line.find(&needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    // Drop the leading `agent`, then require exactly the signature's arguments — no more, so
+    // an argument this parser has no field for cannot vanish on the way back out.
+    let args = tokens.get(1..)?;
+    if args.len() != hashes + usize::from(has_tail) {
+        return None;
+    }
+    let sounds: Vec<String> = args[..hashes]
+        .iter()
+        .map(|arg| extract_hash40_string(arg))
+        .collect::<Option<_>>()?;
+    Some(ExcuteStmt::Sound(crate::data::SoundCall {
+        func: func.to_string(),
+        sounds,
+        tail: has_tail.then(|| args[hashes].clone()),
+    }))
+}
+
+fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
+    let args = call
+        .sounds
+        .iter()
+        .map(|name| format!("Hash40::new(\"{name}\")"))
+        .chain(call.tail.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{indent}macros::{}(agent, {args});", call.func)
+}
+
 fn parse_attack_mod_call(line: &str) -> Option<ExcuteStmt> {
     for kind in crate::data::AttackModKind::ALL {
         let needle = format!("macros::{}(", kind.macro_name());
@@ -1734,6 +1822,7 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 kind.macro_name(),
                 attack_mod_num(*value)
             ),
+            crate::data::ExcuteStmt::Sound(call) => emit_sound(call, indent),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -1770,6 +1859,12 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
                 lines.extend(emit_stmts(body, &format!("{indent}    ")));
                 lines.push(format!("{indent}}}"));
             }
+            // At the caller's own indent and with no wrapper: the source wrote this command
+            // outside every `is_excute` block, and adding one back would change when it runs.
+            crate::data::AcmdStmt::Bare(inner) => lines.extend(emit_excute_stmts(
+                std::slice::from_ref(inner.as_ref()),
+                indent,
+            )),
             crate::data::AcmdStmt::Raw(line) => lines.push(format!("{indent}{line}")),
         }
     }
@@ -5003,6 +5098,188 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "{} of {checked} sound scripts came back with different whitespace; 6 are known \
              mis-indented at source, so any other number is the emitter's formatting changing",
             checked - byte_exact
+        );
+    }
+
+    /// One real vanilla sound script, read end to end.
+    ///
+    /// `kirby/TurnDash` because it is the only shape in the corpus that carries all three of
+    /// the family's argument layouts at once — one hash, two hashes, and a hash with a trailing
+    /// number — and it spaces them with a `frame` and two `wait`s, so a walk that ignored the
+    /// timing would still have to produce four events but would put them in the wrong places.
+    #[test]
+    fn a_vanilla_sound_script_reads_as_typed_calls_at_the_frames_it_writes() {
+        const TURN_DASH: &str = r#"unsafe extern "C" fn sound_turndash(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_dash_start"));
+        macros::SET_PLAY_INHIVIT(agent, Hash40::new("se_kirby_dash_start"), 20);
+    }
+    wait(agent.lua_state_agent, 13.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+    wait(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_right_m"), Hash40::new("se_kirby_step_left_m"));
+    }
+}
+"#;
+        let script = parse_sound_script(TURN_DASH);
+        let events = script.to_sound_events();
+        let seen: Vec<(u32, &str, Vec<&str>, Option<&str>)> = events
+            .iter()
+            .map(|e| {
+                (
+                    e.frame,
+                    e.call.func.as_str(),
+                    e.call.sounds.iter().map(String::as_str).collect(),
+                    e.call.tail.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (6, "PLAY_SE", vec!["se_kirby_dash_start"], None),
+                (
+                    6,
+                    "SET_PLAY_INHIVIT",
+                    vec!["se_kirby_dash_start"],
+                    Some("20")
+                ),
+                (
+                    19,
+                    "PLAY_STEP_FLIPPABLE",
+                    vec!["se_kirby_step_left_m", "se_kirby_step_right_m"],
+                    None
+                ),
+                (
+                    23,
+                    "PLAY_STEP_FLIPPABLE",
+                    vec!["se_kirby_step_right_m", "se_kirby_step_left_m"],
+                    None
+                ),
+            ]
+        );
+
+        // Parse → emit → parse reaches the same events, which is the property that lets a
+        // typed call be regenerated instead of copied.
+        let again = parse_sound_script(&format!(
+            "unsafe extern \"C\" fn sound_turndash(agent: &mut L2CAgentBase) {{\n{}}}\n",
+            emit_sound_body(&script)
+        ));
+        assert_eq!(again.to_sound_events(), events);
+    }
+
+    /// A sound written outside every `is_excute` block, which 15 corpus scripts do.
+    ///
+    /// `kirby/WalkMiddle` verbatim, because it writes one footstep each way: the first is
+    /// wrapped and the second is bare. Before D1c the bare one parsed as `Raw` and the move
+    /// showed one footstep instead of two — and the corpus oracle counts *statements*, so it
+    /// would go on passing if a bare call were typed but never walked. This is the assertion
+    /// that says the event comes out the other end.
+    #[test]
+    fn a_sound_written_outside_an_excute_block_still_fires() {
+        const WALK_MIDDLE: &str = r#"unsafe extern "C" fn sound_walkmiddle(agent: &mut L2CAgentBase) {
+    wait_loop_sync_mot();
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+    frame(agent.lua_state_agent, 30.0);
+    macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_right_m"), Hash40::new("se_kirby_step_left_m"));
+}
+"#;
+        let script = parse_sound_script(WALK_MIDDLE);
+        let frames: Vec<u32> = script.to_sound_events().iter().map(|e| e.frame).collect();
+        assert_eq!(
+            frames,
+            vec![8, 30],
+            "the bare footstep on frame 30 was lost"
+        );
+
+        // And it is written back bare. Emitting it inside an `if macros::is_excute(agent) {`
+        // it never had would be a behaviour change, not a formatting one: the wrapper decides
+        // whether the line runs on this pass at all.
+        let emitted = emit_sound_body(&script);
+        assert!(
+            emitted.contains(
+                "\n    macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new(\"se_kirby_step_right_m\")"
+            ),
+            "the bare call did not come back at the function's own indent:\n{emitted}"
+        );
+    }
+
+    /// Every sound call the corpus writes is *typed*, not left as `Raw`.
+    ///
+    /// The round-trip gate above cannot see this and never could: an unrecognised line
+    /// round-trips perfectly precisely *because* it is copied verbatim. So it stayed green
+    /// through the whole of D1a, when nothing in the family was typed at all, and it would stay
+    /// green if a member silently stopped being recognised tomorrow. This is the assertion that
+    /// says the new thing works rather than that nothing broke.
+    ///
+    /// Counted per script against the source text rather than in total, so a file that loses
+    /// its calls cannot be hidden by another that gains some.
+    #[test]
+    fn every_sound_call_in_the_corpus_is_typed_rather_than_left_raw() {
+        fn typed(stmts: &[crate::data::AcmdStmt]) -> usize {
+            stmts
+                .iter()
+                .map(|stmt| match stmt {
+                    crate::data::AcmdStmt::Excute(inner) => inner
+                        .iter()
+                        .filter(|s| matches!(s, ExcuteStmt::Sound(_)))
+                        .count(),
+                    crate::data::AcmdStmt::Bare(s) => {
+                        usize::from(matches!(s.as_ref(), ExcuteStmt::Sound(_)))
+                    }
+                    crate::data::AcmdStmt::Loop { body, .. }
+                    | crate::data::AcmdStmt::RawBlock { body, .. } => typed(body),
+                    _ => 0,
+                })
+                .sum()
+        }
+
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        let mut total = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for (path, body) in &bodies {
+            let Some(interior) = function_interior(body, "sound_") else {
+                continue;
+            };
+            let mut written = 0usize;
+            for line in interior.lines() {
+                let matched = SOUND_FUNCS
+                    .iter()
+                    .filter(|(name, _, _)| line.contains(&format!("macros::{name}(")))
+                    .count();
+                // Two needles on one line means a family name is a prefix of another and the
+                // paren is not separating them after all — the `ATTACK`/`ATTACK_ABS` trap. The
+                // wrong layout would then read `PLAY_STEP_FLIPPABLE`'s second footstep away.
+                assert!(matched <= 1, "{path}: two sound macros matched `{line}`");
+                written += matched;
+            }
+            let found = typed(&parse_sound_script(body).stmts);
+            if found != written {
+                problems.push(format!("{path}: {written} calls written, {found} typed"));
+            }
+            total += written;
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} corpus sound scripts lost a call to `Raw`:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+        assert!(
+            total > 500,
+            "only {total} sound calls found — the corpus is too thin to be a gate"
         );
     }
 

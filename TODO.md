@@ -243,25 +243,28 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**347 green after D1b**), including the six corpus
+- [ ] `cargo test` passes (**352 green after D1c**), including the seven corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
-      `cargo test unbalanced` and `cargo test survives_a_round_trip`:
+      `cargo test unbalanced`, `cargo test survives_a_round_trip` and
+      `cargo test is_typed_rather_than`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
       `acmd::tests::cached_scripts_round_trip_through_the_emitter`,
       `acmd::tests::the_effect_export_still_loses_no_more_of_the_corpus_than_it_did`,
       `acmd::tests::no_game_script_in_the_corpus_exports_an_unbalanced_function`,
-      `acmd::tests::every_sound_script_in_the_corpus_survives_a_round_trip` and
-      `acmd::tests::a_partial_project_override_keeps_every_category_it_does_not_define`. They run
+      `acmd::tests::every_sound_script_in_the_corpus_survives_a_round_trip`,
+      `acmd::tests::a_partial_project_override_keeps_every_category_it_does_not_define` and
+      `acmd::tests::every_sound_call_in_the_corpus_is_typed_rather_than_left_raw`. They run
       the new code over every script the app has ever fetched (currently 461 files under
       `~/.cache/visionary/script-cache`, ~1000 functions). The third asserts a *number* — how
       many effect scripts still lose a line — so it fails on a regression rather than only on a
       crash, and the fifth pins the byte-exact count for the same reason.
-      **All six return early and pass vacuously if that cache directory is missing**, and each
+      **All seven return early and pass vacuously if that cache directory is missing**, and each
       carries its own guard against a corpus too thin to mean anything: `checked > 100` on three
       of them, `branching >= 30` on the unbalanced-function one, which would otherwise stay
-      green if branches simply stopped being recognised, and `132 with effects / 78 with
-      hitboxes` on the merge one. Confirm the directory exists before
+      green if branches simply stopped being recognised, `132 with effects / 78 with
+      hitboxes` on the merge one, and `total > 500` calls on the sound-typing one. Confirm the
+      directory exists before
       trusting any of them. `ls` shows only 3
       entries; the files are nested per fighter, so count with
       `find ~/.cache/visionary/script-cache -type f | wc -l`.
@@ -274,6 +277,11 @@ paraphrase it from memory.
       *adding* a family rather than changing one. An unparsed line exports verbatim as `Raw`, so
       it round-trips perfectly; all three were green on `WHOLE_HIT` before and after it was
       modelled. A green oracle says "nothing broke", never "the new thing works".
+      **The seventh is the answer to that**, and the shape to copy when adding the next family:
+      it counts, per script, the calls the *source text* writes against the ones the parser
+      typed, so a member that is not recognised fails instead of falling back to `Raw`. It found
+      15 scripts on its first run whose sound sat outside an `is_excute` block and had been
+      invisible since D1a.
 - [ ] A round-trip test for the new family: parse a real vanilla call → emit → parse again →
       identical IR. Put the real call in the test, not a synthetic one.
 - [ ] A write-back test asserting that a value edit rewrites *only* that argument span, and
@@ -1335,7 +1343,7 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
      with a corpus round-trip gate.
   2. **[x] D1b (done 2026-08-05)** — Merge project and mirror *per category*, which is what
      D1a named as step 2's own first move.
-  3. **[~] D1c** — Type the `PLAY_SE` family and give sound a timeline lane.
+  3. **[x] D1c (done 2026-08-05)** — Type the `PLAY_SE` family and give sound a timeline lane.
   4. Plugin hooks for the sound primitives, capture, then live.
   5. Export + write-back. Note the generated plugin installs per category, so a `sound_` script
      it does not emit still plays vanilla — nothing is lost by sound being absent until here.
@@ -1429,7 +1437,7 @@ sharpest assertion is the one that nearly was not written: two `game_` functions
 parse *fine*, first one wins, so a merge appending vanilla's copy underneath the project's
 would go unnoticed until an export wrote both out. Four mutations run, all caught.
 
-#### [~] D1c — Type the sound family and give sound a timeline lane
+#### [x] D1c — Type the sound family and give sound a timeline lane (done 2026-08-05)
 
 D1a reads a `sound_` function and writes it back unchanged; every line inside it is `Raw`, so
 nothing knows a sound from a comment. This types the calls and puts them on screen.
@@ -1461,6 +1469,43 @@ Arities, read off `macros.rs` rather than guessed — `PLAY_SE`, `PLAY_SE_NO_3D`
   that is the whole gate, because a typed call is now *regenerated* rather than copied. Plus a
   count of how many corpus sound calls are typed rather than left `Raw`, so a family member
   that stops being recognised fails instead of quietly falling back.
+
+**Result:** `ExcuteStmt::Sound(SoundCall)` with `SOUND_FUNCS` naming each member's arity;
+`AcmdScript::to_sound_events` resolves frames through `eval_stmts`. `AppState::sounds` feeds a
+band under the hurtboxes, and `timeline_frame_extent` counts sound frames so the landing thud
+75 frames after the last hitbox is reachable. The round trip stayed byte-exact — 295 of 301,
+the same six mis-indented at source — which is what says a regenerated call is spelled the way
+the game's own scripts spell it.
+
+**The new oracle found a shape nobody had looked for, on its first run.** Fifteen corpus
+`sound_` scripts write their last call *outside* every `is_excute` block — `kirby/WalkMiddle`
+plays one footstep wrapped and the other bare. Those parsed as `Raw`, so the move showed one
+footstep instead of two, and it had been that way since D1a. The round trip never noticed, and
+could not: an unrecognised line round-trips *because* it is copied verbatim.
+
+`AcmdStmt::Bare(Box<ExcuteStmt>)` is the fix. Deliberately not a one-statement `Excute`:
+emitting that would add an `if macros::is_excute(agent) {` the source never wrote, which is a
+behaviour change and not a formatting one. It made `eval_stmts` grow a second route into the
+per-statement logic, so that logic moved into `eval_excute_stmt` and both call it — what a
+command does cannot depend on whether its author wrapped it.
+
+**Only sound calls are routed into `Bare`.** A bare `ATTACK` stays `Raw` exactly as before,
+because nothing has measured whether one exists or what the timeline should do with it.
+
+**The trap this shares with B4:** typing a line moves it out of `Raw`, and `Raw` is what the
+hitbox rebuild keeps by name. A `Bare` the rebuild did not know about would be *deleted* on the
+first hitbox drag — silencing a move as a side effect of moving a hitbox. Both rebuild passes
+route it through the same collision filter a wrapped statement gets, so the answer cannot
+depend on the wrapper; `a_bare_sound_survives_a_hitbox_rebuild` pins it.
+
+Five mutations run, all caught — including the two that motivated their own assertions: a
+`Bare` that is parsed but never walked (the corpus oracle counts statements, so only the
+`kirby/WalkMiddle` event test sees it) and a needle matched without its paren, which reads
+`PLAY_STEP_FLIPPABLE` through `PLAY_STEP`'s one-hash layout.
+
+**Still out of scope, per this entry's own work order:** live playback (step 4) and export plus
+write-back (step 5). Sounds are displayed and nothing else — `sound_` is still not written by
+any export, so nothing can be lost.
 
 ### [ ] D2 — `expression_` scripts
 

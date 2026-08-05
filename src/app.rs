@@ -65,7 +65,12 @@ fn timeline_thin_row() -> f32 {
     (TIMELINE_ROW_HEIGHT * 0.45).max(3.0)
 }
 
-fn timeline_content_height(hitboxes: usize, effects: usize, hurtboxes: usize) -> f32 {
+fn timeline_content_height(
+    hitboxes: usize,
+    effects: usize,
+    hurtboxes: usize,
+    sounds: usize,
+) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
     let band = |rows: usize| {
@@ -75,7 +80,7 @@ fn timeline_content_height(hitboxes: usize, effects: usize, hurtboxes: usize) ->
             4.0 + rows as f32 * thin
         }
     };
-    (24.0 + hitbox_band + band(effects) + band(hurtboxes)).max(24.0)
+    (24.0 + hitbox_band + band(effects) + band(hurtboxes) + band(sounds)).max(24.0)
 }
 
 /// Merge a finished mirror fetch with the project scripts that were waiting on it, and say
@@ -103,6 +108,7 @@ fn merge_fetched_body(
 fn timeline_frame_extent(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
+    sounds: &[crate::data::SoundEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -120,7 +126,15 @@ fn timeline_frame_extent(
         .into_iter()
         .flatten()
     });
-    hitbox_frames.chain(effect_frames).max().unwrap_or(0)
+    // Sounds count too, and often decide the answer on their own: a `sound_` script routinely
+    // plays a landing thud tens of frames after the last hitbox closed, and clipping the
+    // timeline there would put that sound past the right-hand edge with no way to reach it.
+    let sound_frames = sounds.iter().map(|sound| sound.frame);
+    hitbox_frames
+        .chain(effect_frames)
+        .chain(sound_frames)
+        .max()
+        .unwrap_or(0)
 }
 
 fn timeline_scroll_area(viewport_height: f32) -> egui::ScrollArea {
@@ -2127,6 +2141,7 @@ impl VisionaryApp {
         self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
+            &self.state.sounds,
         ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -2440,12 +2455,17 @@ impl VisionaryApp {
             Ok(body) => {
                 let script = crate::acmd::parse_acmd_script(&body);
                 let effect_script = crate::acmd::parse_effect_script(&body);
+                // Read before the hitbox check below, and kept even when that check fails: a
+                // move with sounds but no hitboxes is a real script, the same argument that
+                // stopped effects being thrown away for an effect-only mod.
+                let sounds = crate::acmd::parse_sound_script(&body).to_sound_events();
 
                 let mut hitboxes = script.to_hitboxes();
                 // A move with effects but no hitboxes is a real script, not a failed load.
                 // Throwing its effects away used to make a linked source project that only
                 // carries `effect_*` functions — the common shape for a VFX-only mod — look
                 // like it had loaded nothing at all.
+                self.state.sounds = sounds;
                 let effects_only = hitboxes.is_empty() && !effect_script.stmts.is_empty();
                 if hitboxes.is_empty() && !effects_only {
                     self.acmd_error = Some(format!(
@@ -2480,6 +2500,7 @@ impl VisionaryApp {
                     self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
                         &self.state.hitboxes,
                         &self.state.effects,
+                        &self.state.sounds,
                     ));
 
                     self.jump_to_earliest_active_frame();
@@ -2506,6 +2527,7 @@ impl VisionaryApp {
                 });
                 self.state.effect_script = crate::data::EffectScript::default();
                 self.state.effects = Vec::new();
+                self.state.sounds = Vec::new();
             }
         }
         self.fetching_acmd = false;
@@ -3800,6 +3822,7 @@ impl VisionaryApp {
                     .max(timeline_frame_extent(
                         &self.state.hitboxes,
                         &self.state.effects,
+                        &self.state.sounds,
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -6681,6 +6704,7 @@ impl VisionaryApp {
         self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
+            &self.state.sounds,
         ));
         self.jump_to_earliest_active_frame();
         let mut status =
@@ -11343,6 +11367,7 @@ impl VisionaryApp {
         let total = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
+            &self.state.sounds,
         ));
         if total == 0 {
             return;
@@ -11376,8 +11401,12 @@ impl VisionaryApp {
             .into_iter()
             .filter(|s| s.status != "HIT_STATUS_NORMAL")
             .collect();
-        let timeline_height =
-            timeline_content_height(self.state.hitboxes.len(), n_fx, hurt_states.len());
+        let timeline_height = timeline_content_height(
+            self.state.hitboxes.len(),
+            n_fx,
+            hurt_states.len(),
+            self.state.sounds.len(),
+        );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
 
@@ -11556,6 +11585,47 @@ impl VisionaryApp {
                     1.0,
                     egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 190),
                 );
+            }
+
+            // Sounds — the bottom band, one row per call. Drawn as a tick at its frame rather
+            // than a bar, because a sound has no length this editor can know: the script says
+            // when it starts and nothing in ACMD says when it stops.
+            let sound_band_top = hurt_band_top
+                + if hurt_states.is_empty() {
+                    0.0
+                } else {
+                    hurt_states.len() as f32 * effect_height + 2.0
+                };
+            for (row, sound) in self.state.sounds.iter().enumerate() {
+                let y_top = sound_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(sound.frame.min(total));
+                let end_x = frame_end_to_x(sound.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                // `STOP_SE` silences rather than plays, so it reads as the quieter colour.
+                let base = if sound.call.func.starts_with("STOP") {
+                    egui::Color32::from_rgb(120, 140, 160)
+                } else {
+                    egui::Color32::from_rgb(150, 210, 150)
+                };
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 210),
+                );
+                // The name to the right of the tick, where there is room for it. A tick alone
+                // says a sound happens; the name is the part a modder is actually matching a
+                // hitbox against.
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        sound.call.sounds.join(" / "),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(150, 210, 150, 200),
+                    );
+                }
             }
 
             // Playhead
@@ -13112,11 +13182,17 @@ fn rebuild_script_from_hitboxes(
                 // same reason and not as part of the hitbox it names: it is carried in the
                 // script, not in the edited list, so dropping it here would delete it on the
                 // first hitbox drag.
+                // A sound is retained on the same terms, and this arm is the whole reason it
+                // was worth typing the family behind a compile error: before D1c a `PLAY_SE`
+                // in a `game_` script was `Raw` and survived here by accident. No vanilla
+                // script writes one — all 610 corpus calls are in `sound_` functions — but a
+                // user's may, and dragging a hitbox must not silence their move.
                 ExcuteStmt::HitStatus { .. }
                 | ExcuteStmt::HitResetAll
                 | ExcuteStmt::ColPri(_)
                 | ExcuteStmt::ColNormal
                 | ExcuteStmt::AttackMod { .. }
+                | ExcuteStmt::Sound(_)
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -13145,6 +13221,15 @@ fn rebuild_script_from_hitboxes(
                     count: *count,
                     body: retain_inside_raw_block(body),
                 }),
+                // Routed through the same filter a wrapped statement gets, rather than kept
+                // outright: whether something is a collision cannot depend on whether its
+                // author wrapped it, or a bare one would be emitted here *and* rebuilt from
+                // the edited list, and the move would hit twice.
+                AcmdStmt::Bare(inner) => {
+                    retain_non_collisions_in_block(std::slice::from_ref(inner.as_ref()))
+                        .pop()
+                        .map(|kept| AcmdStmt::Bare(Box::new(kept)))
+                }
                 AcmdStmt::Frame(_)
                 | AcmdStmt::Wait(_)
                 | AcmdStmt::WaitLoopClear
@@ -13186,6 +13271,13 @@ fn rebuild_script_from_hitboxes(
                             body: retain_inside_raw_block(body),
                         },
                     ));
+                }
+                AcmdStmt::Bare(inner) => {
+                    if let Some(kept) =
+                        retain_non_collisions_in_block(std::slice::from_ref(inner.as_ref())).pop()
+                    {
+                        out.push((frame, AcmdStmt::Bare(Box::new(kept))));
+                    }
                 }
                 AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {
                     out.push((frame, stmt.clone()));
@@ -15578,6 +15670,40 @@ mod live_effect_capture_tests {
         );
     }
 
+    /// Dragging a hitbox must not silence a sound written outside an `is_excute` block.
+    ///
+    /// This is B4's lesson pointed at the statement kind D1c added. A bare call used to parse
+    /// as `AcmdStmt::Raw`, which the rebuild keeps by name; typing it moved it into `Bare`, and
+    /// a variant the rebuild does not know about is deleted rather than kept. No vanilla
+    /// `game_` script writes a sound at all, so the corpus oracles cannot reach this — but a
+    /// user's can, and the line is lifted from `kirby/WalkMiddle` rather than invented.
+    #[test]
+    fn a_bare_sound_survives_a_hitbox_rebuild() {
+        const BARE: &str = "macros::PLAY_SE(agent, Hash40::new(\"se_kirby_step_left_m\"));";
+        let source = format!(
+            "unsafe extern \"C\" fn game_test(agent: &mut L2CAgentBase) {{\n    \
+             frame(agent.lua_state_agent, 3.0);\n    {BARE}\n}}\n"
+        );
+        let original = crate::acmd::parse_acmd_script(&source);
+        assert!(
+            matches!(original.stmts[1], crate::data::AcmdStmt::Bare(_)),
+            "the bare sound did not parse as a typed statement: {:?}",
+            original.stmts
+        );
+
+        let hitbox = Hitbox {
+            id: 0,
+            active_start: 3,
+            ..Default::default()
+        };
+        let rebuilt = rebuild_script_from_hitboxes(&original, &[hitbox]);
+        let emitted = crate::acmd::preview_game_fn(&rebuilt, "test");
+        assert!(
+            emitted.contains(BARE),
+            "dragging a hitbox deleted the move's sound:\n{emitted}"
+        );
+    }
+
     /// Renumbering a hitbox is an ordinary edit made from the ID drag box. The rebuild used to
     /// look the collision back up by its *new* id, miss, and silently emit the untouched original
     /// call — so an export carried none of the move's edits.
@@ -15906,28 +16032,34 @@ mod live_effect_capture_tests {
         );
     }
 
-    /// The hurtbox band has to add its own height. Drawing rows the layout did not reserve
-    /// puts them under the next widget, where they are invisible and look like a lost lane.
+    /// Every thin band has to add its own height. Drawing rows the layout did not reserve puts
+    /// them under the next widget, where they are invisible and look like a lost lane — which
+    /// is a failure mode that repeats once per band, so the sound band is checked here rather
+    /// than trusted to be like the two above it.
     #[test]
-    fn the_hurtbox_band_reserves_room_for_its_own_rows() {
-        let none = timeline_content_height(2, 0, 0);
-        let three = timeline_content_height(2, 0, 3);
-        assert!(
-            three > none,
-            "a hurtbox band must grow the timeline: {none} vs {three}"
-        );
-        // Same shape as the effect band beside it — 4px of padding, then one thin row each.
+    fn each_thin_band_reserves_room_for_its_own_rows() {
+        let none = timeline_content_height(2, 0, 0, 0);
+        // Same shape for each — 4px of padding, then one thin row apiece.
         let band = 4.0 + 3.0 * timeline_thin_row();
-        assert!((three - none - band).abs() < 0.01, "{three} vs {none}");
-        // And the two bands stack rather than sharing space.
-        let both = timeline_content_height(2, 3, 3);
-        assert!((both - none - 2.0 * band).abs() < 0.01, "{both} vs {none}");
+        for (label, height) in [
+            ("effect", timeline_content_height(2, 3, 0, 0)),
+            ("hurtbox", timeline_content_height(2, 0, 3, 0)),
+            ("sound", timeline_content_height(2, 0, 0, 3)),
+        ] {
+            assert!(
+                (height - none - band).abs() < 0.01,
+                "the {label} band must grow the timeline by {band}: {none} vs {height}"
+            );
+        }
+        // And they stack rather than sharing space.
+        let all = timeline_content_height(2, 3, 3, 3);
+        assert!((all - none - 3.0 * band).abs() < 0.01, "{all} vs {none}");
     }
 
     #[test]
     fn dense_timeline_rows_scale_without_changing_frame_space() {
-        assert_eq!(timeline_content_height(0, 0, 0), 24.0);
-        assert_eq!(timeline_content_height(40, 0, 0), 504.0);
+        assert_eq!(timeline_content_height(0, 0, 0, 0), 24.0);
+        assert_eq!(timeline_content_height(40, 0, 0, 0), 504.0);
         assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
 
         let dense_capture: Vec<Hitbox> = (0..40)
@@ -15938,7 +16070,7 @@ mod live_effect_capture_tests {
                 ..Default::default()
             })
             .collect();
-        assert_eq!(timeline_frame_extent(&dense_capture, &[]), 45);
+        assert_eq!(timeline_frame_extent(&dense_capture, &[], &[]), 45);
 
         let context = egui::Context::default();
         let input = egui::RawInput {
@@ -15952,7 +16084,7 @@ mod live_effect_capture_tests {
         let _ = context.run_ui(input, |ui| {
             let output = timeline_scroll_area(120.0).show(ui, |ui| {
                 ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), timeline_content_height(40, 0, 0)),
+                    egui::vec2(ui.available_width(), timeline_content_height(40, 0, 0, 0)),
                     egui::Sense::hover(),
                 );
             });
@@ -15961,6 +16093,33 @@ mod live_effect_capture_tests {
         let (viewport_height, content_height) = measured.unwrap();
         assert!(viewport_height <= 120.01);
         assert!(content_height >= 504.0);
+    }
+
+    /// A sound after the last collision still has to fit on the timeline.
+    ///
+    /// This is the common shape, not an edge case: a `sound_` script routinely plays a landing
+    /// thud tens of frames after the move's hitboxes have closed — Kirby's dash appeal fires
+    /// its last sound on frame 83 with nothing to hit anyone at all — and an extent that
+    /// ignored sounds would draw that row past the right-hand edge.
+    #[test]
+    fn a_sound_after_the_last_hitbox_still_widens_the_timeline() {
+        let sound = |frame: u32| crate::data::SoundEvent {
+            frame,
+            call: crate::data::SoundCall {
+                func: "PLAY_SE".into(),
+                sounds: vec!["se_kirby_landing02".into()],
+                tail: None,
+            },
+        };
+        let hitbox = vec![Hitbox {
+            active_start: 5,
+            active_end: 8,
+            ..Default::default()
+        }];
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[]), 8);
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[sound(83)]), 83);
+        // And a sound inside the move does not shrink it.
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[sound(2)]), 8);
     }
 
     #[test]

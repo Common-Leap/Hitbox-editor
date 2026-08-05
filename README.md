@@ -337,6 +337,19 @@ export instead of being written into your source. `SET_SEARCH_SIZE_EXIST`, which
 re-sizes a box already out, is not modelled: it belongs with the hitbox tuning
 above rather than here, and no vanilla script uses it.
 
+**Sounds** get their own band at the bottom of the timeline, one row per call,
+each a tick at the frame it fires on with the sound's name beside it. A move's
+`sound_` script is read alongside its hitboxes and effects, so you can see the
+swing that goes with a hitbox, the footsteps a run plays, and the landing thud
+that lands well after the last hitbox closed — the timeline widens to fit that
+last one rather than cutting it off. `STOP_SE` is drawn in a colder colour,
+because it silences a sound rather than playing one.
+
+A sound is a tick and not a bar on purpose: the script says when one starts and
+nothing in ACMD says when it ends. Sounds are shown but not yet editable, and
+nothing about them is written or played back — reading them changes only what
+you can see.
+
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour
