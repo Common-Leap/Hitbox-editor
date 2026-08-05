@@ -38,6 +38,10 @@ impl Default for ModProjectFile {
 }
 
 impl ModProjectFile {
+    /// Deliberately does not consult `effect_dropped_lines`. It is a note about what an export
+    /// would lose, not an edit, so a project holding only that has nothing to build and must
+    /// still count as empty — otherwise "No edits to export yet" turns into an export that
+    /// produces no files.
     pub fn is_empty(&self) -> bool {
         self.fighters.values().all(|f| {
             f.acmd.is_empty()
@@ -63,6 +67,17 @@ pub struct FighterMod {
     /// move name → full edited spawn list (what the exported effect script emits)
     #[serde(default)]
     pub effect_calls_full: HashMap<String, Vec<crate::data::EffectCall>>,
+    /// move name → the lines the effect export throws away, as measured when the move was last
+    /// read from a script.
+    ///
+    /// Stored rather than derived because it cannot be derived later: the export regenerates the
+    /// function from `effect_calls_full`, and a line that became no call is in neither the calls
+    /// nor the output. This is the only field here that changes no generated code — it exists so
+    /// that exporting a reloaded project reports the same losses as the source pane does with the
+    /// script open. Moves that lost nothing are left out, and `#[serde(default)]` keeps projects
+    /// saved before C6c loadable; both simply report nothing, which is what they did before.
+    #[serde(default)]
+    pub effect_dropped_lines: HashMap<String, Vec<String>>,
     /// move name → the whole edited `sound_` script (what the exported sound script emits)
     ///
     /// The whole script, not the changed calls, for the reason `effect_calls_full` is whole:

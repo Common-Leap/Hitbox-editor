@@ -256,6 +256,20 @@ use is of exactly that kind — a costume check wrapped around a recolour — so
 those are listed under the generated code as lines the export drops, not attached
 to whichever spawn happens to be nearest.
 
+That list now also reaches the export itself. It used to appear only under the
+generated code in the editor, which meant it was shown while the move was open
+and nowhere else — exporting a project you had reopened told you nothing, because
+the dropped lines are the one thing a saved project did not remember and the
+export had no way to mention them if it had. Both halves are fixed: a move
+carries its dropped lines in the project file, and the export summary prints them
+under the line that says what was written. If an export is going to leave
+something out, it says so at the moment it happens.
+
+What it says is a snapshot from when the move was last read. Open the move and it
+is re-derived; leave it closed and export, and you get what was true when you
+saved. That is the honest reading of a note about a script the project no longer
+has.
+
 Throws carry a hit with no volume. `ATTACK_ABS` sets the damage and knockback
 applied to an opponent who is *already* caught, so it has no bone, no size, and
 no position — the fields that would describe those are hidden rather than shown

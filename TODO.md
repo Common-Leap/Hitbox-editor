@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**372 green after D1e**), including the eight corpus
+- [ ] `cargo test` passes (**375 green after C6c**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -1277,6 +1277,11 @@ entry is still open.
   Still probably a warning — but the reasoning in C5's entry is now out of date and should be
   re-derived rather than re-quoted.
 
+  **C6c (2026-08-05) changed one of the inputs to that re-derivation.** The choice was framed as
+  warning *versus* blocker, which assumed a warning is heard. On the export path it was not: the
+  report was built and discarded, so "warning" meant silence there until C6c gave it a channel.
+  Re-derive against what the two now actually do, not against what the words imply.
+
 **Measured remainder after `COL_NORMAL`, 15 of 132 scripts:** `wait_loop_sync_mot` 7, `else {` 5,
 `methodlib::L2CAgent::pop()` 2, `CANCEL_FILL_SCREEN` 2, `EffectModule::remove_screen` 2.
 
@@ -1286,17 +1291,65 @@ editor meaning (`pop()`, `remove_screen`), or another entry's work (`CANCEL_FILL
 C6b should be closed at 15 rather than kept open for a cheap win that does not exist — the only
 thing still owed is the warning-vs-blocker re-derivation below, which is a decision, not code.
 
-### [~] C6c — Close C5's export-path gap
+### [x] C6c — Close C5's export-path gap (done 2026-08-05)
 
-Carried lines already report on the export path, because they travel on the `EffectCall`s a
-project saves. Dropped lines do not: nothing in a saved project remembers them.
+**The entry's premise was wrong, and this is the Rule 5 rewrite.** It opened "Carried lines
+already report on the export path, because they travel on the `EffectCall`s a project saves."
+They travel there, and `check_carried_lines` does run on every export, and the finding it
+produces was **read by nobody**. `source_project` built the whole `Report` and consulted
+`has_blockers()` — one bit of it. Every warning went on the floor, carried and dropped alike.
 
-- Store the loss list beside `effect_calls_full` in `FighterEdits`, populate it where the script
-  is still in hand, and pass it at [acmd_verify.rs:161](src/acmd_verify.rs:161).
-- **This is a schema change for a report, not for behaviour** — which is why C6 left it. Weigh
-  that before starting: the generated-source pane, which is where a user looks before exporting,
-  already has the script and already checks. The gap only bites someone who exports a saved
-  project without opening the pane.
+So the gap was not "one of the two halves is missing". It was that the export path had no
+warning channel at all, and the half that was supposedly working was working into a void. That
+also means the original scope note — "a schema change for a report, not for behaviour" — was
+right about the schema and wrong about the stakes: it described the gap as biting only someone
+who exports without opening the source pane, when in fact the source pane was the *only* place
+any loss was ever reported.
+
+**What shipped, in two halves that are both required:**
+
+- **Somewhere to keep the list.** `FighterMod::effect_dropped_lines` (`#[serde(default)]`, keyed
+  by move) beside `effect_calls_full`, mirrored by `AppState::effect_dropped_lines` keyed
+  `"fighter/move"`. Written by `record_dropped_effect_lines`, called at each of the four places
+  `state.effect_script` is assigned — the moment the script exists, and the only one, since the
+  export regenerates the function from the calls and a line that became no call is in neither
+  the calls nor the output.
+- **A channel to report it through.** `source_project` returns `GeneratedSource { project,
+  warnings }` instead of a bare project, and the export summary prints the warnings under the
+  "verified" line. `Report::warning_summary()` caps at 5, on `blocker_summary`'s reasoning.
+
+**Do not filter the loss list against the emitted text.** Tried, to stop a list carried in an
+old project from naming a line a newer Visionary had learned to emit. Measured over the corpus
+it silenced 2 of 20 losses: kirby's `SpecialHi2` and `SpecialAirHi2` each call
+`methodlib::L2CAgent::pop()` **twice**, one carried on a spawn and one not, so the surviving
+copy made the dropped one look reproduced. A stale warning is noise; a hidden loss is the
+silence C5 exists to end, and the two are not worth trading. The reasoning is recorded above
+`check_dropped_lines` so the next person does not re-derive it.
+
+**Staleness is therefore a named limitation, not a solved problem.** A carried list says what
+was lost when the move was last parsed. Opening the move re-derives it, and the source pane
+always derives fresh, so it only goes stale for a move exported from a reloaded project without
+ever being opened. That is the exact case this entry exists to serve, so it is worth knowing it
+is served with a snapshot.
+
+**Six mutations run; two survived and both were findings.**
+- The project-save half was untested and a mutation deleting it passed everything — the same
+  shape as `[[registration-is-the-half-that-does-nothing]]`: the reporting side was complete,
+  correct, and reading a map the editor never filled. `project_loss_note` was extracted from
+  `build_project` purely so it could be tested, and the editor's own source pane derives its
+  copy from the open script, so an empty saved map looks identical from inside the app.
+- The "only gather notes for moves being exported" filter in `source_project` could not change
+  an outcome — `verify_export` walks the exported moves and asks the map about each, so an
+  orphan note is never consulted. **Removed rather than tested.** The behaviour it claimed to
+  protect is still asserted, at the layer that actually enforces it.
+
+**Named exceptions.** Live is untouched and out of scope — this is a disk surface. Warnings
+still do not appear for the `.nro` build path, only the source export, because that path does
+not call `source_project`.
+
+**Trap for whoever adds the next verification check:** `Report` findings are only rendered in
+the source pane. Anything new reaching only `verify_export` is invisible unless it is a blocker
+or it goes through `warning_summary`.
 
 ### [ ] C4 — Effect lifetime control
 

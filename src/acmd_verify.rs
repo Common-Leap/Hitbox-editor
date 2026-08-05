@@ -31,7 +31,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::acmd::ModProject;
-use crate::data::{AcmdScript, AcmdStmt, EffectCall, EffectScript, ExcuteStmt, Hitbox};
+use crate::data::{AcmdScript, AcmdStmt, EffectCall, ExcuteStmt, Hitbox};
 use crate::mod_project::LiveTweak;
 
 /// How much a finding matters. Ordered so `max()` picks the worse one.
@@ -89,6 +89,27 @@ impl Report {
         self.blockers().next().is_some()
     }
 
+    pub fn warnings(&self) -> impl Iterator<Item = &Finding> {
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+    }
+
+    /// One line per warning, for an export that succeeded but did not carry everything.
+    ///
+    /// Capped on the same reasoning as [`Self::blocker_summary`], and more sharply: a single
+    /// unmodelled macro in a `for` body produces one finding per move that uses it, and an
+    /// export summary is read at a glance rather than studied.
+    pub fn warning_summary(&self) -> Vec<String> {
+        const SHOWN: usize = 5;
+        let all: Vec<String> = self.warnings().map(|f| f.to_string()).collect();
+        let mut out: Vec<String> = all.iter().take(SHOWN).cloned().collect();
+        if all.len() > SHOWN {
+            out.push(format!("… and {} more", all.len() - SHOWN));
+        }
+        out
+    }
+
     pub fn is_clean(&self) -> bool {
         self.findings.is_empty()
     }
@@ -120,12 +141,21 @@ impl Report {
 /// `acmd_edits` and `effect_edits` are the same `(fighter, move, …)` lists handed to
 /// [`crate::acmd::build_mod_project_full`], so this checks the code that is actually about to
 /// be written rather than a re-derivation of it.
+///
+/// `dropped` is keyed `"fighter/move"` and holds what the effect export threw away when that
+/// move was last read from a script. It is separate from `effect_edits` because it is the one
+/// input here that no amount of looking at the generated project can recover: the export builds
+/// the function out of the calls it understood, so a line that became no call left no trace in
+/// either the edits or the output. A move missing from the map had no source in hand, which is
+/// not the same as a move that had one and lost nothing — but both produce no findings, so the
+/// distinction costs nothing to collapse and empty lists are not stored.
 pub fn verify_export(
     project: &ModProject,
     acmd_edits: &[(String, String, AcmdScript)],
     effect_edits: &[(String, String, Vec<EffectCall>)],
     sound_edits: &[(String, String, AcmdScript)],
     tweaks: &[LiveTweak],
+    dropped: &HashMap<String, Vec<String>>,
 ) -> Report {
     let mut report = Report::default();
     check_files(project, &mut report);
@@ -153,18 +183,22 @@ pub fn verify_export(
 
     for (fighter, move_name, calls) in effect_edits {
         let subject = format!("{fighter} / {move_name}");
+        // Not `subject`: that is prose for the report and has spaces around the slash. The
+        // dropped map is keyed the way the editor keys every other per-move table.
+        let key = format!("{fighter}/{move_name}");
         let emitted = crate::acmd::preview_effect_fn(calls, move_name, tweaks);
-        // Still no source to hand over, but this gap is now half the size C5 described. A
-        // saved project stores the resolved call list, and C6 put the *carried* lines on the
-        // calls themselves — so `check_carried_lines` runs here in full, and an exported mod
-        // does warn about the lines it copied through verbatim.
-        //
-        // What is still missing is the dropped half: a line that reached no call left no trace
-        // in the project, so naming it here would need `FighterEdits` to store the loss list
-        // beside `effect_calls_full`. That is a schema change for a report, not for behaviour,
-        // and the generated-source pane — where a user looks before exporting — does have the
-        // script and does check.
-        verify_effect_move(&subject, calls, &emitted, tweaks, None, &mut report);
+        // C5 left this call passing `None`, because a saved project remembered the resolved
+        // calls and nothing about the lines that became none of them. C6c gave the project
+        // somewhere to keep that list, so both halves of the loss report now reach an export
+        // run from a reloaded mod, not just the generated-source pane.
+        verify_effect_move(
+            &subject,
+            calls,
+            &emitted,
+            tweaks,
+            dropped.get(&key).map(Vec::as_slice),
+            &mut report,
+        );
         if !sources.iter().any(|text| text.contains(&emitted)) {
             report.blocker(
                 &subject,
@@ -232,27 +266,29 @@ pub fn verify_move(subject: &str, script: &AcmdScript, emitted: &str, report: &m
 /// `tweaks` are needed, not incidental: a live speed override deliberately replaces a spawn's
 /// own `LAST_EFFECT_SET_RATE` value in the emitted code, so without them a tweaked effect
 /// looks exactly like an export that lost the script's rate.
-/// `source` is the script the calls were parsed from, when there is one. It is the only place
-/// the lines an export deletes still exist — `calls` has already lost them and `emitted` never
-/// had them — so without it that check cannot run. Pass `None` for a move captured live, which
-/// has no source anywhere.
+/// `lost` is what [`crate::acmd::unexportable_effect_lines`] said about the script the calls were
+/// parsed from. This function takes the finished list rather than the script for the reason C6c
+/// exists: by export time the script is usually gone — `calls` has already lost those lines and
+/// `emitted` never had them — but the list can be carried in a saved project, and the caller that
+/// still holds a script can derive it in one line. Pass `None` when no source was ever in hand,
+/// which is the case for a move reconstructed from live captures.
 pub fn verify_effect_move(
     subject: &str,
     calls: &[EffectCall],
     emitted: &str,
     tweaks: &[LiveTweak],
-    source: Option<&EffectScript>,
+    lost: Option<&[String]>,
     report: &mut Report,
 ) {
     check_effect_fidelity(subject, calls, emitted, tweaks, report);
     check_effect_values(subject, calls, report);
-    // Unlike the dropped-line check, this one needs no source: the carried lines travel on the
-    // calls themselves, so a project saved and reloaded still reports them. That is the point —
-    // a user who opens a saved mod and exports it gets the same warning as the one who parsed
-    // the script this session.
+    // Unlike the dropped-line check, this one needs nothing carried alongside: the carried lines
+    // travel on the calls themselves, so a project saved and reloaded still reports them. That is
+    // the point — a user who opens a saved mod and exports it gets the same warning as the one
+    // who parsed the script this session.
     check_carried_lines(subject, calls, report);
-    if let Some(source) = source {
-        check_dropped_lines(subject, source, report);
+    if let Some(lost) = lost {
+        check_dropped_lines(subject, lost, report);
     }
     for (spawn_func, effect_name) in crate::acmd::export_spawn_downgrades(calls) {
         report.warn(
@@ -743,19 +779,26 @@ fn check_effect_fidelity(
 /// one line this parser has no variant for, so refusing them would turn a lossy export into no
 /// export at all — worse for every user who does not care about the dropped line, and no better
 /// for the ones who do, since the message is the same either way.
-fn check_dropped_lines(subject: &str, source: &EffectScript, report: &mut Report) {
-    // Both ways of losing a line — no typed variant, and a typed one that binds to no spawn —
-    // are inside `unexportable_effect_lines` now. This used to append the second list here as
-    // well; once C6 folded it into the first, doing that reported every unbound modifier twice.
-    let lost = crate::acmd::unexportable_effect_lines(source);
-
+///
+/// `lost` comes from [`crate::acmd::unexportable_effect_lines`], which already folds together
+/// both ways of losing a line — no typed variant, and a typed one that binds to no spawn. This
+/// used to derive it here and append the second list separately, which reported every unbound
+/// modifier twice.
+///
+/// **Do not filter `lost` against the emitted text.** C6c tried it, to stop a list carried in a
+/// saved project from naming a line a newer Visionary had since learned to emit. Measured over
+/// the corpus it silenced two real losses: kirby's `SpecialHi2` and `SpecialAirHi2` each call
+/// `methodlib::L2CAgent::pop()` twice, one carried on a spawn and one not, so the surviving copy
+/// made the dropped one look reproduced. Reporting a loss that no longer happens is a stale
+/// warning; hiding one that does is the silence this whole check exists to end.
+fn check_dropped_lines(subject: &str, lost: &[String], report: &mut Report) {
     // Grouped by text and kept in first-seen order: a line inside a `for` body is genuinely
     // lost once per iteration, but saying so five times reads as five different problems.
     let mut seen: Vec<(String, usize)> = Vec::new();
     for line in lost {
-        match seen.iter_mut().find(|(text, _)| *text == line) {
+        match seen.iter_mut().find(|(text, _)| text == line) {
             Some((_, count)) => *count += 1,
-            None => seen.push((line, 1)),
+            None => seen.push((line.clone(), 1)),
         }
     }
     for (line, count) in seen {
@@ -1272,7 +1315,7 @@ mod tests {
                             &calls,
                             &emitted,
                             &[],
-                            Some(&effect_script),
+                            Some(&crate::acmd::unexportable_effect_lines(&effect_script)),
                             &mut report,
                         );
                         checked += 1;
@@ -1334,7 +1377,7 @@ mod tests {
                 contents: "pub fn main() { let x = ;\n".into(),
             }],
         };
-        let report = verify_export(&project, &[], &[], &[], &[]);
+        let report = verify_export(&project, &[], &[], &[], &[], &Default::default());
         assert!(report.has_blockers(), "{}", messages(&report));
         assert!(
             messages(&report).contains("does not parse at line"),
@@ -1353,7 +1396,7 @@ mod tests {
             ("mario".into(), "attackairn".into(), script(&body)),
         ];
         let project = build_mod_project(&edits, "collide_plugin");
-        let report = verify_export(&project, &edits, &[], &[], &[]);
+        let report = verify_export(&project, &edits, &[], &[], &[], &Default::default());
         assert!(
             messages(&report).contains("both generate `game_attackairn`"),
             "{}",
@@ -1371,7 +1414,7 @@ mod tests {
         project
             .files
             .retain(|file| !file.rel_path.ends_with("/acmd.rs"));
-        let report = verify_export(&project, &edits, &[], &[], &[]);
+        let report = verify_export(&project, &edits, &[], &[], &[], &Default::default());
         assert!(
             messages(&report).contains("missing from the exported project"),
             "{}",
@@ -1536,7 +1579,14 @@ mod tests {
         );
 
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        verify_effect_move(
+            "test",
+            &calls,
+            &emitted,
+            &[],
+            Some(&crate::acmd::unexportable_effect_lines(&source)),
+            &mut report,
+        );
         assert!(
             messages(&report).contains("wait_loop_sync_mot(agent.lua_state_agent, false, 3.0);"),
             "the dropped line was not named:\n{}",
@@ -1596,7 +1646,14 @@ mod tests {
         let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
 
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        verify_effect_move(
+            "test",
+            &calls,
+            &emitted,
+            &[],
+            Some(&crate::acmd::unexportable_effect_lines(&source)),
+            &mut report,
+        );
         let said = messages(&report);
         // The two reports use different wording on purpose, and the difference is the whole
         // point of this test — "does not include" is a deletion, "copies this line through" is
@@ -1651,7 +1708,14 @@ mod tests {
         let calls = source.to_effect_calls();
         let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &[], Some(&source), &mut report);
+        verify_effect_move(
+            "test",
+            &calls,
+            &emitted,
+            &[],
+            Some(&crate::acmd::unexportable_effect_lines(&source)),
+            &mut report,
+        );
         assert!(
             report.is_clean(),
             "a script the export reproduces exactly still reported something:\n{}",

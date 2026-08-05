@@ -1,7 +1,7 @@
 //! Pure helpers shared by the console-package and developer export paths.
 
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::acmd::{build_mod_project_full, ModProject};
@@ -50,14 +50,28 @@ pub fn base_eff_has_content(eff: &EffMod) -> bool {
             .any(|operation| operation.one_slot_slots.is_empty())
 }
 
+/// A generated source project, and what verification had to say about it short of refusing it.
+///
+/// The warnings are returned rather than logged because this function is the only thing that
+/// ever sees them and the user is the only one they are for. Until C6c they were built and
+/// dropped on the floor here: verification produced a full loss report on every export and
+/// `source_project` read one bit of it — whether anything was fatal. An export that quietly
+/// deletes a line the editor could not model was reported to nobody.
+pub struct GeneratedSource {
+    pub project: ModProject,
+    /// Ready-to-show lines, already capped. Empty when the export carried everything.
+    pub warnings: Vec<String>,
+}
+
 /// Convert every ACMD/effect-call record in a saved project into one buildable Skyline source
 /// project. Effect-call deltas are not sufficient by themselves because the generated script
 /// replaces the entire original effect script.
-pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
+pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource>> {
     let mut acmd_edits = Vec::new();
     let mut effect_edits = Vec::new();
     let mut sound_edits = Vec::new();
     let mut tweaks: Vec<LiveTweak> = Vec::new();
+    let mut dropped: HashMap<String, Vec<String>> = HashMap::new();
     let mut incomplete = Vec::new();
     let mut exported_effect_names = HashSet::new();
 
@@ -79,6 +93,14 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
                     .map(|call| call.effect_name.to_ascii_lowercase()),
             );
             effect_edits.push((fighter.clone(), move_name.clone(), calls.clone()));
+        }
+        for (move_name, lost) in &edits.effect_dropped_lines {
+            // Re-keyed to match what the report looks moves up by, and otherwise passed through
+            // whole. A note for a move this build ships no function for needs no filtering here:
+            // `verify_export` walks the exported moves and asks the map about each, so an orphan
+            // note is never consulted. C6c wrote that filter first and removed it once a mutation
+            // showed it could not change an outcome.
+            dropped.insert(format!("{fighter}/{move_name}"), lost.clone());
         }
         // Sound scripts. A move whose sound script parsed to nothing is skipped rather than
         // exported: emitting an empty `sound_` function would install silence over the
@@ -146,6 +168,7 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
         &effect_edits,
         &sound_edits,
         &tweaks,
+        &dropped,
     );
     if report.has_blockers() {
         bail!(
@@ -153,7 +176,10 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<ModProject>> {
             report.blocker_summary()
         );
     }
-    Ok(Some(built))
+    Ok(Some(GeneratedSource {
+        project: built,
+        warnings: report.warning_summary(),
+    }))
 }
 
 /// Materialize a generated Cargo project at exactly `root` (without adding another surprise
@@ -443,6 +469,113 @@ mod tests {
         assert!(error.contains("kirby/attack_dash"), "{error}");
     }
 
+    /// C6c, end to end: the losses a move suffers on the way through the export survive being
+    /// saved, reloaded, and exported again.
+    ///
+    /// The fixture is lifted from the corpus rather than written here, because a hand-made
+    /// "lossy" script only proves that this test can construct one. `SpecialHi2` is a real
+    /// script that really loses a line, and the assertion below is that a user who saves that
+    /// project, closes Visionary, reopens it and exports without ever opening the move again is
+    /// still told so — which before C6c they were not, twice over: the project had nowhere to
+    /// keep the list, and the export threw its whole report away bar the blockers.
+    #[test]
+    fn a_reloaded_project_still_reports_the_lines_its_export_deletes() {
+        let script_path = crate::scratch_dirs::app_storage_root()
+            .join("script-cache")
+            .join("kirby")
+            .join("SpecialHi2.txt");
+        let Ok(body) = std::fs::read_to_string(&script_path) else {
+            return;
+        };
+        let parsed = crate::acmd::parse_effect_script(&body);
+        let calls = parsed.to_effect_calls();
+        let lost = crate::acmd::unexportable_effect_lines(&parsed);
+        // Guard the oracle with what it claims to test. If this move ever stops losing a line —
+        // because the family got modelled, which is the good outcome — this test is measuring
+        // nothing and should be repointed at a move that still does, not deleted.
+        assert!(
+            !calls.is_empty() && !lost.is_empty(),
+            "SpecialHi2 no longer exercises a loss; repoint this test at a move that does"
+        );
+
+        let build = |dropped: HashMap<String, Vec<String>>| {
+            let mut project = ModProjectFile {
+                version: PROJECT_VERSION,
+                name: "loss_report".into(),
+                ..Default::default()
+            };
+            project.fighters.insert(
+                "kirby".into(),
+                FighterMod {
+                    effect_calls_full: HashMap::from([("special_hi2".into(), calls.clone())]),
+                    effect_dropped_lines: dropped,
+                    ..Default::default()
+                },
+            );
+            // Through JSON, because that is the trip being tested. Asserting on the struct in
+            // memory would pass even if the new field never reached the file.
+            let json = serde_json::to_string(&project).unwrap();
+            let reloaded: ModProjectFile = serde_json::from_str(&json).unwrap();
+            source_project(&reloaded)
+                .unwrap()
+                .expect("effect edits should export")
+                .warnings
+                .join("\n")
+        };
+
+        let said = build(HashMap::from([("special_hi2".into(), lost.clone())]));
+        let first = lost[0].trim();
+        assert!(
+            said.contains(first),
+            "the export never mentioned the line it deleted ({first}):\n{said}"
+        );
+
+        // The control, and the only thing that shows the stored list is what carried it: the
+        // calls, the generated code and the verification are identical here.
+        let silent = build(HashMap::new());
+        assert!(
+            !silent.contains(first),
+            "the loss was reported without the saved list, so this test proves nothing about \
+             it:\n{silent}"
+        );
+
+        // A note for a move this build ships no function for. Visionary never saves that pair —
+        // the note only goes out beside the calls — but these files travel with mods and get
+        // hand-edited, and a warning about a move that is not in the export is a warning the
+        // user cannot act on. Enforced by the report only ever asking about moves it is
+        // exporting, so this holds no matter what the gathering above passes along.
+        let orphan = build(HashMap::from([("some_other_move".into(), lost.clone())]));
+        assert!(
+            !orphan.contains(first),
+            "a loss note was reported for a move with no exported function:\n{orphan}"
+        );
+    }
+
+    /// A loss note is a remark about an export, not an edit to be exported.
+    ///
+    /// If it counted, a project holding nothing else would stop reporting "no edits yet" and
+    /// start producing an export with no files in it.
+    #[test]
+    fn a_project_holding_only_a_loss_note_is_still_empty() {
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "note_only".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "kirby".into(),
+            FighterMod {
+                effect_dropped_lines: HashMap::from([(
+                    "special_hi2".into(),
+                    vec!["methodlib::L2CAgent::pop();".into()],
+                )]),
+                ..Default::default()
+            },
+        );
+        assert!(project.is_empty());
+        assert!(source_project(&project).unwrap().is_none());
+    }
+
     /// End to end: a script the user actually wrote → parsed → carried through a saved
     /// project → generated plugin source. The macros they called have to come out the other
     /// side, because a mod that silently swaps `EFFECT_FOLLOW_FLIP` for `EFFECT` does not
@@ -484,7 +617,10 @@ unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
         let json = serde_json::to_string(&project).unwrap();
         let project: ModProjectFile = serde_json::from_str(&json).unwrap();
 
-        let generated = source_project(&project).unwrap().expect("source project");
+        let generated = source_project(&project)
+            .unwrap()
+            .expect("source project")
+            .project;
         let acmd = generated
             .files
             .iter()
@@ -569,7 +705,8 @@ unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
             .unwrap();
         let source = source_project(&project)
             .unwrap()
-            .expect("ACMD source edits");
+            .expect("ACMD source edits")
+            .project;
         let source_root = output.join("acmd_source");
         write_source_project(&source, &source_root).unwrap();
 

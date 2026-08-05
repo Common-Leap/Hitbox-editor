@@ -1758,6 +1758,10 @@ impl VisionaryApp {
         self.state.total_frames = move_entry.frame_count;
         self.state.hitboxes.clear();
         self.state.set_script(crate::data::AcmdScript::default());
+        // No `record_dropped_effect_lines` here, unlike the other resets of this field.
+        // `selected_move` is still the *previous* move on this line, so recording would file
+        // this blank script under that move's name and erase a note that is still true — its
+        // spawn snapshot in `effect_call_full` outlives this clear for the same reason.
         self.state.effect_script = crate::data::EffectScript::default();
         self.state.effects = Vec::new();
         self.acmd_error = None;
@@ -2039,10 +2043,14 @@ impl VisionaryApp {
                 &self.state.effects,
                 &emitted,
                 &tweaks,
-                // Empty for a move captured live from the game, which has no script text
-                // anywhere — and correctly reports no dropped lines, because there is no
-                // original for the export to fall short of.
-                Some(&self.state.effect_script),
+                // Derived fresh rather than read out of `effect_dropped_lines`. This pane is the
+                // one place the script is on hand, so it can afford to be current; the stored
+                // copy exists for the export path, which cannot. A move captured live from the
+                // game has an empty script here and correctly reports no dropped lines, because
+                // there is no original for the export to fall short of.
+                Some(&crate::acmd::unexportable_effect_lines(
+                    &self.state.effect_script,
+                )),
                 &mut report,
             );
             out.push_str(&emitted);
@@ -2183,6 +2191,7 @@ impl VisionaryApp {
                 self.state.effects = calls;
                 self.state.selected_effect_call = None;
                 self.state.effect_script = effect_script;
+                self.record_dropped_effect_lines();
                 self.push_effect_rules();
                 None
             }
@@ -2646,6 +2655,7 @@ impl VisionaryApp {
                         fighter_name, move_name
                     ));
                     self.state.effect_script = crate::data::EffectScript::default();
+                    self.record_dropped_effect_lines();
                     self.state.effects = Vec::new();
                 } else {
                     if effects_only {
@@ -2666,6 +2676,7 @@ impl VisionaryApp {
                     self.apply_effect_call_edits_to_current();
                     self.push_effect_rules();
                     self.state.effect_script = effect_script;
+                    self.record_dropped_effect_lines();
                     if self.apply_saved_hitbox_edits_to_current() {
                         self.push_hitbox_rules();
                     }
@@ -2699,6 +2710,7 @@ impl VisionaryApp {
                     format!("Fetch failed: {e}")
                 });
                 self.state.effect_script = crate::data::EffectScript::default();
+                self.record_dropped_effect_lines();
                 self.state.effects = Vec::new();
                 self.state.sounds = Vec::new();
                 self.state.sounds_pristine = Vec::new();
@@ -5799,6 +5811,48 @@ impl VisionaryApp {
 
     /// Rebuild `state.effects` from the pristine parse + this move's saved edits.
     /// Idempotent — used at move load and after loading a project.
+    /// The loss note a saved project should carry for one move, if any.
+    ///
+    /// Pulled out of `build_project` so it can be tested at all. Everything downstream of the
+    /// save works on data this decides to write, so a save that quietly skipped the note would
+    /// leave a correct, fully tested report with nothing to report on — and look identical from
+    /// inside the editor, where the source pane derives its own copy from the open script.
+    ///
+    /// `None` when the move ships no generated effect function: the note describes what *that
+    /// function* left out, so without one there is nothing for it to be a note about.
+    fn project_loss_note<'a>(
+        state: &'a crate::data::AppState,
+        key: &str,
+    ) -> Option<&'a Vec<String>> {
+        state.effect_call_full.get(key)?;
+        state.effect_dropped_lines.get(key)
+    }
+
+    /// Record what an export of the current move would throw away, from the script just parsed.
+    ///
+    /// **Call this immediately after assigning `state.effect_script`**, including where that
+    /// assignment is a reset — a move that failed to load must drop its old note rather than
+    /// keep describing the script it no longer holds. The exception is a reset that runs
+    /// *before* `selected_move` is updated, where the key still names the previous move; see
+    /// [`Self::select_move`].
+    ///
+    /// This is the only moment the information exists. `effect_call_full` keeps the calls a
+    /// script resolved to and the export regenerates the function from those, so a line that
+    /// resolved to no call is gone from both by the time anything downstream could look for it.
+    /// Moves that lose nothing are removed rather than stored empty, so the map answers "did
+    /// this move lose anything" and never grows an entry per move browsed.
+    fn record_dropped_effect_lines(&mut self) {
+        let Some(mv) = self.current_move_key() else {
+            return;
+        };
+        let lost = crate::acmd::unexportable_effect_lines(&self.state.effect_script);
+        if lost.is_empty() {
+            self.state.effect_dropped_lines.remove(&mv);
+        } else {
+            self.state.effect_dropped_lines.insert(mv, lost);
+        }
+    }
+
     fn apply_effect_call_edits_to_current(&mut self) {
         self.state.effects = self.state.effects_pristine.clone();
         let Some(mv) = self.current_move_key() else {
@@ -5902,6 +5956,9 @@ impl VisionaryApp {
             fm.effect_calls.insert(mv.to_string(), edits.clone());
             if let Some(full) = self.state.effect_call_full.get(key) {
                 fm.effect_calls_full.insert(mv.to_string(), full.clone());
+                if let Some(lost) = Self::project_loss_note(&self.state, key) {
+                    fm.effect_dropped_lines.insert(mv.to_string(), lost.clone());
+                }
             }
         }
         for (key, script) in &self.state.sound_script_edits {
@@ -6188,7 +6245,8 @@ impl VisionaryApp {
         };
         let has_source = generated_source.is_some();
         let mut source_root: Option<std::path::PathBuf> = None;
-        if let Some(src_project) = generated_source {
+        if let Some(generated) = generated_source {
+            let src_project = &generated.project;
             let root = if developer {
                 dest.join("acmd_source")
             } else {
@@ -6196,7 +6254,7 @@ impl VisionaryApp {
                     .join("export-source")
                     .join(&plugin_name)
             };
-            match crate::mod_export::write_source_project(&src_project, &root) {
+            match crate::mod_export::write_source_project(src_project, &root) {
                 Ok(()) => {
                     report.push(format!(
                         "ACMD source: {} move script(s), {} effect script(s) — verified to \
@@ -6204,6 +6262,15 @@ impl VisionaryApp {
                         acmd_edits.len(),
                         effect_edits.len()
                     ));
+                    // The export summary is the only place these are ever shown. Before C6c
+                    // they were computed on every export and discarded, so "verified" above was
+                    // the whole story a user got even when a line had just been deleted.
+                    report.extend(
+                        generated
+                            .warnings
+                            .iter()
+                            .map(|warning| format!("  ⚠ {warning}")),
+                    );
                     source_root = Some(root);
                 }
                 Err(e) => errors.push(format!("smashline source: {e}")),
@@ -6387,6 +6454,7 @@ impl VisionaryApp {
         self.state.edit_log.entries.clear();
         self.state.effect_call_edits.clear();
         self.state.effect_call_full.clear();
+        self.state.effect_dropped_lines.clear();
         self.state.sound_script_edits.clear();
         self.eff_mods.clear();
         self.live_overrides = crate::game_link::LiveOverrides::default();
@@ -6429,6 +6497,11 @@ impl VisionaryApp {
                 self.state
                     .effect_call_full
                     .insert(format!("{fighter}/{mv}"), full);
+            }
+            for (mv, lost) in fm.effect_dropped_lines {
+                self.state
+                    .effect_dropped_lines
+                    .insert(format!("{fighter}/{mv}"), lost);
             }
             for (mv, script) in fm.sound_scripts {
                 self.state
@@ -16054,6 +16127,50 @@ mod live_effect_capture_tests {
     /// synced. Nothing would look wrong — the sounds are correct — but the user's source would
     /// grow functions they never edited, and each one silently pins that move's sound against
     /// future game updates.
+    /// The loss note is only worth anything if the save writes it, and the save is the half a
+    /// working report cannot vouch for.
+    ///
+    /// Both halves of this were live bugs waiting to happen rather than hypotheticals: the
+    /// export-side reporting was fully built and fully tested against a map the editor never
+    /// filled, and the editor's own source pane derives its copy from the open script, so an
+    /// empty saved map looks exactly like a correct one until someone reloads a project.
+    #[test]
+    fn a_loss_note_is_saved_with_its_move_and_never_on_its_own() {
+        let mut state = crate::data::AppState::default();
+        let lost = vec!["methodlib::L2CAgent::pop();".to_string()];
+        state
+            .effect_dropped_lines
+            .insert("kirby/special_hi2".into(), lost.clone());
+
+        // The call lists below are empty because only the key matters here — the question this
+        // helper answers is whether the move is being exported at all, not what it exports.
+        //
+        // No calls for that move yet: the export ships no function for it, so there is nothing
+        // for the note to describe and it must not travel alone.
+        assert_eq!(
+            VisionaryApp::project_loss_note(&state, "kirby/special_hi2"),
+            None
+        );
+
+        state
+            .effect_call_full
+            .insert("kirby/special_hi2".into(), Vec::new());
+        assert_eq!(
+            VisionaryApp::project_loss_note(&state, "kirby/special_hi2"),
+            Some(&lost)
+        );
+
+        // A move that ships a function and lost nothing gets no note, which is how the map
+        // stays "did this lose anything" rather than one entry per move ever opened.
+        state
+            .effect_call_full
+            .insert("kirby/attack_dash".into(), Vec::new());
+        assert_eq!(
+            VisionaryApp::project_loss_note(&state, "kirby/attack_dash"),
+            None
+        );
+    }
+
     #[test]
     fn creating_a_missing_script_is_asked_for_by_an_edit_and_by_nothing_else() {
         const BODY: &str = r#"unsafe extern "C" fn sound_turndash(agent: &mut L2CAgentBase) {

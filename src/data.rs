@@ -1841,6 +1841,14 @@ pub struct AppState {
     /// Full edited call list snapshot per "fighter/move" — what the mod exporter emits
     /// (a generated effect script replaces the whole move's spawn list).
     pub effect_call_full: HashMap<String, Vec<EffectCall>>,
+    /// What the effect export would throw away, per "fighter/move" — the companion to
+    /// `effect_call_full` and written at the same moments, because the script both are derived
+    /// from is in hand only then.
+    ///
+    /// A move is present only if it was parsed from a script *and* lost something. Absent
+    /// therefore means "captured live, or lost nothing"; the two are indistinguishable here and
+    /// deliberately so, since neither produces a finding.
+    pub effect_dropped_lines: HashMap<String, Vec<String>>,
     /// Edited `sound_` script per "fighter/move" — what the mod exporter emits, on the same
     /// terms as `effect_call_full`: whole scripts, because an installed one replaces the
     /// fighter's own. A move is in here only once its sounds have actually been changed.
@@ -1889,6 +1897,7 @@ impl Default for AppState {
             loaded_body: String::new(),
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
+            effect_dropped_lines: HashMap::new(),
             sound_script_edits: HashMap::new(),
             selected_effect_call: None,
             show_all_effect_calls: false,
