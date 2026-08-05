@@ -492,6 +492,14 @@ new collisions.
 `ATK_SET_SHIELD_SETOFF_MUL` 9, `ATK_HIT_ABS` 6, `WHOLE_HIT` 6, `ATK_POWER` 2,
 `ATK_LERP_RATIO` 0. B4's "take that first" deferral is discharged — B4 shipped 2026-08-04.
 
+**One member arrived late, from B5 (2026-08-04): `SET_SEARCH_SIZE_EXIST(agent, id: u64,
+size: ToF32)`.** B5 listed it as a detection box; its signature says otherwise — it re-sizes a
+search box *already out*, keyed on that box's id, which is precisely this entry's shape. It
+would drop into `ATTACK_MOD_COMMANDS` and `AttackModKind` with no new machinery, and its
+`ToF32` slot carries the same integer-formatting trap `attack_mod_num` exists for. It is
+**not done**, and the reason is the one that governs B2: **zero corpus calls**, so there is
+no vanilla line to prove the round trip against. Take it if a corpus with one ever appears.
+
 **[x] `WHOLE_HIT` was not one of these and is done, as B4's family (2026-08-04).** It takes a
 single `hit_status: i32` and the corpus writes `*HIT_STATUS_XLU` (5) and `*HIT_STATUS_NORMAL`
 (1) — that is how the fighter *receives* hits, not an edit to a hitbox already out. It is the
@@ -643,7 +651,7 @@ addition rather than a restructure. The real cost was somewhere the entry did no
   hurtbox call is known to re-export identically. The live surface is built but not exercised
   against a running game — that needs a deploy, which is not available here.
 
-### [ ] B5 — `SEARCH` / detection boxes
+### [~] B5 — `SEARCH` / detection boxes
 
 Grab-range and detection volumes. Geometrically these are close to grab boxes, so the panel
 work is mostly reuse.
@@ -653,6 +661,32 @@ appear **zero** times in the local corpus, though all four have `macros.rs` wrap
 is really a one-macro task with three untestable extras — there is no vanilla call to build a
 round-trip test from for those three, which the definition of done requires. Scope it to
 `SEARCH` and say so, rather than shipping three families no corpus can check.
+
+**Re-measured on the way in (2026-08-04), and the zero-corpus count was not the only reason
+to drop the three extras — their signatures were.** Reading each, the way B3 should have been
+read:
+
+- `ENABLE_AREA(agent, kind: i32)` and `UNABLE_AREA(agent, kind: i32)` take **one int and no
+  geometry at all**. They toggle an area the stage or the fighter already owns; they do not
+  define a volume. "Geometrically close to grab boxes" cannot describe them — they are not a
+  smaller `SEARCH`, they are a different thing, and they belong with the enable/disable
+  lifetime commands (near **C4**), not in a collision panel. Filed there rather than here.
+- `SET_SEARCH_SIZE_EXIST(agent, id: u64, size: ToF32)` re-sizes a search box that is *already
+  out*. That is not a box command, it is the exact shape **B3** just built: a post-hoc
+  modifier keyed on the id of a live collision. It also has the `ToF32` slot B3 found, so it
+  carries the same integer-formatting trap. It belongs in B3's table, gated on a corpus call
+  existing to test it against — which there is not. Recorded under B3, not done here.
+
+So B5 is one macro, `SEARCH`, with 7 vanilla calls across 7 kirby scripts. The corpus does
+exercise both arities (4 calls without the capsule end, 3 with it) and the extras genuinely
+vary — `COLLISION_KIND_MASK_ATTACK`/`_HIT`, `HIT_STATUS_MASK_ALL`/`_NORMAL`, and an unnamed
+int that is 0, 1 and 60 — so keeping them losslessly is doing real work, not defending
+against a hypothetical.
+
+`SEARCH` maps onto `Hitbox` better than `ATTACK_ABS` did: id, part, bone, size, x/y/z, the
+optional capsule end, and all three of `situation_mask`/`category_mask`/`part_mask` land on
+fields that already exist. The four with no home — collision kind, hit status, the unnamed
+int, and a trailing bool — become a `SearchExtras` beside `CatchExtras` and `AbsExtras`.
 
 - **Trap:** new collision family → it must be added to the plugin's `is_collision_func` and
   given a category id on the wire, alongside 0 attack / 1 grab / 2 wind.
@@ -1099,6 +1133,12 @@ spawns.
 0 — all three have `macros.rs` wrappers. So the detach half, which is the part carrying the
 trap below, has no vanilla usage to test against; `SET_PLAY_INHIVIT` is the only member with
 real corpus backing. Consider scoping to it alone.
+
+**Inherited from B5 (2026-08-04):** `ENABLE_AREA(agent, kind: i32)` and
+`UNABLE_AREA(agent, kind: i32)` were filed under B5 as detection volumes. They take one int
+and no geometry — they turn an existing area on and off, which is this entry's subject, not
+B5's. Both have **zero** corpus calls, so they are subject to the same round-trip-test bar
+the detach half fails; do not schedule them on their own.
 
 - **Trap:** end frames are currently derived from `EFFECT_OFF_KIND`. A detach ends a spawn's
   attachment without ending the spawn. Do not fold it into the same end-frame field.
