@@ -459,9 +459,13 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
-        // AFTER_IMAGE_OFF — turns off a sword trail.
+        // AFTER_IMAGE_OFF — turns off a sword trail. Its one argument is undocumented but
+        // required by the macro, so it is read and carried rather than discarded.
         if line.contains("macros::AFTER_IMAGE_OFF(") {
-            macros.push(EffectMacro::AfterImageOff);
+            let arg = try_extract("macros::AFTER_IMAGE_OFF(")
+                .and_then(|t| t.get(1).and_then(|v| v.trim().parse::<f32>().ok()))
+                .unwrap_or(crate::data::TRAIL_OFF_DEFAULT);
+            macros.push(EffectMacro::AfterImageOff { arg });
             continue;
         }
 
@@ -1938,7 +1942,17 @@ fn retarget_trail_line(raw: &str, call: &crate::data::EffectCall) -> String {
 /// carries is a texture, and `EFFECT_OFF_KIND` on it terminates nothing.
 fn emit_spawn_stop(call: &crate::data::EffectCall, indent: &str) -> String {
     if call.spawn_func == "AFTER_IMAGE_ON" {
-        return format!("{indent}macros::AFTER_IMAGE_OFF(agent);\n");
+        // The argument is not optional. `macros::AFTER_IMAGE_OFF` is declared
+        // `<F: ToF32>(agent, unk: F)`, so the bare call this used to emit does not compile —
+        // every exported move with a sword trail was an unbuildable project.
+        //
+        // `attack_mod_num`, not `num`: the slot is `ToF32`-generic, so both `0` and `0.0`
+        // compile, and all four vanilla calls write the bare integer. See B3.
+        let arg = call.trail_off.unwrap_or(crate::data::TRAIL_OFF_DEFAULT);
+        return format!(
+            "{indent}macros::AFTER_IMAGE_OFF(agent, {});\n",
+            attack_mod_num(arg)
+        );
     }
     format!(
         "{indent}macros::EFFECT_OFF_KIND(agent, {}, false, true);\n",
@@ -3654,6 +3668,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                         .collect(),
                 ),
                 raw_line: None,
+                trail_off: None,
                 rate: None,
                 tint: None,
                 alpha: None,
@@ -3676,6 +3691,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 disabled: false,
                 extra_args: Some(vec!["true".into()]),
                 raw_line: None,
+                trail_off: None,
                 rate: None,
                 tint: None,
                 alpha: None,
@@ -4641,6 +4657,76 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// Both `AFTER_IMAGE_OFF` values the corpus writes survive a round trip, as integers.
+    ///
+    /// The four vanilla calls split 2/2 between `0` and `3`, so neither is "the" value and
+    /// normalising to either would rewrite half the archive. The slot is `ToF32`-generic, so
+    /// `0` and `0.0` both compile and no semantic check would flag the difference — the same
+    /// formatting trap B3 found, in a second family.
+    #[test]
+    fn a_trails_closing_argument_round_trips_as_the_integer_the_corpus_writes() {
+        for value in ["0", "3"] {
+            let src = format!(
+                r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {{
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {{
+        macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), 0, 0, 0, Hash40::new("sword2"), 0, 0, 0);
+    }}
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {{
+        macros::AFTER_IMAGE_OFF(agent, {value});
+    }}
+}}
+"#
+            );
+            let calls = parse_effect_script(&src).to_effect_calls();
+            assert_eq!(calls.len(), 1, "{value}");
+            assert_eq!(calls[0].trail_off, Some(value.parse::<f32>().unwrap()));
+
+            let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+            assert!(
+                emitted.contains(&format!("macros::AFTER_IMAGE_OFF(agent, {value});")),
+                "{value} must come back exactly as written:\n{emitted}"
+            );
+        }
+    }
+
+    /// A trail the editor ends itself still exports a call that compiles.
+    ///
+    /// There is no closing line to take the argument from — the trail was retimed or added in
+    /// the editor — so the export supplies one. What it must not do is emit the bare call,
+    /// which is what happens if the argument is treated as optional because it is unknown.
+    #[test]
+    fn a_trail_with_no_closing_line_still_exports_the_required_argument() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), 0, 0, 0, Hash40::new("sword2"), 0, 0, 0);
+    }
+}
+"#;
+        let mut calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].trail_off, None, "nothing closed it");
+        // The user drags the trail's end onto frame 12.
+        calls[0].active_end = 12;
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        assert!(
+            emitted.contains(&format!(
+                "macros::AFTER_IMAGE_OFF(agent, {});",
+                crate::data::TRAIL_OFF_DEFAULT as i64
+            )),
+            "{emitted}"
+        );
+        assert!(
+            !emitted.contains("AFTER_IMAGE_OFF(agent);"),
+            "the arity-less form does not compile:\n{emitted}"
+        );
+    }
+
     #[test]
     fn after_image_trails_export_as_trails() {
         let src = r#"
@@ -4651,7 +4737,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     }
     frame(agent.lua_state_agent, 9.0);
     if macros::is_excute(agent) {
-        macros::AFTER_IMAGE_OFF(agent);
+        macros::AFTER_IMAGE_OFF(agent, 3);
     }
 }
 "#;
@@ -4659,15 +4745,25 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].spawn_func, "AFTER_IMAGE_ON");
         assert_eq!((calls[0].active_start, calls[0].active_end), (3, 9));
+        // The closing call's argument is kept: the corpus does not agree on it, so replacing
+        // it with a house value would change what the author wrote.
+        assert_eq!(calls[0].trail_off, Some(3.0));
 
         let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
         assert!(
             emitted.contains("macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new(\"tex1\")"),
             "the trail call must be replayed verbatim:\n{emitted}"
         );
+        // With its argument, and as the bare integer the corpus writes. `macros::AFTER_IMAGE_OFF`
+        // is declared `<F: ToF32>(agent, unk: F)` — the bare call this used to emit is a compile
+        // error, so every exported move with a trail was an unbuildable project.
         assert!(
-            emitted.contains("macros::AFTER_IMAGE_OFF(agent);"),
-            "a trail is closed by AFTER_IMAGE_OFF:\n{emitted}"
+            emitted.contains("macros::AFTER_IMAGE_OFF(agent, 3);"),
+            "a trail is closed by AFTER_IMAGE_OFF, which takes an argument:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("AFTER_IMAGE_OFF(agent);"),
+            "the arity-less form does not compile:\n{emitted}"
         );
         assert!(
             !emitted.contains("EFFECT_OFF_KIND") && !emitted.contains("EFFECT_FOLLOW"),
@@ -4693,6 +4789,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             disabled: false,
             extra_args: None,
             raw_line: None,
+            trail_off: None,
             rate: None,
             tint: None,
             alpha: None,

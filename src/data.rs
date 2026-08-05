@@ -394,6 +394,14 @@ pub const CATCH_DEFAULT_SITUATION: &str = "COLLISION_SITUATION_MASK_GA";
 pub const SEARCH_DEFAULT_COLLISION_KIND: &str = "COLLISION_KIND_MASK_ATTACK";
 pub const SEARCH_DEFAULT_HIT_STATUS: &str = "HIT_STATUS_MASK_ALL";
 
+/// The `AFTER_IMAGE_OFF` argument used when the editor ends a trail that no script closed.
+///
+/// A real choice, not a discovered fact: the four corpus calls split evenly between `0` and
+/// `3`, and the argument is undocumented beyond `unk` in `macros.rs`, so there is no majority
+/// to follow and no meaning to reason from. `0` is taken as the more literal reading of "the
+/// trail stops here". A trail read from a script keeps its own value and never reaches this.
+pub const TRAIL_OFF_DEFAULT: f32 = 0.0;
+
 /// The `CATCH` arguments that are not editable properties of a grab box.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CatchExtras {
@@ -2109,7 +2117,12 @@ pub enum EffectMacro {
         raw: String,
     },
     /// AFTER_IMAGE_OFF — turns off a sword trail.
-    AfterImageOff,
+    ///
+    /// Carries its one argument. `macros::AFTER_IMAGE_OFF` is declared
+    /// `<F: ToF32>(agent, unk: F)`, so a call written without it does not compile — which is
+    /// exactly what the export used to emit. The value is undocumented beyond `unk`, and the
+    /// corpus writes `0` twice and `3` twice, so it is carried rather than normalised.
+    AfterImageOff { arg: f32 },
     /// EFFECT_OFF_KIND — terminates a following effect by name.
     EffectOffKind { effect_name: String },
     /// LAST_EFFECT_SET_RATE — modifies the rate of the last spawned effect.
@@ -2281,6 +2294,13 @@ pub struct EffectCall {
     /// AFTER_IMAGE trail macros); exports re-emit this line as-is.
     #[serde(default)]
     pub raw_line: Option<String>,
+    /// The argument of the `AFTER_IMAGE_OFF` that closed this trail, when a script wrote one.
+    ///
+    /// `None` means the editor is ending the trail itself — a retimed or newly-added one — and
+    /// the export supplies [`TRAIL_OFF_DEFAULT`]. Keeping the author's value matters because
+    /// the corpus does not agree on it: two calls write `0` and two write `3`.
+    #[serde(default)]
+    pub trail_off: Option<f32>,
     /// Playback rate from a `LAST_EFFECT_SET_RATE` line following this spawn.
     ///
     /// `None` means the script sets no rate and the export writes no line — which is not the
@@ -2584,6 +2604,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: Some(extra_args.clone()),
                                 raw_line: None,
+                                trail_off: None,
                                 rate: None,
                                 tint: None,
                                 alpha: None,
@@ -2624,6 +2645,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
+                                trail_off: None,
                                 rate: None,
                                 tint: None,
                                 alpha: None,
@@ -2644,12 +2666,14 @@ fn eval_effect_stmts(
                             // refusing costs no coverage and avoids inventing an answer.
                             anchor = None;
                         }
-                        EffectMacro::AfterImageOff => {
-                            // Close the most recent open after-image effect.
+                        EffectMacro::AfterImageOff { arg } => {
+                            // Close the most recent open after-image effect, keeping the
+                            // argument this call wrote so the export can write it back.
                             if let Some(call) =
                                 calls.iter_mut().rev().find(|c| c.active_end == 9999)
                             {
                                 call.active_end = script_frame(frame);
+                                call.trail_off = Some(*arg);
                             }
                             anchor = None;
                         }
@@ -2706,6 +2730,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: None,
+                                trail_off: None,
                                 rate: None,
                                 tint: None,
                                 alpha: None,

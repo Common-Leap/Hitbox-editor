@@ -227,7 +227,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**335 green after B5**), including the three corpus
+- [ ] `cargo test` passes (**337 green after C2a**), including the three corpus
       oracles — run
       them by name with `cargo test cached_script` and `cargo test still_loses`:
       `acmd_verify::tests::every_cached_script_survives_its_own_export`,
@@ -905,7 +905,7 @@ worse problem underneath it.**
 So the joint pair is deferred, not refused: it is a reasonable feature with no way to verify it
 today. Take it if a corpus with a real trail call ever appears, and read the signature first.
 
-### [~] C2a — `AFTER_IMAGE_OFF` is exported without its argument
+### [x] C2a — `AFTER_IMAGE_OFF` is exported without its argument (done 2026-08-04)
 
 Found by the measurement above, and this one *is* testable — against 4 real corpus lines.
 
@@ -922,6 +922,23 @@ build. The existing test asserts the wrong output, which is why it was never not
 - The author's own value has to survive, so `EffectMacro::AfterImageOff` needs to carry it.
   For a trail the editor ended itself there is no donor and a default is needed; the corpus
   splits 2/2 between `0` and `3`, so the default is a genuine choice and should say so.
+
+**Result.** `EffectMacro::AfterImageOff` now carries `arg`, `EffectCall` carries `trail_off`,
+and the emitter writes `macros::AFTER_IMAGE_OFF(agent, N);` through `attack_mod_num`.
+`TRAIL_OFF_DEFAULT` is `0` and its doc comment says outright that it is a choice, not a
+measurement. 337 tests, clippy clean, `cargo fmt --check` clean, `build_check.sh` exit 0.
+
+- Three tests, each mutation-checked: reverting the formatter to `num` fails all three. The
+  round-trip test covers **both** corpus values rather than one, because the archive does not
+  agree on this argument and a test pinning only `0` would have let `3` be normalised away.
+- **The old test asserted the broken output.** That is the finding worth carrying: a test can
+  pin a bug as firmly as it pins a behaviour, and this one made the export look verified. When
+  a fixture is hand-written rather than lifted from the corpus, it is evidence of nothing —
+  and this file's fixture was hand-written *and* structurally impossible (see C2 above).
+- Not a regression from any recent task; the bare call has been emitted since trails were
+  first modelled. It survived because no corpus script pairs a trail ON with an OFF, so the
+  round-trip oracle never reaches the branch. **Coverage, not oracle blindness** — the distinct
+  failure mode from B5a, which the oracle ran over and still could not see.
 
 ### [x] C3 — Screen and body colour effects
 

@@ -4424,6 +4424,7 @@ impl VisionaryApp {
                     disabled: false,
                     extra_args: None,
                     raw_line: None,
+                    trail_off: None,
                     rate: None,
                     tint: None,
                     alpha: None,
@@ -4470,6 +4471,7 @@ impl VisionaryApp {
                     // No originating macro — exports emit the plain EFFECT_FOLLOW form.
                     extra_args: None,
                     raw_line: None,
+                    trail_off: None,
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
                     rate: None,
@@ -7070,6 +7072,7 @@ impl VisionaryApp {
                     .collect::<Option<Vec<_>>>()
             }),
             raw_line: None,
+            trail_off: None,
             // A spawn call carries none of the three modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
@@ -7135,6 +7138,7 @@ impl VisionaryApp {
             disabled: false,
             extra_args: None,
             raw_line: None,
+            trail_off: None,
             rate: None,
             tint: None,
             alpha: None,
