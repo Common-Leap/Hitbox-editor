@@ -2287,7 +2287,7 @@ the speed macros.
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
 
-### [ ] E2 — Model `FT_MOTION_RATE` (direction SETTLED 2026-08-06 — ready to schedule)
+### [~] E2 — Model `FT_MOTION_RATE` (in progress 2026-08-06)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks** (`check_script_shape`, via
