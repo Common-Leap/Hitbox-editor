@@ -2290,9 +2290,33 @@ the speed macros.
 ### [ ] E2 — Model `FT_MOTION_RATE` (direction SETTLED 2026-08-06 — ready to schedule)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
-presence deliberately **disables the export timing checks**
-([acmd_verify.rs:941](src/acmd_verify.rs:941)). Modelling rate would re-enable those checks for a
-large slice of the corpus.
+presence deliberately **disables the export timing checks** (`check_script_shape`, via
+`has_unmodelled_flow`).
+
+**Rule 5 correction, measured 2026-08-06 — two of the three named macros do not exist here, and
+the stated payoff was wrong.** Counted over the 461-file cache with the real parser, not a grep:
+
+| | count |
+|---|---|
+| `FT_MOTION_RATE` calls | 17, in 10 functions |
+| `FT_MOTION_RATE_RANGE` calls | **0** |
+| `FT_DESIRED_RATE` calls | **0** |
+| functions parsed | 432 |
+| functions gated by *any* unmodelled line | 107 |
+| functions gated **only** by a rate call | **9** |
+
+So modelling rate re-enables the timing checks on **9 of 432 functions (2%)**, not "a large slice
+of the corpus" as this entry claimed. **That sentence was written from the macro's importance, not
+from a count** — the same mistake E1 was corrected for, and the reason the working agreement says
+to count a macro before scheduling the entry built on it. Scope this to `FT_MOTION_RATE` alone;
+the other two are unschedulable until a fighter that uses them is in the corpus.
+
+**The entry is still worth doing, for the other reason it lists.** 7 of the 17 calls are
+`FT_MOTION_RATE(agent, 1.0)`, a no-op restore, so there are 10 live rate windows — and they sit on
+`attack_11`, `attack_hi4`, `attack_lw4`, `attack_air_n`, `attack_air_hi`, `special_n_start`,
+`special_lw`, `cliff_escape`. Those are headline moves, the timeline currently shows the wrong
+frame numbers for all of them, and the rate value **cannot be edited at all** today. That is the
+justification; the verifier is a side effect of it.
 
 ## The direction, measured
 
@@ -2556,7 +2580,7 @@ there. It survived because the consolidation moved the *pollers* and never audit
   frame-budget risk, but they ship enabled and write to the SD root. Worth folding into the trace
   gate if that area is touched again; not worth a commit of its own.
 
-### [~] R5 — The move list shows only attacks (in progress 2026-08-06)
+### [x] R5 — The move list shows only attacks (done 2026-08-06)
 
 **Found while trying to verify D1f live: the walk cycle cannot be opened in the editor at all.**
 [app.rs:1755](src/app.rs:1755) filters the motion list to six substrings — `attack`, `special`,
@@ -2602,6 +2626,19 @@ new family arrives.** Added to the traps list.
 - **Test bar:** a corpus test over every distinct move name asserting the uncategorised bucket
   stays small and that named examples land in the right group. A categoriser silently dumping
   everything into "Other" is the failure mode, and it looks like success.
+
+**Done.** [move_kinds.rs](src/move_kinds.rs) holds an 18-group `MoveGroup` with an explicit
+`ORDER` for display. The six-substring filter is gone and the per-move frame-count read moved
+into `select_move`, so widening the list to all 458 names did not regress load time. Copied
+specials are their own group rather than a corner of Specials, and the item weapon movesets fold
+into one "Items & weapons" group.
+
+- **The corpus test caught two errors the hand-written rules made**, which is the whole reason it
+  is a corpus test and not a table of examples. Jabs are spelled both `attack_11` and `attack_1`
+  in the wild, and `_swing` weapons had to be matched by *shape* rather than against an
+  enumerated list of weapon names — an enumerated list being the exact trap this backlog keeps
+  hitting.
+- **Two categorisers already existed and this consolidated them rather than adding a third.**
 
 ### [ ] R6 — Kirby copy abilities live in motion directories the editor never loads
 
@@ -2673,6 +2710,39 @@ the things that exist" that was accurate when written. See the traps list.
   write.** A per-move field added to `AppState` has to be cleared there and asserted there, and
   nothing else will catch it. Both mutations caught: dropping the sound clear fails it and fails
   `a_cleared_move_accepts_a_captured_sound_script_again`.
+
+### [~] R9 — A missing script is cached as its own HTTP error page (in progress 2026-08-06)
+
+Found while counting the corpus for E2. Three files in the 461-file cache are 14 bytes long and
+contain the text `404: Not Found`:
+
+```
+dolly/SpecialBStart.txt   dolly/SpecialBAttack.txt   dolly/SpecialBAttackW.txt
+```
+
+`fetch_script_body` returns `HTTP.get(&url).send()?.text()?` — **`send()?` only fails on a
+transport error, so a 404 is a perfectly successful request whose body is the error page.** That
+body is then written to the cache and returned as `Ok(body)` to six call sites, every one of which
+treats it as script source.
+
+**The cache doc comment says this is deliberate** — "bodies (including `404: Not Found` misses)
+are stored … so fighter-wide scans only hit the network once per move ever" — and for the *scan*
+path that is right: the move genuinely does not exist upstream and re-asking every session is
+waste. The bug is that the same value is handed to the *open a move* path, which cannot tell a
+miss from a script. Caching the miss is correct; **representing it as a body is not.**
+
+- **Symptom in the editor:** opening one of those moves shows a one-line script whose content is
+  the words `404: Not Found`, presented as if the move had a script with one unmodelled line.
+- **Symptom in the export, which is worse:** `emit_stmts` writes `AcmdStmt::Raw` lines out
+  verbatim, so exporting that move emits `404: Not Found` into a generated `.rs` file. That is
+  the [verbatim escape hatch](#traps-that-have-already-cost-real-time) trap again — a Raw line is
+  trusted to be Rust, and here it is an HTTP error page.
+- **Fix shape:** check the status code at fetch time and cache a miss as an *empty* file, and
+  treat both empty and a legacy `404: Not Found` body as "no script" on the read path, so the
+  three files already on disk are handled without asking anyone to clear their cache.
+- **Test bar, and this is the part to get right:** a negative test ("the miss is not parsed as a
+  script") needs its paired positive — a real body through the same path that *does* parse —
+  or it passes with the bug restored. See the standing trap.
 
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
