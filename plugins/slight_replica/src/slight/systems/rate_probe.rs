@@ -47,6 +47,14 @@ static SAMPLES: AtomicU32 = AtomicU32::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
 static LAST_FRAME: AtomicU64 = AtomicU64::new(0);
 static LAST_MOTION: AtomicU64 = AtomicU64::new(0);
+/// The battle object the previous sample came from.
+///
+/// **The first run of this probe produced forty useless lines for want of this.**
+/// `current_agent()` alternates between the fighters on screen, so consecutive calls are
+/// consecutive *agents*, not consecutive frames of one agent. With two Kirbys both standing in
+/// `wait` the deltas came out as -181 and +182 alternating — two frame counters interleaved. A
+/// motion check cannot catch it, because both agents were in the same motion.
+static LAST_BOID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Per-frame entry point. Resolves the current agent itself rather than taking one.
 ///
@@ -68,14 +76,14 @@ pub fn on_frame() {
         }
         smash::app::sv_battle_object::module_accessor(rec.boid)
     };
-    tick(ptr);
+    tick(rec.boid, ptr);
 }
 
 /// Sample one fighter's motion frame for the E2 measurement.
 ///
 /// Does no I/O — `diag::note` buffers — and does nothing at all once [`MAX_SAMPLES`] lines have
 /// been written, so it cannot run away during a long session.
-pub fn tick(boma: *mut BattleObjectModuleAccessor) {
+pub fn tick(boid: u32, boma: *mut BattleObjectModuleAccessor) {
     if boma.is_null() || SAMPLES.load(Ordering::Relaxed) >= MAX_SAMPLES {
         return;
     }
@@ -88,18 +96,21 @@ pub fn tick(boma: *mut BattleObjectModuleAccessor) {
         )
     };
 
-    // Arm on the first off-default rate seen, and stay armed: the interesting part is not only
-    // the slowed span but the frame it returns to 1.0, because that is where a wrong reading
-    // would show a discontinuity rather than a smooth resume.
-    let off_default =
-        (rate - 1.0).abs() > RATE_EPSILON || (whole - 1.0).abs() > RATE_EPSILON;
-    if !ARMED.load(Ordering::Relaxed) {
-        if !off_default {
-            LAST_FRAME.store(frame.to_bits() as u64, Ordering::Relaxed);
-            LAST_MOTION.store(motion, Ordering::Relaxed);
-            return;
-        }
-        ARMED.store(true, Ordering::Relaxed);
+    let off_default = (rate - 1.0).abs() > RATE_EPSILON || (whole - 1.0).abs() > RATE_EPSILON;
+
+    // Remember this agent's frame whatever happens, so that when a rate does appear there is a
+    // previous frame *for the same agent* to subtract.
+    let prev_boid = LAST_BOID.swap(boid, Ordering::Relaxed);
+    let prev_motion = LAST_MOTION.swap(motion, Ordering::Relaxed);
+    let prev_bits = LAST_FRAME.swap(frame.to_bits() as u64, Ordering::Relaxed);
+
+    // **Only log frames that are actually carrying a rate.** The first run stayed armed through
+    // idle frames and spent every one of its forty samples on `wait` at rate 1.0, which says
+    // nothing — the budget has to go on the moves the entry is about.
+    if !off_default {
+        return;
+    }
+    if !ARMED.swap(true, Ordering::Relaxed) {
         crate::slight::diag::note(
             "RATE probe armed — E2. delta is how far MotionModule::frame moved in ONE game frame.",
         );
@@ -109,18 +120,20 @@ pub fn tick(boma: *mut BattleObjectModuleAccessor) {
         );
     }
 
-    let prev_motion = LAST_MOTION.swap(motion, Ordering::Relaxed);
-    let prev_bits = LAST_FRAME.swap(frame.to_bits() as u64, Ordering::Relaxed);
-    let prev = f32::from_bits(prev_bits as u32);
-    // A motion change resets the frame counter, so the delta across that boundary is meaningless
-    // and would read as a large negative step.
-    if prev_motion != motion {
+    // A different agent, or the same agent in a new motion, means the previous frame number
+    // belongs to a different counter and the delta across it is meaningless. `current_agent()`
+    // alternates between fighters, so the boid check is the load-bearing one — see [`LAST_BOID`].
+    if prev_boid != boid || prev_motion != motion {
+        crate::slight::diag::note(format!(
+            "RATE -- first sample for boid={boid} motion={motion:#x} rate={rate:.4} (no delta yet)"
+        ));
         return;
     }
+    let prev = f32::from_bits(prev_bits as u32);
     let delta = frame - prev;
     let n = SAMPLES.fetch_add(1, Ordering::Relaxed);
     crate::slight::diag::note(format!(
-        "RATE {n:02} motion={motion:#x} frame={frame:.4} delta={delta:.4} \
+        "RATE {n:02} boid={boid} motion={motion:#x} frame={frame:.4} delta={delta:.4} \
          rate={rate:.4} whole={whole:.4} => A_predicts={rate:.4} B_predicts={:.4}",
         if rate.abs() > f32::EPSILON {
             1.0 / rate

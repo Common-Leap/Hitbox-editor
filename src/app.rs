@@ -3781,7 +3781,10 @@ impl VisionaryApp {
                 };
                 if ui
                     .add_enabled(!self.fetching_acmd, egui::Button::new(btn_text))
-                    .on_hover_text("Fetch hitboxes from GitHub ACMD scripts")
+                    .on_hover_text(
+                        "Fetch this move's ACMD scripts from GitHub — hitboxes, hurtboxes, \
+                         effects and sounds. A move with no hitboxes can still have the rest.",
+                    )
                     .clicked()
                 {
                     self.fetch_acmd();
@@ -3966,6 +3969,31 @@ impl VisionaryApp {
 
         let menu_height = ui.available_height();
         hitbox_menu_scroll_area(menu_height).show(ui, |ui| {
+            // **An empty list is the ordinary case for most of the roster now.** The move list
+            // used to be filtered to attacks, so "no hitboxes" meant "not fetched yet" and a
+            // blank panel was readable. R5 widened it, and a walk cycle legitimately has none —
+            // the first person to open one concluded the editor could not edit its sounds,
+            // because nothing on screen said where they were. Say it.
+            if self.state.hitboxes.is_empty() && self.state.selected_move.is_some() {
+                let fetched = !self.state.acmd_source.is_empty();
+                if !fetched {
+                    ui.weak("Nothing loaded yet — press Fetch ACMD.");
+                } else {
+                    ui.weak("This move has no hitboxes.");
+                    let mut has = Vec::new();
+                    if !self.state.sounds.is_empty() {
+                        has.push(format!("{} sound(s)", self.state.sounds.len()));
+                    }
+                    if !self.state.effects.is_empty() {
+                        has.push(format!("{} effect(s)", self.state.effects.len()));
+                    }
+                    if has.is_empty() {
+                        ui.weak("It has no effects or sounds either.");
+                    } else {
+                        ui.weak(format!("It does have {} — see below.", has.join(" and ")));
+                    }
+                }
+            }
             let mut to_delete = None;
             for (i, hb) in self.state.hitboxes.iter().enumerate() {
                 let color = hitbox_display_color(hb);
@@ -15747,6 +15775,47 @@ mod live_effect_capture_tests {
         assert!(!adopted, "a fetched script must win over a capture");
         assert_eq!(state.sound_script.stmts.len(), 1);
         assert!(state.sounds.is_empty());
+    }
+
+    /// The exact `sound_walkfast` the mirror serves, end to end.
+    ///
+    /// Lifted verbatim from `kirby/WalkFast.txt` because that is the move the first person to try
+    /// this feature actually opened, and the section did not appear. It exercises three things at
+    /// once that no other fixture here does together: a leading `wait_loop_sync_mot()`, a wrapped
+    /// call, and a **bare** call outside every `is_excute` block — the shape D1c found in fifteen
+    /// corpus scripts.
+    #[test]
+    fn the_walk_cycle_the_first_user_opened_produces_two_editable_sounds() {
+        const BODY: &str = r#"unsafe extern "C" fn sound_walkfast(agent: &mut L2CAgentBase) {
+    wait_loop_sync_mot();
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+    frame(agent.lua_state_agent, 20.0);
+    macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_right_m"), Hash40::new("se_kirby_step_left_m"));
+}
+"#;
+        let script = crate::acmd::parse_sound_script(BODY);
+        let events = script.to_sound_events();
+        assert_eq!(events.len(), 2, "both footsteps must be editable");
+        assert_eq!(
+            events[0].call.sounds,
+            vec![
+                "se_kirby_step_left_m".to_string(),
+                "se_kirby_step_right_m".to_string()
+            ]
+        );
+        // The bare one, which is the half that would silently vanish.
+        assert_eq!(
+            events[1].call.sounds,
+            vec![
+                "se_kirby_step_right_m".to_string(),
+                "se_kirby_step_left_m".to_string()
+            ]
+        );
+        // Distinct sites, or an edit to one would rewrite the other.
+        assert_ne!(events[0].site, events[1].site);
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
