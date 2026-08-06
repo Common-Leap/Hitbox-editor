@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**379 green after C6b closed**), including the eight corpus
+- [ ] `cargo test` passes (**382 green after C6d closed**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -290,6 +290,13 @@ paraphrase it from memory.
       **It also records a measured absence**: zero of the 301 corpus sound scripts contain a
       `for`, so it says nothing whatever about looped calls, and a green run there must not be
       read as covering the site cursor's rewind.
+- [ ] **A second, separate corpus gate exists and is easy to miss.** Every test needing real
+      binary effect data — the whole of `eff_export::tests`, plus C6d's
+      `a_refused_export_does_not_write_the_eff_files_either` — skips unless `VISIONARY_EFF_ROOT`
+      points at an extracted `effect/` tree (the directory *containing* `effect/fighter/…`, e.g.
+      an ArcExplorer `export/` folder). It is unset by default, so a plain `cargo test` on a
+      fresh checkout silently skips all of them and still says 382. Set it before claiming an EFF
+      or export-ordering change was verified.
 - [ ] A round-trip test for the new family: parse a real vanilla call → emit → parse again →
       identical IR. Put the real call in the test, not a synthetic one.
 - [ ] A write-back test asserting that a value edit rewrites *only* that argument span, and
@@ -1314,7 +1321,9 @@ entry is still open.
     ([app.rs:6166](src/app.rs:6166)); `info.toml` is written *after*, at
     [app.rs:6283](src/app.rs:6283). So a blocker leaves a folder holding effect files and no
     `info.toml` — which ARCropolis will not load and which does not look like a failure. See
-    **C6d**, which is this bug for the blockers that already exist.
+    **C6d**, which is this bug for the blockers that already exist. (Fixed there on 2026-08-05;
+    the argument above stands on the other two points, and this one is now an argument about
+    what a blocker *would* still cost — a project-wide refusal — not about debris.)
   - **Most of what is left is not the user's to fix.** Of the 20 remaining dropped lines, 7 are
     `wait_loop_sync_mot`, dropped by this tool's own decision, and 5 are the mis-scoped `else {`
     that C6b declined to pin. Refusing to export until the user fixes those is refusing over
@@ -1423,7 +1432,7 @@ in it is a matter of time** — treat it as a notification, never as the record.
 the source pane. Anything new reaching only `verify_export` is invisible unless it is a blocker
 or it goes through `warning_summary`.
 
-### [~] C6d — A blocked export leaves a half-written mod folder
+### [x] C6d — A blocked export leaves a half-written mod folder (done 2026-08-05)
 
 Found by C6b's warning-vs-blocker re-derivation, which had to establish what a blocker actually
 does. It does not do what its own comment says.
@@ -1442,11 +1451,44 @@ sibling folder rather than replacing it. So the debris accumulates and does not 
 
 - **This is not hypothetical and not about C5.** It is what every blocker that already exists
   does today — a rounded hitbox value, a mismatched number, anything `verify_export` refuses.
-- **Work order:** decide the whole export before writing any of it. Verification does not depend
-  on the EFF files being on disk, so `source_project` can run before the EFF loop; that is
-  probably a move, not a redesign.
-- **Done when:** a project whose verification fails writes nothing at all, asserted by a test
-  that exports into a temp dir and checks it is empty — not by reading the order of the calls.
+
+**Fixed.** It was a move, as predicted. Verification now runs first and a refusal returns before
+anything is written, so the folder the user picked is left exactly as it was found.
+
+**The move needed a seam to be testable at all.** `export_mod` opens a native folder dialog and
+takes `&mut self` on a type no test can construct, so ordering inside it is unobservable. The
+writing half came out as a free `run_export(&ModProjectFile, &ExportInputs) -> Result<ExportOutcome, String>`
+([app.rs](src/app.rs)), with everything it needed from the app — resolved `.eff` source paths,
+the dump root, the destination, the source root — resolved into plain data first. **The decision
+and the writes it guards had to land in the same function**; splitting them would have left the
+ordering guaranteed by the order of two statements again, just in a different method.
+
+`Err` now means "the destination is untouched". `ExportOutcome::errors` keeps its old and
+different meaning — one file did not write, the rest did — which is the merge the original
+watch-for warned against, and it did not happen.
+
+- **The first test written for this was vacuous, and a mutation caught it.** It built the project
+  with a junk `.eff`, so `rebuild_eff_bytes_for_slot` failed and nothing was written *for reasons
+  having nothing to do with ordering*. Restoring the old verify-after-EFF order left all three
+  tests green. A successfully rebuilt EFF is the only thing that ever reached disk ahead of the
+  decision — `info.toml` and the README came after it in both orders — so a test that cannot
+  produce one is testing nothing.
+- **What replaced it is paired in a single test.** Half one exports the same project *without*
+  the blocker and asserts the EFF file lands; half two adds the blocker and asserts the folder is
+  empty. Half one is the guard: if the rebuild ever stops working, that half fails loudly instead
+  of half two passing for free. With the old order restored, it fails on the right assertion.
+- **Named limitation: that test is corpus-gated.** It needs a real `ef_mario.eff` and so skips
+  unless `VISIONARY_EFF_ROOT` points at an extracted `effect/` tree, exactly like every other EFF
+  test in the crate. The two ungated tests in the module cover the refusal and the accepted
+  control, but **the assertion that specifically distinguishes the two orderings only runs with
+  the corpus present.** Do not treat a green run on a bare checkout as having exercised it.
+- **Deliberate: the folder dialog still opens before verification.** A refused export therefore
+  still asks where to put it, and then puts nothing there. Verifying earlier would move the
+  decision out of `run_export`, which is the one place a test can see it happen next to the
+  writes — one dialog is worth less than that.
+- **Three mutations run, all three caught**: the old verify-after-EFF order (caught by the paired
+  test, and *not* by the vacuous one it replaced); swallowing the blocker with `unwrap_or(None)`;
+  and never writing `info.toml`, which the accepted control caught.
 - **Watch for:** the EFF loop pushes to `errors`, which is a different failure channel that
   *does* continue. Do not merge the two; a failed EFF write should still leave the rest.
 

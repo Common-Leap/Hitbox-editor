@@ -6096,6 +6096,7 @@ impl VisionaryApp {
             self.state.status = "No edits to export yet.".into();
             return;
         }
+        let plugin_name = crate::mod_export::plugin_name(&project);
         let title = if developer {
             "Export developer files into folder…"
         } else {
@@ -6118,230 +6119,50 @@ impl VisionaryApp {
         };
         let dest = unused_export_root(&parent, &export_name);
 
-        let mut report: Vec<String> = Vec::new();
-        let mut errors: Vec<String> = Vec::new();
-
-        // 1. Data mod: rebuilt eff files under effect/fighter/<name>/… + info.toml.
-        //    One-slot-scoped transplants additionally write ef_<fighter>_cXX.eff per slot
-        //    (the "One-Slot Effects" plugin's file naming; the slotted file replaces the
-        //    base file for that costume, so it carries the unscoped transplants too).
-        let mod_dir = if developer {
-            dest.join("effect_mod")
-        } else {
-            dest.clone()
-        };
-        let has_eff = project
-            .fighters
-            .values()
-            .any(|fighter| fighter.eff.as_ref().is_some_and(|eff| !eff.is_empty()));
+        // Everything from here is decided, then written. `run_export` verifies before it
+        // touches the destination, so a refusal leaves the folder the user picked untouched
+        // rather than holding half a mod — see C6d.
+        let mut eff_sources: std::collections::HashMap<String, std::path::PathBuf> =
+            Default::default();
         for (fighter, fm) in &project.fighters {
-            match &fm.eff {
-                Some(eff) if !eff.is_empty() => {
-                    let src_path = self.resolve_eff_source(&eff.source_rel);
-                    let root = self.eff_editor.export_root().to_path_buf();
-                    let write_variant = |slot: Option<u8>| -> anyhow::Result<()> {
-                        let bytes = std::fs::read(&src_path)?;
-                        let rebuilt = crate::eff_export::rebuild_eff_bytes_for_slot(
-                            &bytes,
-                            eff,
-                            Some(&root),
-                            slot,
-                        )?;
-                        let rel = match slot {
-                            None => eff.source_rel.clone(),
-                            Some(s) => {
-                                // effect/fighter/mario/ef_mario.eff → …/ef_mario_c0X.eff
-                                let p = std::path::Path::new(&eff.source_rel);
-                                let stem = p.file_stem().and_then(|x| x.to_str()).unwrap_or("ef");
-                                let file = format!("{stem}_c{s:02}.eff");
-                                p.parent()
-                                    .map(|d| d.join(&file).to_string_lossy().replace('\\', "/"))
-                                    .unwrap_or(file)
-                            }
-                        };
-                        let out = mod_dir.join(&rel);
-                        if let Some(parent) = out.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&out, rebuilt)?;
-                        Ok(())
-                    };
-                    // Base file: authored edits + costume-unscoped ops. Skip only when
-                    // literally nothing lands in it.
-                    let base_has_content = crate::mod_export::base_eff_has_content(eff);
-                    let mut ok = true;
-                    if base_has_content {
-                        if let Err(e) = write_variant(None) {
-                            errors.push(format!("{fighter} eff: {e}"));
-                            ok = false;
-                        }
-                    }
-                    // One-slot-scoped files: union of every transplant's costume slots.
-                    let mut slots: Vec<u8> = eff
-                        .transplants
-                        .iter()
-                        .flat_map(|op| op.one_slot_slots.iter().copied())
-                        .collect();
-                    slots.sort();
-                    slots.dedup();
-                    for s in &slots {
-                        if let Err(e) = write_variant(Some(*s)) {
-                            errors.push(format!("{fighter} eff c{s:02}: {e}"));
-                            ok = false;
-                        }
-                    }
-                    if ok {
-                        let mut msg = format!(
-                            "{fighter}: eff written ({} authored, {} transplant(s)",
-                            eff.authored.len(),
-                            eff.transplants.len()
-                        );
-                        if !slots.is_empty() {
-                            msg.push_str(&format!(
-                                ", skin EFFs: {}",
-                                slots
-                                    .iter()
-                                    .map(|s| format!("c{s:02}"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            ));
-                        }
-                        msg.push(')');
-                        report.push(msg);
-                    }
-                }
-                _ => report.push(format!(
-                    "{fighter}: no authored eff edits — spawn/live edits ship via the plugin"
-                )),
+            if let Some(eff) = &fm.eff {
+                eff_sources.insert(fighter.clone(), self.resolve_eff_source(&eff.source_rel));
             }
         }
-
-        // 2. smashline source project (hitboxes + effect spawn scripts + live tweaks).
-        let acmd_edits: Vec<(String, String, crate::data::AcmdScript)> = project
-            .fighters
-            .iter()
-            .flat_map(|(f, fm)| {
-                fm.acmd
-                    .iter()
-                    .map(move |(m, r)| (f.clone(), m.clone(), r.script.clone()))
-            })
-            .collect();
-        let effect_edits: Vec<(String, String, Vec<crate::data::EffectCall>)> = project
-            .fighters
-            .iter()
-            .flat_map(|(f, fm)| {
-                fm.effect_calls_full
-                    .iter()
-                    .map(move |(m, calls)| (f.clone(), m.clone(), calls.clone()))
-            })
-            .collect();
-        let plugin_name = crate::mod_export::plugin_name(&project);
-        let generated_source = match crate::mod_export::source_project(&project) {
-            Ok(source) => source,
-            Err(error) => {
-                self.state.status = format!("Export failed: {error}");
-                return;
-            }
-        };
-        let has_source = generated_source.is_some();
-        let mut source_root: Option<std::path::PathBuf> = None;
-        // Derived once, here, rather than assigned from inside the branch below. Three separate
-        // places have to say the same thing about a dropped line, and the failure mode this
-        // whole line of work keeps running into is one of them quietly holding an empty list.
-        let warnings: Vec<String> = generated_source
-            .as_ref()
-            .map(|generated| generated.warnings.clone())
-            .unwrap_or_default();
-        if let Some(generated) = generated_source {
-            let src_project = &generated.project;
-            let root = if developer {
+        let inputs = ExportInputs {
+            dest: dest.clone(),
+            developer,
+            project_name: self.project_name.clone(),
+            slug: slug.clone(),
+            eff_sources,
+            eff_export_root: self.eff_editor.export_root().to_path_buf(),
+            source_root: if developer {
                 dest.join("acmd_source")
             } else {
                 crate::scratch_dirs::app_storage_root()
                     .join("export-source")
                     .join(&plugin_name)
-            };
-            match crate::mod_export::write_source_project(src_project, &root) {
-                Ok(()) => {
-                    report.push(format!(
-                        "ACMD source: {} move script(s), {} effect script(s) — verified to \
-                         read back as the moves in the editor",
-                        acmd_edits.len(),
-                        effect_edits.len()
-                    ));
-                    // Before C6c these were computed on every export and discarded, so
-                    // "verified" above was the whole story a user got even when a line had just
-                    // been deleted. They go to three places now, because the status line alone
-                    // does not hold: the summary here, the mod folder's README, and the message
-                    // the background build ends with.
-                    report.extend(warnings.iter().map(|warning| format!("  ⚠ {warning}")));
-                    source_root = Some(root);
-                }
-                Err(e) => errors.push(format!("smashline source: {e}")),
-            }
-        } else {
-            report.push("source: no hitbox/spawn edits — skipped".into());
-        }
-
-        // info.toml sits beside rebuilt EFF files so Arcropolis can load that folder directly.
-        if has_eff || has_source {
-            let _ = std::fs::create_dir_all(&mod_dir);
-            let display_name = serde_json::to_string(&self.project_name)
-                .unwrap_or_else(|_| "\"Visionary mod\"".into());
-            let info = format!(
-                "display_name = {display_name}\nauthors = \"Visionary\"\nversion = \"1.0.0\"\ndescription = \"Exported by Visionary\"\ncategory = \"Misc\"\n"
-            );
-            if let Err(e) = std::fs::write(mod_dir.join("info.toml"), info) {
-                errors.push(format!("info.toml: {e}"));
-            }
-        }
-
-        // Top-level README: what goes where.
-        let readme = if developer {
-            let effect_note = if has_eff {
-                "`effect_mod/` contains the rebuilt Arcropolis effect files.\n"
-            } else {
-                "This project has no EFF data edits, so no effect mod folder is needed.\n"
-            };
-            let source_note = if has_source {
-                "`acmd_source/` contains the editable Skyline/Smashline Rust project for hitbox and effect-spawn edits.\n\
-                 Build it with `acmd_source/build.bat` on Windows or `bash acmd_source/build.sh` on Linux.\n"
-            } else {
-                "This project has no hitbox or effect-spawn edits, so no ACMD source folder is needed.\n"
-            };
-            format!(
-                "# {name} developer files\n\n\
-                 {effect_note}\
-                 {source_note}",
-                name = self.project_name,
-            )
-        } else {
-            let plugin_note = if has_source {
-                "ARCropolis chainloads the generated ACMD plugin from this mod's root `plugin.nro`."
-            } else {
-                "This project has no ACMD edits, so this mod does not need a Skyline plugin."
-            };
-            let copy_note =
-                format!("Copy this entire `{slug}/` folder into `<SD root>/ultimate/mods/`.");
-            let effect_note = if has_eff {
-                "ARCropolis loads the effect files from this mod's `effect/` folder.".to_string()
-            } else {
-                "This project has no Arcropolis effect files.".to_string()
-            };
-            format!(
-                "# {name}\n\n\
-                 {copy_note}\n\n\
-                 {effect_note} {plugin_note}\n",
-                name = self.project_name,
-            )
+            },
         };
-        let readme = readme + &export_warning_section(&warnings);
-        let _ = std::fs::write(dest.join("README.md"), readme);
+        let outcome = match run_export(&project, &inputs) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.state.status = format!("Export failed: {error}");
+                return;
+            }
+        };
+        let ExportOutcome {
+            report,
+            errors,
+            warnings,
+            built_source_root,
+            has_source,
+        } = outcome;
 
         // 3. Mod-folder exports compile the generated plugin in the background and keep the NRO
         // inside that ARCropolis mod. Developer exports intentionally stop at editable source.
         if !developer && errors.is_empty() {
-            if let Some(src_root) = source_root {
+            if let Some(src_root) = built_source_root {
                 let nro = dest.join("plugin.nro");
                 self.spawn_export_build(dest.clone(), src_root, plugin_name, nro, warnings.clone());
             }
@@ -14331,6 +14152,274 @@ fn unused_export_root(parent: &std::path::Path, base_name: &str) -> std::path::P
     parent.join(format!("{base_name}_{}", std::process::id()))
 }
 
+/// Everything the export needs from the app, resolved before any of it is written.
+///
+/// This exists so that [`run_export`] can be a free function — the decision to refuse an export
+/// and the writes that decision guards have to sit in one testable place, or the only thing
+/// holding them in the right order is the order of two statements in a method no test can call.
+struct ExportInputs {
+    dest: std::path::PathBuf,
+    developer: bool,
+    project_name: String,
+    slug: String,
+    /// fighter → the source `.eff` to rebuild from, already resolved against the app's roots.
+    eff_sources: std::collections::HashMap<String, std::path::PathBuf>,
+    /// The dump root a transplant's donor emitters are read from.
+    eff_export_root: std::path::PathBuf,
+    /// Where the generated Rust project goes: inside `dest` for a developer export, a scratch
+    /// directory otherwise, since a mod folder ships the built `.nro` rather than the source.
+    source_root: std::path::PathBuf,
+}
+
+/// What an export produced, for the caller to turn into a status line and a plugin build.
+#[derive(Debug)]
+struct ExportOutcome {
+    report: Vec<String>,
+    /// Failures that did not stop the rest. Distinct from `run_export` returning `Err`, which
+    /// means nothing was written at all.
+    errors: Vec<String>,
+    warnings: Vec<String>,
+    /// `Some` when generated source reached disk and can be built.
+    built_source_root: Option<std::path::PathBuf>,
+    has_source: bool,
+}
+
+/// Write a whole mod folder, or, if verification refuses the project, write nothing.
+///
+/// **The order of the first two steps is the point of this function.** `source_project` used to
+/// run after the rebuilt EFF files were already on disk and before `info.toml`, so any blocker —
+/// a rounded hitbox value, a mismatched number, anything `verify_export` refuses — left a folder
+/// holding effect files, no `info.toml` and no `plugin.nro`. ARCropolis will not load that, it
+/// does not look like a failure, and `unused_export_root` sends the next attempt to a
+/// differently-named sibling instead of replacing it, so the debris accumulates silently. The
+/// verification reads only the project, never the destination, so there was never a reason for it
+/// to run second.
+///
+/// `Err` therefore means the destination is untouched. `ExportOutcome::errors` is the other
+/// failure channel and keeps its old meaning: one file did not write and the rest still did.
+fn run_export(
+    project: &crate::mod_project::ModProjectFile,
+    inputs: &ExportInputs,
+) -> Result<ExportOutcome, String> {
+    let ExportInputs {
+        dest,
+        developer,
+        project_name,
+        slug,
+        eff_sources,
+        eff_export_root,
+        source_root,
+    } = inputs;
+    let developer = *developer;
+
+    // 0. Verify first, while a refusal still costs nothing. Nothing below this line may move
+    //    above it.
+    let generated_source =
+        crate::mod_export::source_project(project).map_err(|error| error.to_string())?;
+    let has_source = generated_source.is_some();
+    // Derived once, here, rather than assigned from inside the branch below. Three separate
+    // places have to say the same thing about a dropped line, and the failure mode this
+    // whole line of work keeps running into is one of them quietly holding an empty list.
+    let warnings: Vec<String> = generated_source
+        .as_ref()
+        .map(|generated| generated.warnings.clone())
+        .unwrap_or_default();
+
+    let mut report: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1. Data mod: rebuilt eff files under effect/fighter/<name>/… + info.toml.
+    //    One-slot-scoped transplants additionally write ef_<fighter>_cXX.eff per slot
+    //    (the "One-Slot Effects" plugin's file naming; the slotted file replaces the
+    //    base file for that costume, so it carries the unscoped transplants too).
+    let mod_dir = if developer {
+        dest.join("effect_mod")
+    } else {
+        dest.clone()
+    };
+    let has_eff = project
+        .fighters
+        .values()
+        .any(|fighter| fighter.eff.as_ref().is_some_and(|eff| !eff.is_empty()));
+    for (fighter, fm) in &project.fighters {
+        match &fm.eff {
+            Some(eff) if !eff.is_empty() => {
+                let src_path = eff_sources
+                    .get(fighter)
+                    .cloned()
+                    .unwrap_or_else(|| eff_export_root.join(&eff.source_rel));
+                let write_variant = |slot: Option<u8>| -> anyhow::Result<()> {
+                    let bytes = std::fs::read(&src_path)?;
+                    let rebuilt = crate::eff_export::rebuild_eff_bytes_for_slot(
+                        &bytes,
+                        eff,
+                        Some(eff_export_root),
+                        slot,
+                    )?;
+                    let rel = match slot {
+                        None => eff.source_rel.clone(),
+                        Some(s) => {
+                            // effect/fighter/mario/ef_mario.eff → …/ef_mario_c0X.eff
+                            let p = std::path::Path::new(&eff.source_rel);
+                            let stem = p.file_stem().and_then(|x| x.to_str()).unwrap_or("ef");
+                            let file = format!("{stem}_c{s:02}.eff");
+                            p.parent()
+                                .map(|d| d.join(&file).to_string_lossy().replace('\\', "/"))
+                                .unwrap_or(file)
+                        }
+                    };
+                    let out = mod_dir.join(&rel);
+                    if let Some(parent) = out.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&out, rebuilt)?;
+                    Ok(())
+                };
+                // Base file: authored edits + costume-unscoped ops. Skip only when
+                // literally nothing lands in it.
+                let base_has_content = crate::mod_export::base_eff_has_content(eff);
+                let mut ok = true;
+                if base_has_content {
+                    if let Err(e) = write_variant(None) {
+                        errors.push(format!("{fighter} eff: {e}"));
+                        ok = false;
+                    }
+                }
+                // One-slot-scoped files: union of every transplant's costume slots.
+                let mut slots: Vec<u8> = eff
+                    .transplants
+                    .iter()
+                    .flat_map(|op| op.one_slot_slots.iter().copied())
+                    .collect();
+                slots.sort();
+                slots.dedup();
+                for s in &slots {
+                    if let Err(e) = write_variant(Some(*s)) {
+                        errors.push(format!("{fighter} eff c{s:02}: {e}"));
+                        ok = false;
+                    }
+                }
+                if ok {
+                    let mut msg = format!(
+                        "{fighter}: eff written ({} authored, {} transplant(s)",
+                        eff.authored.len(),
+                        eff.transplants.len()
+                    );
+                    if !slots.is_empty() {
+                        msg.push_str(&format!(
+                            ", skin EFFs: {}",
+                            slots
+                                .iter()
+                                .map(|s| format!("c{s:02}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ));
+                    }
+                    msg.push(')');
+                    report.push(msg);
+                }
+            }
+            _ => report.push(format!(
+                "{fighter}: no authored eff edits — spawn/live edits ship via the plugin"
+            )),
+        }
+    }
+
+    // 2. smashline source project (hitboxes + effect spawn scripts + live tweaks).
+    let acmd_edits = project
+        .fighters
+        .values()
+        .map(|fm| fm.acmd.len())
+        .sum::<usize>();
+    let effect_edits = project
+        .fighters
+        .values()
+        .map(|fm| fm.effect_calls_full.len())
+        .sum::<usize>();
+    let mut built_source_root: Option<std::path::PathBuf> = None;
+    if let Some(generated) = generated_source {
+        match crate::mod_export::write_source_project(&generated.project, source_root) {
+            Ok(()) => {
+                report.push(format!(
+                    "ACMD source: {acmd_edits} move script(s), {effect_edits} effect script(s) — \
+                     verified to read back as the moves in the editor"
+                ));
+                // Before C6c these were computed on every export and discarded, so
+                // "verified" above was the whole story a user got even when a line had just
+                // been deleted. They go to three places now, because the status line alone
+                // does not hold: the summary here, the mod folder's README, and the message
+                // the background build ends with.
+                report.extend(warnings.iter().map(|warning| format!("  ⚠ {warning}")));
+                built_source_root = Some(source_root.clone());
+            }
+            Err(e) => errors.push(format!("smashline source: {e}")),
+        }
+    } else {
+        report.push("source: no hitbox/spawn edits — skipped".into());
+    }
+
+    // info.toml sits beside rebuilt EFF files so Arcropolis can load that folder directly.
+    if has_eff || has_source {
+        let _ = std::fs::create_dir_all(&mod_dir);
+        let display_name =
+            serde_json::to_string(project_name).unwrap_or_else(|_| "\"Visionary mod\"".into());
+        let info = format!(
+            "display_name = {display_name}\nauthors = \"Visionary\"\nversion = \"1.0.0\"\ndescription = \"Exported by Visionary\"\ncategory = \"Misc\"\n"
+        );
+        if let Err(e) = std::fs::write(mod_dir.join("info.toml"), info) {
+            errors.push(format!("info.toml: {e}"));
+        }
+    }
+
+    // Top-level README: what goes where.
+    let readme = if developer {
+        let effect_note = if has_eff {
+            "`effect_mod/` contains the rebuilt Arcropolis effect files.\n"
+        } else {
+            "This project has no EFF data edits, so no effect mod folder is needed.\n"
+        };
+        let source_note = if has_source {
+            "`acmd_source/` contains the editable Skyline/Smashline Rust project for hitbox and effect-spawn edits.\n\
+             Build it with `acmd_source/build.bat` on Windows or `bash acmd_source/build.sh` on Linux.\n"
+        } else {
+            "This project has no hitbox or effect-spawn edits, so no ACMD source folder is needed.\n"
+        };
+        format!(
+            "# {project_name} developer files\n\n\
+             {effect_note}\
+             {source_note}"
+        )
+    } else {
+        let plugin_note = if has_source {
+            "ARCropolis chainloads the generated ACMD plugin from this mod's root `plugin.nro`."
+        } else {
+            "This project has no ACMD edits, so this mod does not need a Skyline plugin."
+        };
+        let copy_note =
+            format!("Copy this entire `{slug}/` folder into `<SD root>/ultimate/mods/`.");
+        let effect_note = if has_eff {
+            "ARCropolis loads the effect files from this mod's `effect/` folder.".to_string()
+        } else {
+            "This project has no Arcropolis effect files.".to_string()
+        };
+        format!(
+            "# {project_name}\n\n\
+             {copy_note}\n\n\
+             {effect_note} {plugin_note}\n"
+        )
+    };
+    let readme = readme + &export_warning_section(&warnings);
+    let _ = std::fs::write(dest.join("README.md"), readme);
+
+    Ok(ExportOutcome {
+        report,
+        errors,
+        warnings,
+        built_source_root,
+        has_source,
+    })
+}
+
 // ── Persistent config ─────────────────────────────────────────────────────────
 
 fn config_path(key: &str) -> Option<std::path::PathBuf> {
@@ -16797,5 +16886,210 @@ mod export_warning_channel_tests {
         let done = export_build_done_message("plugin build FAILED — see build.log", &warnings());
         assert!(done.contains("plugin build FAILED"));
         assert!(done.contains("methodlib::L2CAgent::pop();"));
+    }
+}
+
+/// C6d: a refused export must leave the destination exactly as it found it.
+///
+/// These drive [`run_export`] against a real directory and then look at the directory, rather
+/// than asserting that verification is called before the writes. The bug being pinned *was* a
+/// call order — `source_project` sat between the EFF loop and `info.toml` — and a test that reads
+/// the order back is a test that agrees with whatever the code currently does.
+#[cfg(test)]
+mod blocked_export_writes_nothing_tests {
+    use super::*;
+    use crate::data::{AcmdScript, AcmdStmt, EditRecord};
+    use crate::mod_project::{EffMod, FighterMod, ModProjectFile};
+
+    /// Same env var, same skip message, as every other test in this crate that needs real
+    /// effect data.
+    fn corpus_root() -> Option<std::path::PathBuf> {
+        std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+    }
+
+    fn inputs(dest: &std::path::Path, source_root: &std::path::Path) -> ExportInputs {
+        ExportInputs {
+            dest: dest.to_path_buf(),
+            developer: false,
+            project_name: "test mod".into(),
+            slug: "test_mod".into(),
+            eff_sources: Default::default(),
+            eff_export_root: dest.join("_no_dump_root"),
+            source_root: source_root.to_path_buf(),
+        }
+    }
+
+    fn fighter_with(script: AcmdScript) -> FighterMod {
+        let mut fm = FighterMod::default();
+        fm.acmd.insert(
+            "attack_air_n".into(),
+            EditRecord {
+                fighter: "mario".into(),
+                fighter_display: "Mario".into(),
+                move_name: "attack_air_n".into(),
+                script,
+                hitboxes_pristine: Vec::new(),
+                hitboxes: Vec::new(),
+            },
+        );
+        fm
+    }
+
+    fn project(script: AcmdScript) -> ModProjectFile {
+        let mut project = ModProjectFile {
+            name: "test mod".into(),
+            ..Default::default()
+        };
+        project
+            .fighters
+            .insert("mario".into(), fighter_with(script));
+        project
+    }
+
+    /// A `Raw` line the export copies through verbatim, so the generated Rust does not parse.
+    fn unparseable() -> AcmdScript {
+        AcmdScript {
+            stmts: vec![AcmdStmt::Raw("let x = ;".into())],
+        }
+    }
+
+    fn entries(dir: &std::path::Path) -> Vec<String> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<String> = read
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_refused_export_leaves_the_destination_empty() {
+        let dest = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let error = run_export(&project(unparseable()), &inputs(dest.path(), source.path()))
+            .expect_err("unparseable generated Rust must refuse the export");
+        assert!(
+            error.contains("does not parse"),
+            "the refusal must say why: {error}"
+        );
+        assert_eq!(
+            entries(dest.path()),
+            Vec::<String>::new(),
+            "a refused export wrote into the mod folder — before C6d this left \
+             effect files and no info.toml, which ARCropolis silently will not load"
+        );
+    }
+
+    /// The EFF half is the part that used to be written first, and the *only* thing that ever
+    /// reached disk ahead of the decision — `info.toml` and the README came after it in both
+    /// orders. So this is the test that actually pins C6d, and it needs an EFF rebuild that
+    /// really produces bytes.
+    ///
+    /// **The first half is not scenery.** An earlier version of this test used a junk `.eff`;
+    /// the rebuild failed, nothing was written for reasons having nothing to do with ordering,
+    /// and restoring the old verify-after-EFF order left the test green. A test for "this was
+    /// not written" is worthless without a paired demonstration that it otherwise *would* be.
+    #[test]
+    fn a_refused_export_does_not_write_the_eff_files_either() {
+        let Some(root) = corpus_root() else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        let rel = "effect/fighter/mario/ef_mario.eff";
+        let src_eff = root.join(rel);
+        assert!(
+            src_eff.exists(),
+            "{} is missing from the corpus",
+            src_eff.display()
+        );
+
+        let with_eff = |project: &mut ModProjectFile| {
+            let fighter = project.fighters.get_mut("mario").unwrap();
+            fighter.eff = Some(EffMod {
+                source_rel: rel.into(),
+                // The cheapest edit that makes `base_eff_has_content` true, so the base file is
+                // rebuilt and written. Naming a texture the eff does not have is deliberate: the
+                // rebuild warns and carries on, and this test is about *whether* bytes land, not
+                // which bytes.
+                textures_removed: vec!["_visionary_no_such_texture".into()],
+                ..Default::default()
+            });
+        };
+        let eff_inputs = |dest: &std::path::Path, source: &std::path::Path| {
+            let mut inputs = inputs(dest, source);
+            inputs.eff_sources.insert("mario".into(), src_eff.clone());
+            inputs.eff_export_root = root.clone();
+            inputs
+        };
+
+        // Half one: the same project, minus the blocker, does put that EFF in the mod folder.
+        let accepted_dest = tempfile::tempdir().unwrap();
+        let accepted_source = tempfile::tempdir().unwrap();
+        let mut accepted = project(AcmdScript::default());
+        with_eff(&mut accepted);
+        let outcome = run_export(
+            &accepted,
+            &eff_inputs(accepted_dest.path(), accepted_source.path()),
+        )
+        .expect("a project with nothing wrong must export");
+        assert!(
+            outcome.errors.is_empty(),
+            "the EFF rebuild has to succeed for half two to mean anything: {:?}",
+            outcome.errors
+        );
+        assert!(
+            accepted_dest.path().join(rel).exists(),
+            "the accepted export did not write {rel}, so this test cannot tell whether the \
+             refused one below was stopped by the ordering or by a broken rebuild"
+        );
+
+        // Half two: add the blocker, and that same EFF must not appear.
+        let refused_dest = tempfile::tempdir().unwrap();
+        let refused_source = tempfile::tempdir().unwrap();
+        let mut refused = project(unparseable());
+        with_eff(&mut refused);
+        run_export(
+            &refused,
+            &eff_inputs(refused_dest.path(), refused_source.path()),
+        )
+        .expect_err("the blocker must still refuse");
+        assert_eq!(
+            entries(refused_dest.path()),
+            Vec::<String>::new(),
+            "the rebuilt EFF files reached disk before verification refused the export — \
+             that folder has effect data, no info.toml and no plugin.nro, and ARCropolis \
+             will not load it"
+        );
+    }
+
+    /// The control: the same shape of project, minus the blocker, does write. Otherwise every
+    /// assertion above would keep passing if `run_export` simply stopped writing anything.
+    #[test]
+    fn an_accepted_export_writes_the_mod_folder() {
+        let dest = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let outcome = run_export(
+            &project(AcmdScript::default()),
+            &inputs(dest.path(), source.path()),
+        )
+        .expect("a project with nothing wrong must export");
+        assert!(
+            outcome.errors.is_empty(),
+            "unexpected errors: {:?}",
+            outcome.errors
+        );
+        assert!(
+            dest.path().join("info.toml").exists() && dest.path().join("README.md").exists(),
+            "the accepted export produced {:?}",
+            entries(dest.path())
+        );
+        assert!(
+            outcome.built_source_root.is_some(),
+            "generated source was not written, so this control proves nothing about \
+             the refusal tests"
+        );
     }
 }
