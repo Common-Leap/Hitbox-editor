@@ -307,6 +307,19 @@ paraphrase it from memory.
       script only copies the `.nro` to `target/output/`; it does not deploy, so the `diag.txt`
       build stamp cannot be checked from a build alone. If you have a running game, check it;
       if you do not, say so in the entry rather than implying the live surface was exercised.
+
+      **You probably do have one, and several closed entries wrongly say otherwise.** Measured
+      2026-08-06: `/usr/bin/eden` and `/usr/bin/Ryujinx` are installed, SSBU
+      (`01006A800016E000`) is installed under both, each has a
+      `…/Arcropolis/romfs/skyline/plugins/` holding this plugin, and the last session wrote
+      `~/.local/share/eden/sdmc/slight/diag.txt` on 2026-08-05. D1c, D1d and B4 each say this
+      machine has no emulator; that was never checked and is false. **Before writing "needs
+      hardware" in an entry, run `ls ~/.local/share/eden/sdmc/slight/diag.txt` and read the
+      `build=` line** — it names the build actually installed, which is the thing that decides
+      whether a live claim can be tested at all. It was 66 commits stale when this was written.
+      What genuinely is not available here: a **physical Switch** (R3 — Eden's JIT is the
+      blocker, so an Eden boot cannot settle it), a **Windows host** (R2 half 1), and a
+      **game dump** (R1 — no `exefs/main` on this machine).
 - [ ] [README.md](README.md) updated if user-visible behaviour changed. House style: plain
       imperative button labels, no ellipsis.
 
@@ -1695,7 +1708,7 @@ the detach half fails; do not schedule them on their own.
 
 ## New script categories
 
-### [ ] D1 — `sound_` scripts
+### [~] D1 — `sound_` scripts (D1a–D1e done; D1f in progress 2026-08-06)
 
 Blocked by: nothing, but it is the largest task here — treat it as its own project.
 
@@ -1728,7 +1741,16 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   5. **[x] D1e (done 2026-08-05)** — Let write-back *create* the category function a
      project does not have. This is the one surface D1b left open, and D1d turned it from an
      edge case into the ordinary one.
-  6. Plugin hooks for the sound primitives, capture, then live.
+  6. **[~] D1f (in progress 2026-08-06)** — Plugin hooks for the sound primitives, capture,
+     then live.
+
+     **Taken now because the "needs hardware" deferral was measured and found false.** Eden
+     and Ryujinx are both installed on this machine with SSBU under each, and the last session
+     ran 2026-08-05. The deployed plugin is `build=2026-08-03f`, **66 commits stale** — so the
+     live surface of A2, A3, B1, B3, B4, B5, B5b, C1, C2 and C3 has never run either. This step
+     is written *before* the boot so one session verifies sound alongside all ten of those.
+     See the note under D1d that says this machine has no emulator; it is wrong and this
+     entry is the correction Rule 5 asks for.
 
 **Work order revised 2026-08-05, and this is the correction Rule 5 asks for.** The old steps 4
 and 5 were "plugin hooks, capture, then live" followed by "export + write-back", and *both
