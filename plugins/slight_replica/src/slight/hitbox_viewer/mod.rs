@@ -264,6 +264,9 @@ struct CaptureClaim {
     run: u32,
 }
 
+/// Bounded report budget for the claim-collision drop in `mark_capture_motion`.
+static CLAIM_DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 static CAPTURE_CLAIMS: LazyLock<Mutex<HashMap<(i32, u64), CaptureClaim>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -407,7 +410,7 @@ pub unsafe fn record_for_boma(
 
     // Resolve the run BEFORE the dedupe key — the key is scoped to it, and a new playback
     // must not be silently folded into the previous one's key set.
-    let Some(run) = mark_capture_motion((*boma).battle_object_id, motion, kind, frame) else {
+    let Some(run) = mark_capture_motion((*boma).battle_object_id, motion, kind, frame, func) else {
         return;
     };
 
@@ -464,6 +467,10 @@ fn clear_captures_if_requested() {
     CAPTURE_CLAIMS.lock().clear();
     MOTION_WATCH.lock().clear();
     MOTION_WATCH_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+    // A fresh capture window is a fresh thing to debug. Budgeting these per boot is what made
+    // D1g's third round unreadable: ordinary play spent the budget thousands of lines before
+    // the case under test ever arrived.
+    CLAIM_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
     crate::rust_extender::debuggable_server::notify_acmd_capture_cleared();
     crate::slight::diag::note("live ACMD captures cleared");
 }
@@ -513,7 +520,15 @@ pub fn requeue_all() {
 /// line callback on the frame a move is cancelled into another), so it also closes out the
 /// motion it replaces — otherwise a cancelled move's end marker would be dropped, and its
 /// lines would be filed under the incoming motion's run.
-fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> Option<u32> {
+fn mark_capture_motion(
+    boid: u32,
+    motion: u64,
+    kind: i32,
+    frame: f32,
+    // Only for the drop report below — a claim collision is far easier to read when it names
+    // the call that was discarded.
+    func: &'static str,
+) -> Option<u32> {
     let mut finished: Option<(i32, u64, u32)> = None;
     {
         let mut watch = MOTION_WATCH.lock();
@@ -544,7 +559,23 @@ fn mark_capture_motion(boid: u32, motion: u64, kind: i32, frame: f32) -> Option<
 
     let run = {
         let mut claims = CAPTURE_CLAIMS.lock();
-        if claims.contains_key(&(kind, motion)) {
+        if let Some(held) = claims.get(&(kind, motion)) {
+            // **The one silent drop on the capture path, and it discards a whole family.**
+            // A `(kind, motion)` stays claimed until the editor clears captures, so anything
+            // arriving here after the watch entry for this object is gone — a second
+            // performance, or a sibling coroutine whose frame ran behind the one that set the
+            // watch — is thrown away. From the editor that is indistinguishable from "the game
+            // never ran the call", which is how "hitboxes and tuning are missing from the live
+            // fetch" has been reported three times without ever naming a cause.
+            //
+            // Bounded and keyed by the func so one noisy motion cannot bury the rest.
+            if CLAIM_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
+                crate::slight::diag::note(format!(
+                    "CAP drop {func} motion={motion:#x} frame={frame:.2} boid={boid} — \
+                     already claimed by boid={} run={}; this call is not in any capture",
+                    held.boid, held.run
+                ));
+            }
             return None;
         }
         let run = next_run();
