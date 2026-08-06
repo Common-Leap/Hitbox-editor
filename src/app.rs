@@ -8652,11 +8652,20 @@ impl VisionaryApp {
     ///
     /// The cost is that unedited sites are sent too, which is a no-op write of the value the
     /// script already has. That is the cheaper mistake.
+    /// **Both early returns below say so in the status bar.** They were silent in the first
+    /// version, and the cost was a full game boot spent establishing only that no rule had
+    /// arrived — the plugin's log can say "nothing was sent" but never *why*, because the reason
+    /// lives on this side of the wire. The editor's own status line is the one feedback channel
+    /// that does not need the game running at all.
     fn push_motion_rate_rules(&mut self) {
         let Some(mv_key) = self.current_move_key() else {
+            self.state.status =
+                "Rate edit not sent live: no move is selected as the live target".into();
             return;
         };
         let Some(motion) = self.current_motion_hash() else {
+            self.state.status =
+                "Rate edit not sent live: this move has no motion name to key a rule on".into();
             return;
         };
         let rules: Vec<crate::game_link::HitboxRuleWire> = self
@@ -8685,6 +8694,7 @@ impl VisionaryApp {
             .collect();
 
         let key = format!("{mv_key}#rate");
+        let sent = rules.len();
         if rules.is_empty() {
             self.hitbox_rules_store.remove(&key);
         } else {
@@ -8697,6 +8707,14 @@ impl VisionaryApp {
             .cloned()
             .collect();
         self.game_link.send_hitbox_rules(&all);
+        // Says whether the game is even listening. "Sent" and "the plugin is not connected" are
+        // the two outcomes a user cannot tell apart from the game side, and confusing them is
+        // what makes a live feature feel broken when it is merely unplugged.
+        self.state.status = if self.game_link.status() == crate::game_link::LinkStatus::Connected {
+            format!("Sent {sent} playback-rate rule(s) live")
+        } else {
+            format!("{sent} playback-rate rule(s) ready — not connected to the game yet")
+        };
     }
 
     /// Send the post-hoc hitbox modifiers the editor has changed to the running game.

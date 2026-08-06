@@ -57,8 +57,40 @@ fn rate_arg(arg: &LuaArg) -> Option<f32> {
 /// A free function taking the motion and frame rather than a method reading them, so the
 /// decision is reachable without a running game — the plugin crate is outside the workspace and
 /// cannot host a test, but the editor asserts against this file's *source*.
+///
+/// **Says why a rule did not fire.** The first version of this returned `None` silently, with
+/// "every early return reports itself" written directly above it — and the *rule miss* is the
+/// one return that matters, because a live edit doing nothing is the failure this family is most
+/// exposed to. A rate rule can miss on the motion or on the frame window, and from outside the
+/// two are indistinguishable: both look like "the edit did not apply". This is the third time
+/// that shape has cost a game boot on this project.
 fn rate_action(motion: u64, frame: f32) -> Option<(bool, Option<HbOverrides>)> {
-    super::action_for(CAT_MOTION_RATE, motion, 0, frame)
+    let hit = super::action_for(CAT_MOTION_RATE, motion, 0, frame);
+    if hit.is_none() && MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < MISS_BUDGET {
+        let loaded: Vec<String> = {
+            let rules = super::RULES.lock();
+            rules
+                .iter()
+                .filter(|r| r.category == CAT_MOTION_RATE)
+                .map(|r| {
+                    format!(
+                        "[motion={:#x} frames={:?}..{:?}]",
+                        r.motion, r.frame_start, r.frame_end
+                    )
+                })
+                .collect()
+        };
+        crate::slight::diag::note(format!(
+            "RATE miss motion={motion:#x} frame={frame:.4} — {} rate rule(s) loaded: {}",
+            loaded.len(),
+            if loaded.is_empty() {
+                "none (the editor sent nothing for this category)".to_string()
+            } else {
+                loaded.join(" ")
+            }
+        ));
+    }
+    hit
 }
 
 unsafe fn rate_action_for_call(lua_state: u64, args: &[LuaArg]) -> bool {
