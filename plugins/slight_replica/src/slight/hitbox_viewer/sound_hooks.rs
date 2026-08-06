@@ -88,6 +88,7 @@ fn sound_action(motion: u64, hash: u64, frame: f32, func: &str) -> Option<(bool,
 /// states for its target.
 unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaArg]) -> bool {
     record(lua_state, func, args);
+    super::SOUND_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if !any_rules() {
         return false;
     }
@@ -213,6 +214,13 @@ sound_hook!(
     2
 );
 
+/// Set once the twelve hooks are in. Read by `write_capture_diag`.
+static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn installed() -> bool {
+    INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn install() {
     skyline::install_hooks!(
         hook_play_se,
@@ -228,6 +236,13 @@ pub fn install() {
         hook_play_fly_voice,
         hook_set_play_inhivit
     );
+    INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    // **`diag::note`, not `skyline::println!`.** The two go to different places and only one of
+    // them is a file anybody reads afterwards: `println!` reaches the Skyline log, while
+    // `sd:/slight/diag.txt` is written by `diag`. D1f's first boot was checked by grepping
+    // diag.txt for the `println!` banner beside this one, found nothing, and proved nothing —
+    // the hooks may well have been fine. A banner nobody can find is not a banner.
+    crate::slight::diag::note("ACMD SOUND hooks installed (12 macros, capture + rules)");
     skyline::println!("[SLight] ACMD SOUND hooks installed (capture + rules)");
 }
 

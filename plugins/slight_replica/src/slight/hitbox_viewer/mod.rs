@@ -296,6 +296,10 @@ static MOTION_WATCH_ACTIVE: std::sync::atomic::AtomicBool =
 /// Small on-SD counters for distinguishing capture failures from editor/network failures.
 static CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static EFFECT_CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Sound-family lines recorded, broken out because D1f's first boot could not be read without
+/// it: the aggregate counters cannot tell "the hooks are installed and this move has no sounds"
+/// from "the hooks never installed". Both are the same number, and they need opposite answers.
+static SOUND_CAPTURE_RECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CAPTURE_DRAINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CAPTURE_LAST_MOTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CAPTURE_LAST_KIND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -308,9 +312,14 @@ fn write_capture_diag(stage: &str) {
     let _ = std::fs::write(
         "sd:/effect_viewer_capture.txt",
         format!(
-            "stage={stage}\nrecorded={}\neffect_recorded={}\ndrained={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
+            "stage={stage}\nrecorded={}\neffect_recorded={}\nsound_recorded={}\nsound_hooks={}\ndrained={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
             CAPTURE_RECORDED.load(Ordering::Relaxed),
             EFFECT_CAPTURE_RECORDED.load(Ordering::Relaxed),
+            SOUND_CAPTURE_RECORDED.load(Ordering::Relaxed),
+            // Installed, not merely compiled in. `sound_recorded=0` is ambiguous on its own —
+            // a move with no sounds reads the same as a family that never hooked — so the
+            // install itself is reported beside the count.
+            sound_hooks::installed(),
             CAPTURE_DRAINED.load(Ordering::Relaxed),
             CAPTURE_LAST_KIND.load(Ordering::Relaxed) as i64,
             CAPTURE_LAST_MOTION.load(Ordering::Relaxed),
