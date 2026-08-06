@@ -7335,7 +7335,7 @@ impl VisionaryApp {
         // "Capture has no ATTACK/EFFECT lines". That is the move-list filter's mistake again: a
         // guard that was an accurate summary when it was written, and became a silent drop when
         // a new family arrived.
-        let hurt = Self::hurtbox_script_from_captures(&captures, &bone_rev);
+        let hurt = Self::script_from_captures(&captures, &bone_rev);
         let captured_sounds = Self::sound_script_from_captures(&captures, &self.state.labels);
         let n_snd = captured_sounds.to_sound_events().len();
 
@@ -7348,6 +7348,12 @@ impl VisionaryApp {
 
         let n_hb = hitboxes.len();
         let n_fx = effects.len();
+        // Counted before `hurt` is moved, and counted whether or not it is adopted — the whole
+        // point is to distinguish "the capture did not contain any" from "it contained some and
+        // they were refused below".
+        let n_hurt = hurt.to_hurtboxes().0.len();
+        let n_mod = hurt.to_attack_mods().len();
+        let n_rate = hurt.motion_rate_sites().len();
         if !hitboxes.is_empty() {
             self.state.hitboxes_pristine = hitboxes.clone();
             self.state.hitboxes = hitboxes;
@@ -7356,7 +7362,8 @@ impl VisionaryApp {
         // along with everything else in the move, and replacing it with a hurtbox-only one
         // would drop every raw line the export carries verbatim. An empty script is the case
         // this is for: a move captured live has no file anywhere.
-        if self.state.script.stmts.is_empty() && !hurt.stmts.is_empty() {
+        let script_kept = !self.state.script.stmts.is_empty();
+        if !script_kept && !hurt.stmts.is_empty() {
             self.state.set_script(hurt);
         }
         // Guarded on the *sound* script rather than on `state.script`, because the two are
@@ -7382,12 +7389,28 @@ impl VisionaryApp {
             &self.state.sounds,
         ));
         self.jump_to_earliest_active_frame();
-        // Names every family, so "nothing happened" is distinguishable from "nothing of the one
-        // kind you were looking at". A walk reports its footsteps rather than three zeroes.
+        // **Names every family, and this comment said so while naming three of six.** Hurtboxes,
+        // hitbox tuning and motion rate were all counted, adopted and then not mentioned, so a
+        // capture that dropped them was indistinguishable from one that never had them — which
+        // is exactly how it was reported: "the live capture failed to get hitbox tuning and
+        // motion rate", with no way to tell which half was at fault.
+        //
+        // Zeroes are printed rather than omitted, on purpose. "0 tuning" is the answer to "did
+        // the game not run any, or did the editor not read them", and hiding it to keep the line
+        // short is what made this invisible.
         let mut status = format!(
-            "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) from live game \
+            "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) + {n_hurt} \
+             hurtbox state(s) + {n_mod} tuning call(s) + {n_rate} rate call(s) from live game \
              capture"
         );
+        // The refusal above is silent otherwise, and it is the one that explains a capture whose
+        // script-borne families are all present in the count and absent from the panel.
+        if script_kept && (n_hurt + n_mod + n_rate) > 0 {
+            status.push_str(
+                " — kept the loaded script, so its hurtboxes, tuning and rate are the script's, \
+                 not the capture's",
+            );
+        }
         if let Some(note) = self.capture_vs_script_offset() {
             status.push_str(" — ");
             status.push_str(&note);
@@ -8034,19 +8057,33 @@ impl VisionaryApp {
         hitboxes
     }
 
-    /// Rebuild a script's hurtbox statements from a live capture.
+    /// Rebuild a script's non-collision statements from a live capture.
     ///
     /// These are not resolved into spans here the way hitboxes are, because a span is derived
     /// state: the panel, the export and the source sync all read `state.script`, so a capture
     /// has to land as *statements* or it would show on screen and reach nothing else.
     ///
     /// Frames come back as motion frames and are converted the same way every other capture is.
-    fn hurtbox_script_from_captures(
+    ///
+    /// **This was `hurtbox_script_from_captures` and carried one family.** The plugin has always
+    /// recorded `ATK_POWER` and `ATK_SET_SHIELD_SETOFF_MUL`, and this side simply dropped them,
+    /// so a live capture of a move with post-hoc tuning came back without it — visibly, since
+    /// the GitHub fetch of the same move shows it. `FT_MOTION_RATE` arrived in E2 with the same
+    /// hole. Adding a second and third builder beside this one was the wrong shape: they share
+    /// the frame bucketing, the ordering rule and the output script, and three copies of that
+    /// is three things to keep in step. **Adding a family here means adding a `match` arm, and
+    /// the arm is the only place to look.**
+    fn script_from_captures(
         captures: &[crate::game_link::CaptureLine],
         bone_rev: &HashMap<u64, String>,
     ) -> crate::data::AcmdScript {
         use crate::data::{AcmdStmt, ExcuteStmt, HurtTarget};
         let mut by_frame: std::collections::BTreeMap<u32, Vec<ExcuteStmt>> = Default::default();
+        // Statements written at the function's top level rather than inside `is_excute`.
+        // `FT_MOTION_RATE` is the only one: all 17 corpus calls are bare, and wrapping one in an
+        // `is_excute` block the source never had would be both a behaviour change and a
+        // round-trip failure.
+        let mut bare_by_frame: std::collections::BTreeMap<u32, Vec<AcmdStmt>> = Default::default();
         let mut ordered: Vec<_> = captures.iter().enumerate().collect();
         ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
 
@@ -8120,6 +8157,20 @@ impl VisionaryApp {
             if line.func == "COL_NORMAL" && !pri_open {
                 continue;
             }
+            // Top level, not inside an `is_excute` block — see `bare_by_frame`.
+            if line.func == "FT_MOTION_RATE" {
+                if let Some(rate) = line
+                    .args
+                    .first()
+                    .and_then(|a| a.as_f32().or_else(|| a.as_i64().map(|i| i as f32)))
+                {
+                    bare_by_frame
+                        .entry(Self::motion_to_script_frame(line.frame))
+                        .or_default()
+                        .push(AcmdStmt::MotionRate(rate));
+                }
+                continue;
+            }
             if let Some(stmt) = stmt_of(line, bone_rev) {
                 // Only this pair moves the flag. Reading it off every statement would let the
                 // `HIT_RESET_ALL` that so often shares a frame with the reset close the span
@@ -8136,12 +8187,24 @@ impl VisionaryApp {
             }
         }
 
-        crate::data::AcmdScript {
-            stmts: by_frame
-                .into_iter()
-                .flat_map(|(frame, stmts)| [AcmdStmt::Frame(frame as f32), AcmdStmt::Excute(stmts)])
-                .collect(),
+        // One `frame()` per frame that has anything on it, from either bucket, with the bare
+        // statements ahead of the block. That ordering is the source's: `FT_MOTION_RATE` sets
+        // the rate the frame is entered at, so emitting it after the block would round-trip to a
+        // script that changes speed one block too late.
+        let frames: std::collections::BTreeSet<u32> = by_frame
+            .keys()
+            .chain(bare_by_frame.keys())
+            .copied()
+            .collect();
+        let mut stmts = Vec::new();
+        for frame in frames {
+            stmts.push(AcmdStmt::Frame(frame as f32));
+            stmts.extend(bare_by_frame.remove(&frame).unwrap_or_default());
+            if let Some(inner) = by_frame.remove(&frame) {
+                stmts.push(AcmdStmt::Excute(inner));
+            }
         }
+        crate::data::AcmdScript { stmts }
     }
 
     /// Rebuild a `sound_` script from the captured `PLAY_SE`-family calls.
@@ -16603,7 +16666,7 @@ mod live_effect_capture_tests {
         ];
         let bone_rev: HashMap<u64, String> = [(bone, "kneer".to_string())].into_iter().collect();
 
-        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let script = VisionaryApp::script_from_captures(&captures, &bone_rev);
         let (states, pris) = script.to_hurtboxes();
 
         let [state] = &states[..] else {
@@ -16654,7 +16717,7 @@ mod live_effect_capture_tests {
         ];
         let bone_rev: HashMap<u64, String> = [(bone, "kneer".to_string())].into_iter().collect();
 
-        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let script = VisionaryApp::script_from_captures(&captures, &bone_rev);
         let (states, _) = script.to_hurtboxes();
 
         let whole = states
@@ -16809,7 +16872,7 @@ mod live_effect_capture_tests {
         ];
         let bone_rev: HashMap<u64, String> = [(bone, "kneer".to_string())].into_iter().collect();
 
-        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let script = VisionaryApp::script_from_captures(&captures, &bone_rev);
         let mods = script.to_attack_mods();
         let [power] = &mods[..] else {
             panic!("expected exactly the one modifier, got {mods:?}");
@@ -16853,7 +16916,7 @@ mod live_effect_capture_tests {
         ];
         let bone_rev: HashMap<u64, String> = [(bone, "haver".to_string())].into_iter().collect();
 
-        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &bone_rev);
+        let script = VisionaryApp::script_from_captures(&captures, &bone_rev);
         let exported = crate::acmd::export_acmd_source(&script, "kirby", "special_s");
         assert!(
             !exported.contains("COL_NORMAL"),
@@ -16891,7 +16954,7 @@ mod live_effect_capture_tests {
             line("COL_NORMAL", 20.0, vec![]),
         ];
 
-        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &HashMap::new());
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let (_, pris) = script.to_hurtboxes();
         assert_eq!(
             (pris[0].pri, pris[0].active_end),
@@ -16923,8 +16986,59 @@ mod live_effect_capture_tests {
             args: vec![A::Hash(0xdead_beef), A::Int(2)],
             run: 1,
         }];
-        let script = VisionaryApp::hurtbox_script_from_captures(&captures, &HashMap::new());
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert!(script.to_hurtboxes().0.is_empty());
+    }
+
+    /// A captured `FT_MOTION_RATE` reaches the script as a typed, **top-level** statement.
+    ///
+    /// The plugin overrode rates from the day E2 landed but never `record`ed one, so a "⟳ Live"
+    /// load of a rate-carrying move came back with no rate in it and an export written from that
+    /// capture would have dropped the call entirely. Reported as "the live capture failed to get
+    /// motion rate; the GitHub one has it".
+    ///
+    /// **Top level is the load-bearing half.** All 17 corpus calls are bare, and wrapping one in
+    /// an `is_excute` block the source never had is both a behaviour change and a round-trip
+    /// failure — so this asserts the statement's position, not merely its presence.
+    #[test]
+    fn a_captured_motion_rate_lands_as_a_bare_top_level_statement() {
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("attack_lw4").0,
+                frame: 0.0,
+                func: "FT_MOTION_RATE".into(),
+                args: vec![A::Num(0.25)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("attack_lw4").0,
+                frame: 15.0,
+                func: "ATK_POWER".into(),
+                args: vec![A::Int(0), A::Int(10)],
+                run: 1,
+            },
+        ];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+
+        let rates = script.motion_rate_sites();
+        assert_eq!(rates.len(), 1, "the rate must survive the capture");
+        assert_eq!(rates[0].2, 0.25);
+        assert!(
+            script
+                .stmts
+                .iter()
+                .any(|s| matches!(s, crate::data::AcmdStmt::MotionRate(_))),
+            "the rate must be a top-level statement, not buried in an is_excute block: {:?}",
+            script.stmts
+        );
+
+        // The paired family, in the same capture: tuning was already read correctly, and if it
+        // ever stops being, this says so rather than leaving the rate arm to take the blame.
+        let mods = script.to_attack_mods();
+        assert_eq!(mods.len(), 1, "ATK_POWER must still be adopted");
+        assert_eq!(mods[0].value, 10.0);
     }
 
     fn attack_capture(id: i64, frame: f32, bone: u64) -> CaptureLine {

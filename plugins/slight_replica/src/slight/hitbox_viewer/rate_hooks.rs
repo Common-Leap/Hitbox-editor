@@ -16,7 +16,7 @@
 //! structural edit that belongs to the export — the same boundary the sound and hurtbox
 //! sections draw.
 
-use super::{any_rules, read_args_exact, HbOverrides, LuaArg, CAT_MOTION_RATE};
+use super::{any_rules, read_args_exact, record, HbOverrides, LuaArg, CAT_MOTION_RATE};
 
 /// Reports per rule set, not per boot.
 ///
@@ -94,6 +94,15 @@ fn rate_action(motion: u64, frame: f32) -> Option<(bool, Option<HbOverrides>)> {
 }
 
 unsafe fn rate_action_for_call(lua_state: u64, args: &[LuaArg]) -> bool {
+    // **Captured first, and unconditionally.** Overriding and capturing are two different jobs:
+    // a rule only exists once the user has edited something, while a capture is what lets them
+    // see the move at all. The first version of this hook did only the override, so a live
+    // capture of a rate-carrying move came back with no rate in it — the value was simply
+    // missing from a "⟳ Live" load, and the export then wrote a move with no rate call.
+    //
+    // Every other family here records on the same line for the same reason; this one was
+    // written from the override end and never grew the other half.
+    record(lua_state, "FT_MOTION_RATE", args);
     // Every early return reports itself. A branch that bails silently is invisible in exactly
     // the case you are debugging it, which is the lesson three rounds of D1g paid for.
     if !any_rules() {

@@ -2837,6 +2837,36 @@ already on disk are handled without anyone clearing their cache.
   are still parsed as one-`Raw`-line scripts by the oracle. Harmless today — they round-trip —
   but it inflates any count taken over the cache, which is how this was found in the first place.
 
+### [x] R10 — A live capture had no motion rate, and could not say what else it dropped (done 2026-08-06)
+
+Reported as "the live capture failed to get hitboxes, hitbox tuning, and motion rate — the GitHub
+one has it", on `attack_lw4`, which carries all three.
+
+- **Motion rate: a real gap, and mine.** `rate_hooks` was written from the override end and never
+  grew the other half — it never called `record`, so no `FT_MOTION_RATE` ever entered the capture
+  stream. Every other family here records on the same line as it acts. A capture of a
+  rate-carrying move therefore came back with no rate, and an export written from that capture
+  would have dropped the call. Fixed on both sides: the plugin records it, and the rebuild places
+  it as a **bare top-level statement** — all 17 corpus calls are bare, and wrapping one in an
+  `is_excute` the source never had is a behaviour change as well as a round-trip failure.
+- **Hitbox tuning: not a gap.** `ATK_POWER` has always been recorded by the plugin and read by an
+  arm in the rebuild, and `LuaArgWire::as_f32` already accepts an `Int`. Checked rather than
+  assumed — the first fix written for it was a duplicate `match` arm, caught by the compiler as
+  unreachable.
+- **The real defect was that none of this was observable.** The post-capture status line named
+  hitboxes, effects and sounds, with a comment reading "Names every family" — while three of the
+  six went uncounted. So a capture that dropped tuning and rate was indistinguishable from one
+  that never contained any, and the report could not tell the two apart either. **Fifth instance
+  of the enumeration trap**, and the first where the enumeration was in a *message* rather than
+  in a guard, which is why no test caught it: nothing was wrong with the code it described.
+- Now counts all six and **prints the zeroes**, because "0 tuning call(s)" is the answer to the
+  question, not noise to be trimmed. The `state.script.stmts.is_empty()` refusal — which keeps a
+  fetched script rather than replacing it with a capture-derived one — also says so now when it
+  actually discards something, instead of being silently correct.
+- **Consolidated rather than extended.** `hurtbox_script_from_captures` became
+  `script_from_captures`; adding a second and third builder beside it would have been three
+  copies of the same frame bucketing and ordering rule. Adding a family is now one `match` arm.
+
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
