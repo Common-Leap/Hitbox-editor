@@ -2711,7 +2711,7 @@ the things that exist" that was accurate when written. See the traps list.
   nothing else will catch it. Both mutations caught: dropping the sound clear fails it and fails
   `a_cleared_move_accepts_a_captured_sound_script_again`.
 
-### [~] R9 — A missing script is cached as its own HTTP error page (in progress 2026-08-06)
+### [x] R9 — A missing script is cached as its own HTTP error page (done 2026-08-06)
 
 Found while counting the corpus for E2. Three files in the 461-file cache are 14 bytes long and
 contain the text `404: Not Found`:
@@ -2743,6 +2743,33 @@ miss from a script. Caching the miss is correct; **representing it as a body is 
 - **Test bar, and this is the part to get right:** a negative test ("the miss is not parsed as a
   script") needs its paired positive — a real body through the same path that *does* parse —
   or it passes with the bug restored. See the standing trap.
+
+**Done.** `fetch_script_body` checks the status and reports a miss as an empty body;
+`script_source_from_body` normalises a legacy `404: Not Found` file the same way, so the three
+already on disk are handled without anyone clearing their cache.
+
+- **A miss normalises to an empty body, deliberately not to `None`.** `None` means "not cached"
+  to the fighter-wide scan, so the obvious fix would have sent every known-missing move back to
+  the network on every scan — undoing the caching this path exists for, and failing nothing.
+  `a_cached_miss_still_counts_as_fetched_so_a_scan_does_not_re_request_it` exists for that
+  specific wrong fix, and it is the mutation that proves it: implementing the miss as `None`
+  fails it.
+- **The cold and warm paths were about to disagree.** `fetch_script_body_cached` returned the
+  fetch result *unnormalised* on a cold cache and the normalised one on a warm cache, so the
+  status check was the only guard on the first fetch of a move and the normaliser the only guard
+  afterwards. Both now go through the one function, which is what makes the next point tolerable.
+- **Named coverage boundary: neither network function is under test**, because both need a
+  network and there is no injectable client. What *is* tested is the decision they feed — that
+  is why the cold path was routed through it rather than left to the status check alone. A
+  regression in the status check is now caught downstream instead of shipping.
+- **Three mutations, all caught**, and each by a different test: blinding the detector fails the
+  read and export tests, returning `None` for a miss fails the scan test, and returning an empty
+  body unconditionally fails only the *positive* half — which is exactly the hole a lone negative
+  test would have left.
+- **Follow-up, small: the corpus test helpers still read the cache raw.** Five of them build
+  their own file lists rather than going through `cached_script_body`, so those three error pages
+  are still parsed as one-`Raw`-line scripts by the oracle. Harmless today — they round-trip —
+  but it inflates any count taken over the cache, which is how this was found in the first place.
 
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 

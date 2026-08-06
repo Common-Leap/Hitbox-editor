@@ -55,29 +55,85 @@ fn script_cache_path(fighter: &str, move_name: &str) -> std::path::PathBuf {
         .join(format!("{}.txt", move_name_to_pascal(move_name)))
 }
 
+/// A cached body that is really an HTTP error page rather than a script.
+///
+/// Until 2026-08-06 the fetch below wrote whatever came back to the cache, and a 404 from
+/// `raw.githubusercontent.com` is a *successful* request whose body is the eight-word error
+/// page. Those files reached the parser as script source: the move opened as a one-line script
+/// reading `404: Not Found`, and because that line is kept as [`AcmdStmt::Raw`] the export wrote
+/// it verbatim into a generated `.rs` file.
+///
+/// The fetch now checks the status, so no new file can look like this. This exists for the ones
+/// already on disk — normalising them rather than deleting them, so the fix takes effect without
+/// anyone clearing their cache.
+fn is_cached_error_page(body: &str) -> bool {
+    body.trim().starts_with("404: Not Found")
+}
+
+/// The script source a body represents: the body itself, or **empty** if it is a miss.
+///
+/// A miss is empty rather than [`None`] on purpose. To the fighter-wide scan `None` means "not
+/// cached", so reporting a known-missing move that way would send it back to the network on
+/// every scan and undo the caching this whole path exists for. Upstream never serves an empty
+/// script, so an empty body is an unambiguous "this move has none".
+///
+/// **Every body reaching a caller goes through here, fresh off the wire or off the disk.** The
+/// status check in [`fetch_script_body`] cannot be reached by a test without a network, so it is
+/// deliberately not the only guard: if it regressed, this would still catch the page before it
+/// reached a parser.
+fn script_source_from_body(raw: &str) -> String {
+    if is_cached_error_page(raw) {
+        String::new()
+    } else {
+        raw.to_string()
+    }
+}
+
 /// Cached script body, if this move was fetched before. Never touches the network — lets a
 /// scan resolve every already-known move up front and spend threads only on the rest.
+///
+/// [`Some`] means "this move has been fetched", **not** "this move has a script": a cached miss
+/// comes back as `Some("")`. See [`script_source_from_body`].
 pub fn cached_script_body(fighter: &str, move_name: &str) -> Option<String> {
-    std::fs::read_to_string(script_cache_path(fighter, move_name)).ok()
+    cached_script_body_at(&script_cache_path(fighter, move_name))
+}
+
+/// [`cached_script_body`] against an explicit path, so a test can exercise the real read and
+/// normalise without redirecting the process-wide cache directory out from under the corpus
+/// tests (which would make them silently skip rather than fail).
+fn cached_script_body_at(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|raw| script_source_from_body(&raw))
 }
 
 /// Fetch the raw script body text for a fighter+move from GitHub.
+///
+/// A move with no upstream script is an ordinary outcome, not an error, and is reported as an
+/// empty body. **`send()?` does not fail on a 404** — the request succeeded, and it is the
+/// status that says the file is missing, so this has to be checked explicitly.
 pub fn fetch_script_body(fighter: &str, move_name: &str) -> anyhow::Result<String> {
     let pascal = move_name_to_pascal(move_name);
     let url = format!(
         "https://raw.githubusercontent.com/WuBoytH/SSBU-Dumped-Scripts/main/smashline/lua2cpp_{fighter}/{fighter}/{pascal}.txt"
     );
-    Ok(HTTP.get(&url).send()?.text()?)
+    let response = HTTP.get(&url).send()?;
+    if !response.status().is_success() {
+        return Ok(String::new());
+    }
+    Ok(response.text()?)
 }
 
-/// Disk-cached [`fetch_script_body`]: bodies (including "404: Not Found" misses) are
-/// stored under `{app_storage_root}/script-cache/{fighter}/`, so fighter-wide scans
-/// (the transplant studio's full-use discovery) only hit the network once per move ever.
+/// Disk-cached [`fetch_script_body`]: bodies (**including misses**, stored as an empty file) are
+/// kept under `{app_storage_root}/script-cache/{fighter}/`, so fighter-wide scans (the
+/// transplant studio's full-use discovery) only hit the network once per move ever.
 pub fn fetch_script_body_cached(fighter: &str, move_name: &str) -> anyhow::Result<String> {
     if let Some(body) = cached_script_body(fighter, move_name) {
         return Ok(body);
     }
-    let body = fetch_script_body(fighter, move_name)?;
+    // Normalised before it is stored *and* before it is returned, so the cold path and the warm
+    // path cannot disagree: what goes on disk is exactly what a later read gives back.
+    let body = script_source_from_body(&fetch_script_body(fighter, move_name)?);
     let path = script_cache_path(fighter, move_name);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -3067,6 +3123,83 @@ pub fn export_acmd_source(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Three files in a long-lived script cache are the literal bytes `404: Not Found`, because
+    /// the fetch used to store whatever a request returned and a 404 is a *successful* request.
+    ///
+    /// Both halves matter and the negative one is worthless alone: "the error page is not read
+    /// as a script" passes just as well against a function that reads nothing at all, so the
+    /// same call is made with a real script body to show the path still carries one through.
+    #[test]
+    fn a_cached_error_page_is_not_read_as_a_script_but_a_real_one_still_is() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let miss = dir.path().join("SpecialBStart.txt");
+        std::fs::write(&miss, "404: Not Found").unwrap();
+        assert_eq!(
+            cached_script_body_at(&miss).as_deref(),
+            Some(""),
+            "an HTTP error page must not reach the parser as script source"
+        );
+
+        let real = dir.path().join("AttackHi4.txt");
+        let body = "unsafe extern \"C\" fn game_attackhi4(agent: &mut L2CAgentBase) {\n\
+                        frame(agent.lua_state_agent, 4.0);\n\
+                    }\n";
+        std::fs::write(&real, body).unwrap();
+        assert_eq!(
+            cached_script_body_at(&real).as_deref(),
+            Some(body),
+            "a real cached script must come back byte for byte"
+        );
+    }
+
+    /// The regression this fix could easily have introduced, and the reason a miss normalises to
+    /// an empty body instead of to `None`.
+    ///
+    /// The fighter-wide scan reads `None` as "not cached yet" and queues the move for a network
+    /// fetch. If a known-missing move answered `None`, every scan would re-request all of them
+    /// forever — the exact cost the cache was built to avoid — and nothing would have failed.
+    #[test]
+    fn a_cached_miss_still_counts_as_fetched_so_a_scan_does_not_re_request_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let miss = dir.path().join("SpecialBAttack.txt");
+        std::fs::write(&miss, "404: Not Found").unwrap();
+
+        assert!(
+            cached_script_body_at(&miss).is_some(),
+            "a cached miss is still cached; returning None sends it back to the network"
+        );
+        assert!(
+            cached_script_body_at(&dir.path().join("NeverFetched.txt")).is_none(),
+            "a move that was never fetched must stay distinguishable from one that missed"
+        );
+    }
+
+    /// What the bug actually cost, asserted at the surface where it did damage.
+    ///
+    /// `404: Not Found` is not a macro call, so the parser keeps it as [`AcmdStmt::Raw`] and
+    /// `emit_stmts` writes `Raw` lines straight back out. Exporting one of those three dolly
+    /// moves therefore emitted the words `404: Not Found` into a generated `.rs` file, which no
+    /// toolchain will build. This is the verbatim-escape-hatch trap: a `Raw` line is trusted to
+    /// be Rust, and here it was an error page.
+    #[test]
+    fn exporting_a_move_with_no_upstream_script_does_not_emit_the_error_page() {
+        // Unnormalised, to show the export path really would have written it.
+        let raw = parse_acmd_script("404: Not Found");
+        assert!(
+            preview_game_fn(&raw, "special_b_start").contains("404: Not Found"),
+            "if this stops holding the export no longer round-trips Raw lines, and the \
+             normalisation below is guarding nothing — re-check the fix, do not delete this"
+        );
+
+        let normalised = parse_acmd_script(&script_source_from_body("404: Not Found"));
+        let emitted = preview_game_fn(&normalised, "special_b_start");
+        assert!(
+            !emitted.contains("404"),
+            "a move with no upstream script must export as an empty function, got:\n{emitted}"
+        );
+    }
 
     /// `AttackModule::clear_all` used to end a hitbox the frame *before* it started when the
     /// script had no `frame()` call ahead of it, so the timeline and the viewport drew nothing
