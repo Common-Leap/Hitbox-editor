@@ -816,6 +816,39 @@ plus a test pinning each mapping and asserting neither family lands on the hurtb
 - **Not verified against a running game.** The mapping is proven by test; that a live `ATTACK_ABS`
   edit now actually lands needs a deploy, which is not available here.
 
+### [~] B6 — Site counters disagree with the walk about raw blocks (started 2026-08-05)
+
+Three sibling counters in [data.rs](src/data.rs:1289) — `count_hurt_stmts`, `count_sound_stmts`,
+`count_attack_mod_stmts` — exist for one purpose, at one call site
+([data.rs:1634](src/data.rs:1634)): stepping the site cursor over a `for` body that runs **zero**
+iterations, so a statement *after* the loop still gets the ordinal a plain pre-order walk of the
+source would give it.
+
+`count_sound_stmts` recurses into `AcmdStmt::RawBlock`, and its doc comment says why: *"`eval_stmts`
+walks a raw block's body, so a sound inside one takes a site, and a count that disagreed with the
+walk is the bug this function exists to prevent."* **The other two do not.** They return `0` for a
+raw block, while [eval_stmts](src/data.rs:1644) recurses into it deliberately — a hitbox inside an
+`if` has always been shown unconditionally, and eighteen `game_` scripts rely on that.
+
+So a zero-iteration `for` containing an `if` containing `HIT_STATUS` / `COL_PRI` / `COL_NORMAL` /
+`HIT_RESET_ALL` / `ATTACK_MOD` under-steps the cursor, and every **subsequent** hurtbox and
+attack-mod edit resolves to the wrong line — producing a script that is still perfectly well-formed.
+That is the failure mode the sound counter's comment names, in the two functions that did not get it.
+
+**Reachability, measured not assumed** (460-file cache, 2026-08-05): 57 such statements sit inside
+an `if` across 21 files; **5 of them across 3 files** — `dolly/SpecialHiCommand.txt`,
+`dolly/SpecialAirHiCommand.txt`, `kirby/SpecialAirSStart.txt` — sit inside an `if` that is itself
+inside a `for`. The shape ships in vanilla.
+
+- **Work order:** add the `RawBlock` arm to both counters, matching `count_sound_stmts`. Then find
+  what should have caught this: the sound side presumably has a test the other two families lack,
+  and adding the arm without adding that test leaves the third instance of this to be found by hand.
+- **Done when:** a zero-iteration `for` wrapping an `if` that contains a hurtbox statement resolves
+  the *next* statement's site to the right line, proven by test for both families; and a mutation
+  reverting either arm fails.
+- **Surfaces:** Parse+IR only. This is a site-numbering fix behind existing capability, not a new
+  one — no panel, live, export or write-back change. Say so explicitly if that turns out false.
+
 ## Effects
 
 ### [x] C1 — `LAST_EFFECT_SET_COLOR` and `LAST_EFFECT_SET_ALPHA`
