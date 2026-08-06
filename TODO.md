@@ -1904,6 +1904,31 @@ approach, same round-trip gate.
 verbatim today. High mod value — this is how a move's momentum is authored — and the editor
 already knows the frame each call lands on.
 
+**Measured 2026-08-05, and this is the Rule 5 correction: four of the five named macros have
+zero corpus calls, and the reason is structural.** `sv_kinetic_energy` 0, `SET_SPEED_EX` 0,
+`SET_SPEED` (any form) 0, `ADD_SPEED_NO_LIMIT` 0, `CORRECT` 0. The single `KineticModule` hit in
+the whole cache is `KineticModule::change_kinetic` in kirby `EscapeAir` — a raw module call, not
+a macro. Kinetics in Ultimate is overwhelmingly authored in *status* modules, not in ACMD
+scripts, so this entry is largely aimed at code the editor does not load and this task does not
+cover. That is a different problem from [B2](#-b2--attack_fp-fighter-position-hitboxes) and
+[C4](#-c4--effect-lifetime-control): those are macros that exist in ACMD and happen to be
+unused here, this is a family that mostly lives somewhere else.
+
+`REVERSE_LR` is the exception and the only schedulable part: **7 real calls**, all
+`macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,
+`ItemLightThrowAirB`, `ItemLightThrowAirB4`, `ItemHeavyThrowB`, `ItemHeavyThrowB4`, `EscapeF`).
+It takes no arguments, so "editing" it means placing and removing it on a frame, not tuning a
+value — which is a much smaller task than the entry's framing implies and shares nothing with
+the speed macros.
+
+- **Counting trap, hit while measuring this.** A substring grep says 9, not 7. The extra two are
+  `FIGHTER_DOLLY_STATUS_SPECIAL_HI_WORK_FLAG_REVERSE_LR` in `WorkModule::on_flag` — a flag name
+  that ends in the macro name. Word-boundary the pattern and read the call site; see the
+  `ACMD family prefix and const collisions` note.
+- **Before scheduling this, re-scope it.** Either split `REVERSE_LR` out as its own small entry
+  and leave the speed macros parked behind a re-measure, or fetch status-module sources and
+  decide whether they are in scope for this editor at all. Do not take the entry as written —
+  the round-trip bar cannot be met for four of its five members.
 - **Trap:** these change where the fighter *is*, so previewing them means moving the model,
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
