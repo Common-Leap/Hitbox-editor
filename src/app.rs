@@ -4461,12 +4461,18 @@ impl VisionaryApp {
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.heading("Playback rate");
+            // "Motion rate", not "Playback rate". The effects list already has a per-spawn
+            // "Rate" (`LAST_EFFECT_SET_RATE`) that its own code called the playback rate, and
+            // the two were confused on the first day this section existed — a live effect-rate
+            // edit was reported as this feature working, which it is not: they are different
+            // macros, on different scripts, travelling on different channels.
+            ui.heading("Motion rate");
             ui.colored_label(egui::Color32::from_rgb(160, 190, 235), "FT_MOTION_RATE");
         })
         .response
         .on_hover_text(
-            "FT_MOTION_RATE scales how fast the animation advances from that frame on. A rate \
+            "FT_MOTION_RATE scales how fast the whole ANIMATION advances from that frame on — \
+             not the speed of an effect, which is the Rate field on each effect spawn. A rate \
              BELOW 1 makes the move play faster, not slower: the engine advances 1/rate motion \
              frames per game frame, so 0.25 crosses four frames of windup in one.",
         );
@@ -5673,13 +5679,17 @@ impl VisionaryApp {
                                 // The checkbox is the difference between "no rate line" and "a
                                 // rate line that happens to say 1.0". Off means the export
                                 // writes nothing, which is not the same as writing the default.
-                                ui.label("Rate");
+                                // "Effect rate", not bare "Rate": the move itself has a Motion
+                                // rate section (`FT_MOTION_RATE`), and the two were mistaken for
+                                // each other the first day both existed.
+                                ui.label("Effect rate");
                                 ui.horizontal(|ui| {
                                     let mut on = ec.rate.is_some();
                                     if ui
                                         .checkbox(&mut on, "")
                                         .on_hover_text(
-                                            "Play this effect faster or slower than authored. \
+                                            "Play THIS EFFECT faster or slower than authored — \
+                                             not the animation, which is the Motion rate section. \
                                              Off writes no LAST_EFFECT_SET_RATE line at all.",
                                         )
                                         .changed()

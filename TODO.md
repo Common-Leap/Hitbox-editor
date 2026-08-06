@@ -2411,9 +2411,32 @@ the right tool for a change of this shape and found two sites review would not h
   two-argument `FT_MOTION_RATE_SYNTHETIC` to isolate the name match the parser actually relies on.
   Both are the standing "a detector tested on its own pattern" trap wearing different clothes.
 
-**Not yet confirmed in game** — deployed as `2026-08-06l-motion-rate`, unverified. The check is
-kirby's down smash (`attack_lw4`, rate `0.25`) or up tilt (`attack_hi4`, `0.6`): edit the value in
-the new **Playback rate** section and look for `RATE hit` in `diag.txt`.
+**Live surface still unconfirmed in game.** Two boots have gone into it and neither reached a
+`RATE hit`, for two different reasons — both worth recording, because neither was a bug in the
+feature.
+
+- **Boot 1** established only that no rule had arrived, because *neither side of the wire could
+  say why*. The plugin's `rate_action` returned `None` silently with "every early return reports
+  itself" written directly above it — the rule miss being the one return that matters, since a
+  miss on the motion and a miss on the frame window are indistinguishable from outside. The
+  editor's two early returns were silent as well, and that reason lives on the editor side, so
+  the plugin's log could never have supplied it. **Third instance of this shape on this project.**
+  Both now report; the editor also says in its status bar how many rules went out and whether the
+  game is connected, which needs no boot at all.
+- **Boot 2 was a naming collision, not a defect.** The reported "I edited the rate and it applied
+  live" was `LAST_EFFECT_SET_RATE` — the per-spawn effect rate from A3, which has always worked
+  live and travels on a different channel. This section had been called **Playback rate**, and
+  the effect field's own code comment called it "Playback rate" too. Every log line was
+  consistent with the feature working exactly as designed: `RATE bail: no rules loaded yet`
+  proves the hook *is* reached by a real move, which is the one thing boot 1 could not show.
+  Renamed to **Motion rate** and **Effect rate**, and both hover texts now say which is which by
+  contrast.
+
+**The check, when it next gets a boot:** kirby's down smash (`attack_lw4`, rate `0.25`) or up tilt
+(`attack_hi4`, `0.6`). Edit the value in the **Motion rate** section — the status bar should say
+the rules were sent — then *perform that specific move*, since only 10 of kirby's carry a rate
+call and a walk cycle will never fire the hook. `RATE miss` now prints every loaded rule's motion
+and frame window beside the ones the game used, so a mismatch names itself.
 
 ### [x] E3 — Camera and zoom (done 2026-08-06 — as a placement fix, not a camera panel)
 
