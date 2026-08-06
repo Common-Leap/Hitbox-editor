@@ -1044,6 +1044,9 @@ pub struct VisionaryApp {
     use_scan: Option<UseScan>,
     fighter_search: String,
     move_search: String,
+    /// Filter for the Sounds section's ▾ picker. Shared by every row, because the user is
+    /// looking for one kind of sound at a time ("step", "swing") rather than per call.
+    sound_filter: String,
     /// The user's own smashline project, when linked. Scripts are read from here in
     /// preference to the dumped-script mirror — see `acmd_src`.
     acmd_src: Option<crate::acmd_src::SourceIndex>,
@@ -1303,6 +1306,7 @@ impl VisionaryApp {
             use_scan: None,
             fighter_search: String::new(),
             move_search: String::new(),
+            sound_filter: String::new(),
             acmd_src: None,
             show_acmd_src: false,
             acmd_src_buffer: None,
@@ -4451,6 +4455,14 @@ impl VisionaryApp {
             return;
         }
 
+        let fighter = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        let candidates = sound_candidates(&self.state.labels, &fighter);
+
         ui.separator();
         ui.horizontal(|ui| {
             ui.heading("Sounds");
@@ -4462,10 +4474,24 @@ impl VisionaryApp {
              the bank does not have is silent rather than an error, so a typo here plays nothing \
              and the game says nothing about it.",
         );
+        // Say what is on offer. Without this the field is a bare text box with no indication that
+        // there is a fixed vocabulary at all, which is how the first person to use it read it.
+        ui.horizontal(|ui| {
+            ui.weak(format!(
+                "{} known sounds for {fighter} — press ▾ to browse, or type any name.",
+                candidates.len()
+            ));
+        });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.sound_filter)
+                .hint_text("Filter the ▾ list (e.g. step, swing, voice)…")
+                .desired_width(f32::INFINITY),
+        );
 
         // Collected and applied after the loop, so the mutable borrow of the script does not
         // overlap the event list it was derived from — the hurtbox section's reason exactly.
         let mut edit: Option<(usize, ExcuteStmt)> = None;
+        let filter = self.sound_filter.to_lowercase();
 
         for event in &self.state.sounds {
             let active = event.frame == self.state.current_frame;
@@ -4492,6 +4518,51 @@ impl VisionaryApp {
                                 .desired_width(200.0),
                         )
                         .changed();
+                    // A tick for a name the dump knows, a question mark for one it does not.
+                    // **Not an error marker.** The dump is incomplete — real scripts play
+                    // `se_common_step_left_m`, which is not in it — so an unknown name is a
+                    // "cannot confirm", and saying otherwise would train the user to distrust
+                    // working sounds.
+                    let known = candidates.iter().any(|c| c == name);
+                    ui.colored_label(
+                        if known {
+                            egui::Color32::from_rgb(120, 190, 120)
+                        } else {
+                            egui::Color32::from_rgb(170, 170, 110)
+                        },
+                        if known { "✔" } else { "?" },
+                    )
+                    .on_hover_text(if known {
+                        "This name is in the loaded label dump."
+                    } else {
+                        "Not in the label dump. That does not mean it is wrong — the dump is \
+                         incomplete — but check the spelling."
+                    });
+                    egui::ComboBox::from_id_salt(("sound_pick", event.site, index))
+                        .selected_text("▾")
+                        .width(24.0)
+                        .show_ui(ui, |ui| {
+                            let mut shown = 0;
+                            for cand in &candidates {
+                                if !filter.is_empty() && !cand.to_lowercase().contains(&filter) {
+                                    continue;
+                                }
+                                // Bounded, because the unfiltered list is hundreds of entries and
+                                // egui builds every row it is handed.
+                                if shown >= 200 {
+                                    ui.weak("…filter to narrow this list");
+                                    break;
+                                }
+                                shown += 1;
+                                if ui.selectable_label(cand == name, cand).clicked() {
+                                    *name = cand.clone();
+                                    changed = true;
+                                }
+                            }
+                            if shown == 0 {
+                                ui.weak("No sound matches that filter.");
+                            }
+                        });
                 }
                 // Shown, not editable: the suppression window is the one non-hash argument in
                 // the family and nothing has measured what a sensible range for it is.
@@ -14306,7 +14377,29 @@ pub fn synthesize_script_from_hitboxes(
     AcmdScript { stmts }
 }
 
-/// Display labels for the move-list categories, indexed by `move_category_index`.
+/// The sound labels a fighter can plausibly play, for the Sounds picker.
+///
+/// Three families, because those are the three the corpus's `sound_` scripts draw on: the
+/// fighter's own effects (`se_kirby_*`), the shared bank every fighter uses (`se_common_*`), and
+/// the fighter's voice clips (`vc_kirby_*`). Measured for Kirby: 61, 162 and 137 respectively.
+///
+/// **This is a suggestion list, not a validator.** The free-text field stays, because the label
+/// dump is known to be incomplete — `se_common_step_left_m` is played by real scripts and is not
+/// in `ParamLabels.csv` — and refusing a name it does not know would block a sound that works.
+/// A name off this list is offered; a name not on it is still accepted.
+fn sound_candidates(labels: &HashMap<u64, String>, fighter: &str) -> Vec<String> {
+    let own_se = format!("se_{fighter}_");
+    let own_vc = format!("vc_{fighter}_");
+    let mut out: Vec<String> = labels
+        .values()
+        .filter(|l| l.starts_with(&own_se) || l.starts_with(&own_vc) || l.starts_with("se_common_"))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn format_move_name(name: &str) -> String {
     let stripped = if name.len() > 3 {
         let b = name.as_bytes();
@@ -15816,6 +15909,59 @@ mod live_effect_capture_tests {
         );
         // Distinct sites, or an edit to one would rewrite the other.
         assert_ne!(events[0].site, events[1].site);
+    }
+
+    /// The Sounds picker offers the fighter's own bank, the shared bank, and its voice clips.
+    ///
+    /// Three families rather than "every `se_` label in the dump", which is about ten thousand
+    /// entries and unusable as a list. Another fighter's sounds are excluded because playing them
+    /// is not a thing a `sound_` script does — all 610 corpus calls name the performer's own bank
+    /// or the common one.
+    #[test]
+    fn the_sound_picker_offers_three_banks_and_not_the_whole_dump() {
+        let labels: HashMap<u64, String> = [
+            (1, "se_kirby_swing_l".to_string()),
+            (2, "se_common_smash_start".to_string()),
+            (3, "vc_kirby_attack01".to_string()),
+            (4, "se_mario_swing_l".to_string()),
+            (5, "collision_attr_normal".to_string()),
+            (6, "attack_air_n".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let got = sound_candidates(&labels, "kirby");
+
+        assert!(got.contains(&"se_kirby_swing_l".to_string()));
+        assert!(got.contains(&"se_common_smash_start".to_string()));
+        assert!(got.contains(&"vc_kirby_attack01".to_string()));
+        // Another fighter's bank, and labels that are not sounds at all.
+        assert!(!got.contains(&"se_mario_swing_l".to_string()));
+        assert!(!got.contains(&"collision_attr_normal".to_string()));
+        assert!(!got.contains(&"attack_air_n".to_string()));
+        // Sorted, because it is drawn as a list a person scans.
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(got, sorted);
+    }
+
+    /// A fighter with no labels loaded gets an empty list rather than everything.
+    ///
+    /// The prefix is built from the fighter name, so an empty name would make `se__` — which
+    /// matches nothing, and must not accidentally become a bare `se_` that matches the whole
+    /// dump and offers Mario's voice for Kirby.
+    #[test]
+    fn an_unknown_fighter_offers_only_the_shared_bank() {
+        let labels: HashMap<u64, String> = [
+            (1, "se_kirby_swing_l".to_string()),
+            (2, "se_common_smash_start".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let got = sound_candidates(&labels, "");
+
+        assert_eq!(got, vec!["se_common_smash_start".to_string()]);
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back

@@ -40,21 +40,28 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 /// Enough samples to see the step and its recovery, few enough to read by eye.
 const MAX_SAMPLES: u32 = 40;
 
-/// A rate this close to 1.0 is the default and says nothing.
-const RATE_EPSILON: f32 = 0.01;
+/// The move being measured. Everything else is ignored outright.
+///
+/// **The second run of this probe spent its whole budget on `run` and `walk_middle`.** Arming on
+/// "any rate away from 1.0" looked reasonable and is not: the engine drives `MotionModule::rate`
+/// continuously during locomotion — measured values from 0.73 to 3.17 while simply moving — so
+/// an off-default rate is the *normal* state for a walking fighter and says nothing about
+/// `FT_MOTION_RATE`. Exactly one of ~300 logged lines was the move the entry is about.
+const TARGET_MOTION: &str = "attack_lw4";
 
 static SAMPLES: AtomicU32 = AtomicU32::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
 static LAST_FRAME: AtomicU64 = AtomicU64::new(0);
 static LAST_MOTION: AtomicU64 = AtomicU64::new(0);
-/// The battle object the previous sample came from.
+/// The battle object this probe locked onto — the first one seen in [`TARGET_MOTION`].
 ///
-/// **The first run of this probe produced forty useless lines for want of this.**
-/// `current_agent()` alternates between the fighters on screen, so consecutive calls are
-/// consecutive *agents*, not consecutive frames of one agent. With two Kirbys both standing in
-/// `wait` the deltas came out as -181 and +182 alternating — two frame counters interleaved. A
-/// motion check cannot catch it, because both agents were in the same motion.
-static LAST_BOID: AtomicU32 = AtomicU32::new(u32::MAX);
+/// **A single shared "previous sample" slot is not enough, and that was the third run's bug.**
+/// `current_agent()` alternates between the fighters on screen, so every other `tick` belonged
+/// to a different agent and overwrote the slot. Every logged line then reported a boid change
+/// and refused to compute a delta — 300 lines of "no delta yet", all of them for `boid=0`,
+/// because the *intervening* ticks were the other fighter. Locking to one boid removes the
+/// interleaving instead of trying to detect it.
+static PROBE_BOID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Per-frame entry point. Resolves the current agent itself rather than taking one.
 ///
@@ -96,36 +103,43 @@ pub fn tick(boid: u32, boma: *mut BattleObjectModuleAccessor) {
         )
     };
 
-    let off_default = (rate - 1.0).abs() > RATE_EPSILON || (whole - 1.0).abs() > RATE_EPSILON;
-
-    // Remember this agent's frame whatever happens, so that when a rate does appear there is a
-    // previous frame *for the same agent* to subtract.
-    let prev_boid = LAST_BOID.swap(boid, Ordering::Relaxed);
-    let prev_motion = LAST_MOTION.swap(motion, Ordering::Relaxed);
-    let prev_bits = LAST_FRAME.swap(frame.to_bits() as u64, Ordering::Relaxed);
-
-    // **Only log frames that are actually carrying a rate.** The first run stayed armed through
-    // idle frames and spent every one of its forty samples on `wait` at rate 1.0, which says
-    // nothing — the budget has to go on the moves the entry is about.
-    if !off_default {
+    // Only the move under test. See [`TARGET_MOTION`] for why "any off-default rate" was the
+    // wrong trigger — locomotion runs at a continuously varying rate as a matter of course.
+    if motion != smash::phx::Hash40::new(TARGET_MOTION).hash {
         return;
     }
+
+    // Lock to the first agent seen performing it, so the other fighter's ticks cannot interleave.
+    let locked = PROBE_BOID.load(Ordering::Relaxed);
+    if locked == u32::MAX {
+        PROBE_BOID.store(boid, Ordering::Relaxed);
+    } else if locked != boid {
+        return;
+    }
+
     if !ARMED.swap(true, Ordering::Relaxed) {
+        crate::slight::diag::note(format!(
+            "RATE probe armed on {TARGET_MOTION} boid={boid} — E2. delta is how far \
+             MotionModule::frame moved in ONE game frame."
+        ));
         crate::slight::diag::note(
-            "RATE probe armed — E2. delta is how far MotionModule::frame moved in ONE game frame.",
+            "RATE  reading A (rate is playback speed): delta == the FT_MOTION_RATE argument. \
+             reading B (game frames per motion frame): delta == 1/argument.",
         );
         crate::slight::diag::note(
-            "RATE  reading A (rate is playback speed): delta == rate. \
-             reading B (rate is game frames per motion frame): delta == 1/rate.",
+            "RATE  NOTE MotionModule::rate is NOT the macro argument — it reads 1.0 here while \
+             the script sets 0.25. The delta is the measurement; rate= is context only.",
         );
     }
 
-    // A different agent, or the same agent in a new motion, means the previous frame number
-    // belongs to a different counter and the delta across it is meaningless. `current_agent()`
-    // alternates between fighters, so the boid check is the load-bearing one — see [`LAST_BOID`].
-    if prev_boid != boid || prev_motion != motion {
+    let prev_motion = LAST_MOTION.swap(motion, Ordering::Relaxed);
+    let prev_bits = LAST_FRAME.swap(frame.to_bits() as u64, Ordering::Relaxed);
+    // Every frame of the move is logged, not only the off-default ones: the whole point is to
+    // see the frame advance while the script's rate is in force, and the rate the *macro* set is
+    // not visible in `MotionModule::rate` at all.
+    if prev_motion != motion {
         crate::slight::diag::note(format!(
-            "RATE -- first sample for boid={boid} motion={motion:#x} rate={rate:.4} (no delta yet)"
+            "RATE -- {TARGET_MOTION} started, frame={frame:.4} (no delta yet)"
         ));
         return;
     }

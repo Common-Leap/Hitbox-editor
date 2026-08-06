@@ -2255,7 +2255,19 @@ Nothing on this machine distinguishes them: the smashline docs say only that rat
 speed of the animation and how fast the script playback is", and the corpus cannot be used as
 an oracle because it contains no independent statement of when a move actually hits.
 
-**A probe is now deployed and the entry is one boot from an answer (2026-08-06).**
+**Half of E2 is now answered, and it is the half that was actually open (2026-08-06).**
+`MotionModule::rate` is **not** the `FT_MOTION_RATE` argument. Measured live: Kirby's down smash
+reports `rate=1.0000` while `attack_lw4`'s script sets `FT_MOTION_RATE(agent, 0.25)`, and
+locomotion reports a continuously varying rate — 0.73 to 3.17 across `run`, `run_brake_l`,
+`walk_middle`, `walk_slow` — driven by movement speed and nothing to do with any macro. So the
+sequencer's `frame + rate` arithmetic describes the engine's animation blending, and **cannot be
+cited as evidence for either reading of the macro**. The prediction recorded below is withdrawn.
+
+That leaves the original question open and narrows it usefully: the measurement has to be the
+frame *delta* during a rate-carrying move, because the rate itself is not observable through that
+accessor. The probe now targets `attack_lw4` by motion hash and logs every frame of it.
+
+**A probe is deployed and the entry is one boot from the rest of the answer (2026-08-06).**
 `systems/rate_probe.rs`, in `build=2026-08-06d-rate-probe`, samples `MotionModule::frame` on
 consecutive game frames and writes at most 40 `RATE` lines to `sd:/slight/diag.txt`. It arms only
 when a rate away from 1.0 appears, so it is silent until a rate-carrying move is performed.
@@ -2266,7 +2278,7 @@ down smash** (`attack_lw4`, `FT_MOTION_RATE(agent, 0.25)`), the largest separati
 reading A predicts `delta ≈ 0.25`, reading B predicts `delta ≈ 4.0`. The probe prints both
 predictions on each line so the comparison needs no arithmetic.
 
-**There is already a standing prediction, and it favours reading A.**
+**~~There is already a standing prediction, and it favours reading A.~~ Withdrawn — see above.**
 `animation_sequencer::at_end_frame` computes `end <= frame + rate` and `update_predict_checker`
 steps by `frame + rate * step` — working code that treats rate as motion frames advanced per game
 frame. That settles what `MotionModule::rate` *means*; it does not settle whether that number is
