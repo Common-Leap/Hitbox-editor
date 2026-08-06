@@ -14,7 +14,28 @@ pub const DEBUG_TRACE: &str = "sd:/slight/debug/trace.txt";
 /// Whitespace/comma-separated subsystem names to leave uninstalled — see [`subsystem_disabled`].
 pub const DEBUG_OFF: &str = "sd:/slight/debug/off.txt";
 
+/// Guards [`ensure_slight_dirs`] against running more than once. See that function.
+static DIRS_ENSURED: AtomicBool = AtomicBool::new(false);
+
+/// Create the plugin's SD directories and seed the cached debug flags. **Boot only** — every
+/// call after the first returns without touching the filesystem.
+///
+/// The guard is not an optimisation, it is the fix for R2's headline finding.
+/// `poll_transactions` called this on **every frame** as a defensive prelude to its `read_dir`,
+/// and each call is four `create_dir_all` (a `stat` per path component, all of them long since
+/// present), three `exists` probes through `refresh_debug_logging`, and a `read_to_string` of
+/// `off.txt`, which normally does not exist. Nine filesystem operations per frame on the game
+/// thread, of which nine were redundant — and the whole point of `slight::sd_poll` is that this
+/// costs 20-200 µs each on Windows against a 16.6 ms budget.
+///
+/// Nothing recreates a directory a user deletes mid-session, and nothing should: `read_dir` on a
+/// missing directory already returns empty, which is the same answer it gives for the empty
+/// directory this used to guarantee. The only caller that needs one to *exist* is the one
+/// writing into it, and those create their own.
 pub fn ensure_slight_dirs() {
+    if DIRS_ENSURED.swap(true, Ordering::Relaxed) {
+        return;
+    }
     let _ = std::fs::create_dir_all(DEBUG_LOGGERS);
     let _ = std::fs::create_dir_all(ERROR_LOGS);
     let _ = std::fs::create_dir_all(DEBUGGABLES_DIR);

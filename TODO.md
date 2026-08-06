@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**399 green after B6 closed**), including the eight corpus
+- [ ] `cargo test` passes (**400 green after R2 closed**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -2172,7 +2172,7 @@ capstone using the ADRP+ADD/LDR technique `xref_scan.py` already uses, and read 
 loads. **Validate the method by re-deriving the known `EFFECT_MANAGER_OFFSET = 0x5333920`
 first — if it does not reproduce that number, do not trust the new one.**
 
-### [~] R2 — Windows path and frame-path audit (started 2026-08-05)
+### [x] R2 — Windows path and frame-path audit (done 2026-08-05)
 
 The dev machine runs Eden on Linux; a chunk of the tester base is on Windows. Two bug classes
 are structurally invisible here and have shipped before:
@@ -2185,12 +2185,68 @@ are structurally invisible here and have shipped before:
    and silently resolves to a nonexistent Windows location — and `create_dir_all` then
    *creates* it, turning a wrong path into a successful write.
 
-- **Work order:** sweep for `home_dir()` in host code and for `exists`/`metadata`/`read_dir`/
-  `remove_file` on plugin frame paths. Move the latter onto `slight::sd_poll`. Use
-  `dirs::data_dir()`/`dirs::config_dir()`, and validate a probed directory **by its contents**,
-  never by `is_dir()` alone.
-- **Done when:** a grep-level sweep is clean and the findings are written down here, since this
-  cannot be verified locally.
+**Closed 2026-08-05. The sweep is written up below. The headline finding was not the bug class
+this entry predicted.**
+
+**Half 2 (host paths) was already clean.** One `home_dir()` remains, in a Linux-only test that
+exists to prove `dirs::data_dir()` still resolves to the path that was hardcoded before. No
+hardcoded `.local/share` / `AppData` / `C:\Users` anywhere in `src/`. Every `is_dir()` outside
+[scratch_dirs.rs](src/scratch_dirs.rs) is an iteration filter, a test assertion, or a check that
+a path the *user explicitly chose* still exists — none is a probe validated by existence alone.
+`is_emulator_sd_root` still requires `ultimate/`. Nothing to do.
+
+**Half 1 (frame paths) was not clean, and the sd_poll consolidation had a hole in it.**
+`poll_transactions` was called from the debuggable-server facade's `on_frame` **every frame,
+ungated**, and its first statement was `ensure_slight_dirs()`. Per frame, on the game thread:
+
+| # | Call | Path | Normally |
+|---|------|------|----------|
+| 1-4 | `create_dir_all` ×4 | `debug/loggers/`, `user/error_logs/`, `user/debuggables/`, `user/` | all four already exist |
+| 5-7 | `exists` ×3 via `refresh_debug_logging` | `activate.txt`, `deactivate.txt`, `trace.txt` | all three missing |
+| 8 | `read_to_string` via `load_disabled_subsystems` | `debug/off.txt` | missing |
+| 9 | `read_dir` | `user/debuggables/` | empty |
+
+**Nine filesystem operations per frame, every one of them redundant** — four `create_dir_all` on
+directories created at boot, four failing lookups, and a `read_dir` of a directory that is empty
+except in the seconds after someone drops a file into it by hand. That is precisely the shape
+`slight::sd_poll` was built to eliminate, at roughly the same magnitude as everything that moved
+there. It survived because the consolidation moved the *pollers* and never audited the *callers*.
+
+- **Three separate comments asserted the invariant this call site broke**, and all three still
+  read as correct: `sd_poll`'s module doc ("they all live here now"),
+  [agent_extender](plugins/slight_replica/src/slight/agent_extender/mod.rs:218) ("Every SD-card
+  poll in the plugin happens here"), and `refresh_debug_logging`'s own ("Called from the
+  throttled SD poll tick, not per frame") — which was true of one of its two callers.
+- **Fixes.** `ensure_slight_dirs` is boot-only now, guarded by an atomic, which removes eight of
+  the nine with no behaviour change (nothing recreates a directory a user deletes mid-session,
+  and `read_dir` on a missing directory already returns the empty answer). The `read_dir` is
+  throttled to one poll per 10 frames. It stays in the facade rather than moving into
+  `sd_poll::tick` because it returns edits to apply and that tick returns nothing.
+- **A coupled constant went with it.** `MAX_TRANSACTION_ATTEMPTS` counted one attempt per *poll*
+  and was documented "~10s at 60fps", which silently assumed a poll every frame. Throttling
+  alone would have stretched that window to 100 seconds. It is 60 now, next to a
+  `TRANSACTION_POLL_EVERY` the caller gates on, so the two cannot drift apart unnoticed.
+- **Not a live-edit regression.** Transactions are the hand-dropped-file escape hatch — the
+  editor never writes one (nothing in `src/` mentions `debuggables`); live edits go over TCP via
+  `poll_tcp_edits`, which is untouched and still runs every frame.
+- **Regression guard, aimed at what actually went wrong.**
+  `no_plugin_frame_path_reaches_the_filesystem_ungated` in [scratch_dirs.rs](src/scratch_dirs.rs)
+  fails if any of the plugin's 32 frame entry points reaches a filesystem-touching function
+  without a throttle between them. Both sides are derived by scanning plugin source — no
+  hand-maintained list to rot. **A ratchet on the number of filesystem call sites, which is what
+  I first reached for, would have been green through this entire bug:** nothing was added, a
+  long-standing I/O function was simply called on the wrong schedule. The property that catches
+  it is cadence, not count. Verified by reverting the fix and watching it go red.
+- **What is still not verified, and cannot be here.** The guard is one hop deep and blind to
+  chains through an intermediate, to trait objects, and to function pointers. It is a tripwire on
+  a shape that has now gone wrong twice, not a proof of absence. Frame timing on Windows remains
+  the only real oracle, so **this class stays open in practice even though the entry is closed**
+  — re-run the sweep when a tester reports frame drops rather than assuming the guard settles it.
+- **Also noticed, not fixed (deliberately).** Four debug writes to hardcoded `sd:/…txt` paths are
+  *not* behind `trace_enabled()` — `hook_effect_off_kind`, `track`, `handle_kill_hash`,
+  `install_hooks`. Each is bounded (32 or 48 distinct keys per boot, or one-shot), so none is a
+  frame-budget risk, but they ship enabled and write to the SD root. Worth folding into the trace
+  gate if that area is touched again; not worth a commit of its own.
 
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 

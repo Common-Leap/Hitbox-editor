@@ -61,9 +61,18 @@ impl Facade for DebuggableServerFacade {
         for edit in crate::rust_extender::debuggable_server::poll_tcp_edits() {
             let _ = crate::slight::effect_viewer::apply::apply_kind_edit(&edit);
         }
-        for (edit, path) in crate::rust_extender::debuggable_server::poll_transactions() {
-            let applied = crate::slight::effect_viewer::apply::apply_kind_edit(&edit);
-            crate::rust_extender::debuggable_server::finish_transaction(&path, applied);
+        // Throttled with the rest: this is a `read_dir` of a directory that is empty except in
+        // the seconds after someone drops a file into it by hand, which is the exact shape
+        // `slight::sd_poll` exists to keep off the frame path. It ran every frame until R2.
+        //
+        // It stays here rather than moving into `sd_poll::tick` because it returns edits to
+        // apply and that tick returns nothing — but it is on a throttle now, and the retry
+        // budget below is expressed in frames so the two cannot drift apart silently.
+        if n % crate::rust_extender::debuggable_server::TRANSACTION_POLL_EVERY == 0 {
+            for (edit, path) in crate::rust_extender::debuggable_server::poll_transactions() {
+                let applied = crate::slight::effect_viewer::apply::apply_kind_edit(&edit);
+                crate::rust_extender::debuggable_server::finish_transaction(&path, applied);
+            }
         }
     }
 }

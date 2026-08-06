@@ -430,9 +430,20 @@ fn parse_transaction_name(name: &str) -> Option<(u64, u64, u64)> {
     Some((object_id, client_id, transaction_id))
 }
 
-/// Attempts before a transaction that keeps failing to apply is parked as `.failed`
-/// (~10s at 60fps — long enough for a briefly-missing effect to come back).
-const MAX_TRANSACTION_ATTEMPTS: u32 = 600;
+/// How often [`poll_transactions`] may run, in game frames. The caller gates on this.
+///
+/// Declared here, next to the budget it divides, because the two are one decision: the retry
+/// window is `MAX_TRANSACTION_ATTEMPTS * TRANSACTION_POLL_EVERY` frames, and moving the poll off
+/// the frame path without moving the budget would have quietly stretched a 10-second window to
+/// 100 seconds.
+pub const TRANSACTION_POLL_EVERY: u64 = 10;
+
+/// Attempts before a transaction that keeps failing to apply is parked as `.failed`.
+///
+/// One attempt per *poll*, not per frame — see [`TRANSACTION_POLL_EVERY`]. 60 polls at one every
+/// 10 frames is ~10s at 60fps, which is what this was before the poll was throttled and is still
+/// what it is for: long enough for a briefly-missing effect to come back.
+const MAX_TRANSACTION_ATTEMPTS: u32 = 60;
 
 static TRANSACTION_ATTEMPTS: parking_lot::Mutex<Option<std::collections::HashMap<String, u32>>> =
     parking_lot::Mutex::new(None);
