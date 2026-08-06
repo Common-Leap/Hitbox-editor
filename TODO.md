@@ -2229,108 +2229,66 @@ the speed macros.
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
 
-### [ ] E2 — Model `FT_MOTION_RATE`
-
-Highest-leverage task in Part 1, and the one most likely to break things.
+### [ ] E2 — Model `FT_MOTION_RATE` (direction SETTLED 2026-08-06 — ready to schedule)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks**
-([acmd_verify.rs:941](src/acmd_verify.rs:941)) — the editor does not model animation rate, and
-a timing warning that guesses is worse than none. Modelling rate would re-enable those checks
-for a large slice of the corpus.
+([acmd_verify.rs:941](src/acmd_verify.rs:941)). Modelling rate would re-enable those checks for a
+large slice of the corpus.
 
-**Blocked 2026-08-05 on a fact that cannot be established offline: which way the multiplier
-goes.** 17 corpus calls, all Kirby, all top-level, values 0.25–1.0. The two readings give
-opposite answers and both have evidence:
+## The direction, measured
 
-- *Rate is playback speed*, so `game = motion / rate`. `FT_MOTION_RATE(0.5)` halves the speed.
-  This is the community reading and what "rate" normally means.
-- *Rate is game frames per motion frame*, so `game = rate × motion`. This is what
-  `FT_MOTION_RATE_RANGE`'s own arithmetic says — it computes
-  `rate = game_frames / (motion_end_frame - motion_start_frame)`, which only makes sense if a
-  rate above 1 stretches a span.
+**`FT_MOTION_RATE(agent, r)` advances the motion by `1/r` motion frames per game frame.**
+Therefore `game_frames = motion_frames × r`. **This is reading B** — the reading
+`FT_MOTION_RATE_RANGE`'s own arithmetic implied, and *not* the community reading the earlier
+draft of this entry led with.
 
-Under the first reading Kirby's jab 1 hitbox lands on game frame 5; under the second, frame 2.
-Nothing on this machine distinguishes them: the smashline docs say only that rate "changes the
-speed of the animation and how fast the script playback is", and the corpus cannot be used as
-an oracle because it contains no independent statement of when a move actually hits.
+Measured live on Eden, `build=2026-08-06g-rate-multi`, three moves and two distinct arguments:
 
-**Half of E2 is now answered, and it is the half that was actually open (2026-08-06).**
-`MotionModule::rate` is **not** the `FT_MOTION_RATE` argument. Measured live: Kirby's down smash
-reports `rate=1.0000` while `attack_lw4`'s script sets `FT_MOTION_RATE(agent, 0.25)`, and
-locomotion reports a continuously varying rate — 0.73 to 3.17 across `run`, `run_brake_l`,
-`walk_middle`, `walk_slow` — driven by movement speed and nothing to do with any macro. So the
-sequencer's `frame + rate` arithmetic describes the engine's animation blending, and **cannot be
-cited as evidence for either reading of the macro**. The prediction recorded below is withdrawn.
+| move | script arg | reading A predicts | reading B predicts | **measured delta** | samples |
+|---|---|---|---|---|---|
+| `special_n_start` | 0.5 | 0.5 | 2.0 | **2.0000** | 9 consecutive |
+| `attack_11` | 0.5 | 0.5 | 2.0 | **2.0000** | 1 (short window) |
+| `attack_hi4` | 0.6 | 0.6 | 1.6667 | **1.6667** | 3 consecutive |
+| `attack_lw4` | 0.25 | 0.25 | 4.0 | **4.0000** | 1 (short window) |
 
-That leaves the original question open and narrows it usefully: the measurement has to be the
-frame *delta* during a rate-carrying move, because the rate itself is not observable through that
-accessor. The probe now targets `attack_lw4` by motion hash and logs every frame of it.
+Cross-check: `special_n_start` holds the rate from motion frame 0 to 18 and crossed it in 9 game
+frames. `18 × 0.5 = 9`. The frames either side of every window are exactly `delta=1.0`, which is
+what says the probe samples once per game frame rather than missing ticks.
 
-**The first clean trace favours reading B, on one sample, and it needs confirming (2026-08-06).**
-`attack_lw4` measured live, `build=2026-08-06f-rate-lw4`:
+**A rate below 1 makes a move play FASTER in game-frame terms.** It compresses motion frames into
+fewer game frames — it is skipping windup, not slowing it. Counter-intuitive, load-bearing, and
+the opposite of what "rate" reads like; say it in the panel when this is built.
 
-```
-RATE -- attack_lw4 started, frame=0.0000 (no delta yet)
-RATE 00 frame=4.0000 delta=4.0000    <- the FT_MOTION_RATE(0.25) window
-RATE 01 frame=5.0000 delta=1.0000    <- and 39 more, all exactly 1.0
-```
+## The observable, which is not the one the first probe assumed
 
-The script holds `0.25` from script frame 0 to 4 and restores `1.0` there. Reading A predicts
-`delta == 0.25`; reading B predicts `delta == 1/0.25 == 4.0`. **The measured delta across that
-window is exactly 4.0**, and every frame after the restore is exactly 1.0 — so the probe is
-sampling once per game frame and the 4.0 is real rather than a missed tick. Thirty-nine
-consecutive deltas of exactly 1.0 is what makes the cadence trustworthy.
+- **`MotionModule::rate` is useless here** — it reads `1.0000` throughout every window above.
+- **`MotionModule::whole_rate` IS the multiplier**, and equals `1/arg` exactly: `2.0000` while
+  `special_n_start` holds 0.5, `1.6667` while `attack_hi4` holds 0.6, back to `1.0000` on the
+  frame the script restores it. **A live capture can read the effective rate straight off it**,
+  with no need to parse the macro out of the script.
 
-Reading B also matches `FT_MOTION_RATE_RANGE`'s own arithmetic, which was the original argument
-for it: `rate = game_frames / (motion_end - motion_start)`. A rate *below* 1 therefore makes the
-animation play **faster**, compressing motion frames into fewer game frames — which is
-counter-intuitive enough that it is worth stating outright, and is the opposite of the community
-reading this entry recorded as reading A.
+The animation sequencer's `at_end_frame` (`end <= frame + rate`) uses `motion_rate()`, which
+prefers `whole_rate` when it is not 1.0 — so that code was right all along, and the earlier note
+in this entry claiming it supported reading A was wrong about *which accessor* it consulted.
+Withdrawn.
 
-**One sample is not enough to close this**, because `attack_lw4`'s slowed span is four motion
-frames and reading B crosses it in a single game frame. `build=2026-08-06g-rate-multi` now targets
-nine rate-carrying Kirby moves; **`special_n_start` is the decisive one** — it holds `0.5` from
-script frame 1 to 18, a seventeen-frame span no reading crosses in one tick. Reading A predicts
-~34 samples at `delta=0.5`, reading B ~8 samples at `delta=2.0`.
+## Work order, now that the direction is known
 
-**Do not model the multiplier until that second measurement agrees with this one.**
-
-
-`systems/rate_probe.rs`, in `build=2026-08-06d-rate-probe`, samples `MotionModule::frame` on
-consecutive game frames and writes at most 40 `RATE` lines to `sd:/slight/diag.txt`. It arms only
-when a rate away from 1.0 appears, so it is silent until a rate-carrying move is performed.
-
-Both readings are statements about how far the motion frame moves in one game frame, so the delta
-distinguishes them outright — no hitbox timing or script correlation needed. Perform **Kirby's
-down smash** (`attack_lw4`, `FT_MOTION_RATE(agent, 0.25)`), the largest separation in the corpus:
-reading A predicts `delta ≈ 0.25`, reading B predicts `delta ≈ 4.0`. The probe prints both
-predictions on each line so the comparison needs no arithmetic.
-
-**~~There is already a standing prediction, and it favours reading A.~~ Withdrawn — see above.**
-`animation_sequencer::at_end_frame` computes `end <= frame + rate` and `update_predict_checker`
-steps by `frame + rate * step` — working code that treats rate as motion frames advanced per game
-frame. That settles what `MotionModule::rate` *means*; it does not settle whether that number is
-the argument `FT_MOTION_RATE` was handed, which is the actual question. The probe logs `rate` and
-`whole_rate` beside the delta so both halves are answered at once.
-
-Delete `rate_probe.rs` and its call in the animation-sequencer facade once the answer is recorded
-here — it is a measurement, not a feature.
-
-**Do not take this entry until the direction is settled**, and settle it by *measuring*, not by
-reasoning: the plugin already reports `MotionModule::frame`, so capturing a rate-carrying move
-live and comparing the reported frame against the script frame answers it in one run. Getting
-it backwards is worse than today's "not modelled" — the entry's own done-when says so.
-
-- **Also unmodelled and inherited from the same reading:** a `game_` script's rate calls change
-  the pacing of that move's `effect_` and `sound_` scripts too. Whatever the timeline does with
-  rate has to apply across all four categories, not just the one the call is written in.
-- **Work order:** rate scales the frame advance for everything after it. The timeline must show
-  real frames, not script frames, once one is in play.
-- **Done when:** the timing checks run on rate-carrying scripts and are *correct* on the
-  corpus. Re-enabling them while wrong is strictly worse than today.
-- **Trap:** branches (`if(WorkModule::is_flag(…)){`) are excluded from timing checks for the
-  same reason and are **not** in scope here. Leave that exclusion alone.
+- **Timeline:** rate scales the frame advance for everything after it, so the timeline must show
+  real game frames once one is in play. `game = motion × r` over each span.
+- **All four categories.** A `game_` script's rate calls change the pacing of that move's
+  `effect_` and `sound_` scripts too, so whatever the timeline does with rate applies across all
+  of them, not just the one the call is written in.
+- **Done when:** the timing checks run on rate-carrying scripts and are *correct* on the corpus.
+  Re-enabling them while wrong is strictly worse than today.
+- **Trap:** branches (`if(WorkModule::is_flag(…)){`) are excluded from timing checks for a
+  separate reason and are **not** in scope here. Leave that exclusion alone.
+- **Trap, from the measurement:** a move can *restart* without the motion hash changing —
+  `attack_11` jabbed twice and the frame went 5 → 0, a negative delta. Anything walking frames
+  forward has to treat a backwards step as a restart rather than as a rate.
+- **Delete the probe** — `plugins/slight_replica/src/slight/systems/rate_probe.rs` and its call in
+  the animation-sequencer facade. It is a measurement and its job is done.
 
 ### [x] E3 — Camera and zoom (done 2026-08-06 — as a placement fix, not a camera panel)
 
