@@ -32,6 +32,7 @@ use std::sync::LazyLock;
 use parking_lot::Mutex;
 use smash::lib::{L2CValue, L2CValueType};
 
+mod rate_hooks;
 mod sound_hooks;
 
 // ── Typed lua args (wire + capture form) ─────────────────────────────────────
@@ -188,6 +189,16 @@ pub const CAT_SEARCH: u8 = 7;
 /// Not in [`is_collision_func`], for the reason `SEARCH` is not: nothing clears a sound.
 pub const CAT_SOUND: u8 = 8;
 
+/// `FT_MOTION_RATE` — the animation playback rate, not a collision at all.
+///
+/// One category for all three rate macros, because `smash-script` compiles
+/// `FT_MOTION_RATE_RANGE` and `FT_DESIRED_RATE` into the same `sv_animcmd::FT_MOTION_RATE` call.
+/// A rule carries no id: a rate call has nothing to key on but its motion and its frame.
+///
+/// Not in [`is_collision_func`], for the reason `SEARCH` and `CAT_SOUND` are not: nothing clears
+/// a rate.
+pub const CAT_MOTION_RATE: u8 = 9;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -312,7 +323,7 @@ fn write_capture_diag(stage: &str) {
     let _ = std::fs::write(
         "sd:/effect_viewer_capture.txt",
         format!(
-            "stage={stage}\nrecorded={}\neffect_recorded={}\nsound_recorded={}\nsound_hooks={}\ndrained={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
+            "stage={stage}\nrecorded={}\neffect_recorded={}\nsound_recorded={}\nsound_hooks={}\nrate_hook={}\ndrained={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
             CAPTURE_RECORDED.load(Ordering::Relaxed),
             EFFECT_CAPTURE_RECORDED.load(Ordering::Relaxed),
             SOUND_CAPTURE_RECORDED.load(Ordering::Relaxed),
@@ -320,6 +331,7 @@ fn write_capture_diag(stage: &str) {
             // a move with no sounds reads the same as a family that never hooked — so the
             // install itself is reported beside the count.
             sound_hooks::installed(),
+            rate_hooks::installed(),
             CAPTURE_DRAINED.load(Ordering::Relaxed),
             CAPTURE_LAST_KIND.load(Ordering::Relaxed) as i64,
             CAPTURE_LAST_MOTION.load(Ordering::Relaxed),
@@ -728,6 +740,12 @@ pub struct HbOverrides {
     /// editor holds them as a list for the same reason. Applied only as far as the member
     /// actually declares hash slots; see `sound_hooks::hash_slots`.
     pub sound_hashes: Option<Vec<u64>>,
+    /// Replacement `FT_MOTION_RATE` argument.
+    ///
+    /// **Below 1.0 plays FASTER** — `game_frames = motion_frames * rate`. Rejected by the hook
+    /// if it is not finite and positive, because a zero rate freezes the animation and nothing
+    /// below the call would ever run.
+    pub motion_rate: Option<f32>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -829,6 +847,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
     // A new rule set is a new thing to debug, so the sound path gets its reporting budget back.
     // Without this the budget is spent long before the rule under test ever arrives.
     sound_hooks::reset_reports();
+    rate_hooks::reset_reports();
     crate::slight::diag::note(format!(
         "hitbox_rules set: {n} rule(s) [{}]",
         by_cat.join(" ")
@@ -1851,6 +1870,7 @@ pub fn install() {
     // do with collisions. Its own banner also makes "did the sound hooks load" answerable from
     // the log without counting names.
     sound_hooks::install();
+    rate_hooks::install();
     // **After the hooks, not before.** This used to be the first statement in the function, which
     // was harmless while it only reported a stage — and became a lie the moment it started
     // reporting `sound_hooks`, because that flag is set by the call two lines up. It read `false`

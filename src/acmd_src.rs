@@ -2839,6 +2839,81 @@ pub fn sync_attack_mods(
     })
 }
 
+// ── Playback rate write-back ─────────────────────────────────────────────────
+
+/// The `FT_MOTION_RATE` calls in `text`, in document order — index `n` is site `n`.
+///
+/// **Name equality, not a prefix.** `FT_MOTION_RATE_RANGE` starts with this macro's entire name
+/// and takes three arguments after `agent`; counting it here would number every later site one
+/// too high and write a rate into an unrelated call. The arity filter says the same thing twice
+/// on purpose, because both of these have gone wrong before in this codebase.
+fn motion_rate_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "FT_MOTION_RATE" && site.args.len() == 2)
+        .collect()
+}
+
+/// Rewrite edited playback rates into the user's own source.
+///
+/// `edited` is the script's rate calls in script order, as
+/// [`AcmdScript::motion_rate_sites`](crate::data::AcmdScript::motion_rate_sites) gives them.
+/// **The source is its own pristine copy** — the value in the file is what the game plays — so
+/// unlike the other families here this takes no separate baseline. That is possible because a
+/// rate edit changes the argument and nothing else: it cannot renumber, retime, or change which
+/// macro is called.
+///
+/// **The counts must agree, and this refuses rather than guessing when they do not.** The parser
+/// only models a rate call at the function's top level, so one written inside a runtime branch is
+/// kept as a raw line and never reaches `edited` — while `motion_rate_sites` above would still
+/// count it. That mismatch is exactly the site-ordinal drift that silently retargets a later
+/// edit, so it is reported instead.
+pub fn rewrite_motion_rates(
+    text: &str,
+    label: &str,
+    edited: &[(usize, f32, f32)],
+) -> Result<(String, SyncReport)> {
+    let sites = motion_rate_sites(text);
+    let mut report = SyncReport::default();
+
+    if sites.len() != edited.len() {
+        report.skipped.push(format!(
+            "{label}: the source has {} `FT_MOTION_RATE` call(s) and the editor models {} — one \
+             of them is inside a branch, which this cannot address by position",
+            sites.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (site, (_, _, rate)) in sites.iter().zip(edited.iter()) {
+        // Slot 0 is `agent`, so the rate is slot 1 — the order `macros.rs` declares.
+        if let Some(span) = site.args.get(1) {
+            // `float_edit`, not `to_f32_edit`: every corpus call writes a decimal (`0.5`, `1.0`),
+            // and the argument is `ToF32`-generic, so keeping the decimal form matches both the
+            // source and what `acmd::num` emits.
+            edits.extend(float_edit(text, span, *rate));
+        }
+    }
+
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited playback rates for one move back into the project source on disk.
+pub fn sync_motion_rates(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    edited: &[(usize, f32, f32)],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_motion_rates(body, &format!("{fighter}/{move_name}"), edited)
+    })
+}
+
 // ── Sound write-back ─────────────────────────────────────────────────────────
 
 /// The sound calls in `text`, in document order — index `n` is site `n`.
@@ -2985,6 +3060,93 @@ pub fn sync_hurtboxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kirby's down smash, verbatim from the corpus — two rate calls around a `frame()`.
+    const DOWN_SMASH: &str = "unsafe extern \"C\" fn game_attacklw4(agent: &mut L2CAgentBase) {\n\
+        \x20   macros::FT_MOTION_RATE(agent, 0.25);\n\
+        \x20   frame(agent.lua_state_agent, 4.0);\n\
+        \x20   macros::FT_MOTION_RATE(agent, 1.0);\n\
+        }\n";
+
+    /// A rate edit rewrites **only** that argument's span, leaving the rest byte for byte.
+    ///
+    /// The paired positive matters as much as the change: a rewriter that returned the whole
+    /// file re-rendered from the model would pass "the new value is present" while quietly
+    /// reformatting the user's own source, which is the thing this path exists to avoid.
+    #[test]
+    fn a_rate_edit_rewrites_only_that_argument() {
+        let edited = crate::acmd::parse_acmd_script(DOWN_SMASH);
+        let mut sites = edited.motion_rate_sites();
+        assert_eq!(sites.len(), 2, "the fixture has two rate calls");
+        sites[0].2 = 0.5;
+
+        let (out, report) = rewrite_motion_rates(DOWN_SMASH, "kirby/attack_lw4", &sites).unwrap();
+        assert_eq!(report.changed, 1, "one argument changed");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(
+            out,
+            DOWN_SMASH.replace("agent, 0.25", "agent, 0.5"),
+            "only the first rate's argument may differ"
+        );
+    }
+
+    /// The site-ordinal guard.
+    ///
+    /// The parser models a rate call only at the function's top level, so one written inside a
+    /// runtime branch never reaches the editor — while the source scan still counts it. Writing
+    /// by position across that mismatch lands the edit on the *wrong call*, silently, which is
+    /// the failure this codebase has already paid for once with per-family site counters.
+    ///
+    /// Paired with a positive: the same source with the branch removed must still write, or this
+    /// test would pass against a rewriter that refuses everything.
+    #[test]
+    fn a_rate_inside_a_branch_is_refused_rather_than_written_by_position() {
+        let branched = "unsafe extern \"C\" fn game_x(agent: &mut L2CAgentBase) {\n\
+            \x20   if WorkModule::is_flag(agent.module_accessor, 0) {\n\
+            \x20       macros::FT_MOTION_RATE(agent, 0.25);\n\
+            \x20   }\n\
+            \x20   macros::FT_MOTION_RATE(agent, 1.0);\n\
+            }\n";
+        let script = crate::acmd::parse_acmd_script(branched);
+        let sites = script.motion_rate_sites();
+        assert_eq!(sites.len(), 1, "only the top-level call is modelled");
+
+        let (out, report) = rewrite_motion_rates(branched, "kirby/x", &sites).unwrap();
+        assert_eq!(
+            out, branched,
+            "nothing may be written when the counts disagree"
+        );
+        assert!(
+            report.skipped.iter().any(|s| s.contains("branch")),
+            "the refusal must say why: {:?}",
+            report.skipped
+        );
+
+        // The positive half, through the same function.
+        let flat = crate::acmd::parse_acmd_script(DOWN_SMASH);
+        let (_, ok) =
+            rewrite_motion_rates(DOWN_SMASH, "kirby/x", &flat.motion_rate_sites()).unwrap();
+        assert!(
+            ok.skipped.is_empty(),
+            "a flat script must not be refused: {:?}",
+            ok.skipped
+        );
+    }
+
+    /// `FT_MOTION_RATE_RANGE` must not be counted as a rate site.
+    ///
+    /// It begins with `FT_MOTION_RATE`'s entire name, so a prefix match would count it, shift
+    /// every later site by one, and write a playback rate into its first frame argument.
+    #[test]
+    fn the_range_macro_is_not_counted_as_a_rate_site() {
+        let text = "unsafe extern \"C\" fn game_x(agent: &mut L2CAgentBase) {\n\
+            \x20   macros::FT_MOTION_RATE_RANGE(agent, 5.0, 10.0, 0.5);\n\
+            \x20   macros::FT_MOTION_RATE(agent, 0.6);\n\
+            }\n";
+        let sites = motion_rate_sites(text);
+        assert_eq!(sites.len(), 1, "only the plain form is a rate site");
+        assert_eq!(sites[0].arg(text, 1).map(str::trim), Some("0.6"));
+    }
 
     fn write(root: &Path, rel: &str, body: &str) -> PathBuf {
         let path = root.join(rel);

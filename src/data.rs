@@ -1070,6 +1070,22 @@ pub enum AcmdStmt {
     /// `Raw`, exactly as it did before, because nothing has measured whether one exists or what
     /// the timeline should do with it.
     Bare(Box<ExcuteStmt>),
+    /// `macros::FT_MOTION_RATE(agent, r)` — the animation's playback rate from here on.
+    ///
+    /// **`r` below 1.0 makes the move play FASTER**, which is the opposite of what the name
+    /// suggests and is load-bearing everywhere this value is used. The engine advances the
+    /// motion by `1/r` motion frames per game frame, so a span of `n` motion frames takes
+    /// `n * r` game frames: kirby's down smash sets `0.25` and crosses 4 motion frames of windup
+    /// in a single game frame. Measured live, four moves and four arguments — see E2 in
+    /// `TODO.md`.
+    ///
+    /// This is why the timeline distinguishes script frames from game frames at all. A script
+    /// frame is a *motion* frame, which is the number the author writes and the number every
+    /// other statement here is keyed to; the game frame is what the player experiences.
+    ///
+    /// Written at the function's top level, never inside an `is_excute` block, in all 17 corpus
+    /// calls.
+    MotionRate(f32),
     Raw(String),
 }
 
@@ -1079,7 +1095,120 @@ pub struct AcmdScript {
     pub stmts: Vec<AcmdStmt>,
 }
 
+/// One stretch of the timeline over which the playback rate does not change.
+///
+/// `rate` is the [`AcmdStmt::MotionRate`] argument in force, so `1.0` outside every rate window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateSpan {
+    /// First motion frame this rate applies to.
+    pub from_motion: f32,
+    /// Motion frame the next span starts at, or [`f32::INFINITY`] for the last one.
+    pub to_motion: f32,
+    /// Game frame `from_motion` lands on.
+    pub from_game: f32,
+    pub rate: f32,
+}
+
 impl AcmdScript {
+    /// The script's motion-frame → game-frame mapping, one entry per rate change.
+    ///
+    /// Motion frames are what a script names and what every hitbox range is keyed to; game
+    /// frames are what the player experiences. They differ wherever a rate other than `1.0` is
+    /// in force: the engine advances the motion by `1/r` motion frames per game frame, so a span
+    /// of `n` motion frames takes `n * r` game frames.
+    ///
+    /// Rate calls sit at the function's top level in all 17 corpus calls, so only the top level
+    /// is walked. A rate set inside a runtime branch would apply for real, but whether the
+    /// branch is taken is not knowable here, and pretending otherwise would put a confident
+    /// wrong number on the timeline; those scripts keep a `Raw` block and are left alone.
+    pub fn rate_spans(&self) -> Vec<RateSpan> {
+        let mut spans: Vec<RateSpan> = Vec::new();
+        let (mut motion, mut game, mut rate) = (0.0f32, 0.0f32, 1.0f32);
+        for stmt in &self.stmts {
+            match stmt {
+                // `frame()` waits *until* a frame and returns immediately if it has already
+                // passed, so a target behind the cursor advances nothing rather than rewinding.
+                AcmdStmt::Frame(f) => {
+                    let advance = (*f - motion).max(0.0);
+                    motion += advance;
+                    game += advance * rate;
+                }
+                AcmdStmt::Wait(w) => {
+                    let advance = w.max(0.0);
+                    motion += advance;
+                    game += advance * rate;
+                }
+                AcmdStmt::MotionRate(r) if *r > 0.0 => {
+                    if let Some(last) = spans.last_mut() {
+                        last.to_motion = motion;
+                    }
+                    spans.push(RateSpan {
+                        from_motion: motion,
+                        to_motion: f32::INFINITY,
+                        from_game: game,
+                        rate: *r,
+                    });
+                    rate = *r;
+                }
+                _ => {}
+            }
+        }
+        spans
+    }
+
+    /// The game frame a motion frame lands on, given this script's rate windows.
+    ///
+    /// Every top-level rate call as `(index into `stmts`, motion frame it lands on, rate)`.
+    ///
+    /// The index is what an edit writes through, so the panel can change a value without
+    /// rebuilding the script — the same shape the hurtbox and hitbox-tuning sections use, and
+    /// for the same reason: these statements are carried through the script rather than
+    /// regenerated from a list, so the script is the model and there is no second copy.
+    pub fn motion_rate_sites(&self) -> Vec<(usize, f32, f32)> {
+        let mut sites = Vec::new();
+        let mut motion = 0.0f32;
+        for (index, stmt) in self.stmts.iter().enumerate() {
+            match stmt {
+                AcmdStmt::Frame(f) => motion += (*f - motion).max(0.0),
+                AcmdStmt::Wait(w) => motion += w.max(0.0),
+                AcmdStmt::MotionRate(r) => sites.push((index, motion, *r)),
+                _ => {}
+            }
+        }
+        sites
+    }
+
+    /// The rate statement at a site from [`motion_rate_sites`](Self::motion_rate_sites).
+    ///
+    /// Returns `None` if the index is not a rate call, so a stale site from a script that has
+    /// since been re-parsed writes nothing rather than overwriting an unrelated statement.
+    pub fn motion_rate_mut(&mut self, index: usize) -> Option<&mut f32> {
+        match self.stmts.get_mut(index) {
+            Some(AcmdStmt::MotionRate(rate)) => Some(rate),
+            _ => None,
+        }
+    }
+
+    /// Equal to `motion` for a script with no rate call, which is every script but ten in the
+    /// corpus — so callers can use this unconditionally rather than branching on whether a rate
+    /// is present, which is the kind of branch that goes stale.
+    pub fn game_frame(&self, motion: f32) -> f32 {
+        let spans = self.rate_spans();
+        // Before the first rate call the animation runs at 1.0, so the frame is its own answer.
+        let Some(first) = spans.first() else {
+            return motion;
+        };
+        if motion <= first.from_motion {
+            return motion;
+        }
+        let span = spans
+            .iter()
+            .rev()
+            .find(|s| motion >= s.from_motion)
+            .unwrap_or(first);
+        span.from_game + (motion - span.from_motion) * span.rate
+    }
+
     /// Flatten the script into display hitboxes with computed frame ranges.
     pub fn to_hitboxes(&self) -> Vec<Hitbox> {
         let mut hitboxes: Vec<Hitbox> = Vec::new();
@@ -1623,7 +1752,12 @@ fn eval_stmts(
         match stmt {
             AcmdStmt::Frame(f) => frame = *f,
             AcmdStmt::Wait(w) => frame += w,
-            AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {}
+            // `MotionRate` is deliberately inert here. This walk resolves the frames a script
+            // *names*, which are motion frames, and every hitbox range it produces is keyed to
+            // them. Rate converts motion frames to game frames, which is a separate mapping —
+            // see [`game_frame_spans`] — and applying it here would move every hitbox to a
+            // frame its own source does not mention.
+            AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) | AcmdStmt::MotionRate(_) => {}
             AcmdStmt::Excute(stmts) => {
                 for s in stmts {
                     eval_excute_stmt(s, frame, hitboxes, hurt);
@@ -3210,6 +3344,106 @@ impl EffectScript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// kirby's down smash, which is the clearest case in the corpus: it sets `0.25`, crosses
+    /// four motion frames of windup, then restores `1.0` and plays one more.
+    ///
+    /// ```text
+    /// FT_MOTION_RATE(agent, 0.25);   frame(4.0);   FT_MOTION_RATE(agent, 1.0);   frame(5.0);
+    /// ```
+    ///
+    /// Four motion frames at `0.25` are **one** game frame, so the whole windup is gone by the
+    /// time the player's second frame starts. The numbers below are the measured live behaviour
+    /// (E2), not a reading of the macro's name.
+    fn down_smash() -> AcmdScript {
+        AcmdScript {
+            stmts: vec![
+                AcmdStmt::MotionRate(0.25),
+                AcmdStmt::Frame(4.0),
+                AcmdStmt::MotionRate(1.0),
+                AcmdStmt::Frame(5.0),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_rate_window_compresses_motion_frames_into_fewer_game_frames() {
+        let script = down_smash();
+        assert_eq!(script.game_frame(0.0), 0.0);
+        assert_eq!(
+            script.game_frame(2.0),
+            0.5,
+            "halfway through the 0.25 window"
+        );
+        assert_eq!(
+            script.game_frame(4.0),
+            1.0,
+            "4 motion frames at 0.25 = 1 game"
+        );
+        assert_eq!(script.game_frame(5.0), 2.0, "then 1 motion frame at 1.0");
+    }
+
+    /// The direction, asserted on its own so that inverting the arithmetic fails a test whose
+    /// name says what broke.
+    ///
+    /// **A rate below 1.0 makes a move play FASTER**, which is the opposite of what "rate"
+    /// reads like and the thing most likely to be "corrected" by someone later.
+    #[test]
+    fn a_rate_below_one_makes_the_move_finish_sooner_not_later() {
+        let slow_looking = down_smash();
+        let plain = AcmdScript {
+            stmts: vec![AcmdStmt::Frame(4.0)],
+        };
+        assert!(
+            slow_looking.game_frame(4.0) < plain.game_frame(4.0),
+            "0.25 must reach motion frame 4 in fewer game frames than 1.0, got {} vs {}",
+            slow_looking.game_frame(4.0),
+            plain.game_frame(4.0),
+        );
+    }
+
+    /// A script with no rate call must map every frame to itself — so callers can use
+    /// `game_frame` unconditionally instead of branching on whether a rate is present, which is
+    /// the kind of branch that goes stale when a family arrives.
+    #[test]
+    fn a_script_with_no_rate_call_maps_every_frame_to_itself() {
+        let script = AcmdScript {
+            stmts: vec![AcmdStmt::Frame(3.0), AcmdStmt::Wait(4.0)],
+        };
+        assert!(script.rate_spans().is_empty());
+        for frame in [0.0, 1.0, 3.0, 7.0, 40.0] {
+            assert_eq!(script.game_frame(frame), frame);
+        }
+    }
+
+    /// `frame()` waits *until* a frame and returns immediately if it has already passed, so a
+    /// target behind the cursor must advance neither clock. Kirby's stone special really does
+    /// this — `frame(14.0)` then `frame(2.0)`.
+    ///
+    /// **A rate change has to come after the rewind for this to test anything.** The obvious
+    /// version — assert the backwards frame still maps somewhere sane — passes with the clamp
+    /// deleted, because with a single rate window `game_frame` recomputes from that span's own
+    /// origin and never reads the running clock. The corrupted clock is only visible where the
+    /// *next* span starts, so the script below opens one. Caught by mutation, not by review.
+    #[test]
+    fn a_frame_target_already_passed_does_not_rewind_the_clock_the_next_span_starts_from() {
+        let script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::MotionRate(0.5),
+                AcmdStmt::Frame(14.0), // 14 motion frames at 0.5 = 7 game frames
+                AcmdStmt::Frame(2.0),  // already passed: advances nothing
+                AcmdStmt::MotionRate(1.0), // so this span starts at motion 14, game 7
+                AcmdStmt::Frame(20.0), // 6 more motion frames, now at 1.0
+            ],
+        };
+        assert_eq!(script.game_frame(14.0), 7.0);
+        assert_eq!(
+            script.game_frame(20.0),
+            13.0,
+            "the second rate window must start from motion 14 / game 7, not from the \
+             rewound frame(2.0)"
+        );
+    }
 
     fn touch(path: &std::path::Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

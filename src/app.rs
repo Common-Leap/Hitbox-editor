@@ -2394,6 +2394,22 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            // And a fourth for the playback rate. It takes no pristine list: the value in the
+            // user's file is its own baseline, because a rate edit can only change an argument —
+            // it cannot renumber a call, retime one, or turn it into a different macro.
+            match crate::acmd_src::sync_motion_rates(
+                index,
+                &fighter,
+                &move_name,
+                &self.state.script.motion_rate_sites(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
         // Sounds get a pass of their own, and unlike the three above it writes a *different
         // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
@@ -4422,8 +4438,102 @@ impl VisionaryApp {
 
             self.draw_hurtbox_section(ui);
             self.draw_attack_mod_section(ui);
+            self.draw_motion_rate_section(ui);
             self.draw_sound_section(ui);
         });
+    }
+
+    /// Animation playback rate, and the game frames it turns this move's script frames into.
+    ///
+    /// Every other number in this panel is a *motion* frame — the frame the script names. A rate
+    /// call changes how many game frames those motion frames take, so this is the one section
+    /// where the distinction is visible, and it says so rather than leaving the user to work out
+    /// why the move ends sooner than its last frame number suggests.
+    ///
+    /// Edits go straight into `state.script` by site index, like the hurtbox section: rate calls
+    /// are carried through the script rather than rebuilt from a list, so the script is the
+    /// model and there is no second copy to keep in step.
+    fn draw_motion_rate_section(&mut self, ui: &mut Ui) {
+        let sites = self.state.script.motion_rate_sites();
+        if sites.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Playback rate");
+            ui.colored_label(egui::Color32::from_rgb(160, 190, 235), "FT_MOTION_RATE");
+        })
+        .response
+        .on_hover_text(
+            "FT_MOTION_RATE scales how fast the animation advances from that frame on. A rate \
+             BELOW 1 makes the move play faster, not slower: the engine advances 1/rate motion \
+             frames per game frame, so 0.25 crosses four frames of windup in one.",
+        );
+
+        let mut edit: Option<(usize, f32)> = None;
+        for (site, motion, rate) in &sites {
+            ui.horizontal(|ui| {
+                let active = *motion as u32 == self.state.current_frame;
+                ui.colored_label(
+                    if active {
+                        egui::Color32::from_rgb(160, 190, 235)
+                    } else {
+                        egui::Color32::from_gray(140)
+                    },
+                    if active { "◆" } else { "◇" },
+                );
+                ui.label(format!("f{motion}"));
+
+                let mut value = *rate;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut value)
+                            .speed(0.01)
+                            .range(0.01..=10.0),
+                    )
+                    .changed()
+                {
+                    edit = Some((*site, value));
+                }
+
+                // The consequence, spelled out per row, because the direction is the part
+                // people get wrong and a number is more convincing than the hover text.
+                let (verb, factor) = if *rate < 1.0 {
+                    ("faster", 1.0 / rate.max(f32::EPSILON))
+                } else if *rate > 1.0 {
+                    ("slower", *rate)
+                } else {
+                    ("normal speed", 1.0)
+                };
+                ui.weak(if *rate == 1.0 {
+                    "normal speed".to_string()
+                } else {
+                    format!("{factor:.2}x {verb}")
+                });
+            });
+        }
+
+        // The whole move, in the units the player experiences. `game_frame` maps the last motion
+        // frame the script names through every rate window above it.
+        let last_motion = sites
+            .iter()
+            .map(|(_, motion, _)| *motion)
+            .fold(0.0f32, f32::max)
+            .max(self.state.total_frames as f32);
+        let last_game = self.state.script.game_frame(last_motion);
+        if (last_game - last_motion).abs() > 0.01 {
+            ui.weak(format!(
+                "{last_motion:.0} script frames play in {last_game:.1} game frames",
+            ));
+        }
+
+        if let Some((site, value)) = edit {
+            if let Some(rate) = self.state.script.motion_rate_mut(site) {
+                *rate = value;
+                self.push_motion_rate_rules();
+            }
+        }
     }
 
     /// Which sound each call in the move's `sound_` script plays.
@@ -8530,6 +8640,65 @@ impl VisionaryApp {
         self.game_link.send_hitbox_rules(&all);
     }
 
+    /// Send this move's `FT_MOTION_RATE` values to the running game.
+    ///
+    /// **Deliberately not diffed against a pristine copy**, unlike every other family here. Those
+    /// diff because their rule has to *match* the call the game makes, and an edit changes the
+    /// very field the match keys on — so the rule keys on the pristine value. A rate rule keys on
+    /// the motion and the frame only, and editing a rate changes neither: a rate scales how fast
+    /// motion frames become game frames, and the frames a script names are motion frames. So the
+    /// current value is already the right thing to send, and carrying a `motion_rates_pristine`
+    /// would add a second copy to keep in step for no matching benefit.
+    ///
+    /// The cost is that unedited sites are sent too, which is a no-op write of the value the
+    /// script already has. That is the cheaper mistake.
+    fn push_motion_rate_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let rules: Vec<crate::game_link::HitboxRuleWire> = self
+            .state
+            .script
+            .motion_rate_sites()
+            .iter()
+            .map(|(_, frame, rate)| {
+                let (frame_start, frame_end) = Self::rule_frame_window(*frame as u32);
+                crate::game_link::HitboxRuleWire {
+                    motion,
+                    category: crate::game_link::CAT_MOTION_RATE,
+                    // A rate call has nothing to key on but its motion and its frame.
+                    hitbox_id: None,
+                    suppress: false,
+                    frame_start,
+                    frame_end,
+                    overrides: Some(crate::game_link::HbOverridesWire {
+                        motion_rate: Some(*rate),
+                        ..Default::default()
+                    }),
+                    inject: None,
+                    func: None,
+                }
+            })
+            .collect();
+
+        let key = format!("{mv_key}#rate");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+    }
+
     /// Send the post-hoc hitbox modifiers the editor has changed to the running game.
     ///
     /// Diffed by site against `attack_mods_pristine`, on the same terms as the hurtbox rules, and
@@ -8842,6 +9011,10 @@ impl VisionaryApp {
             // Nor is a sound. It lives in a different script entirely — `sound_attackairn`, not
             // `game_attackairn` — so nothing about a hitbox diff can reach one.
             sound_hashes: None,
+            // Nor is the playback rate. It is a property of the whole animation from its own
+            // frame onward rather than of any one collision, so `push_motion_rate_rules` sends
+            // it under its own category and this diff leaves it alone.
+            motion_rate: None,
         }
     }
 
@@ -13898,6 +14071,7 @@ fn rebuild_script_from_hitboxes(
                 AcmdStmt::Frame(_)
                 | AcmdStmt::Wait(_)
                 | AcmdStmt::WaitLoopClear
+                | AcmdStmt::MotionRate(_)
                 | AcmdStmt::Raw(_) => Some(stmt.clone()),
             })
             .collect()
@@ -13944,7 +14118,10 @@ fn rebuild_script_from_hitboxes(
                         out.push((frame, AcmdStmt::Bare(Box::new(kept))));
                     }
                 }
-                AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) => {
+                // A rate call is a timing statement, not a collision, so it survives a rebuild
+                // like any other. It does not move the frame clock: it changes how fast motion
+                // frames become game frames, and this walk counts motion frames.
+                AcmdStmt::WaitLoopClear | AcmdStmt::MotionRate(_) | AcmdStmt::Raw(_) => {
                     out.push((frame, stmt.clone()));
                 }
             }

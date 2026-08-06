@@ -329,6 +329,14 @@ pub const CAT_ATK_SETOFF_MUL: u8 = 6;
 /// [`HitboxRuleWire::func`] to close even that.
 pub const CAT_SOUND: u8 = 8;
 
+/// Wire category for `FT_MOTION_RATE`. **Must equal the plugin's value.**
+///
+/// One category covers all three rate macros because `smash-script` compiles
+/// `FT_MOTION_RATE_RANGE` and `FT_DESIRED_RATE` down to the same `sv_animcmd::FT_MOTION_RATE`,
+/// so the plugin cannot tell them apart and does not try. The editor only models the plain form;
+/// a rule keys on the motion and frame alone, because a rate call has no id.
+pub const CAT_MOTION_RATE: u8 = 9;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -457,6 +465,13 @@ pub struct HbOverridesWire {
     // them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sound_hashes: Option<Vec<u64>>,
+    /// Replacement `FT_MOTION_RATE` argument.
+    ///
+    /// **Below 1.0 plays FASTER**: `game_frames = motion_frames * rate`. The plugin refuses a
+    /// value that is not finite and positive rather than trusting this end, because a zero rate
+    /// freezes the animation and nothing below the call would run again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_rate: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2113,6 +2128,92 @@ mod tests {
         }
         // Guard against the whole loop passing because the table went empty.
         assert_eq!(checked, 12, "the sound family is 12 members");
+    }
+
+    /// The rate category and override field the editor sends are the ones the plugin reads.
+    ///
+    /// Same mechanism and same weakness as the sound checks above: this pins the plugin's
+    /// source, not the linked `.nro`. It is worth having because every other check is blind
+    /// here — a rate rule under the wrong category still serialises, still sends, and still
+    /// deserialises, and simply matches nothing. That is precisely the shape that cost D1g four
+    /// game restarts.
+    #[test]
+    fn the_motion_rate_category_and_override_match_the_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer");
+        let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        assert!(
+            module.contains(&format!(
+                "pub const CAT_MOTION_RATE: u8 = {CAT_MOTION_RATE};"
+            )),
+            "plugin's CAT_MOTION_RATE disagrees with the editor's {CAT_MOTION_RATE}"
+        );
+        // One flat category space shared by every family: a collision routes rate rules into
+        // another family's hook, where they would be applied to the wrong argument.
+        for other in [
+            CAT_ABS,
+            CAT_ATK_POWER,
+            CAT_ATK_SETOFF_MUL,
+            CAT_SEARCH,
+            CAT_SOUND,
+        ] {
+            assert_ne!(
+                CAT_MOTION_RATE, other,
+                "CAT_MOTION_RATE collides with another family"
+            );
+        }
+        assert!(
+            module.contains("pub motion_rate: Option<f32>,"),
+            "the plugin's HbOverrides has no motion_rate field to deserialise into"
+        );
+
+        let hooks = std::fs::read_to_string(root.join("rate_hooks.rs")).expect("read rate_hooks");
+        assert!(
+            hooks.contains("replace = smash::app::sv_animcmd::FT_MOTION_RATE"),
+            "the plugin no longer hooks sv_animcmd::FT_MOTION_RATE"
+        );
+        // The guard that stops a bad rule wedging the fighter: a zero or negative rate freezes
+        // the animation and nothing below the call runs again.
+        assert!(
+            hooks.contains("rate > 0.0") && hooks.contains("is_finite"),
+            "the plugin no longer refuses a non-positive rate"
+        );
+    }
+
+    /// A rate rule serialises under the field names the plugin deserialises.
+    #[test]
+    fn outbound_motion_rate_rules_match_plugin_field_names() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_MOTION_RATE,
+            hitbox_id: None,
+            suppress: false,
+            frame_start: Some(8.5),
+            frame_end: Some(9.5),
+            overrides: Some(HbOverridesWire {
+                motion_rate: Some(0.6),
+                ..Default::default()
+            }),
+            inject: None,
+            func: None,
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &v["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_MOTION_RATE as u64));
+        assert_eq!(
+            rule["overrides"]["motion_rate"].as_f64().map(|f| f as f32),
+            Some(0.6),
+            "the rate did not go out under the plugin's field name"
+        );
+        // A rate rule keys on motion and frame alone. The plugin passes 0 as the id, so a
+        // serialised id would make the rule match nothing at all.
+        assert!(
+            rule["hitbox_id"].is_null(),
+            "a rate rule must not carry an id: {rule}"
+        );
     }
 
     /// The wire category the editor sends is the one the plugin matches on.

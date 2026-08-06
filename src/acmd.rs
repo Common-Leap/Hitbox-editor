@@ -217,6 +217,14 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
             continue;
         }
 
+        // macros::FT_MOTION_RATE(agent, r) — the animation playback rate from here on. Read
+        // before the block and `Raw` fallthroughs below, which is where it used to end up.
+        if let Some(rate) = parse_motion_rate_call(line) {
+            stmts.push(AcmdStmt::MotionRate(rate));
+            pos += 1;
+            continue;
+        }
+
         // wait(lua_state, N)
         if line.contains("wait(") {
             if let Some(w) = parse_wait_call(line) {
@@ -960,6 +968,26 @@ fn parse_frame_call(line: &str) -> Option<f32> {
         search_start = abs_pos + 6;
     }
     None
+}
+
+/// `macros::FT_MOTION_RATE(agent, 0.6);` → `0.6`.
+///
+/// **Matched with its opening parenthesis, never as a prefix.** `FT_MOTION_RATE_RANGE` begins
+/// with this macro's entire name and takes a different argument list, so a
+/// `contains("FT_MOTION_RATE")` would read one as the other and write back a call the game does
+/// not have. That is the family-prefix collision this codebase has already paid for once with
+/// `ATTACK`/`ATTACK_ABS`.
+///
+/// `FT_MOTION_RATE_RANGE` and `FT_DESIRED_RATE` have **zero** calls between them in the corpus,
+/// so neither is modelled and both stay [`AcmdStmt::Raw`] — deliberately, because there is no
+/// sample to check a parse of them against.
+fn parse_motion_rate_call(line: &str) -> Option<f32> {
+    let (_, rest) = line.split_once("FT_MOTION_RATE(")?;
+    let (inner, _) = rest.split_once(')')?;
+    let (agent, rate) = inner.split_once(',')?;
+    // The first argument is the agent in every corpus call. Anything else is a shape this has
+    // not seen, and guessing at it is how a wrong value reaches the export.
+    (agent.trim() == "agent").then(|| rate.trim().parse::<f32>().ok())?
 }
 
 fn parse_wait_call(line: &str) -> Option<f32> {
@@ -1950,6 +1978,10 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
             crate::data::AcmdStmt::WaitLoopClear => {
                 lines.push(format!("{indent}wait_loop_clear(agent.lua_state_agent);"))
             }
+            crate::data::AcmdStmt::MotionRate(rate) => lines.push(format!(
+                "{indent}macros::FT_MOTION_RATE(agent, {});",
+                num(*rate)
+            )),
             crate::data::AcmdStmt::Excute(inner) => {
                 lines.push(format!("{indent}if macros::is_excute(agent) {{"));
                 lines.extend(emit_excute_stmts(inner, &format!("{indent}    ")));
@@ -3123,6 +3155,118 @@ pub fn export_acmd_source(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The test with teeth for a newly modelled macro: **the typed thing comes out at all.**
+    ///
+    /// A round-trip oracle cannot show this. An unmodelled line is kept as `Raw` and emitted
+    /// verbatim, so it round-trips *perfectly* — every export test was green on
+    /// `FT_MOTION_RATE` both before and after it was given a parse arm. Green means "nothing
+    /// broke", never "the new family works".
+    #[test]
+    fn a_motion_rate_call_parses_to_a_typed_statement_and_not_to_raw() {
+        let script = parse_acmd_script(
+            "unsafe extern \"C\" fn game_attackhi4(agent: &mut L2CAgentBase) {\n\
+                 frame(agent.lua_state_agent, 9.0);\n\
+                 macros::FT_MOTION_RATE(agent, 0.6);\n\
+             }\n",
+        );
+        assert!(
+            matches!(
+                script.stmts.as_slice(),
+                [
+                    crate::data::AcmdStmt::Frame(f),
+                    crate::data::AcmdStmt::MotionRate(r),
+                ] if *f == 9.0 && *r == 0.6
+            ),
+            "expected a typed rate statement, got {:?}",
+            script.stmts
+        );
+    }
+
+    /// `FT_MOTION_RATE_RANGE` begins with `FT_MOTION_RATE`'s entire name and takes a different
+    /// argument list, so a prefix or `contains` match reads one as the other and writes back a
+    /// call the game does not have. This codebase has paid for that shape once already with
+    /// `ATTACK` / `ATTACK_ABS`.
+    ///
+    /// Both of these have **zero** corpus calls, so they stay `Raw` on purpose — there is no
+    /// sample to check a parse of them against. If one is ever modelled, this test should
+    /// change rather than be deleted.
+    ///
+    /// **The third line is synthetic and is the one with teeth.** Mutation showed that the two
+    /// real calls are rejected by their *argument count*, not by their name — replacing the
+    /// parenthesised match with a prefix match still passes on them, because `5.0, 10.0, 0.5`
+    /// fails to parse as one `f32`. That makes the real guard accidental. A two-argument macro
+    /// whose name merely starts with `FT_MOTION_RATE` isolates the name match itself, which is
+    /// what the parser actually relies on.
+    #[test]
+    fn the_longer_rate_macros_are_not_read_as_a_motion_rate() {
+        for line in [
+            "    macros::FT_MOTION_RATE_RANGE(agent, 5.0, 10.0, 0.5);",
+            "    macros::FT_DESIRED_RATE(agent, 12.0);",
+            "    macros::FT_MOTION_RATE_SYNTHETIC(agent, 0.5);",
+        ] {
+            assert_eq!(
+                parse_motion_rate_call(line),
+                None,
+                "{line} must not be read as FT_MOTION_RATE"
+            );
+            let script = parse_acmd_script(&format!(
+                "unsafe extern \"C\" fn game_x(agent: &mut L2CAgentBase) {{\n{line}\n}}\n"
+            ));
+            assert!(
+                matches!(script.stmts.as_slice(), [crate::data::AcmdStmt::Raw(_)]),
+                "{line} should still be kept verbatim, got {:?}",
+                script.stmts
+            );
+        }
+    }
+
+    /// Every `FT_MOTION_RATE` in the corpus, parsed and written back.
+    ///
+    /// This is the round-trip half, and it is worth having *given* the test above: together
+    /// they say the call is now typed **and** that typing it did not change what is exported.
+    #[test]
+    fn every_corpus_motion_rate_call_survives_being_typed() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+        let mut seen = 0usize;
+        for (path, body) in &bodies {
+            for func in body.split_inclusive("\n}\n") {
+                let script = parse_acmd_script(func);
+                let rates: Vec<f32> = script
+                    .stmts
+                    .iter()
+                    .filter_map(|s| match s {
+                        crate::data::AcmdStmt::MotionRate(r) => Some(*r),
+                        _ => None,
+                    })
+                    .collect();
+                if rates.is_empty() {
+                    continue;
+                }
+                seen += rates.len();
+                let emitted = preview_game_fn(&script, "audit");
+                let reparsed: Vec<f32> = parse_acmd_script(&emitted)
+                    .stmts
+                    .iter()
+                    .filter_map(|s| match s {
+                        crate::data::AcmdStmt::MotionRate(r) => Some(*r),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(rates, reparsed, "{path} lost or changed a rate on export");
+            }
+        }
+        // Guard the oracle with what it claims to test: if the corpus stops containing rate
+        // calls, or the parse arm regresses, this test would otherwise pass having checked
+        // nothing at all.
+        assert!(
+            seen >= 17,
+            "expected at least the 17 known corpus rate calls, saw {seen}"
+        );
+    }
 
     /// Three files in a long-lived script cache are the literal bytes `404: Not Found`, because
     /// the fetch used to store whatever a request returned and a 404 is a *successful* request.

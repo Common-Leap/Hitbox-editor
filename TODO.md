@@ -2287,7 +2287,7 @@ the speed macros.
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
 
-### [~] E2 — Model `FT_MOTION_RATE` (in progress 2026-08-06)
+### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
 presence deliberately **disables the export timing checks** (`check_script_shape`, via
@@ -2371,6 +2371,49 @@ Withdrawn.
   forward has to treat a backwards step as a restart rather than as a rate.
 - **~~Delete the probe~~** — done 2026-08-06, along with its call in the animation-sequencer
   facade. The measurement it existed for is recorded above.
+
+## Done 2026-08-06 — all five surfaces
+
+`AcmdStmt::MotionRate(f32)` is parsed, exported, editable, written back, and applied live.
+Adding the variant made the compiler enumerate the five matches that had to handle it, which is
+the right tool for a change of this shape and found two sites review would not have.
+
+- **The direction was independently confirmed from the macro's own source**, after being measured
+  live. `smash-script`'s `FT_DESIRED_RATE(agent, motion_frames, game_frames)` passes
+  `game_frames / motion_frames` as the rate, so `game_frames = motion_frames × rate` is the
+  macro's own arithmetic. Two unrelated methods agreeing is the strongest form this entry could
+  have reached, and it settles the reading for good.
+- **One hook covers all three macros.** All of `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE` and
+  `FT_DESIRED_RATE` compile to the same `sv_animcmd::FT_MOTION_RATE` with one `f32` on the stack;
+  the longer forms just divide first. So the live surface needed no family table and cannot drift
+  from the editor's the way the sound one can.
+- **`eval_stmts` is deliberately untouched.** It resolves the frames a script *names*, which are
+  motion frames, and every hitbox range is keyed to them. Rate is a separate motion → game
+  mapping (`rate_spans` / `game_frame`); applying it in the walk would move every hitbox to a
+  frame its own source never mentions.
+- **The verifier claim, checked rather than asserted.** The timing checks now run on all 10
+  rate-carrying corpus functions and fire exactly one warning, on `kirby/SpecialLw` — and that
+  warning is **true**: the script really does `frame(14.0)` and then `frame(2.0)`, so the
+  `AttackModule::clear_all` runs on frame 14, the same frame the `ATTACK` spawns. Modelling rate
+  revealed a real finding that the `Raw` gate had been hiding. It is a warning, not a blocker, so
+  nothing that exports today stops exporting.
+- **Write-back takes no pristine copy, unlike every other family here.** Those diff because their
+  rule keys on a field the edit changes; a rate edit can only change an argument, so the user's
+  file is its own baseline. It *does* refuse when the source's rate-call count disagrees with the
+  editor's — a call inside a runtime branch is scanned but not modelled, and writing by position
+  across that gap lands the edit on the wrong call.
+- **Mutation testing found a test that proved nothing.** The first rewind-guard test asserted the
+  backwards `frame()` still mapped somewhere sane, and passed with the clamp deleted: with a
+  single rate window `game_frame` recomputes from that span's own origin and never reads the
+  running clock. It needed a *second* rate window after the rewind to become a test at all.
+- **A second one, same session:** the prefix-collision test passed against a prefix match, because
+  the two real longer macros are rejected by their argument *count*. It took a synthetic
+  two-argument `FT_MOTION_RATE_SYNTHETIC` to isolate the name match the parser actually relies on.
+  Both are the standing "a detector tested on its own pattern" trap wearing different clothes.
+
+**Not yet confirmed in game** — deployed as `2026-08-06l-motion-rate`, unverified. The check is
+kirby's down smash (`attack_lw4`, rate `0.25`) or up tilt (`attack_hi4`, `0.6`): edit the value in
+the new **Playback rate** section and look for `RATE hit` in `diag.txt`.
 
 ### [x] E3 — Camera and zoom (done 2026-08-06 — as a placement fix, not a camera panel)
 

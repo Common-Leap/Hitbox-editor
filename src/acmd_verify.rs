@@ -1234,6 +1234,20 @@ fn check_shape(subject: &str, stmts: &[AcmdStmt], clock: &mut f32, report: &mut 
                 // the same statement once per iteration would say nothing new.
                 check_shape(subject, body, clock, report);
             }
+            // The clock counts *motion* frames, which is what every other statement here is
+            // keyed to, and a rate call does not move it — it changes how many game frames
+            // those motion frames take. So this arm checks the value and nothing else.
+            AcmdStmt::MotionRate(rate) => {
+                if *rate <= 0.0 {
+                    report.warn(
+                        subject,
+                        format!(
+                            "`FT_MOTION_RATE(agent, {rate})` stops the animation advancing, and \
+                             nothing below it will run"
+                        ),
+                    );
+                }
+            }
             // A bare command is a single statement, so the duplicate-call check the `Excute`
             // arm runs has nothing to compare it against. `Bare` is only produced for `sound_`
             // scripts, which this pass does not verify at all.
