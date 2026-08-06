@@ -2130,6 +2130,40 @@ mod tests {
         assert_eq!(checked, 12, "the sound family is 12 members");
     }
 
+    /// A charged smash attack must not lose everything after the charge.
+    ///
+    /// `mark_capture_motion` refuses to open a second run for a `(kind, motion)` that is already
+    /// claimed, and a claim lives until the editor clears captures. A smash attack's hold reads
+    /// as "the playback ended" — the motion frame rewinds, or the fighter parks in another
+    /// motion — so every call after the charge landed on that refusal and was discarded:
+    /// `attack_lw4` kept its two `FT_MOTION_RATE` calls from frames 0 and 4 and lost the
+    /// `ATTACK` on 10, the `ATK_POWER` on 15 and its sounds. Tilts have no hold and were fine,
+    /// which is what made it look like a per-family bug for three rounds.
+    ///
+    /// This pins the *source*, not the linked `.nro`, and it is a weak check for a strong
+    /// property — but the property is otherwise invisible from this crate, and the failure it
+    /// guards is silent by construction: a dropped capture line looks exactly like a call the
+    /// game never made.
+    #[test]
+    fn the_plugin_resumes_a_capture_claim_held_by_the_same_object() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs"),
+        )
+        .expect("read the plugin's hitbox_viewer");
+        assert!(
+            source.contains("Some(held) if held.boid == boid => held.run,"),
+            "the same-object resume arm is gone — a charged smash attack will lose every call \
+             after its hold, silently"
+        );
+        // The other half: a claim held by a *different* object is still a real conflict and must
+        // still be refused, or one fighter's capture absorbs another's.
+        assert!(
+            source.contains("claimed by another object"),
+            "the cross-object refusal is gone — captures from two objects can now merge"
+        );
+    }
+
     /// The rate category and override field the editor sends are the ones the plugin reads.
     ///
     /// Same mechanism and same weakness as the sound checks above: this pins the plugin's

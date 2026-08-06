@@ -2867,6 +2867,47 @@ one has it", on `attack_lw4`, which carries all three.
   `script_from_captures`; adding a second and third builder beside it would have been three
   copies of the same frame bucketing and ordering rule. Adding a family is now one `match` arm.
 
+### [x] R11 — A charged smash attack lost every call after its charge (done 2026-08-06)
+
+**Diagnosed by the user, from the symptom pattern, after I had guessed wrong three times:** "the
+tilt attack looks right, but the smash attack has similar issues… down smash is an attack that has
+a loop section during which it is charged."
+
+`mark_capture_motion` refuses to open a second run for a `(kind, motion)` already claimed, and a
+claim lives until the editor clears captures. Both it and `capture_tick` decide a playback is over
+with the same test — `w.motion != motion || frame + 0.5 < w.frame`. A smash attack's hold trips
+it: `attack_lw4` sets `START_SMASH_HOLD` on frame 5, and the charge either rewinds the motion
+frame or parks in another motion. The capture was declared finished there, and **every later call
+was then dropped by the claim**, silently.
+
+| `attack_lw4` | frame | outcome |
+|---|---|---|
+| `FT_MOTION_RATE` ×2 | 0, 4 | before the hold — captured |
+| `START_SMASH_HOLD` | 5 | capture declared over |
+| `ATTACK` ×2 | 10 | **dropped** |
+| `ATK_POWER` ×2 | 15 | **dropped** |
+| sounds | after 5 | **dropped** |
+
+- **Fixed by resuming the run when the claim is held by the same object.** A charge is one
+  performance of one move and belongs in one capture. A genuine repeat — a jab thrown twice —
+  folds into the lines already held, because the dedupe key is (motion, frame, func, args). A
+  claim held by a *different* object is a real conflict and is still refused.
+- **`capture_tick`'s early end marker is deliberately left alone.** It is what ends a capture of a
+  genuinely looping motion (`walk`, `run`), which never reaches `end_frame`. The premature marker
+  now self-heals: the run resumes, and the real end pushes a second marker carrying the complete
+  capture.
+- **Why this took four rounds.** The symptom moved every time — first "hitboxes, tuning and motion
+  rate", then "hitboxes, tuning and sound" — because *which* families went missing depended only
+  on whether they ran before or after frame 5. Reading that as a per-family bug is what sent me
+  into three different families' code in turn. **The invariant was "everything after the charge",
+  and only the user saw it**, because they knew down smash charges and I was reading the families
+  in isolation. **When a symptom set changes between reports but the move does not, the thing they
+  share is a position in the timeline, not a family.**
+- Guarded from the editor by `the_plugin_resumes_a_capture_claim_held_by_the_same_object`, which
+  reads the plugin's source. Weak — it pins text, not the linked `.nro` — but the property is
+  invisible from this crate and its failure is silent by construction: a dropped capture line
+  looks exactly like a call the game never made.
+
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in

@@ -559,28 +559,45 @@ fn mark_capture_motion(
 
     let run = {
         let mut claims = CAPTURE_CLAIMS.lock();
-        if let Some(held) = claims.get(&(kind, motion)) {
-            // **The one silent drop on the capture path, and it discards a whole family.**
-            // A `(kind, motion)` stays claimed until the editor clears captures, so anything
-            // arriving here after the watch entry for this object is gone — a second
-            // performance, or a sibling coroutine whose frame ran behind the one that set the
-            // watch — is thrown away. From the editor that is indistinguishable from "the game
-            // never ran the call", which is how "hitboxes and tuning are missing from the live
-            // fetch" has been reported three times without ever naming a cause.
+        match claims.get(&(kind, motion)) {
+            // **The same object returning to a motion it already owns — resume its run.**
             //
-            // Bounded and keyed by the func so one noisy motion cannot bury the rest.
-            if CLAIM_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
-                crate::slight::diag::note(format!(
-                    "CAP drop {func} motion={motion:#x} frame={frame:.2} boid={boid} — \
-                     already claimed by boid={} run={}; this call is not in any capture",
-                    held.boid, held.run
-                ));
+            // This is what a charged smash attack does. `attack_lw4` sets
+            // `START_SMASH_HOLD` on frame 5, and the hold either rewinds the motion frame or
+            // parks in a separate motion; either way the tests above read it as "the playback
+            // ended". The claim then blocked a new run, so **everything after the charge was
+            // discarded**: the `ATTACK` on frame 10, the `ATK_POWER` on frame 15, and the
+            // sounds. Only `FT_MOTION_RATE` on frames 0 and 4 survived, because it runs before
+            // the hold — which is exactly the pattern that was reported, three times, as
+            // "hitboxes and tuning are missing but the GitHub script has them".
+            //
+            // A tilt has no hold and never hit this, which is why the same fetch looked correct
+            // on one move and broken on the next.
+            //
+            // Resuming rather than opening a new run is deliberate: a charge is one performance
+            // of one move and belongs in one capture, and the dedupe key (motion, frame, func,
+            // args) folds a genuine repeat — a jab thrown twice — into the same lines it already
+            // holds. A *different* object claiming the same motion is a real conflict and is
+            // still refused.
+            Some(held) if held.boid == boid => held.run,
+            Some(held) => {
+                // The remaining drop, now genuinely rare. Bounded, and it names the call so a
+                // whole family going missing can never again be silent.
+                if CLAIM_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
+                    crate::slight::diag::note(format!(
+                        "CAP drop {func} motion={motion:#x} frame={frame:.2} boid={boid} — \
+                         claimed by another object boid={} run={}; not in any capture",
+                        held.boid, held.run
+                    ));
+                }
+                return None;
             }
-            return None;
+            None => {
+                let run = next_run();
+                claims.insert((kind, motion), CaptureClaim { boid, run });
+                run
+            }
         }
-        let run = next_run();
-        claims.insert((kind, motion), CaptureClaim { boid, run });
-        run
     };
     let mut watch = MOTION_WATCH.lock();
     watch.insert(
