@@ -16331,6 +16331,51 @@ mod live_effect_capture_tests {
         assert_eq!(end, Some(5.5));
     }
 
+    /// Kirby's up tilt: the exact rule a rename of its one sound goes out with.
+    ///
+    /// Composed from `kirby/AttackHi3.txt`, the move a user actually tried this on. Pins all
+    /// four fields a live sound rule is matched on at once, because a mismatch in any of them is
+    /// silent from both ends — the editor sends a well-formed rule and the game plays the
+    /// original.
+    #[test]
+    fn renaming_the_up_tilt_sound_sends_a_rule_the_game_can_match() {
+        const BODY: &str = r#"unsafe extern "C" fn sound_attackhi3(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_kirby_swing_l"));
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_sound_script(BODY).to_sound_events();
+        assert_eq!(pristine.len(), 1);
+        assert_eq!(pristine[0].frame, 4, "the call sits at script frame 4");
+
+        let mut edited = pristine.clone();
+        edited[0].call.sounds = vec!["se_common_electric_l".to_string()];
+
+        let motion = hash40::hash40("attack_hi3").0;
+        let rules = VisionaryApp::sound_rules_for(motion, &pristine, &edited);
+
+        let [rule] = &rules[..] else {
+            panic!("expected one rule, got {}", rules.len());
+        };
+        assert_eq!(rule.motion, motion);
+        assert_eq!(rule.category, crate::game_link::CAT_SOUND);
+        assert_eq!(rule.func.as_deref(), Some("PLAY_SE"));
+        // Keyed on the sound the SCRIPT names, so the game's own argument matches it.
+        assert_eq!(rule.hitbox_id, Some(effect_name_hash("se_kirby_swing_l")));
+        // Script frame 4 is motion frame 3, and the window is the rounding bucket around it —
+        // any observation that would round to script frame 4 falls inside, and neither
+        // neighbour does. **This is the assertion to check against `SND miss` output**: if the
+        // game reports a frame outside 2.5..3.5 at this call, the conversion is the bug.
+        assert_eq!(rule.frame_start, Some(2.5));
+        assert_eq!(rule.frame_end, Some(3.5));
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().sound_hashes,
+            Some(vec![effect_name_hash("se_common_electric_l")])
+        );
+    }
+
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
     /// as statements rather than as spans — the panel, the export, and the source sync all read
     /// the script, and spans alone would show on screen and reach none of them.

@@ -113,9 +113,28 @@ fn sound_action(motion: u64, hash: u64, frame: f32, func: &str) -> Option<(bool,
     hit
 }
 
-/// Misses reported this session. Bounded so a move played repeatedly cannot flood the log.
+/// Misses reported since the last rule set. Bounded so a move played repeatedly cannot flood.
+///
+/// **Reset by [`reset_reports`] whenever rules arrive, and that is the whole point.** Budgeting
+/// per boot spent all twelve reports on "no rules loaded" during ordinary play — the normal
+/// state before any edit — and the rule the user was actually debugging arrived 2400 lines
+/// later to a budget that had been empty since the opening seconds. The window worth reporting
+/// begins when rules arrive, not when the game boots.
 static MISSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const MAX_MISS_REPORTS: u32 = 12;
+
+/// Whether "no rules loaded" has been said once already.
+///
+/// Separate from the budget above because it is not a diagnostic event: with no editor
+/// connected it is true for every sound in the session, and it is worth saying once so the
+/// silence is explained, not twelve times so nothing else can be.
+static SAID_NO_RULES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Give the next rule set a fresh reporting budget.
+pub(super) fn reset_reports() {
+    MISSES.store(0, std::sync::atomic::Ordering::Relaxed);
+    SAID_NO_RULES.store(false, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Report an early return, bounded, sharing the miss budget.
 fn bail(func: &str, why: &str) {
@@ -150,7 +169,12 @@ unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaA
     // path that was taken. A branch that bails silently is invisible in exactly the case you are
     // trying to debug.
     if !any_rules() {
-        bail(func, "no rules loaded at all (any_rules() is false)");
+        if !SAID_NO_RULES.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::slight::diag::note(format!(
+                "SND bail {func}: no rules loaded yet — expected until the editor sends one. \
+                 Said once; the report budget is untouched."
+            ));
+        }
         return false;
     }
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)

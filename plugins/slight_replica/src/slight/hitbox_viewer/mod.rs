@@ -826,6 +826,9 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
             })
             .collect()
     };
+    // A new rule set is a new thing to debug, so the sound path gets its reporting budget back.
+    // Without this the budget is spent long before the rule under test ever arrives.
+    sound_hooks::reset_reports();
     crate::slight::diag::note(format!(
         "hitbox_rules set: {n} rule(s) [{}]",
         by_cat.join(" ")
