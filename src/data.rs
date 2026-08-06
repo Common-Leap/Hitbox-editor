@@ -1170,7 +1170,7 @@ impl AcmdScript {
                             *seen += 1;
                         }
                     }
-                    AcmdStmt::Loop { body, .. } => {
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
                         if let Some(found) = walk(body, site, seen) {
                             return Some(found);
                         }
@@ -1201,7 +1201,7 @@ impl AcmdScript {
                             *seen += 1;
                         }
                     }
-                    AcmdStmt::Loop { body, .. } => {
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
                         if let Some(found) = walk(body, site, seen) {
                             return Some(found);
                         }
@@ -1216,11 +1216,15 @@ impl AcmdScript {
 
     /// The sound call a [`SoundEvent::site`] refers to, for writing an edit back into the IR.
     ///
-    /// Walks the same shapes [`count_sound_stmts`] counts, in the same order — including
-    /// `Bare` and `RawBlock`, which the two functions above do not have to handle. If these two
-    /// ever disagree about what takes a site, an edit lands on the wrong call and produces a
-    /// script that is still perfectly well-formed, which is why the corpus oracle checks the
-    /// macro name at the resolved site rather than only that a site resolves.
+    /// Walks the same shapes [`count_sound_stmts`] counts, in the same order — including `Bare`,
+    /// which the two functions above genuinely do not have to handle: no hurtbox or attack
+    /// modifier is ever written outside an `is_excute` block. `RawBlock` used to be listed here
+    /// as a second such exemption and was not one — the two above skipped it while `eval_stmts`
+    /// descended into it, so for those families a site inside a runtime branch resolved to the
+    /// call *after* the branch. If these ever disagree about what takes a site, an edit lands on
+    /// the wrong call and produces a script that is still perfectly well-formed, which is why the
+    /// corpus oracle checks the macro name at the resolved site rather than only that a site
+    /// resolves.
     pub fn sound_stmt_mut(&mut self, site: usize) -> Option<&mut ExcuteStmt> {
         fn walk<'a>(
             stmts: &'a mut [AcmdStmt],
@@ -1286,12 +1290,18 @@ struct WalkAccum {
 /// statement *after* an empty loop still gets the ordinal a plain pre-order walk of the source
 /// would give it. Without this the two definitions of "site" diverge exactly when a loop runs
 /// no iterations, and the editor would resolve a site to the wrong line.
+///
+/// Counts [`AcmdStmt::RawBlock`] for the reason [`count_sound_stmts`] gives — [`eval_stmts`]
+/// descends into a runtime branch, so a hurtbox inside one takes a site. This arm was missing
+/// until B6, and the corpus could not have found it: **no** hurtbox statement anywhere in the
+/// cache sits inside a raw block, against 26 sounds that do. It is reachable from a user's own
+/// script, where an `if` around a `HIT_NODE` is nothing unusual.
 fn count_hurt_stmts(stmts: &[AcmdStmt]) -> usize {
     stmts
         .iter()
         .map(|stmt| match stmt {
             AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_hurt_stmt(s)).count(),
-            AcmdStmt::Loop { body, .. } => count_hurt_stmts(body),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => count_hurt_stmts(body),
             _ => 0,
         })
         .sum()
@@ -1349,14 +1359,17 @@ fn is_sound_stmt(stmt: &ExcuteStmt) -> bool {
 
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
-/// The [`count_hurt_stmts`] argument applies unchanged: a zero-iteration `for` still has to step
+/// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
+/// reason that arm cannot be justified from the corpus: a zero-iteration `for` still has to step
 /// the cursor over its body, or a statement after it resolves to the wrong line.
 fn count_attack_mod_stmts(stmts: &[AcmdStmt]) -> usize {
     stmts
         .iter()
         .map(|stmt| match stmt {
             AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_attack_mod_stmt(s)).count(),
-            AcmdStmt::Loop { body, .. } => count_attack_mod_stmts(body),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_attack_mod_stmts(body)
+            }
             _ => 0,
         })
         .sum()

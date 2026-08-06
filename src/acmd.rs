@@ -3170,6 +3170,177 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         assert_eq!((normal.active_start, normal.active_end), (20, 9999));
     }
 
+    /// A runtime `if` around a hurtbox call, with a second call after it.
+    ///
+    /// Composed rather than lifted, and that is defensible here in a way it would not be for a
+    /// macro signature: **both halves are corpus shapes, only their nesting is not.** The header
+    /// is one of the twenty-five distinct `RawBlock` openers the cache contains verbatim, and
+    /// `HIT_NODE` appears in it hundreds of times — what is being constructed is a composition,
+    /// not a guess about what the game accepts. Nothing here claims a layout the corpus could
+    /// have refuted.
+    ///
+    /// The measurement that makes this fixture necessary: **zero** hurtbox and **zero**
+    /// attack-modifier statements sit inside a `RawBlock` anywhere in the 460-file cache, against
+    /// 26 sounds in 16 files and 107 effect calls in 12. So the corpus oracles cannot reach this
+    /// path for these two families and never could, however long they run.
+    const HURT_IN_RAW_BLOCK: &str = r#"unsafe extern "C" fn game_rawblockhurt(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 2.0);
+    if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_SQUAT_FLAG_REQUEST_SQUAT_SE) {
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("shoulderl"), *HIT_STATUS_XLU);
+    }
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_NORMAL);
+    }
+}
+"#;
+
+    /// The walk and the resolver have to agree about a hurtbox inside a runtime branch.
+    ///
+    /// [`eval_stmts`](crate::data) descends into an [`AcmdStmt::RawBlock`] deliberately — a
+    /// hitbox inside an `if` has always been shown unconditionally — so a `HIT_NODE` in there
+    /// takes a site. `hurt_stmt_mut` used not to descend, so it resolved sites against a
+    /// *shorter* sequence than the one that handed them out: the branch's own state resolved to
+    /// the call after the branch, and the last state resolved to nothing at all.
+    ///
+    /// Asserted on the resolved statement's **bone**, not on `is_some()`. Both sites resolve to
+    /// a real `HIT_NODE` with the bug present; what is wrong is *which one*, and a liveness
+    /// check cannot see that. Every state in the script is checked rather than just the
+    /// interesting one, because the failure is a shift — pinning only the branch's own call
+    /// would pass with the walk and the resolver both wrong by the same amount.
+    #[test]
+    fn a_hurtbox_inside_a_runtime_branch_resolves_to_its_own_call() {
+        let mut script = parse_acmd_script(HURT_IN_RAW_BLOCK);
+        let (states, _) = script.to_hurtboxes();
+        let expected: Vec<(usize, String)> = states
+            .iter()
+            .map(|s| {
+                let crate::data::HurtTarget::Bone(bone) = &s.target else {
+                    panic!("fixture uses HIT_NODE, which targets a bone");
+                };
+                (s.site, bone.clone())
+            })
+            .collect();
+        assert_eq!(
+            expected.len(),
+            2,
+            "the walk should see the branch's call and the one after it"
+        );
+        for (site, bone) in expected {
+            let stmt = script
+                .hurt_stmt_mut(site)
+                .unwrap_or_else(|| panic!("site {site} ({bone}) resolved to nothing"));
+            let crate::data::ExcuteStmt::HitStatus { target, .. } = stmt else {
+                panic!("site {site} resolved to {stmt:?}, not a hurtbox statement");
+            };
+            assert_eq!(
+                target,
+                &crate::data::HurtTarget::Bone(bone.clone()),
+                "site {site} should be the `{bone}` call the walk took it from"
+            );
+        }
+    }
+
+    /// A zero-iteration `for` wrapping a runtime branch still steps both cursors over it.
+    ///
+    /// The counters are a *second* place the same disagreement lives, reachable only through a
+    /// zero-count loop — at one iteration or more the cursor arrives correctly on its own, which
+    /// is why the two tests above pass with the counter arms reverted. Verified by mutation, not
+    /// assumed: reverting either arm left all 397 other tests green.
+    ///
+    /// Both families in one test here, unlike the resolver pair above, because the assertion is
+    /// about a single shared property — the site the *trailing* call receives — and neither
+    /// family's number is meaningful without the other's cursor having advanced too.
+    #[test]
+    fn a_branch_inside_a_loop_that_never_runs_still_advances_both_cursors() {
+        const EMPTY_LOOP_BRANCH: &str = r#"unsafe extern "C" fn game_emptyloopbranch(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 2.0);
+    for _ in 0..0 {
+    if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_SQUAT_FLAG_REQUEST_SQUAT_SE) {
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("shoulderl"), *HIT_STATUS_XLU);
+        macros::ATK_POWER(agent, 0, 12.0);
+    }
+    }
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_NORMAL);
+        macros::ATK_POWER(agent, 1, 3.5);
+    }
+}
+"#;
+        let script = parse_acmd_script(EMPTY_LOOP_BRANCH);
+        let (states, _) = script.to_hurtboxes();
+        let mods = script.to_attack_mods();
+        assert_eq!(
+            states.len(),
+            1,
+            "a loop with no iterations set a hurtbox anyway"
+        );
+        assert_eq!(
+            mods.len(),
+            1,
+            "a loop with no iterations ran a modifier anyway"
+        );
+        // Site 1, not 0: the skipped branch's own call is site 0 and keeps it. Without the
+        // `RawBlock` arm in the counters the cursor never steps over that call, and the
+        // surviving statement claims site 0 — the line inside the loop that never ran.
+        assert_eq!(
+            states[0].site, 1,
+            "the surviving `kneer` call took the site of the `shoulderl` call inside the skipped loop"
+        );
+        assert_eq!(
+            mods[0].site, 1,
+            "the surviving id-1 modifier took the site of the id-0 call inside the skipped loop"
+        );
+    }
+
+    /// The attack-modifier resolver, same defect and same fixture shape.
+    ///
+    /// Its own test rather than a second assertion in the one above, because the two families
+    /// keep independent numbering spaces on purpose — a shared counter would make every hurtbox
+    /// site shift the moment a script gained an `ATK_POWER` — so a fix to one is no evidence
+    /// about the other. They were in fact broken and fixed together, which is exactly the
+    /// coincidence that makes a shared test worthless later.
+    #[test]
+    fn an_attack_modifier_inside_a_runtime_branch_resolves_to_its_own_call() {
+        const MOD_IN_RAW_BLOCK: &str = r#"unsafe extern "C" fn game_rawblockmod(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_ATTACK_FLAG_SMASH_SMASH_HOLD_TO_ATTACK) {
+    if macros::is_excute(agent) {
+        macros::ATK_POWER(agent, 0, 12.0);
+    }
+    }
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        macros::ATK_POWER(agent, 1, 3.5);
+    }
+}
+"#;
+        let mut script = parse_acmd_script(MOD_IN_RAW_BLOCK);
+        let expected: Vec<(usize, i64)> = script
+            .to_attack_mods()
+            .iter()
+            .map(|m| (m.site, m.id))
+            .collect();
+        assert_eq!(expected.len(), 2, "the walk should see both modifiers");
+        for (site, id) in expected {
+            let stmt = script
+                .attack_mod_stmt_mut(site)
+                .unwrap_or_else(|| panic!("site {site} (id {id}) resolved to nothing"));
+            let crate::data::ExcuteStmt::AttackMod { id: got, .. } = stmt else {
+                panic!("site {site} resolved to {stmt:?}, not an attack modifier");
+            };
+            assert_eq!(
+                *got, id,
+                "site {site} should be the id-{id} call the walk took it from"
+            );
+        }
+    }
+
     /// The round-trip the definition of done asks for: real vanilla text in, export, parse the
     /// export, and the same spans come back. `*HIT_STATUS_XLU` in particular has to survive as
     /// a symbol — writing the `2` it stands for compiles and stops matching the archive.
@@ -5849,6 +6020,59 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             events[0].site, 2,
             "the surviving footstep resolved to `{}`, a call inside the loop that never ran",
             sites[events[0].site].name
+        );
+    }
+
+    /// The sound family's own `RawBlock` arms, which had the code but never the test.
+    ///
+    /// `count_sound_stmts` and `sound_stmt_mut` have descended into a raw block since D1c, on
+    /// evidence — 26 corpus sounds sit inside one, against zero hurtbox and zero attack-modifier
+    /// statements, which is why the sound family got the arm first and the other two waited for
+    /// B6. But *having* the arm was never pinned: deleting `RawBlock` from either left all 398
+    /// other tests green, verified by mutation.
+    ///
+    /// The corpus oracle beside this one cannot close the gap however many scripts it reads. It
+    /// compares the walk against `acmd_src::sound_sites`, a *textual* scan — a different function
+    /// from `sound_stmt_mut`, which resolves against the IR. Two implementations of "which call
+    /// is site N", and the oracle only ever exercises one of them.
+    #[test]
+    fn a_sound_inside_a_runtime_branch_is_counted_and_resolvable() {
+        const SOUND_IN_RAW_BLOCK: &str = r#"unsafe extern "C" fn sound_rawblocksound(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 2.0);
+    for _ in 0..0 {
+    if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_SQUAT_FLAG_REQUEST_SQUAT_SE) {
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_common_guardoff"));
+    }
+    }
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_SQUAT_FLAG_REQUEST_SQUAT_SE) {
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+    }
+}
+"#;
+        let mut script = parse_sound_script(SOUND_IN_RAW_BLOCK);
+        let events = script.to_sound_events();
+        assert_eq!(events.len(), 1, "the skipped loop played a sound anyway");
+        // Site 1 exercises the counter: without its `RawBlock` arm the cursor never steps over
+        // the call inside the skipped branch, and this event claims site 0.
+        assert_eq!(
+            events[0].site, 1,
+            "the surviving call took the site of the one inside the skipped loop"
+        );
+        // And resolving it exercises the walker, which is the other half and the other function.
+        let stmt = script
+            .sound_stmt_mut(events[0].site)
+            .expect("a sound inside a branch must resolve to a statement");
+        let crate::data::ExcuteStmt::Sound(call) = stmt else {
+            panic!("site {} resolved to {stmt:?}, not a sound", events[0].site);
+        };
+        assert_eq!(
+            call.func, "PLAY_STEP_FLIPPABLE",
+            "resolved to the wrong call — an edit here would rewrite a different line"
         );
     }
 

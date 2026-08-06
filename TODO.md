@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**395 green after C2 closed**), including the eight corpus
+- [ ] `cargo test` passes (**399 green after B6 closed**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -816,7 +816,7 @@ plus a test pinning each mapping and asserting neither family lands on the hurtb
 - **Not verified against a running game.** The mapping is proven by test; that a live `ATTACK_ABS`
   edit now actually lands needs a deploy, which is not available here.
 
-### [~] B6 — Site counters disagree with the walk about raw blocks (started 2026-08-05)
+### [x] B6 — Site resolution disagreed with the walk about raw blocks (done 2026-08-05)
 
 Three sibling counters in [data.rs](src/data.rs:1289) — `count_hurt_stmts`, `count_sound_stmts`,
 `count_attack_mod_stmts` — exist for one purpose, at one call site
@@ -835,19 +835,46 @@ So a zero-iteration `for` containing an `if` containing `HIT_STATUS` / `COL_PRI`
 attack-mod edit resolves to the wrong line — producing a script that is still perfectly well-formed.
 That is the failure mode the sound counter's comment names, in the two functions that did not get it.
 
-**Reachability, measured not assumed** (460-file cache, 2026-08-05): 57 such statements sit inside
-an `if` across 21 files; **5 of them across 3 files** — `dolly/SpecialHiCommand.txt`,
-`dolly/SpecialAirHiCommand.txt`, `kirby/SpecialAirSStart.txt` — sit inside an `if` that is itself
-inside a `for`. The shape ships in vanilla.
+**Closed 2026-08-05 — six arms added across four functions, all six pinned by mutation.**
 
-- **Work order:** add the `RawBlock` arm to both counters, matching `count_sound_stmts`. Then find
-  what should have caught this: the sound side presumably has a test the other two families lack,
-  and adding the arm without adding that test leaves the third instance of this to be found by hand.
-- **Done when:** a zero-iteration `for` wrapping an `if` that contains a hurtbox statement resolves
-  the *next* statement's site to the right line, proven by test for both families; and a mutation
-  reverting either arm fails.
-- **Surfaces:** Parse+IR only. This is a site-numbering fix behind existing capability, not a new
-  one — no panel, live, export or write-back change. Say so explicitly if that turns out false.
+**The bug was bigger than filed, and the reachability claim in the original entry was wrong.**
+Both corrections came from checking, and they went in opposite directions.
+
+- **Bigger:** it is not only the two counters. `hurt_stmt_mut` and `attack_mod_stmt_mut` — the
+  *resolvers* — skipped `RawBlock` as well, and those need no zero-iteration loop to go wrong. A
+  plain `if` around a `HIT_NODE`, with any statement after it, was enough: the branch's own site
+  resolved to the call *after* the branch, and the last site resolved to nothing. The comment at
+  [data.rs:1219](src/data.rs:1219) stated the opposite in as many words — that `RawBlock` was
+  something "the two functions above do not have to handle" — and that sentence was the whole
+  defence. It has been rewritten to say which exemption is real (`Bare`; no hurtbox is ever
+  written outside an `is_excute`) and which was not.
+- **Not reachable from vanilla, contrary to what this entry first claimed.** The filed figure —
+  "5 statements across 3 files" — was an artifact: the measuring script treated the
+  `unsafe extern "C" fn … {` header as a raw block, so *every* statement in *every* script counted
+  as being inside one. Re-measured with the header excluded, the real counts inside a `RawBlock`
+  are **hurtbox 0, attack-modifier 0**, against **sound 26 in 16 files**, **effect 107 in 12**,
+  **hitbox 48 in 4**. That asymmetry is the entire explanation for the bug: `count_sound_stmts`
+  got its arm when D1c's corpus demanded it, and the two families with no vanilla instance never
+  did. **The first number a measurement gives you is worth one more minute of doubt when it is
+  the number that justifies the task.**
+- **Fixed anyway, and the justification is different from the one filed.** Not "vanilla does
+  this" but "the resolver must mirror the walk, and a user's own script can compose two shapes the
+  corpus only contains separately". That is a weaker warrant than a corpus call and a stronger one
+  than B2's zero-evidence bar, which is about *inventing a macro signature* — here nothing about
+  the game is being guessed. The fixtures compose a verbatim corpus `RawBlock` header with a
+  corpus `HIT_NODE`; see the note on `HURT_IN_RAW_BLOCK` in [acmd.rs](src/acmd.rs).
+- **The sound family had the code and never the test.** Deleting `RawBlock` from either
+  `count_sound_stmts` or `sound_stmt_mut` left all 398 other tests green. The corpus oracle
+  `every_corpus_sound_site_lands_on_a_call_of_its_own_macro` reads as though it covers this and
+  cannot: it compares the walk against `acmd_src::sound_sites`, a **textual** scan, which is a
+  different function from the IR resolver. Two implementations of "which call is site N", one
+  oracle, one of them exercised. Both arms are pinned now.
+- **Surfaces:** Parse+IR only, as filed. A site-numbering fix behind existing capability — no
+  panel, live, export or write-back change. The panel benefits without changing:
+  [app.rs:4653](src/app.rs:4653) and [app.rs:4515](src/app.rs:4515) are the two callers, and they
+  were writing edits to the wrong statement.
+- **Not verified against a running game**, and nothing here needs it: the defect and the fix are
+  both in host-side site arithmetic.
 
 ## Effects
 
