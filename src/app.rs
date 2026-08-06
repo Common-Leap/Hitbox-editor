@@ -7262,8 +7262,22 @@ impl VisionaryApp {
             }
         }
 
-        if hitboxes.is_empty() && effects.is_empty() {
-            self.state.status = "Capture has no ATTACK/EFFECT lines for this move yet.".into();
+        // **Built before the empty check, because they are two of the four things this can
+        // load.** The check used to be `hitboxes.is_empty() && effects.is_empty()`, written when
+        // those were the only families a capture produced. Hurtboxes (B4) and sounds (D1f)
+        // arrived later and are adopted below, so the early return discarded them — a walk cycle
+        // has no hitbox and no effect, and its two footsteps were thrown away with the message
+        // "Capture has no ATTACK/EFFECT lines". That is the move-list filter's mistake again: a
+        // guard that was an accurate summary when it was written, and became a silent drop when
+        // a new family arrived.
+        let hurt = Self::hurtbox_script_from_captures(&captures, &bone_rev);
+        let captured_sounds = Self::sound_script_from_captures(&captures, &self.state.labels);
+        let n_snd = captured_sounds.to_sound_events().len();
+
+        if let Some(message) =
+            nothing_to_load(hitboxes.len(), effects.len(), hurt.stmts.len(), n_snd)
+        {
+            self.state.status = message;
             return;
         }
 
@@ -7277,20 +7291,14 @@ impl VisionaryApp {
         // along with everything else in the move, and replacing it with a hurtbox-only one
         // would drop every raw line the export carries verbatim. An empty script is the case
         // this is for: a move captured live has no file anywhere.
-        if self.state.script.stmts.is_empty() {
-            let hurt = Self::hurtbox_script_from_captures(&captures, &bone_rev);
-            if !hurt.stmts.is_empty() {
-                self.state.set_script(hurt);
-            }
+        if self.state.script.stmts.is_empty() && !hurt.stmts.is_empty() {
+            self.state.set_script(hurt);
         }
         // Guarded on the *sound* script rather than on `state.script`, because the two are
         // fetched independently: a move can have a real `game_` function and no `sound_` one,
         // and gating on the wrong emptiness would then either drop live sounds or overwrite a
         // fetched sound script with a capture-only copy.
-        adopt_captured_sounds(
-            Self::sound_script_from_captures(&captures, &self.state.labels),
-            &mut self.state,
-        );
+        adopt_captured_sounds(captured_sounds, &mut self.state);
         if !effects.is_empty() {
             self.state.effects_pristine = effects.clone();
             self.state.effects = effects;
@@ -7309,8 +7317,12 @@ impl VisionaryApp {
             &self.state.sounds,
         ));
         self.jump_to_earliest_active_frame();
-        let mut status =
-            format!("Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) from live game capture");
+        // Names every family, so "nothing happened" is distinguishable from "nothing of the one
+        // kind you were looking at". A walk reports its footsteps rather than three zeroes.
+        let mut status = format!(
+            "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) from live game \
+             capture"
+        );
         if let Some(note) = self.capture_vs_script_offset() {
             status.push_str(" — ");
             status.push_str(&note);
@@ -14377,6 +14389,29 @@ pub fn synthesize_script_from_hitboxes(
     AcmdScript { stmts }
 }
 
+/// The status message for a capture that carried nothing this editor can show, or `None` to load.
+///
+/// A free function taking four counts so a test can reach it. The decision it makes is one line
+/// and has been wrong once already: it used to ask only about hitboxes and effects, which was an
+/// accurate summary of what a capture produced when it was written and became a silent drop the
+/// moment hurtboxes (B4) and sounds (D1f) started arriving. A walk cycle has neither of the first
+/// two, so its footsteps were discarded with a message naming the two families it had not looked
+/// for. **Every family a capture can produce has to appear here, and the compiler cannot enforce
+/// that** — which is the whole reason this is testable rather than inline.
+fn nothing_to_load(
+    hitboxes: usize,
+    effects: usize,
+    hurt_stmts: usize,
+    sounds: usize,
+) -> Option<String> {
+    if hitboxes == 0 && effects == 0 && hurt_stmts == 0 && sounds == 0 {
+        return Some(
+            "Capture has no hitbox, effect, hurtbox or sound lines for this move yet.".into(),
+        );
+    }
+    None
+}
+
 /// The sound labels a fighter can plausibly play, for the Sounds picker.
 ///
 /// Three families, because those are the three the corpus's `sound_` scripts draw on: the
@@ -15962,6 +15997,47 @@ mod live_effect_capture_tests {
         let got = sound_candidates(&labels, "");
 
         assert_eq!(got, vec!["se_common_smash_start".to_string()]);
+    }
+
+    /// A capture carrying only sounds still loads.
+    ///
+    /// The walk cycle: no hitbox, no effect, two footsteps. This is the case the guard used to
+    /// throw away while reporting "no ATTACK/EFFECT lines", which reads as "the capture failed"
+    /// rather than "I did not look for what you have".
+    #[test]
+    fn a_capture_with_only_sounds_is_still_loaded() {
+        assert!(nothing_to_load(0, 0, 0, 2).is_none());
+    }
+
+    /// Likewise one carrying only hurtbox statements.
+    #[test]
+    fn a_capture_with_only_hurtboxes_is_still_loaded() {
+        assert!(nothing_to_load(0, 0, 4, 0).is_none());
+    }
+
+    /// A genuinely empty capture is refused, and says what it looked for.
+    ///
+    /// The paired positive for the two above: without it, a `nothing_to_load` that always
+    /// returned `None` would pass both of them and load an empty capture over the user's script.
+    #[test]
+    fn a_capture_with_nothing_in_it_is_refused_and_names_every_family() {
+        let message = nothing_to_load(0, 0, 0, 0).expect("an empty capture must be refused");
+        for family in ["hitbox", "effect", "hurtbox", "sound"] {
+            assert!(
+                message.contains(family),
+                "the refusal must name {family}, or the next family added is dropped silently \
+                 again: {message}"
+            );
+        }
+    }
+
+    /// Each family on its own is enough.
+    #[test]
+    fn any_single_family_is_enough_to_load() {
+        assert!(nothing_to_load(1, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 1, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 1, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 1).is_none());
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back

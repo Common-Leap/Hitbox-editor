@@ -2556,6 +2556,38 @@ ACMD scripts, or only animations that the `body/c00` scripts drive. If it is the
 an animation-picker feature and not an ACMD one, and the entry should say so rather than being
 taken as written.
 
+### [x] R7 — A live capture threw away everything but hitboxes and effects (done 2026-08-06)
+
+Found by the first person to press **⟳ Live** on a move with no hitboxes. The button was
+clickable, the status said "Capture has no ATTACK/EFFECT lines for this move yet", and nothing
+changed — while the plugin had captured two `PLAY_STEP_FLIPPABLE` calls from the same walk.
+
+`load_from_captures` returned early on `hitboxes.is_empty() && effects.is_empty()`, and both the
+hurtbox adoption and the sound adoption sit *below* that line. The guard was an accurate summary
+of what a capture produced when it was written; hurtboxes arrived in B4 and sounds in D1f, and
+neither updated it. **A walk cycle has no hitbox and no effect, so its whole capture was
+discarded with a message naming the two families it had not looked for.**
+
+**This is the third instance of one shape in two days**, and it is worth naming as a family:
+a filter or guard that is a correct summary of "everything that exists" at the time of writing,
+and becomes a silent drop when a new family arrives. The other two: the move list's six-substring
+filter (R5) and the `Raw`-only retention in `rebuild_script_from_hitboxes` (B4). None of them
+failed loudly, and none was caught by a test, because in every case the code was *right* when
+written and nothing re-examined it.
+
+- **Fixed** by building the hurtbox script and the sound script *before* the check, and refusing
+  only when all four are empty. The status line now counts sounds too, so "nothing happened" is
+  distinguishable from "nothing of the kind you were looking at".
+- **The decision is now `nothing_to_load(hitboxes, effects, hurt_stmts, sounds)`**, a free
+  function, because the inline version was unreachable by any test — the same move
+  `sound_rules_for` and `adopt_captured_sounds` needed for the same reason.
+- **The refusal message is asserted to name every family**, which is the part that guards the
+  *next* one: a fifth family added without updating the check will fail
+  `a_capture_with_nothing_in_it_is_refused_and_names_every_family` only if its name is expected
+  there, so the test is a reminder rather than a proof. Said plainly in the test's own comment.
+- Two mutations, both caught: restoring the two-family guard fails three tests, and reverting the
+  message to the old wording fails the fourth.
+
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
