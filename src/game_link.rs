@@ -2193,4 +2193,36 @@ mod tests {
             .get("sound_hashes")
             .is_none());
     }
+
+    /// A sound hash arrives from the game typed as `Int`, and every reader has to accept it.
+    ///
+    /// **Measured live 2026-08-06.** Kirby's up tilt passes `se_kirby_swing_l` as
+    /// `L2CValueType::Int` holding `0x10556b83cc`, which is exactly `hash40("se_kirby_swing_l")`
+    /// — the right value under the wrong type tag, because on the lua stack a hash and an int
+    /// are both just numbers.
+    ///
+    /// This asymmetry is what made the bug so hard to see: `as_hash` here already accepted
+    /// `Int`, so **live capture of sounds worked**, while the plugin's rule matcher required
+    /// `LuaArg::Hash` and rejected every sound in the game. Two readers of one stream with
+    /// different tolerance — the feature half-worked, which reads as "nearly right" rather than
+    /// "wrong in one place".
+    #[test]
+    fn a_sound_hash_is_read_whether_it_arrives_as_a_hash_or_an_int() {
+        let value = 0x10_556b_83ccu64;
+        assert_eq!(LuaArgWire::Hash(value).as_hash(), Some(value));
+        assert_eq!(LuaArgWire::Int(value as i64).as_hash(), Some(value));
+        // And the plugin's side of the same stream agrees. Source text, because that crate is
+        // not in this workspace — see `the_plugin_sound_table_still_matches_the_editors`.
+        let source = plugin_sound_hooks_source();
+        let body = source
+            .split_once("fn hash_arg(")
+            .expect("plugin still has hash_arg")
+            .1;
+        let body = &body[..body.find("\n}").unwrap_or(body.len())];
+        assert!(
+            body.contains("LuaArg::Int"),
+            "the plugin's key reader must accept an Int-tagged hash, or live sound edits go \
+             silently dead while live sound capture keeps working: {body}"
+        );
+    }
 }

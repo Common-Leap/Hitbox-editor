@@ -43,6 +43,18 @@ Two export paths, different rules — do not conflate them:
 
 ### Traps that have already cost real time
 
+- **On the live wire a hash and an int are the same thing, and matching on the type tag makes an
+  edit silently dead.** `PLAY_SE`'s signature says `Hash40`; the lua stack passes it as
+  `L2CValueType::Int`. Kirby's up tilt hands over `0x10556b83cc`, which is exactly
+  `hash40("se_kirby_swing_l")` — the right value under the wrong tag. The plugin's sound rule
+  matcher required `LuaArg::Hash` and therefore matched **no sound in the game**, while the
+  editor's `as_hash` already accepted `Int` so live *capture* worked perfectly. **Two readers of
+  one stream with different tolerance is the worst shape this can take**: the feature half-worked,
+  which reads as "nearly right" rather than "wrong in one place", and four game restarts went into
+  diagnostics before the branch that bailed was made to say so. This is
+  `SEARCH`/`CATCH`'s "the same fact needs a different test on each surface" one step over —
+  a source parser can tell `Hash40::new("…")` from an integer literal and a wire reader cannot.
+  **Accept both, mask to 40 bits, and write back under the tag that arrived.**
 - **A guard that enumerates "everything that exists" is correct when written and drops the next
   family silently.** Four instances in two days, none of which failed loudly and none of which any
   test caught: the move list filtered to six substrings and hid 65% of the corpus's sound scripts
@@ -1721,7 +1733,7 @@ the detach half fails; do not schedule them on their own.
 
 ## New script categories
 
-### [~] D1 — `sound_` scripts (D1a–D1e done; D1f built, live edit unverified)
+### [~] D1 — `sound_` scripts (D1a–D1f done; D1g fixes the live edit, awaiting confirmation)
 
 Blocked by: nothing, but it is the largest task here — treat it as its own project.
 
@@ -2197,6 +2209,36 @@ than no flag when it is sampled before the thing it reports.** Check *when* a di
 written before reading a number out of it. The one-shot `SND first captured sound:` line is the
 shape that worked: it names what happened, it does not depend on the editor being connected, and
 it is one buffered write per boot.
+
+#### [x] D1g — Live sound edits matched on the type tag and never fired (done 2026-08-06)
+
+D1f built the rule path and could not verify it. It did not work, and the reason was one branch:
+`sound_action_for_call` read the rule key with `Some(LuaArg::Hash(h)) => *h, _ => return false`.
+The game passes a sound as `L2CValueType::Int`. Kirby's up tilt hands over `0x10556b83cc`, which
+is `hash40("se_kirby_swing_l")` exactly — **the right value, rejected on its type**.
+
+**Live capture worked the whole time**, because the editor's `as_hash` already accepted `Int`.
+So sounds appeared in the panel, could be edited, produced a well-formed rule that reached the
+plugin — and matched nothing. Half a working feature is a worse signal than none.
+
+- **Fixed** by `hash_arg`, which takes `Hash` or `Int` and masks to 40 bits, and by writing the
+  override back **under the tag that arrived** rather than always as `Hash` — reproducing the
+  call's shape as well as its value.
+- **Pinned** by `game_link::a_sound_hash_is_read_whether_it_arrives_as_a_hash_or_an_int`, which
+  checks both wire variants *and* greps the plugin source for the `Int` arm, since that crate is
+  outside the workspace. Mutation-checked: deleting the arm fails it.
+
+**Four game restarts went into the diagnostic rather than the bug, and that is the lesson worth
+keeping.** Three separate reasons the log said nothing:
+1. The install banner went out through `skyline::println!`, which is not the file being grepped.
+2. The counters in `effect_viewer_capture.txt` are written at install and drain only, so
+   `recorded=0` meant "nothing has drained", not "nothing fired".
+3. The report budget was per boot, so twelve "no rules loaded" lines during ordinary play
+   exhausted it 2400 lines before the rule under test arrived.
+
+Only the third round — reporting *every* early return, with a budget reset per rule set — named
+the branch. **A branch that returns silently is invisible in exactly the case you are debugging
+it**, and the cost of adding a line to each one is nothing next to a restart.
 
 ### [ ] D2 — `expression_` scripts
 

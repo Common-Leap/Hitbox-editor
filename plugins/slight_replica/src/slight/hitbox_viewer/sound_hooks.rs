@@ -42,6 +42,28 @@ const SOUND_FUNCS: &[(&str, usize, bool)] = &[
     ("SET_PLAY_INHIVIT", 1, true),
 ];
 
+/// A slot-0 sound hash, however the lua stack happens to have typed it.
+///
+/// **The signature says `Hash40` and the stack says `Int`.** Measured live: Kirby's up tilt
+/// passes `se_kirby_swing_l` as `L2CValueType::Int` holding `0x10556b83cc`, which is exactly
+/// `hash40("se_kirby_swing_l")` — the right value under the wrong type tag. Matching on the tag
+/// rejected every sound in the game, and did it silently, because a rule that never matches and
+/// a rule that was never sent look identical from both ends.
+///
+/// This is the trap this project already records one step over: *the same fact needs a different
+/// test on each surface*, and on the live wire an int and a hash are both just numbers. A source
+/// parser can tell `Hash40::new("…")` from an integer literal; this cannot, and must not try.
+///
+/// Masked to 40 bits because that is what `LuaArg::Hash` is normalised to — an unmasked `Int`
+/// would not compare equal to the editor's key.
+fn hash_arg(arg: &LuaArg) -> Option<u64> {
+    match arg {
+        LuaArg::Hash(h) => Some(*h & 0xff_ffff_ffff),
+        LuaArg::Int(i) => Some((*i as u64) & 0xff_ffff_ffff),
+        _ => None,
+    }
+}
+
 /// How many leading slots of `func` are sounds an override may rewrite.
 ///
 /// An unknown name gets **zero**, not a default of one. This is the bound on every write below,
@@ -183,18 +205,12 @@ unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaA
         bail(func, "battle_object_module_accessor was null");
         return false;
     }
-    let key = match args.first() {
-        Some(LuaArg::Hash(h)) => *h,
-        // Every member declares slot 0 as `Hash40`. Anything else means the call was written by
-        // hand with the wrong type, and there is no key to match on — leave it alone rather than
-        // coercing a number into a hash and firing a rule meant for a different sound.
-        other => {
-            bail(
-                func,
-                &format!("slot 0 is not a Hash40, it is {other:?} (all {} args: {args:?})", args.len()),
-            );
-            return false;
-        }
+    let Some(key) = args.first().and_then(hash_arg) else {
+        bail(
+            func,
+            &format!("slot 0 carries no hash (all {} args: {args:?})", args.len()),
+        );
+        return false;
     };
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
@@ -221,7 +237,14 @@ unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaA
     let writable = hash_slots(func).min(args.len());
     let mut vals = args.to_vec();
     for (idx, hash) in hashes.iter().enumerate().take(writable) {
-        vals[idx] = LuaArg::Hash(*hash);
+        // **Written back under the same type the script passed**, which is `Int` in practice.
+        // Pushing a `Hash`-tagged value where the game handed us an `Int` changes the shape of
+        // the call as well as its value, and there is no reason to: the number is the same
+        // either way, and reproducing what was there cannot be wrong.
+        vals[idx] = match &vals[idx] {
+            LuaArg::Hash(_) => LuaArg::Hash(*hash),
+            _ => LuaArg::Int(*hash as i64),
+        };
     }
     if vals != args {
         super::rewrite_args(lua_state, &vals);
