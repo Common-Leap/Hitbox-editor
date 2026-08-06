@@ -2037,7 +2037,12 @@ impl VisionaryApp {
                 .iter()
                 .filter_map(|(_, form)| live_tweak_from_override(form))
                 .collect();
-            let emitted = crate::acmd::preview_effect_fn(&self.state.effects, &move_name, &tweaks);
+            // The residue comes from the script on hand, not the stored map: this pane exists
+            // to show what an export would write *right now*, and the two agree because
+            // `record_dropped_effect_lines` fills the map from this same parse.
+            let (_, residue) = self.state.effect_script.to_effect_calls_and_residue();
+            let emitted =
+                crate::acmd::preview_effect_fn(&self.state.effects, &move_name, &tweaks, &residue);
             crate::acmd_verify::verify_effect_move(
                 &move_name,
                 &self.state.effects,
@@ -2051,6 +2056,7 @@ impl VisionaryApp {
                 Some(&crate::acmd::unexportable_effect_lines(
                     &self.state.effect_script,
                 )),
+                &residue,
                 &mut report,
             );
             out.push_str(&emitted);
@@ -5899,11 +5905,43 @@ impl VisionaryApp {
         let Some(mv) = self.current_move_key() else {
             return;
         };
-        let lost = crate::acmd::unexportable_effect_lines(&self.state.effect_script);
+        let script = std::mem::take(&mut self.state.effect_script);
+        Self::record_effect_script_notes(&script, &mv, &mut self.state);
+        self.state.effect_script = script;
+    }
+
+    /// The body of [`Self::record_dropped_effect_lines`], split out so it can be tested.
+    ///
+    /// Not a stylistic split. The sibling test `a_loss_note_is_saved_with_its_move_and_never_on\
+    /// _its_own` records that the export-side reporting was once "fully built and fully tested
+    /// against a map the editor never filled" — the writing half is the half no other test can
+    /// reach, because everything downstream builds its own copy from the open script. E3 added a
+    /// second map with the same shape and would have inherited the same blind spot: deleting the
+    /// `insert` below left the whole suite green until this existed.
+    ///
+    /// Both maps are written here because this is the only moment the script they are derived
+    /// from is in hand. They are not interchangeable. A dropped line is *reported*; residue is
+    /// *emitted*, so a move missing from the second map exports as it did before E3 — the lines
+    /// vanish, and no note describes them either, because this build stopped producing one.
+    ///
+    /// Moves that have neither are removed rather than stored empty, so each map answers "did
+    /// this move have any" and neither grows an entry per move browsed.
+    fn record_effect_script_notes(
+        script: &crate::data::EffectScript,
+        mv: &str,
+        state: &mut crate::data::AppState,
+    ) {
+        let lost = crate::acmd::unexportable_effect_lines(script);
         if lost.is_empty() {
-            self.state.effect_dropped_lines.remove(&mv);
+            state.effect_dropped_lines.remove(mv);
         } else {
-            self.state.effect_dropped_lines.insert(mv, lost);
+            state.effect_dropped_lines.insert(mv.to_string(), lost);
+        }
+        let (_, residue) = script.to_effect_calls_and_residue();
+        if residue.is_empty() {
+            state.effect_frame_residue.remove(mv);
+        } else {
+            state.effect_frame_residue.insert(mv.to_string(), residue);
         }
     }
 
@@ -6012,6 +6050,12 @@ impl VisionaryApp {
                 fm.effect_calls_full.insert(mv.to_string(), full.clone());
                 if let Some(lost) = Self::project_loss_note(&self.state, key) {
                     fm.effect_dropped_lines.insert(mv.to_string(), lost.clone());
+                }
+                // Saved next to the call list it will be emitted alongside. Absent for a move
+                // that has none, which is almost all of them.
+                if let Some(residue) = self.state.effect_frame_residue.get(key) {
+                    fm.effect_frame_residue
+                        .insert(mv.to_string(), residue.clone());
                 }
             }
         }
@@ -6342,6 +6386,7 @@ impl VisionaryApp {
         self.state.effect_call_edits.clear();
         self.state.effect_call_full.clear();
         self.state.effect_dropped_lines.clear();
+        self.state.effect_frame_residue.clear();
         self.state.sound_script_edits.clear();
         self.eff_mods.clear();
         self.live_overrides = crate::game_link::LiveOverrides::default();
@@ -6389,6 +6434,11 @@ impl VisionaryApp {
                 self.state
                     .effect_dropped_lines
                     .insert(format!("{fighter}/{mv}"), lost);
+            }
+            for (mv, residue) in fm.effect_frame_residue {
+                self.state
+                    .effect_frame_residue
+                    .insert(format!("{fighter}/{mv}"), residue);
             }
             for (mv, script) in fm.sound_scripts {
                 self.state
@@ -16330,6 +16380,64 @@ mod live_effect_capture_tests {
     /// export-side reporting was fully built and fully tested against a map the editor never
     /// filled, and the editor's own source pane derives its copy from the open script, so an
     /// empty saved map looks exactly like a correct one until someone reloads a project.
+    /// The writing half of the two per-move note maps, which nothing else can reach.
+    ///
+    /// One script, both maps, because the interesting property is that they disagree: the
+    /// `wait_loop_sync_mot` is genuinely deleted and belongs in the loss report, while the
+    /// `CANCEL_FILL_SCREEN` owns a frame of its own and is emitted. A version that wrote both
+    /// lines to both maps would warn about a line the export ships and ship a line it warned
+    /// about, and either alone reads as a plausible report.
+    #[test]
+    fn recording_a_script_separates_the_lines_it_drops_from_the_lines_a_frame_owns() {
+        let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+    }
+    wait_loop_sync_mot(agent.lua_state_agent, false, 3.0);
+    frame(agent.lua_state_agent, 40.0);
+    if macros::is_excute(agent) {
+        macros::CANCEL_FILL_SCREEN(agent, 1, 30);
+    }
+}
+"#;
+        let mut state = crate::data::AppState::default();
+        let script = crate::acmd::parse_effect_script(src);
+        VisionaryApp::record_effect_script_notes(&script, "dolly/test", &mut state);
+
+        let dropped = state.effect_dropped_lines.get("dolly/test").unwrap();
+        assert!(
+            dropped.iter().any(|l| l.contains("wait_loop_sync_mot")),
+            "a timing primitive the export refuses to re-emit is a loss: {dropped:?}"
+        );
+        assert!(
+            !dropped.iter().any(|l| l.contains("CANCEL_FILL_SCREEN")),
+            "a line the export writes must not be reported as deleted: {dropped:?}"
+        );
+
+        let residue = state.effect_frame_residue.get("dolly/test").unwrap();
+        assert_eq!(residue.keys().copied().collect::<Vec<_>>(), vec![40]);
+        assert!(
+            residue[&40]
+                .iter()
+                .any(|l| l.contains("CANCEL_FILL_SCREEN(agent, 1, 30)")),
+            "{residue:?}"
+        );
+
+        // Browsing on to a move with neither must clear both, or the note follows the user to
+        // the next move and describes a script that is no longer open.
+        let clean = crate::acmd::parse_effect_script(
+            r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+    }
+}
+"#,
+        );
+        VisionaryApp::record_effect_script_notes(&clean, "dolly/test", &mut state);
+        assert!(!state.effect_dropped_lines.contains_key("dolly/test"));
+        assert!(!state.effect_frame_residue.contains_key("dolly/test"));
+    }
+
     #[test]
     fn a_loss_note_is_saved_with_its_move_and_never_on_its_own() {
         let mut state = crate::data::AppState::default();

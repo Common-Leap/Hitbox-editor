@@ -92,7 +92,16 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
                     .iter()
                     .map(|call| call.effect_name.to_ascii_lowercase()),
             );
-            effect_edits.push((fighter.clone(), move_name.clone(), calls.clone()));
+            effect_edits.push((
+                fighter.clone(),
+                move_name.clone(),
+                calls.clone(),
+                edits
+                    .effect_frame_residue
+                    .get(move_name)
+                    .cloned()
+                    .unwrap_or_default(),
+            ));
         }
         for (move_name, lost) in &edits.effect_dropped_lines {
             // Re-keyed to match what the report looks moves up by, and otherwise passed through
@@ -554,6 +563,88 @@ mod tests {
         assert!(
             !orphan.contains(first),
             "a loss note was reported for a move with no exported function:\n{orphan}"
+        );
+    }
+
+    /// The saved residue has to survive the file, or E3 only works with the script open.
+    ///
+    /// `effect_frame_residue` is the one saved field that changes generated code. A dropped-line
+    /// note is a remark; these lines are *written*, so a project that reloads without them
+    /// exports exactly what the pre-E3 build did — the lines vanish, and the note that used to
+    /// warn about them is gone too, because this build no longer produces one.
+    ///
+    /// Mutation that made this test necessary: `source_project` passing `Default::default()`
+    /// instead of reading the field. Everything else in the suite stayed green, including the
+    /// corpus ratchet, because every other test builds the residue and the calls from the same
+    /// parse and never goes through a file.
+    #[test]
+    fn saved_frame_residue_reaches_the_generated_source() {
+        // `dolly/FinalAirEnd`'s two frames, with its `FILL_SCREEN_MODEL_COLOR` left out. That
+        // line is carried verbatim and the dump spells it `EffectScreenLayer:*GROUND`, which is
+        // not valid Rust, so the real file is stopped by export verification long before it
+        // reaches this — the designed behaviour, and a different test's subject. The
+        // `CANCEL_FILL_SCREEN` lines are verbatim from that script.
+        let body = r#"unsafe extern "C" fn effect_finalairend(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("dolly_buster_ground"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }
+    frame(agent.lua_state_agent, 40.0);
+    if macros::is_excute(agent) {
+        macros::CANCEL_FILL_SCREEN(agent, 1, 30);
+        macros::CANCEL_FILL_SCREEN(agent, 0, 30);
+    }
+}
+"#;
+        let (calls, residue) = crate::acmd::parse_effect_script(body).to_effect_calls_and_residue();
+        assert!(
+            !calls.is_empty() && !residue.is_empty(),
+            "the premise: a call list plus a frame that owns lines of its own"
+        );
+
+        let build = |residue: HashMap<String, std::collections::BTreeMap<u32, Vec<String>>>| {
+            let mut project = ModProjectFile {
+                version: PROJECT_VERSION,
+                name: "residue_export".into(),
+                ..Default::default()
+            };
+            project.fighters.insert(
+                "dolly".into(),
+                FighterMod {
+                    effect_calls_full: HashMap::from([("finalairend".into(), calls.clone())]),
+                    effect_frame_residue: residue,
+                    ..Default::default()
+                },
+            );
+            // Through JSON, because that is the trip being tested. Asserting on the struct in
+            // memory would pass even if the new field never reached the file.
+            let json = serde_json::to_string(&project).unwrap();
+            let reloaded: ModProjectFile = serde_json::from_str(&json).unwrap();
+            let generated = source_project(&reloaded)
+                .unwrap()
+                .expect("effect edits should export");
+            generated
+                .project
+                .files
+                .iter()
+                .map(|f| f.contents.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let carried = build(HashMap::from([("finalairend".into(), residue.clone())]));
+        assert!(
+            carried.contains("CANCEL_FILL_SCREEN(agent, 1, 30)")
+                && carried.contains("CANCEL_FILL_SCREEN(agent, 0, 30)"),
+            "the saved residue never reached the generated script:\n{carried}"
+        );
+
+        // The control. Without it, "the lines are present" would pass for a build that got them
+        // from somewhere else entirely — the calls, say — and prove nothing about the field.
+        let dropped = build(HashMap::new());
+        assert!(
+            !dropped.contains("CANCEL_FILL_SCREEN"),
+            "the lines appeared without the saved residue, so this test proves nothing about \
+             it:\n{dropped}"
         );
     }
 

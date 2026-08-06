@@ -2226,10 +2226,17 @@ fn emit_spawn_stop(call: &crate::data::EffectCall, indent: &str) -> String {
 /// list: calls grouped by spawn frame, disabled calls omitted. `tweaks` (keyed by effect
 /// hash) adds LAST_EFFECT_SET_COLOR / LAST_EFFECT_SET_RATE lines after matching spawns so
 /// live color/speed multipliers ship with the mod.
+/// `residue` is the second half of
+/// [`EffectScript::to_effect_calls_and_residue`](crate::data::EffectScript::to_effect_calls_and_residue):
+/// wrapped lines that belong to a frame rather than to any one call, because their frame block
+/// held no spawn for them to ride on. There is no defaulted overload on purpose — passing an
+/// empty map is a claim, and a caller that made it by accident would delete those lines exactly
+/// as the export did before E3.
 fn emit_effect_move_fn(
     calls: &[crate::data::EffectCall],
     move_name: &str,
     tweaks: &std::collections::HashMap<u64, crate::mod_project::LiveTweak>,
+    residue: &std::collections::BTreeMap<u32, Vec<String>>,
 ) -> (String, String) {
     let fn_name = script_function_name("effect", move_name);
     // A follow effect's end frame is an ACMD event, not an intrinsic particle lifetime.
@@ -2250,6 +2257,11 @@ fn emit_effect_move_fn(
                 .push(call);
         }
     }
+    // A frame can exist because of residue alone — the source wrote a block there and this
+    // editor modelled nothing in it. Give it an entry so the loop below writes its `frame()`.
+    for frame in residue.keys() {
+        events.entry(*frame).or_default();
+    }
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -2257,6 +2269,14 @@ fn emit_effect_move_fn(
     ));
     for (frame, (stops, starts)) in events {
         out.push_str(&format!("    frame(agent.lua_state_agent, {frame}.0);\n"));
+
+        // Frame-anchored residue comes first: it was written before anything this editor
+        // modelled, because the only reason it is here rather than on a call is that the walk
+        // reached the end of the frame block without finding a spawn to hand it to. It arrives
+        // with its own `is_excute` wrapper and, where the source had one, its own guard.
+        if let Some(lines) = residue.get(&frame) {
+            push_carried(&mut out, lines, "    ");
+        }
 
         // Split the frame's spawns into the runs that can share one `is_excute` block. A run
         // ends where the guard changes or where a carried line has to come between two spawns,
@@ -2292,7 +2312,9 @@ fn emit_effect_move_fn(
             }
         }
         // Stops still need a home when every spawn at this frame was disabled or retimed away.
-        if !runs.iter().any(|r| matches!(r, Run::Spawns { .. })) {
+        // Gated on there being a stop to place: a frame that exists only because of residue has
+        // neither, and an unconditional fallback would open an empty `is_excute` block after it.
+        if !stops.is_empty() && !runs.iter().any(|r| matches!(r, Run::Spawns { .. })) {
             runs.push(Run::Spawns {
                 guard: None,
                 calls: Vec::new(),
@@ -2493,12 +2515,13 @@ pub fn preview_effect_fn(
     calls: &[crate::data::EffectCall],
     move_name: &str,
     live_tweaks: &[crate::mod_project::LiveTweak],
+    residue: &std::collections::BTreeMap<u32, Vec<String>>,
 ) -> String {
     let tweaks = live_tweaks
         .iter()
         .map(|t| (tweak_hash(&t.effect_name), t.clone()))
         .collect();
-    emit_effect_move_fn(calls, move_name, &tweaks).1
+    emit_effect_move_fn(calls, move_name, &tweaks, residue).1
 }
 
 /// Spawns that an export cannot reissue under the macro their script used.
@@ -2538,11 +2561,13 @@ pub fn export_spawn_downgrades(calls: &[crate::data::EffectCall]) -> Vec<(String
 /// - **Statement-level `Raw`.** `wait_loop_sync_mot`, bare `EffectModule::` calls, script
 ///   plumbing. Deliberately never carried — see the `EffectStmt::Raw` arm of
 ///   `eval_effect_stmts` for why re-emitting a timing primitive would be worse than dropping it.
-/// - **Residue with no call to ride on**, from `to_effect_calls_reporting_losses`. A carried
-///   line attaches to a spawn in its own frame block; one whose frame has no spawn at all has
-///   nowhere to go that would not also retime it.
 /// - **A nested conditional's header.** One guard per spawn is modelled; an inner one would
 ///   have to overwrite the outer, so it is reported instead.
+///
+/// A third source used to feed this list and no longer does: residue whose frame block held no
+/// spawn to ride on. E3 gave those lines a frame of their own in the output instead of a report
+/// — see [`crate::data::EffectScript::to_effect_calls_and_residue`]. This function is therefore
+/// decided entirely from the statement tree now, which is why it does not consult the walk.
 ///
 /// Lines carrying no letters or digits are left out. The emitter regenerates every brace it
 /// needs, so a bare `}` is not a loss, and listing one per block would bury the lines that are.
@@ -2574,7 +2599,6 @@ pub fn unexportable_effect_lines(script: &crate::data::EffectScript) -> Vec<Stri
     }
     let mut out = Vec::new();
     walk(&script.stmts, 0, &mut out);
-    out.extend(script.to_effect_calls_reporting_losses().1);
     out
 }
 
@@ -2589,9 +2613,24 @@ pub fn build_mod_project(
     build_mod_project_full(edits, &[], &[], &[], plugin_name)
 }
 
+/// One move's effect script as an export needs it: `(fighter, move, full edited call list,
+/// frame-anchored residue)`.
+///
+/// The fourth element is the second half of
+/// [`EffectScript::to_effect_calls_and_residue`](crate::data::EffectScript::to_effect_calls_and_residue),
+/// carried this far because nothing downstream can recover it — the emitter regenerates the
+/// whole function from the call list, and these lines are not in it. It is a tuple rather than a
+/// struct to stay the shape `sound_edits` and `edits` already are.
+pub type EffectExport = (
+    String,
+    String,
+    Vec<crate::data::EffectCall>,
+    std::collections::BTreeMap<u32, Vec<String>>,
+);
+
 /// Like [`build_mod_project`] but also generates `effect_*` and `sound_*` ACMD scripts.
 ///
-/// `effect_edits` — `(fighter, move, full edited call list)`; the generated effect script
+/// `effect_edits` — see [`EffectExport`]; the generated effect script
 /// REPLACES the move's original effect script, so the list must be the complete set of
 /// calls (pristine + user edits applied), not just the changed ones.
 ///
@@ -2601,7 +2640,7 @@ pub fn build_mod_project(
 /// only *changed calls* is not.
 pub fn build_mod_project_full(
     edits: &[(String, String, crate::data::AcmdScript)],
-    effect_edits: &[(String, String, Vec<crate::data::EffectCall>)],
+    effect_edits: &[EffectExport],
     sound_edits: &[(String, String, crate::data::AcmdScript)],
     live_tweaks: &[crate::mod_project::LiveTweak],
     plugin_name: &str,
@@ -2621,13 +2660,21 @@ pub fn build_mod_project_full(
             .or_default()
             .push((move_name.as_str(), script));
     }
-    let mut fx_by_fighter: HashMap<&str, Vec<(&str, &Vec<crate::data::EffectCall>)>> =
-        HashMap::new();
-    for (fighter, move_name, calls) in effect_edits {
-        fx_by_fighter
-            .entry(fighter.as_str())
-            .or_default()
-            .push((move_name.as_str(), calls));
+    #[allow(clippy::type_complexity)]
+    let mut fx_by_fighter: HashMap<
+        &str,
+        Vec<(
+            &str,
+            &Vec<crate::data::EffectCall>,
+            &std::collections::BTreeMap<u32, Vec<String>>,
+        )>,
+    > = HashMap::new();
+    for (fighter, move_name, calls, residue) in effect_edits {
+        fx_by_fighter.entry(fighter.as_str()).or_default().push((
+            move_name.as_str(),
+            calls,
+            residue,
+        ));
         // Ensure the fighter appears even with no hitbox edits.
         by_fighter.entry(fighter.as_str()).or_default();
     }
@@ -2785,9 +2832,9 @@ pub fn install() {{
         // Effect scripts (edited spawn lists) for this fighter
         if let Some(fx_moves) = fx_by_fighter.get(fighter) {
             let mut sorted_fx = fx_moves.clone();
-            sorted_fx.sort_by_key(|(m, _)| *m);
-            for (move_name, calls) in &sorted_fx {
-                let (fn_name, fn_src) = emit_effect_move_fn(calls, move_name, &tweaks);
+            sorted_fx.sort_by_key(|(m, _, _)| *m);
+            for (move_name, calls, residue) in &sorted_fx {
+                let (fn_name, fn_src) = emit_effect_move_fn(calls, move_name, &tweaks, residue);
                 acmd_src.push_str(&fn_src);
                 acmd_src.push('\n');
                 fn_entries.push((fn_name.clone(), fn_name));
@@ -2822,20 +2869,19 @@ pub fn install() {{
     }
 
     // ── README.md ─────────────────────────────────────────────────────────
-    let mut script_list: Vec<String> = edits
-        .iter()
-        .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (hitboxes)"))
-        .chain(
-            effect_edits
-                .iter()
-                .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (effect spawns)")),
-        )
-        .chain(
-            sound_edits
-                .iter()
-                .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (sounds)")),
-        )
-        .collect();
+    let mut script_list: Vec<String> =
+        edits
+            .iter()
+            .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (hitboxes)"))
+            .chain(effect_edits.iter().map(|(fighter, move_name, _, _)| {
+                format!("- {fighter}: {move_name} (effect spawns)")
+            }))
+            .chain(
+                sound_edits
+                    .iter()
+                    .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (sounds)")),
+            )
+            .collect();
     script_list.sort();
     let move_list = script_list.join("\n");
 
@@ -4066,7 +4112,12 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         let (script, fx, sfx, tweaks) = sample_edits();
         build_mod_project_full(
             &[("mario".into(), "attack_air_n".into(), script)],
-            &[("mario".into(), "attack_air_n".into(), fx)],
+            &[(
+                "mario".into(),
+                "attack_air_n".into(),
+                fx,
+                Default::default(),
+            )],
             &[("mario".into(), "attack_air_n".into(), sfx)],
             &tweaks,
             "sample_plugin",
@@ -4485,7 +4536,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         assert_eq!(calls[1].spawn_func, "EFFECT_FOLLOW_NO_STOP");
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
         assert!(
             emitted.contains(
                 "macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new(\"sys_hit_l\"), Hash40::new(\"sys_hit_r\"), Hash40::new(\"haver\"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);"
@@ -4525,7 +4577,12 @@ unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
         assert_eq!(calls[1].effect_name, "sys_attack_line");
         assert_eq!(calls[1].rate, Some(1.5));
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "downattackd", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "downattackd",
+            &Default::default(),
+            &Default::default(),
+        );
         // `2`, not `2.0`: the macro is generic over `ToF32`, and this is the spelling the
         // archive uses and the source write-back produces.
         assert!(
@@ -4572,7 +4629,12 @@ unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
         assert_eq!(calls[1].tint, None);
         assert_eq!(calls[1].alpha, Some(0.7));
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "attackairhi", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "attackairhi",
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             emitted.contains("macros::LAST_EFFECT_SET_COLOR(agent, 0.25, 1.3, 2.5);"),
             "the script's own tint must be written back out:\n{emitted}"
@@ -4617,15 +4679,15 @@ unsafe extern "C" fn effect_specialhicommand(agent: &mut L2CAgentBase) {
     }
 }
 "#;
-        let (calls, unbound) = parse_effect_script(src).to_effect_calls_reporting_losses();
+        let (calls, residue) = parse_effect_script(src).to_effect_calls_and_residue();
         assert_eq!(calls.len(), 1);
         assert_eq!(
             calls[0].tint, None,
             "a costume-gated tint must not be exported onto every costume"
         );
         assert!(
-            unbound.is_empty(),
-            "the export keeps this line now, so it is no longer a loss to report: {unbound:?}"
+            residue.is_empty(),
+            "the line rides on the spawn above it, so no frame owns it: {residue:?}"
         );
         assert_eq!(
             calls[0].trailing,
@@ -4639,7 +4701,12 @@ unsafe extern "C" fn effect_specialhicommand(agent: &mut L2CAgentBase) {
             "the line rides on the spawn it followed, keeping its costume check"
         );
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialhicommand", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialhicommand",
+            &Default::default(),
+            &Default::default(),
+        );
         // Both halves matter and they pull against each other. The tint must come back — that
         // is C6 — but only inside the costume check it was written in. Emitting the bare macro
         // would recolour all eight costumes, which is exactly what C1 refused to do and the
@@ -4658,6 +4725,140 @@ unsafe extern "C" fn effect_specialhicommand(agent: &mut L2CAgentBase) {
             spawn_at < tint_at,
             "LAST_EFFECT_SET_COLOR recolours whatever spawned last, so carrying it above its \
              own spawn would land it on someone else's:\n{emitted}"
+        );
+    }
+
+    /// `dolly/FinalAirEnd`, trimmed to the two frames that matter and otherwise verbatim.
+    ///
+    /// This is E3's whole measured defect. Frame 40 of that script is two `CANCEL_FILL_SCREEN`
+    /// calls and nothing else — no spawn in the block for C6's carry to attach them to — so both
+    /// lines were deleted by every export of that move. It is the only such frame in the corpus,
+    /// which is why the number moved by two.
+    ///
+    /// The macro is deliberately **not** modelled. Nothing here claims to know what
+    /// `CANCEL_FILL_SCREEN(agent, 1, 30)`'s two arguments mean, and on two corpus calls nothing
+    /// should: the line is reproduced as written, exactly as a carried line is. What changed is
+    /// that a frame can now own lines, not that the editor understands these ones.
+    #[test]
+    fn a_frame_whose_block_holds_no_spawn_still_reaches_the_export() {
+        let src = r#"unsafe extern "C" fn effect_finalairend(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("dolly_buster_ground"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }
+    frame(agent.lua_state_agent, 40.0);
+    if macros::is_excute(agent) {
+        macros::CANCEL_FILL_SCREEN(agent, 1, 30);
+        macros::CANCEL_FILL_SCREEN(agent, 0, 30);
+    }
+}
+"#;
+        let (calls, residue) = parse_effect_script(src).to_effect_calls_and_residue();
+        assert_eq!(calls.len(), 1, "only the EFFECT is a call");
+
+        // Keyed by frame 40, not by frame 1. `end_frame` is handed the cursor it is *leaving*,
+        // and handing it the one being entered would put these lines on the following block —
+        // still exported, still well-formed, and playing at the wrong time. There is no later
+        // frame in this fixture, so the wrong answer here is the script's first frame.
+        assert_eq!(
+            residue.keys().copied().collect::<Vec<_>>(),
+            vec![40],
+            "{residue:?}"
+        );
+        assert!(
+            residue[&40]
+                .iter()
+                .any(|l| l.contains("CANCEL_FILL_SCREEN(agent, 1, 30)"))
+                && residue[&40]
+                    .iter()
+                    .any(|l| l.contains("CANCEL_FILL_SCREEN(agent, 0, 30)")),
+            "both calls, in their own is_excute wrapper: {:?}",
+            residue[&40]
+        );
+
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "finalairend", &Default::default(), &residue);
+        let frame_at = emitted
+            .find("frame(agent.lua_state_agent, 40.0);")
+            .unwrap_or_else(|| panic!("frame 40 must exist in its own right:\n{emitted}"));
+        let first = emitted
+            .find("CANCEL_FILL_SCREEN(agent, 1, 30)")
+            .unwrap_or_else(|| panic!("the line the export used to delete:\n{emitted}"));
+        assert!(
+            frame_at < first,
+            "the lines must land after their frame, not before it:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("CANCEL_FILL_SCREEN(agent, 0, 30)"),
+            "both of them, in source order:\n{emitted}"
+        );
+        assert_eq!(
+            emitted.matches("CANCEL_FILL_SCREEN").count(),
+            2,
+            "and each exactly once — a residue block emitted per call would duplicate them on a \
+             frame that had two:\n{emitted}"
+        );
+        assert_eq!(
+            emitted.matches('{').count(),
+            emitted.matches('}').count(),
+            "the carried block brings its own braces:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("if macros::is_excute(agent) {\n    }"),
+            "a frame that exists only for residue must not also open an empty block:\n{emitted}"
+        );
+
+        // The export no longer deletes them, so the report must no longer say it does.
+        assert!(
+            !unexportable_effect_lines(&parse_effect_script(src))
+                .iter()
+                .any(|l| l.contains("CANCEL_FILL_SCREEN")),
+            "a line the export writes must not be reported as dropped"
+        );
+    }
+
+    /// The frame a residue line is keyed to is the one it was written under, not the next one.
+    ///
+    /// Composed on purpose, and the composition is the point: the corpus's only spawn-less block
+    /// is the *last* frame of `dolly/FinalAirEnd`, so it is flushed by the final `end_frame` and
+    /// says nothing about the two inside the walk. Putting a frame after it is what distinguishes
+    /// "close the block being left" from "close the block being entered" — and getting that
+    /// backwards produces an export that is well-formed, compiles, balances its braces, and plays
+    /// the line 20 frames late. Every other assertion in this file would have stayed green.
+    #[test]
+    fn residue_is_keyed_to_the_frame_it_was_written_at_not_the_next_one() {
+        let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 40.0);
+    if macros::is_excute(agent) {
+        macros::CANCEL_FILL_SCREEN(agent, 1, 30);
+    }
+    frame(agent.lua_state_agent, 60.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_atk_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);
+    }
+}
+"#;
+        let (calls, residue) = parse_effect_script(src).to_effect_calls_and_residue();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].active_start, 60, "the spawn is the later frame's");
+        assert_eq!(
+            residue.keys().copied().collect::<Vec<_>>(),
+            vec![40],
+            "the line was written under frame 40 and belongs to it: {residue:?}"
+        );
+        assert!(
+            calls[0].leading.is_empty(),
+            "and it must not have been handed to the next frame's spawn either, which would \
+             retime it just as surely: {:?}",
+            calls[0].leading
+        );
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default(), &residue);
+        let at_40 = emitted.find("frame(agent.lua_state_agent, 40.0);").unwrap();
+        let at_60 = emitted.find("frame(agent.lua_state_agent, 60.0);").unwrap();
+        let line = emitted.find("CANCEL_FILL_SCREEN").unwrap();
+        assert!(
+            at_40 < line && line < at_60,
+            "the line must sit between its own frame and the next:\n{emitted}"
         );
     }
 
@@ -4695,7 +4896,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 "#;
         let calls = parse_effect_script(src).to_effect_calls();
         assert_eq!(calls.len(), 2);
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
 
         let first_spawn = emitted.find("dolly_roll_l_color1").unwrap();
         let first_tint = emitted.find("0.146").unwrap();
@@ -4740,7 +4942,7 @@ unsafe extern "C" fn effect_attackairhi(agent: &mut L2CAgentBase) {
                 speed: None,
             },
         )]);
-        let (_, emitted) = emit_effect_move_fn(&calls, "attackairhi", &tweaks);
+        let (_, emitted) = emit_effect_move_fn(&calls, "attackairhi", &tweaks, &Default::default());
         assert_eq!(
             emitted.matches("LAST_EFFECT_SET_COLOR").count(),
             1,
@@ -4783,7 +4985,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             calls[0].rate, None,
             "the rate belongs to the unmodelled line above it, not to sys_atk_smoke"
         );
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
         assert_eq!(
             emitted.matches("SOME_UNMODELLED_SPAWN").count(),
             1,
@@ -4888,7 +5091,12 @@ unsafe extern "C" fn effect_attackdash(agent: &mut L2CAgentBase) {
             .iter()
             .all(|call| call.active_end == call.active_start));
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "attackdash", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "attackdash",
+            &Default::default(),
+            &Default::default(),
+        );
         // Whole numbers stay whole: every slot in this family is generic over `ToF32`, so this
         // is the spelling the archive uses and the one the source write-back produces.
         for line in [
@@ -4956,7 +5164,12 @@ unsafe extern "C" fn effect_specialsstart(agent: &mut L2CAgentBase) {
         assert_eq!(calls[1].active_start, calls[0].active_start);
         assert_eq!(calls[2].active_start, calls[1].active_start + 2);
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialsstart", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialsstart",
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             emitted.contains("macros::COL_NORMAL(agent);"),
             "missing the reset from:\n{emitted}"
@@ -5074,7 +5287,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 speed: Some(0.5),
             },
         );
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &tweaks);
+        let (_, emitted) = emit_effect_move_fn(&calls, "test", &tweaks, &Default::default());
         assert_eq!(
             emitted.matches("LAST_EFFECT_SET_RATE").count(),
             1,
@@ -5102,7 +5315,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         // zr=10, yr=20, xr=30 → the editor's [x, y, z].
         assert_eq!(calls[0].rotation, [30.0, 20.0, 10.0]);
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
         assert!(
             emitted.contains("0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 1.0"),
             "the angles must land back in the slots they came from:\n{emitted}"
@@ -5125,7 +5339,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let mut edited = calls.clone();
         edited[0].effect_name = "my_trail".into();
         edited[0].bone_name = "HaveL".into();
-        let out = preview_effect_fn(&edited, "attacks4", &[]);
+        let out = preview_effect_fn(&edited, "attacks4", &[], &Default::default());
 
         assert!(out.contains(r#"Hash40::new("my_trail")"#), "{out}");
         // Joints are hashed lowercase, as everywhere else.
@@ -5139,7 +5353,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(out.contains("macros::AFTER_IMAGE4_ON_arg29("), "{out}");
 
         // And an untouched trail still comes back byte-identical.
-        let untouched = preview_effect_fn(&calls, "attacks4", &[]);
+        let untouched = preview_effect_fn(&calls, "attacks4", &[], &Default::default());
         assert!(
             untouched.contains(
                 r#"macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), Hash40::new("sword2"), 3, 8, 0.75);"#
@@ -5175,7 +5389,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {{
             assert_eq!(calls.len(), 1, "{value}");
             assert_eq!(calls[0].trail_off, Some(value.parse::<f32>().unwrap()));
 
-            let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+            let (_, emitted) =
+                emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
             assert!(
                 emitted.contains(&format!("macros::AFTER_IMAGE_OFF(agent, {value});")),
                 "{value} must come back exactly as written:\n{emitted}"
@@ -5230,7 +5445,12 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
         assert_eq!(trail.effect_name, "tex_kirby_cutter");
         assert_eq!(trail.bone_name, "haver");
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialhi2",
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             emitted.contains(CORPUS_TRAIL.trim()),
             "the trail must be re-emitted exactly as written — there is no \
@@ -5311,7 +5531,12 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
             .expect("trail call");
         trail.bone_name = "top".into();
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialhi2",
+            &Default::default(),
+            &Default::default(),
+        );
         let line = emitted
             .lines()
             .find(|line| line.contains("AFTER_IMAGE3_ON"))
@@ -5350,7 +5575,12 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
         );
         trail.trail_bone2 = Some("blade".into());
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialhi2",
+            &Default::default(),
+            &Default::default(),
+        );
         let line = emitted
             .lines()
             .find(|line| line.contains("AFTER_IMAGE3_ON"))
@@ -5394,7 +5624,8 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
             "there is no slot 8 in this call, so there is no second joint to offer"
         );
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "t", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "t", &Default::default(), &Default::default());
         assert!(
             emitted.contains(short.trim()),
             "a short trail must still ride through verbatim:\n{emitted}"
@@ -5426,7 +5657,8 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
         );
 
         // And the line still round-trips, which is the only reason the branch exists.
-        let (_, emitted) = emit_effect_move_fn(&calls, "t", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "t", &Default::default(), &Default::default());
         assert!(
             emitted.contains(undeclared.trim()),
             "an undeclared spelling must ride through verbatim:\n{emitted}"
@@ -5464,7 +5696,12 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
             "the follow is never closed by this script and must stay open"
         );
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialhi2",
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             emitted.contains("macros::AFTER_IMAGE_OFF(agent, 3);"),
             "the close must survive to the export:\n{emitted}"
@@ -5492,7 +5729,12 @@ unsafe extern "C" fn effect_specialhi4(agent: &mut L2CAgentBase) {
 }
 "#;
         let calls = parse_effect_script(src).to_effect_calls();
-        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi4", &Default::default());
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "specialhi4",
+            &Default::default(),
+            &Default::default(),
+        );
         assert!(
             emitted.contains("macros::AFTER_IMAGE_OFF(agent, 0);"),
             "a close with nothing local to close still has to reach the export:\n{emitted}"
@@ -5566,7 +5808,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         // The user drags the trail's end onto frame 12.
         calls[0].active_end = 12;
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
         assert!(
             emitted.contains(&format!(
                 "macros::AFTER_IMAGE_OFF(agent, {});",
@@ -5602,7 +5845,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         // it with a house value would change what the author wrote.
         assert_eq!(calls[0].trail_off, Some(3.0));
 
-        let (_, emitted) = emit_effect_move_fn(&calls, "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
         assert!(
             emitted.contains("macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new(\"tex1\")"),
             "the trail call must be replayed verbatim:\n{emitted}"
@@ -5652,7 +5896,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             leading: Vec::new(),
             trailing: Vec::new(),
         };
-        let (_, emitted) = emit_effect_move_fn(&[call], "test", &Default::default());
+        let (_, emitted) =
+            emit_effect_move_fn(&[call], "test", &Default::default(), &Default::default());
         assert!(
             emitted.contains(
                 "macros::EFFECT_FOLLOW(agent, Hash40::new(\"sys_hit\"), Hash40::new(\"haver\"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);"
@@ -6572,7 +6817,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             }
             // Re-reading the generated function must find the same set of spawns: this is
             // the property an exported mod depends on, end to end.
-            let (_, emitted) = emit_effect_move_fn(&calls, "audit", &Default::default());
+            let (_, emitted) =
+                emit_effect_move_fn(&calls, "audit", &Default::default(), &Default::default());
             let mut before: Vec<(String, String)> = calls
                 .iter()
                 .filter(|c| !c.disabled)
@@ -6656,6 +6902,11 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let mut with_calls = 0usize;
         let mut unbalanced: Vec<String> = Vec::new();
         let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        // The distinct residue lines the corpus produces, and any that failed to reach an
+        // export. Both are asserted below — a count that only ever shrinks would be satisfied by
+        // a change that stopped producing residue at all.
+        let mut emitted_residue: Vec<String> = Vec::new();
+        let mut missing_residue: Vec<String> = Vec::new();
         for fighter in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
             for entry in std::fs::read_dir(fighter.path())
                 .into_iter()
@@ -6666,7 +6917,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                     continue;
                 };
                 let script = parse_effect_script(&body);
-                let calls = script.to_effect_calls();
+                let (calls, residue) = script.to_effect_calls_and_residue();
                 if calls.is_empty() {
                     continue;
                 }
@@ -6678,7 +6929,26 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 for line in &lost {
                     *kinds.entry(loss_kind(line)).or_default() += 1;
                 }
-                let (_, emitted) = emit_effect_move_fn(&calls, "audit", &Default::default());
+                // Every residue line must come back out. Asserted here rather than trusted,
+                // because the emitter takes residue as a separate argument and a caller that
+                // passes an empty map deletes exactly what this test claims is now kept.
+                for line in residue.values().flatten() {
+                    let text = line.trim();
+                    if text.contains("is_excute") || !text.chars().any(|c| c.is_alphanumeric()) {
+                        continue;
+                    }
+                    if !emitted_residue.iter().any(|s| s == text) {
+                        emitted_residue.push(text.to_string());
+                    }
+                }
+                let (_, emitted) =
+                    emit_effect_move_fn(&calls, "audit", &Default::default(), &residue);
+                for text in residue.values().flatten() {
+                    let text = text.trim();
+                    if text.chars().any(|c| c.is_alphanumeric()) && !emitted.contains(text) {
+                        missing_residue.push(format!("{:?}: {text}", entry.path()));
+                    }
+                }
                 let opens = emitted.matches('{').count();
                 let closes = emitted.matches('}').count();
                 if opens != closes {
@@ -6696,10 +6966,24 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         eprintln!("[audit] {lossy} of {with_calls} effect scripts still lose a line");
         assert!(
-            lossy <= 13,
+            lossy <= 12,
             "the export deletes lines from {lossy} of {with_calls} effect scripts; C5 measured \
-             28, C6 brought it to 19, C6b's COL_NORMAL to 15, and C2's raw-command trail to 13. \
-             Something started dropping user code again."
+             28, C6 brought it to 19, C6b's COL_NORMAL to 15, C2's raw-command trail to 13, and \
+             E3's frame-anchored residue to 12. Something started dropping user code again."
+        );
+        // The other half of the ratchet, and the half E3 needed. `lossy` counts what the report
+        // *names*; these two count what the export *writes*. A change that stopped producing
+        // residue — or that quietly passed an empty map to the emitter — would leave `lossy` at
+        // 12 and be caught only here.
+        assert!(
+            emitted_residue.len() >= 3,
+            "the corpus stopped producing frame-anchored residue, so the assertion below is \
+             measuring nothing: {emitted_residue:?}"
+        );
+        assert!(
+            missing_residue.is_empty(),
+            "residue that reached the emitter and did not reach its output:\n{}",
+            missing_residue.join("\n")
         );
 
         // The count alone was not enough. C6b wrote its remainder down as a table of which
@@ -6715,15 +6999,11 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         // until the trail became one. C2's own estimate — 20 lines to 18, 15 scripts staying 15 —
         // assumed `pop()` would keep those two files lossy, and it was wrong in the useful
         // direction: kirby `SpecialHi2` and `SpecialAirHi2` are now clean.
-        let expected: std::collections::BTreeMap<String, usize> = [
-            ("wait_loop_sync_mot", 7),
-            ("else {", 5),
-            ("macros::CANCEL_FILL_SCREEN", 2),
-            ("EffectModule::remove_screen", 2),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+        let expected: std::collections::BTreeMap<String, usize> =
+            [("wait_loop_sync_mot", 7), ("else {", 5)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
         assert_eq!(
             kinds, expected,
             "the remaining losses are not the ones C6b measured — update that entry's table"
@@ -6767,7 +7047,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             acmd.contains(&game),
             "the previewed game_* function is not what was exported:\n{game}\n---\n{acmd}"
         );
-        let effect = preview_effect_fn(&sample.1, "attack_air_n", &sample.3);
+        let effect = preview_effect_fn(&sample.1, "attack_air_n", &sample.3, &Default::default());
         assert!(
             acmd.contains(&effect),
             "the previewed effect_* function is not what was exported:\n{effect}\n---\n{acmd}"

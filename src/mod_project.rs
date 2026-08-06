@@ -78,6 +78,16 @@ pub struct FighterMod {
     /// saved before C6c loadable; both simply report nothing, which is what they did before.
     #[serde(default)]
     pub effect_dropped_lines: HashMap<String, Vec<String>>,
+    /// move name → effect lines keyed by the frame they belong to, for frames whose block held
+    /// no spawn to attach them to. See [`crate::data::EffectScript::to_effect_calls_and_residue`].
+    ///
+    /// Stored for the same reason as `effect_dropped_lines` and derived at the same moment, but
+    /// unlike that field this one **does** change generated code: the emitter writes these lines
+    /// out at their frame. A project saved before E3 has none, so `#[serde(default)]` loads it
+    /// and it exports exactly as it did then — the lines are dropped, and the note in
+    /// `effect_dropped_lines` written by that older build still says so.
+    #[serde(default)]
+    pub effect_frame_residue: HashMap<String, std::collections::BTreeMap<u32, Vec<String>>>,
     /// move name → the whole edited `sound_` script (what the exported sound script emits)
     ///
     /// The whole script, not the changed calls, for the reason `effect_calls_full` is whole:

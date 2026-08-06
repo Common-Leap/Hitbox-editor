@@ -1862,6 +1862,18 @@ pub struct AppState {
     /// therefore means "captured live, or lost nothing"; the two are indistinguishable here and
     /// deliberately so, since neither produces a finding.
     pub effect_dropped_lines: HashMap<String, Vec<String>>,
+    /// "fighter/move" → the effect lines that belong to a *frame* rather than to any one call.
+    ///
+    /// The exact sibling of `effect_dropped_lines` above, written at the same moment from the
+    /// same parse, and stored for the same reason: it cannot be derived later, because the
+    /// export regenerates the function from `effect_call_full` and these lines are in neither
+    /// the calls nor — before E3 — the output.
+    ///
+    /// The difference is what happens to it. A dropped line is *reported*; one of these is
+    /// *emitted*, at the frame it is keyed by. So this one does change generated code, and a
+    /// move missing from here exports exactly as it did before E3 — the lines vanish. That is
+    /// why it is threaded all the way to the emitter rather than consulted at the end.
+    pub effect_frame_residue: HashMap<String, std::collections::BTreeMap<u32, Vec<String>>>,
     /// Edited `sound_` script per "fighter/move" — what the mod exporter emits, on the same
     /// terms as `effect_call_full`: whole scripts, because an installed one replaces the
     /// fighter's own. A move is in here only once its sounds have actually been changed.
@@ -1911,6 +1923,7 @@ impl Default for AppState {
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
             effect_dropped_lines: HashMap::new(),
+            effect_frame_residue: HashMap::new(),
             sound_script_edits: HashMap::new(),
             selected_effect_call: None,
             show_all_effect_calls: false,
@@ -2705,15 +2718,15 @@ pub enum EffectCallOp {
 impl EffectScript {
     /// Flatten the script into resolved `EffectCall`s with computed frame ranges.
     pub fn to_effect_calls(&self) -> Vec<EffectCall> {
-        self.to_effect_calls_reporting_losses().0
+        self.to_effect_calls_and_residue().0
     }
 
-    /// The resolved calls, plus every `LAST_EFFECT_SET_*` line that bound to no spawn.
+    /// The resolved calls, plus the lines that belong to a frame rather than to any one call.
     ///
     /// The second half exists because a modifier this parser understands but cannot attach is
     /// *worse* than one it never understood: an unrecognised line is reported as dropped by
     /// [`crate::acmd::unexportable_effect_lines`], while a recognised one that binds to nothing
-    /// is simply discarded here and would leave no trace anywhere. That is the trap C1 walked
+    /// used to be discarded here and left no trace anywhere. That is the trap C1 walked
     /// into — modelling `LAST_EFFECT_SET_COLOR` moved 32 of the corpus's 65 calls out of the
     /// dropped-line report without moving them into the export, because they sit inside
     /// costume-gated `if` blocks that separate them from their spawn.
@@ -2721,17 +2734,27 @@ impl EffectScript {
     /// Returned from the same walk that resolves the calls, rather than computed beside it, so
     /// there is exactly one implementation of the rule deciding what a modifier binds to.
     ///
-    /// C6 narrowed what the second half contains without changing what it means. A modifier
-    /// that binds to no spawn but sits in the same frame block as one is now *carried* by that
-    /// call as [`EffectCall::leading`] or [`EffectCall::trailing`] and is no longer reported
-    /// here, because it does reach the export. What is left is the genuine residue: lines with
-    /// no call anywhere in their frame to hang from.
-    pub fn to_effect_calls_reporting_losses(&self) -> (Vec<EffectCall>, Vec<String>) {
+    /// C6 carried a modifier that binds to no spawn but shares a frame block with one, as that
+    /// call's [`EffectCall::leading`] or [`EffectCall::trailing`]. E3 took the remainder: lines
+    /// whose frame holds no spawn at all now come back here keyed by frame, and the emitter
+    /// opens a block for them. **Nothing is dropped by this walk any more**, which is why it no
+    /// longer returns a loss list — what [`crate::acmd::unexportable_effect_lines`] reports is
+    /// now decided entirely from the statement tree.
+    ///
+    /// The caller has to pass the second half to
+    /// [`crate::acmd::emit_effect_move_fn`](../acmd/fn.emit_effect_move_fn.html); there is no
+    /// default. Dropping it on the floor is silent and is exactly the bug this replaced.
+    pub fn to_effect_calls_and_residue(
+        &self,
+    ) -> (
+        Vec<EffectCall>,
+        std::collections::BTreeMap<u32, Vec<String>>,
+    ) {
         let mut calls: Vec<EffectCall> = Vec::new();
         let mut walk = EffectWalk::default();
-        eval_effect_stmts(&self.stmts, 0.0, &mut calls, &mut walk);
-        walk.end_frame();
-        (calls, walk.unbound)
+        let end = eval_effect_stmts(&self.stmts, 0.0, &mut calls, &mut walk);
+        walk.end_frame(end);
+        (calls, walk.frame_residue)
     }
 }
 
@@ -2749,17 +2772,14 @@ struct EffectWalk {
     /// Residue seen since the last spawn in this frame, wrapped and waiting for a call to
     /// attach to.
     pending: Vec<String>,
-    /// The same lines as [`Self::pending`], but as they were written, for the loss report.
-    ///
-    /// Kept beside the wrapped form rather than derived from it because the two are needed in
-    /// different shapes: an export needs the regenerated `if`/`is_excute` scaffolding, and a
-    /// user reading "these lines will be deleted" needs the line they actually wrote, not four
-    /// braces around it.
-    pending_src: Vec<String>,
     /// Index of the most recent spawn in this frame block, if any.
     last_spawn: Option<usize>,
-    /// Residue that never found a call to attach to, reported rather than carried.
-    unbound: Vec<String>,
+    /// Residue from a frame that turned out to contain no spawn at all, keyed by the frame it
+    /// was written at, already wrapped and ready to emit. See [`EffectWalk::end_frame`].
+    ///
+    /// Before E3 this channel did not exist and its contents were reported as deleted, which
+    /// they were.
+    frame_residue: std::collections::BTreeMap<u32, Vec<String>>,
 }
 
 impl EffectWalk {
@@ -2786,26 +2806,38 @@ impl EffectWalk {
         }
         match self.last_spawn {
             Some(index) => calls[index].trailing.extend(block),
-            None => {
-                self.pending.extend(block);
-                self.pending_src.push(line.to_string());
-            }
+            None => self.pending.extend(block),
         }
     }
 
     /// Hand the pending residue to the call about to be pushed, which is now its home.
     fn take_pending(&mut self) -> Vec<String> {
-        self.pending_src.clear();
         std::mem::take(&mut self.pending)
     }
 
-    /// Close the current frame block: nothing may attach across a frame boundary.
+    /// Close the frame block at `frame`: nothing may attach across a frame boundary.
     ///
-    /// Carrying residue to a spawn at a different frame would not preserve the line, it would
-    /// *retime* it — so anything still pending here is reported as dropped, which is what it is.
-    fn end_frame(&mut self) {
-        self.pending.clear();
-        self.unbound.append(&mut self.pending_src);
+    /// Carrying residue to a spawn at a *different* frame would not preserve the line, it would
+    /// retime it, and that is still refused. But there is a third option this used to skip:
+    /// keep the lines at the frame they were written at and emit them there with no call to hang
+    /// from. They arrive from [`Self::residue`] already wrapped in their own
+    /// `if macros::is_excute(agent) { … }`, so a frame that produced nothing else can still be
+    /// written out — the emitter has always been able to open a bare block, it just had no way
+    /// to be told a frame existed unless a call sat on it.
+    ///
+    /// This is the whole of E3's measured defect. `dolly/FinalAirEnd`'s frame 40 is two
+    /// `CANCEL_FILL_SCREEN` calls and nothing else, so there was no spawn in the frame to become
+    /// their `leading`, and the export deleted both. Every other line in the corpus's residue
+    /// channel shares a frame with a spawn and was already carried by C6.
+    ///
+    /// Anything still pending after this is a genuine loss and keeps being reported.
+    fn end_frame(&mut self, frame: f32) {
+        if !self.pending.is_empty() {
+            self.frame_residue
+                .entry(script_frame(frame))
+                .or_default()
+                .append(&mut self.pending);
+        }
         self.last_spawn = None;
     }
 }
@@ -2839,12 +2871,14 @@ fn eval_effect_stmts(
     let mut frame = start_frame;
     for stmt in stmts {
         match stmt {
+            // `end_frame` is handed the frame being *left*, not the one being entered — the
+            // pending residue was written under the old cursor and has to be emitted there.
             EffectStmt::Frame(f) => {
-                walk.end_frame();
+                walk.end_frame(frame);
                 frame = *f;
             }
             EffectStmt::Wait(w) => {
-                walk.end_frame();
+                walk.end_frame(frame);
                 frame += w;
             }
             // Statement-level lines with no typed form: `wait_loop_sync_mot`, bare
@@ -3098,19 +3132,21 @@ fn eval_effect_stmts(
                 }
             }
             EffectStmt::Loop { count, body } => {
-                // Every iteration re-runs the SAME text, so the residue state is rewound to
-                // where the loop started and the loss report is truncated back each time. The
-                // calls are genuinely unrolled — four iterations spawn four effects, and each
-                // carries its own copy of the lines that followed it, which is right. The
-                // *report* is not: it names lines of source, and one line named four times is
-                // three lies. `call_macro_ordinals` rewinds for the same reason.
+                // Every iteration re-runs the SAME text, so the pending residue is rewound to
+                // where the loop started each time. The calls are genuinely unrolled — four
+                // iterations spawn four effects, and each carries its own copy of the lines that
+                // followed it, which is right.
+                //
+                // `frame_residue` is deliberately NOT rewound, and that is a change of meaning
+                // from the loss report this replaced. That report named lines of *source*, and
+                // one line named four times was three lies, so it was truncated back. This is
+                // output: an iteration that reaches a frame of its own needs its own copy there,
+                // exactly as its spawns do. Iterations that land on the same frame append, which
+                // matches what the game runs — every corpus loop advances the frame, so this is
+                // reasoning about a shape the corpus does not contain rather than a measurement.
                 let pending_at_entry = walk.pending.clone();
-                let pending_src_at_entry = walk.pending_src.clone();
-                let reported_at_entry = walk.unbound.len();
                 for _ in 0..*count {
                     walk.pending.clone_from(&pending_at_entry);
-                    walk.pending_src.clone_from(&pending_src_at_entry);
-                    walk.unbound.truncate(reported_at_entry);
                     frame = eval_effect_stmts(body, frame, calls, walk);
                 }
             }

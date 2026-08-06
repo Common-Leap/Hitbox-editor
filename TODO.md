@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**400 unit + 6 integration after R4 closed**; the integration ones
+- [ ] `cargo test` passes (**404 unit + 6 integration after E3 closed**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -1447,9 +1447,16 @@ entry is still open.
   carrying it shifts every effect after it. The honest close is to *model* it as a timing
   statement that the frame walk understands, which is E2's neighbourhood (`FT_MOTION_RATE`),
   not this one.
-- **`methodlib::L2CAgent::pop()`, 2, and the bare `EffectModule::remove_screen` calls, 2.**
-  Genuine script plumbing with no editor meaning. Worth leaving reported.
-- **`CANCEL_FILL_SCREEN`, 2 — belongs to E3, not here. This bullet was wrong on both counts**
+- **[x] `methodlib::L2CAgent::pop()`, 2, and the bare `EffectModule::remove_screen` calls, 2.**
+  Both gone, and neither by being modelled — the `pop()` pair went with C2's trail, and E3's
+  frame-anchored residue took the two `remove_screen` calls. That was not predicted: this bullet
+  said "genuine script plumbing with no editor meaning, worth leaving reported", and it was right
+  about the meaning and wrong about the consequence. They were never lost because nothing
+  understood them; they were lost because their frame block held no spawn to ride on, which is a
+  property of where they sit and not of what they are. They are now copied through verbatim and
+  warned about as verbatim, which is what "no editor meaning" should always have produced.
+- **[x] `CANCEL_FILL_SCREEN`, 2 — belongs to E3, not here** (closed there 2026-08-06, and *not*
+  by modelling the macro — see E3). **This bullet was wrong on both counts**
   (written 2026-08-04, corrected the same day by the arity check it told itself to do).
   It *is* wrapped in `macros.rs`, so it is emittable — that part held. But:
   - **C3 does not model `FILL_SCREEN_MODEL_COLOR`.** C6's own result table already said
@@ -1466,6 +1473,14 @@ entry is still open.
   All 4 occurrences are in dolly's `FinalAirStart` / `FinalAirEnd` — full-screen final-smash
   staging, which is exactly what E3 describes, and E3 already lists both macros by name. Do it
   there, with the camera work, or not at all.
+
+  **What E3 actually did: neither.** Every reason above for not modelling `CANCEL_FILL_SCREEN`
+  still stands, and it is still not modelled. The 2 lines came back because the *placement*
+  problem was fixed instead — a frame block with no spawn can now own its lines. Three bullets
+  of this entry argued about which table to put a macro in when the defect was never the macro.
+
+**Remaining after E3: `wait_loop_sync_mot` × 7 and `else {` × 5, in 12 of 132 scripts.** Both
+are refusals with a written reason above, not omissions.
 - **[x] The C5 finding stays a warning (settled 2026-08-05).** The old reasoning was an
   argument about frequency — a warning because a quarter of vanilla scripts tripped it, and
   under one in eight now. **Frequency turns out to be the wrong axis entirely**, and the three
@@ -2134,12 +2149,105 @@ it backwards is worse than today's "not modelled" — the entry's own done-when 
 - **Trap:** branches (`if(WorkModule::is_flag(…)){`) are excluded from timing checks for the
   same reason and are **not** in scope here. Leave that exclusion alone.
 
-### [~] E3 — Camera and zoom
+### [x] E3 — Camera and zoom (done 2026-08-06 — as a placement fix, not a camera panel)
 
 `CAM_ZOOM_IN_arg5`/`_arg6`, `CAM_ZOOM_IN_FINAL_arg13`, `CAM_ZOOM_OUT`, `CAM_ZOOM_OUT_FINAL`,
 `REQ_MOTION_CAMERA`, `FT_START_CUTIN`, `FILL_SCREEN_MODEL_COLOR`, `CANCEL_FILL_SCREEN`.
 Lowest value of the gameplay set — mostly final-smash staging. Values and timing only; no
 viewport preview.
+
+**Measured first, and the entry did not survive it.** 14 corpus calls, not the 10 this entry
+assumed — it missed `FILL_SCREEN_MODEL_COLOR` (2) and `CANCEL_FILL_SCREEN` (2). Of the eight
+macros named, **not one is worth modelling**:
+
+| macro | corpus | why not |
+|---|---|---|
+| `CAM_ZOOM_IN_arg6`, `CAM_ZOOM_IN_FINAL_arg13`, `CAM_ZOOM_OUT_FINAL`, `REQ_MOTION_CAMERA` | **0** | no evidence, same rule as B2 / C4 / `AFTER_IMAGE2_ON` |
+| `FT_START_CUTIN` | 5 | **takes no arguments.** There is no value to edit |
+| `CAM_ZOOM_OUT` | 2 | same — `(agent)` and nothing else |
+| `CAM_ZOOM_IN_arg5` | 3 | **the corpus form is not a call.** See below |
+| `FILL_SCREEN_MODEL_COLOR` | 2 | 12 slots on 2 calls; already carried verbatim, nothing lost |
+| `CANCEL_FILL_SCREEN` | 2 | **was** deleted by the effect export — fixed without modelling it |
+
+**`CAM_ZOOM_IN_arg5` is a decompiler artifact and would have poisoned an export.** The corpus
+writes `CAM_ZOOM_IN_arg5(0, 0);` — no `macros::` prefix, no `agent`, two arguments. smash-script
+declares `CAM_ZOOM_IN_arg5(agent, zoom_amount, arg2, arg3, y_rot, x_rot)`: agent plus **five**.
+The corpus line cannot compile and never could; it sits two lines below `0x2508e0(-986880942,
+2.1)` in the same block, which is the same tool failing the same way. Modelling this from its
+only evidence would have pinned an export that does not build — precisely the AFTER_IMAGE trap.
+`game_` scripts keep every line they do not understand, so all 10 of the `game_`-side calls
+already round-trip verbatim today, artifact and all, which is the right answer for them.
+
+**So the only real defect in the whole family was 2 deleted lines, and fixing it had nothing to
+do with cameras.** `dolly/FinalAirEnd` frame 40 is two `CANCEL_FILL_SCREEN` calls and nothing
+else. C6 carries an unmodelled line by attaching it to a spawn in its own frame block; that
+frame has no spawn, so both lines were deleted by every export of that move.
+
+**The fix is a third option `EffectWalk::end_frame` had refused to consider.** It knew that
+attaching residue to a *later* frame's spawn would retime it rather than preserve it, and stopped
+there — so the lines were reported as dropped. They can simply stay at the frame they were
+written at and be emitted there with no call to hang from: they already arrive wrapped in their
+own `if macros::is_excute(agent) { … }`, and the emitter has always been able to open a bare
+block, it just had no way to be told a frame existed unless a call sat on it.
+
+Nothing about `CANCEL_FILL_SCREEN` is modelled. Every reason C6b gave for not modelling it still
+holds. The lines are copied through verbatim and warned about as verbatim, exactly like a carried
+line.
+
+**It removed twice what it set out to.** 16 lost lines → 12, 13 lossy scripts → 12: the two
+`CANCEL_FILL_SCREEN` calls *and* the two bare `EffectModule::remove_screen` calls in kirby's
+`FinalAirStart` / `FinalStart`, which C6b had written off as "genuine script plumbing with no
+editor meaning, worth leaving reported". That was right about the meaning and wrong about the
+cause — they were never lost for want of understanding, they were lost for want of a spawn to
+sit beside.
+
+**The surfaces.** Parse+IR: `to_effect_calls_reporting_losses` became
+`to_effect_calls_and_residue` and no longer returns a loss list, because this walk now drops
+nothing; `unexportable_effect_lines` is decided entirely from the statement tree. Export: the
+emitter takes residue as a fourth argument with **no defaulted overload** — passing an empty map
+is a claim, and a caller making it by accident deletes exactly what this fixed. Panel: the
+verification pane derives residue from the open script, so it shows what an export would write.
+Live: untouched and out of scope — these are lines the editor does not model, so there is nothing
+to send. Write-back: untouched, for the same reason.
+
+**Persistence was the half that nearly did nothing.** The export path builds from the saved call
+list, not from a re-parse, so residue had to be saved with the project — `effect_frame_residue`
+on `FighterMod`, the exact sibling of `effect_dropped_lines`. Unlike that field it *changes
+generated code*, so a project that reloads without it exports as the pre-E3 build did: the lines
+vanish, and no note describes them either, because this build stopped producing one.
+
+**Six mutations, three of which survived the first round of tests:**
+
+- Emitter ignores residue — caught immediately.
+- **`end_frame` handed the frame being entered instead of the one being left.** Survived. The
+  corpus's only spawn-less block is the *last* frame of its script, flushed by the final
+  `end_frame`, so it says nothing about the two inside the walk. The wrong version exports code
+  that compiles, balances its braces, re-parses to the same spawns, and plays the line 20 frames
+  late. Needed a fixture with a frame *after* the residue.
+- **`source_project` passing `Default::default()` instead of reading the saved field.** Survived
+  the whole suite including the corpus ratchet, because every other test builds residue and calls
+  from the same parse and never goes through a file.
+- **The app never writing the map.** Survived. Same blind spot the sibling field hit before —
+  its own test records that the export-side reporting was once "fully built and fully tested
+  against a map the editor never filled". The body is now split out as
+  `record_effect_script_notes` so a test can reach it.
+- The carried-line warning ignoring residue — caught after the fix, which is *why* the fix
+  exists: the first draft emitted those lines and said nothing about them, so a script whose only
+  unmodelled line owned a frame of its own exported verbatim, silently.
+- Residue never cleared when a move has none — caught.
+
+The corpus ratchet gained a second half for the same reason. `lossy` counts what the report
+*names*; a new pair of assertions counts what the export *writes*, because a change that stopped
+producing residue at all would have left `lossy` at 12 and looked like success.
+
+**Deliberately not done:** `FILL_SCREEN_MODEL_COLOR` stays unmodelled. Twelve argument slots on
+two calls, one of which the dump spells `EffectScreenLayer:*GROUND` — not valid Rust. Naming
+those slots would be inventing meaning, and it is already carried, so nothing is lost by leaving
+it. Worth knowing: that line is why `dolly/FinalAirEnd` is *still* blocked by export verification
+— carried verbatim, and verbatim from these dumps does not always compile. That is the designed
+failure and it is loud, but it means the move this task was measured on cannot actually be
+exported yet. **A user hitting that has to fix the line by hand.** Real, bounded, and a different
+task from this one.
 
 ---
 

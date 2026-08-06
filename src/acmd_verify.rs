@@ -152,7 +152,7 @@ impl Report {
 pub fn verify_export(
     project: &ModProject,
     acmd_edits: &[(String, String, AcmdScript)],
-    effect_edits: &[(String, String, Vec<EffectCall>)],
+    effect_edits: &[crate::acmd::EffectExport],
     sound_edits: &[(String, String, AcmdScript)],
     tweaks: &[LiveTweak],
     dropped: &HashMap<String, Vec<String>>,
@@ -181,12 +181,12 @@ pub fn verify_export(
         }
     }
 
-    for (fighter, move_name, calls) in effect_edits {
+    for (fighter, move_name, calls, residue) in effect_edits {
         let subject = format!("{fighter} / {move_name}");
         // Not `subject`: that is prose for the report and has spaces around the slash. The
         // dropped map is keyed the way the editor keys every other per-move table.
         let key = format!("{fighter}/{move_name}");
-        let emitted = crate::acmd::preview_effect_fn(calls, move_name, tweaks);
+        let emitted = crate::acmd::preview_effect_fn(calls, move_name, tweaks, residue);
         // C5 left this call passing `None`, because a saved project remembered the resolved
         // calls and nothing about the lines that became none of them. C6c gave the project
         // somewhere to keep that list, so both halves of the loss report now reach an export
@@ -197,6 +197,7 @@ pub fn verify_export(
             &emitted,
             tweaks,
             dropped.get(&key).map(Vec::as_slice),
+            residue,
             &mut report,
         );
         if !sources.iter().any(|text| text.contains(&emitted)) {
@@ -278,15 +279,17 @@ pub fn verify_effect_move(
     emitted: &str,
     tweaks: &[LiveTweak],
     lost: Option<&[String]>,
+    residue: &std::collections::BTreeMap<u32, Vec<String>>,
     report: &mut Report,
 ) {
     check_effect_fidelity(subject, calls, emitted, tweaks, report);
     check_effect_values(subject, calls, report);
-    // Unlike the dropped-line check, this one needs nothing carried alongside: the carried lines
-    // travel on the calls themselves, so a project saved and reloaded still reports them. That is
-    // the point — a user who opens a saved mod and exports it gets the same warning as the one
-    // who parsed the script this session.
-    check_carried_lines(subject, calls, report);
+    // The carried lines travel on the calls themselves, so a project saved and reloaded still
+    // reports them. `residue` is the half that cannot: it belongs to a frame rather than a call,
+    // and it is passed alongside for the same reason `lost` is. Both are saved with the project
+    // — a user who opens a saved mod and exports it gets the same warnings as the one who parsed
+    // the script this session.
+    check_carried_lines(subject, calls, residue, report);
     if let Some(lost) = lost {
         check_dropped_lines(subject, lost, report);
     }
@@ -834,12 +837,22 @@ fn check_dropped_lines(subject: &str, lost: &[String], report: &mut Report) {
 ///
 /// A warning, on the same reasoning as the dropped-line check: refusing the export helps nobody
 /// who can read the message and fix the line.
-fn check_carried_lines(subject: &str, calls: &[EffectCall], report: &mut Report) {
+fn check_carried_lines(
+    subject: &str,
+    calls: &[EffectCall],
+    residue: &std::collections::BTreeMap<u32, Vec<String>>,
+    report: &mut Report,
+) {
     let mut seen: Vec<String> = Vec::new();
     for line in calls
         .iter()
         .filter(|call| !call.disabled)
         .flat_map(|call| call.leading.iter().chain(&call.trailing))
+        // Frame-anchored residue is emitted on exactly the same terms as a carried line and
+        // needs the same warning. E3 added the channel and this chain a moment later: the first
+        // draft emitted those lines and said nothing about them, so a script whose only
+        // unmodelled line owned a frame of its own exported verbatim, silently.
+        .chain(residue.values().flatten())
     {
         // Braces and the regenerated `is_excute` header are this module's own scaffolding, not
         // the user's code, so naming them would bury the lines that are actually theirs.
@@ -1314,15 +1327,17 @@ mod tests {
                         checked += 1;
                     }
                     let effect_script = crate::acmd::parse_effect_script(body);
-                    let calls = effect_script.to_effect_calls();
+                    let (calls, residue) = effect_script.to_effect_calls_and_residue();
                     if !calls.is_empty() {
-                        let emitted = crate::acmd::preview_effect_fn(&calls, "audit", &[]);
+                        let emitted =
+                            crate::acmd::preview_effect_fn(&calls, "audit", &[], &residue);
                         verify_effect_move(
                             &label,
                             &calls,
                             &emitted,
                             &[],
                             Some(&crate::acmd::unexportable_effect_lines(&effect_script)),
+                            &residue,
                             &mut report,
                         );
                         checked += 1;
@@ -1613,8 +1628,8 @@ mod tests {
 }
 "#;
         let source = crate::acmd::parse_effect_script(src);
-        let calls = source.to_effect_calls();
-        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
+        let (calls, residue) = source.to_effect_calls_and_residue();
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[], &residue);
         assert!(
             !emitted.contains("wait_loop_sync_mot"),
             "the premise no longer holds — the export now keeps this line, so this test is \
@@ -1628,6 +1643,7 @@ mod tests {
             &emitted,
             &[],
             Some(&crate::acmd::unexportable_effect_lines(&source)),
+            &residue,
             &mut report,
         );
         assert!(
@@ -1643,7 +1659,15 @@ mod tests {
         // Without the source there is nothing to compare against, and the check must stay quiet
         // rather than guess: a move captured live has no script and has lost nothing.
         let mut blind = Report::default();
-        verify_effect_move("test", &calls, &emitted, &[], None, &mut blind);
+        verify_effect_move(
+            "test",
+            &calls,
+            &emitted,
+            &[],
+            None,
+            &Default::default(),
+            &mut blind,
+        );
         assert!(
             !messages(&blind).contains("does not include this line"),
             "{}",
@@ -1660,8 +1684,17 @@ mod tests {
     ///
     /// Both halves are asserted here on one script, because the failure mode is the report and
     /// the export disagreeing rather than either being wrong alone. Dolly's up special supplies
-    /// the carried case verbatim; the second frame supplies a modifier with no spawn anywhere in
-    /// its block, which is the residue C6 genuinely cannot place.
+    /// the line carried by a spawn in its own block; the second frame supplies one with no spawn
+    /// anywhere in its block, which C6 could not place and E3 now emits at a frame of its own.
+    ///
+    /// The second case used to assert the opposite — that the alpha was *deleted* and named as
+    /// deleted. That was the truth until E3 and is written down here rather than edited away,
+    /// because the two are one line apart in the report and swapping them silently is precisely
+    /// what this test exists to catch.
+    ///
+    /// Note what the fixture has to do to be honest: it passes the residue the parse produced,
+    /// not `Default::default()`. An empty map would have kept `!emitted.contains(...)` green
+    /// while proving only that the test forgot to pass anything.
     #[test]
     fn the_loss_report_names_what_the_export_drops_and_only_that() {
         let src = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
@@ -1681,12 +1714,16 @@ mod tests {
 }
 "#;
         let source = crate::acmd::parse_effect_script(src);
-        let calls = source.to_effect_calls();
+        let (calls, residue) = source.to_effect_calls_and_residue();
         assert_eq!(
             calls[0].tint, None,
             "the premise: a costume-gated tint still binds to no spawn"
         );
-        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
+        assert!(
+            residue.contains_key(&20),
+            "the premise: frame 20 owns its line, because no spawn in that block can: {residue:?}"
+        );
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[], &residue);
 
         let mut report = Report::default();
         verify_effect_move(
@@ -1695,6 +1732,7 @@ mod tests {
             &emitted,
             &[],
             Some(&crate::acmd::unexportable_effect_lines(&source)),
+            &residue,
             &mut report,
         );
         let said = messages(&report);
@@ -1723,15 +1761,23 @@ mod tests {
             "a carried line must be named as carried:\n{said}"
         );
 
-        // Dropped: no spawn shares frame 20, so there is nothing for the alpha to ride on, and
-        // attaching it to frame 9's spawn would retime it rather than preserve it.
+        // Frame 20 has no spawn for the alpha to ride on, and attaching it to frame 9's spawn
+        // would retime it rather than preserve it. E3's answer is neither: the frame keeps it.
         assert!(
-            !emitted.contains("LAST_EFFECT_SET_ALPHA"),
-            "an alpha with no spawn in its own block cannot be placed:\n{emitted}"
+            emitted.contains("frame(agent.lua_state_agent, 20.0);")
+                && emitted.contains("macros::LAST_EFFECT_SET_ALPHA(agent, 0.25);"),
+            "a line whose frame holds no spawn must be emitted at that frame:\n{emitted}"
         );
         assert!(
-            deleted("macros::LAST_EFFECT_SET_ALPHA(agent, 0.25);"),
-            "residue the export really does drop must still be named:\n{said}"
+            !deleted("LAST_EFFECT_SET_ALPHA"),
+            "and must not still be reported as deleted:\n{said}"
+        );
+        // It is copied through, not understood — the same warning the carried tint gets, for the
+        // same reason. Editing the alpha in the panel will not change this line.
+        assert!(
+            said.contains("copies this line through as written")
+                && said.contains("macros::LAST_EFFECT_SET_ALPHA(agent, 0.25);"),
+            "a line emitted verbatim must be named as verbatim:\n{said}"
         );
         assert!(!report.has_blockers(), "{said}");
     }
@@ -1748,8 +1794,8 @@ mod tests {
 }
 "#;
         let source = crate::acmd::parse_effect_script(src);
-        let calls = source.to_effect_calls();
-        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[]);
+        let (calls, residue) = source.to_effect_calls_and_residue();
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &[], &residue);
         let mut report = Report::default();
         verify_effect_move(
             "test",
@@ -1757,6 +1803,7 @@ mod tests {
             &emitted,
             &[],
             Some(&crate::acmd::unexportable_effect_lines(&source)),
+            &residue,
             &mut report,
         );
         assert!(
@@ -1788,9 +1835,17 @@ mod tests {
             speed: Some(0.5),
         }];
 
-        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &tweaks);
+        let emitted = crate::acmd::preview_effect_fn(&calls, "test", &tweaks, &Default::default());
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &tweaks, None, &mut report);
+        verify_effect_move(
+            "test",
+            &calls,
+            &emitted,
+            &tweaks,
+            None,
+            &Default::default(),
+            &mut report,
+        );
         assert!(!report.has_blockers(), "{}", messages(&report));
         assert!(
             messages(&report).contains("ships the live speed override"),
@@ -1800,7 +1855,15 @@ mod tests {
 
         // Without the tweak to explain it, the same divergence is an export that lost a value.
         let mut report = Report::default();
-        verify_effect_move("test", &calls, &emitted, &[], None, &mut report);
+        verify_effect_move(
+            "test",
+            &calls,
+            &emitted,
+            &[],
+            None,
+            &Default::default(),
+            &mut report,
+        );
         assert!(report.has_blockers(), "{}", messages(&report));
         assert!(
             messages(&report).contains("different rate"),
