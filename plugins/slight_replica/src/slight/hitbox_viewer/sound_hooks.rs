@@ -71,15 +71,51 @@ fn hash_slots(func: &str) -> usize {
 /// — read in the only direction that is safe here: too broad rather than silently dead.
 fn sound_action(motion: u64, hash: u64, frame: f32, func: &str) -> Option<(bool, Option<HbOverrides>)> {
     let rules = RULES.lock();
-    rules
+    let hit = rules
         .iter()
         .find(|r| {
             r.inject.is_none()
                 && r.matches(CAT_SOUND, motion, hash, frame)
                 && r.func.as_deref().map(|f| f == func).unwrap_or(true)
         })
-        .map(|r| (r.suppress, r.overrides.clone()))
+        .map(|r| (r.suppress, r.overrides.clone()));
+
+    // **Say why a rule did not fire.** A live sound edit that does nothing is the failure this
+    // family is most exposed to, and every field it can miss on — motion, key, frame window,
+    // macro name — is invisible from either side on its own: the editor sent a well-formed rule
+    // and the game played the original. Bounded to the first few misses per boot, and
+    // `diag::note` buffers rather than doing I/O, so it is safe on an ACMD path.
+    if hit.is_none() {
+        let seen = MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if seen < MAX_MISS_REPORTS {
+            let candidates: Vec<String> = rules
+                .iter()
+                .filter(|r| r.category == CAT_SOUND && r.inject.is_none())
+                .map(|r| {
+                    format!(
+                        "[motion={:#x} key={:?} frames={:?}..{:?} func={:?}]",
+                        r.motion, r.hitbox_id, r.frame_start, r.frame_end, r.func
+                    )
+                })
+                .collect();
+            crate::slight::diag::note(format!(
+                "SND miss {func} motion={motion:#x} key={hash:#x} frame={frame:.4} — \
+                 {} sound rule(s) loaded: {}",
+                candidates.len(),
+                if candidates.is_empty() {
+                    "none (the editor sent nothing for this category)".to_string()
+                } else {
+                    candidates.join(" ")
+                }
+            ));
+        }
+    }
+    hit
 }
+
+/// Misses reported this session. Bounded so a move played repeatedly cannot flood the log.
+static MISSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const MAX_MISS_REPORTS: u32 = 12;
 
 /// Capture one sound call and apply any rule matching it. `true` means suppress it entirely.
 ///
@@ -120,10 +156,14 @@ unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaA
     let Some((suppress, overrides)) = sound_action(motion, key, frame, func) else {
         return false;
     };
+    crate::slight::diag::note(format!(
+        "SND hit {func} motion={motion:#x} key={key:#x} frame={frame:.4} suppress={suppress}"
+    ));
     if suppress {
         return true;
     }
     let Some(ov) = overrides else {
+        crate::slight::diag::note("SND     rule matched but carried no overrides");
         return false;
     };
     let Some(hashes) = ov.sound_hashes else {

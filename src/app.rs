@@ -1044,9 +1044,6 @@ pub struct VisionaryApp {
     use_scan: Option<UseScan>,
     fighter_search: String,
     move_search: String,
-    /// Filter for the Sounds section's ▾ picker. Shared by every row, because the user is
-    /// looking for one kind of sound at a time ("step", "swing") rather than per call.
-    sound_filter: String,
     /// The user's own smashline project, when linked. Scripts are read from here in
     /// preference to the dumped-script mirror — see `acmd_src`.
     acmd_src: Option<crate::acmd_src::SourceIndex>,
@@ -1306,7 +1303,6 @@ impl VisionaryApp {
             use_scan: None,
             fighter_search: String::new(),
             move_search: String::new(),
-            sound_filter: String::new(),
             acmd_src: None,
             show_acmd_src: false,
             acmd_src_buffer: None,
@@ -4467,24 +4463,14 @@ impl VisionaryApp {
              the bank does not have is silent rather than an error, so a typo here plays nothing \
              and the game says nothing about it.",
         );
-        // Say what is on offer. Without this the field is a bare text box with no indication that
-        // there is a fixed vocabulary at all, which is how the first person to use it read it.
-        ui.horizontal(|ui| {
-            ui.weak(format!(
-                "{} known sounds for {fighter} — press ▾ to browse, or type any name.",
-                candidates.len()
-            ));
-        });
-        ui.add(
-            egui::TextEdit::singleline(&mut self.sound_filter)
-                .hint_text("Filter the ▾ list (e.g. step, swing, voice)…")
-                .desired_width(f32::INFINITY),
-        );
+        ui.weak(format!(
+            "{} sounds known for {fighter}. Click a name to pick from the list, or type a new one.",
+            candidates.len()
+        ));
 
         // Collected and applied after the loop, so the mutable borrow of the script does not
         // overlap the event list it was derived from — the hurtbox section's reason exactly.
         let mut edit: Option<(usize, ExcuteStmt)> = None;
-        let filter = self.sound_filter.to_lowercase();
 
         for event in &self.state.sounds {
             let active = event.frame == self.state.current_frame;
@@ -4504,58 +4490,7 @@ impl VisionaryApp {
                 let mut call = event.call.clone();
                 let mut changed = false;
                 for (index, name) in call.sounds.iter_mut().enumerate() {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(name)
-                                .id_salt(("sound_name", event.site, index))
-                                .desired_width(200.0),
-                        )
-                        .changed();
-                    // A tick for a name the dump knows, a question mark for one it does not.
-                    // **Not an error marker.** The dump is incomplete — real scripts play
-                    // `se_common_step_left_m`, which is not in it — so an unknown name is a
-                    // "cannot confirm", and saying otherwise would train the user to distrust
-                    // working sounds.
-                    let known = candidates.iter().any(|c| c == name);
-                    ui.colored_label(
-                        if known {
-                            egui::Color32::from_rgb(120, 190, 120)
-                        } else {
-                            egui::Color32::from_rgb(170, 170, 110)
-                        },
-                        if known { "✔" } else { "?" },
-                    )
-                    .on_hover_text(if known {
-                        "This name is in the loaded label dump."
-                    } else {
-                        "Not in the label dump. That does not mean it is wrong — the dump is \
-                         incomplete — but check the spelling."
-                    });
-                    egui::ComboBox::from_id_salt(("sound_pick", event.site, index))
-                        .selected_text("▾")
-                        .width(24.0)
-                        .show_ui(ui, |ui| {
-                            let mut shown = 0;
-                            for cand in &candidates {
-                                if !filter.is_empty() && !cand.to_lowercase().contains(&filter) {
-                                    continue;
-                                }
-                                // Bounded, because the unfiltered list is hundreds of entries and
-                                // egui builds every row it is handed.
-                                if shown >= 200 {
-                                    ui.weak("…filter to narrow this list");
-                                    break;
-                                }
-                                shown += 1;
-                                if ui.selectable_label(cand == name, cand).clicked() {
-                                    *name = cand.clone();
-                                    changed = true;
-                                }
-                            }
-                            if shown == 0 {
-                                ui.weak("No sound matches that filter.");
-                            }
-                        });
+                    changed |= sound_name_picker(ui, name, &candidates, (event.site, index));
                 }
                 // Shown, not editable: the suppression window is the one non-hash argument in
                 // the family and nothing has measured what a sensible range for it is.
@@ -14439,6 +14374,115 @@ fn nothing_to_load(
     None
 }
 
+/// One editable sound name: a text field that is also a searchable list.
+///
+/// **The first design put a separate `▾` button and a shared filter box beside the field**, which
+/// meant three controls to change one name and a filter that applied to every row at once. This
+/// is one control: the field holds the name, and what is typed in it *is* the filter, so a user
+/// who types `step` sees every step sound without having to know there is a list at all.
+///
+/// Returns whether the name changed.
+///
+/// The list stays open while typing rather than closing on the first keystroke — an
+/// as-you-type filter that dismisses itself is worse than no list. Matching is on any substring,
+/// case-insensitively, because the useful token is usually in the middle: `swing` in
+/// `se_kirby_swing_l`, `step` in `se_common_step_left_m`.
+fn sound_name_picker(
+    ui: &mut Ui,
+    name: &mut String,
+    candidates: &[String],
+    salt: (usize, usize),
+) -> bool {
+    let mut changed = false;
+    let field = ui.add(
+        egui::TextEdit::singleline(name)
+            .id_salt(("sound_name", salt.0, salt.1))
+            .desired_width(230.0),
+    );
+    changed |= field.changed();
+
+    let known = candidates.iter().any(|c| c == name);
+    // A tick for a name the dump knows, a question mark for one it does not. **Not an error
+    // marker.** The dump is incomplete — real scripts play `se_common_step_left_m`, which is not
+    // in it — so an unknown name is "cannot confirm", and saying otherwise would train the user
+    // to distrust working sounds.
+    ui.colored_label(
+        if known {
+            egui::Color32::from_rgb(120, 190, 120)
+        } else {
+            egui::Color32::from_rgb(170, 170, 110)
+        },
+        if known { "✔" } else { "?" },
+    )
+    .on_hover_text(if known {
+        "This name is in the loaded label dump."
+    } else {
+        "Not in the label dump. That does not mean it is wrong — the dump is incomplete — but \
+         check the spelling."
+    });
+
+    let popup = ui.make_persistent_id(("sound_pick", salt.0, salt.1));
+    if field.gained_focus() {
+        egui::Popup::open_id(ui.ctx(), popup);
+    }
+    if egui::Popup::is_id_open(ui.ctx(), popup) {
+        let matches = matching_sounds(candidates, name);
+        let inner = egui::Popup::from_response(&field)
+            .id(popup)
+            // The field keeps focus while the list is open, so typing keeps filtering. A
+            // dropdown that steals focus on the first keystroke is worse than no dropdown.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(240.0);
+                let mut picked: Option<String> = None;
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        if matches.is_empty() {
+                            ui.weak("No sound contains that. It will still be written as typed.");
+                        }
+                        for cand in &matches {
+                            if ui.selectable_label(*cand == name, *cand).clicked() {
+                                picked = Some((*cand).clone());
+                            }
+                        }
+                    });
+                picked
+            });
+        if let Some(picked) = inner.and_then(|r| r.inner) {
+            *name = picked;
+            changed = true;
+            egui::Popup::close_id(ui.ctx(), popup);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            egui::Popup::close_id(ui.ctx(), popup);
+        }
+    }
+    changed
+}
+
+/// Candidates containing every whitespace-separated token of `query`, case-insensitively.
+///
+/// Token-wise rather than one substring so `kirby step` finds `se_kirby_step_left_m` — the names
+/// are underscore-joined, and a user typing two words is describing two parts of one name rather
+/// than a literal substring. An empty query matches everything, which is what makes the list
+/// useful on first click.
+///
+/// Capped, because the unfiltered list is hundreds of entries and egui builds every row it is
+/// handed. The cap is generous enough that a real search is never truncated.
+fn matching_sounds<'a>(candidates: &'a [String], query: &str) -> Vec<&'a String> {
+    let query = query.to_lowercase();
+    let tokens: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    candidates
+        .iter()
+        .filter(|c| {
+            let lower = c.to_lowercase();
+            tokens.iter().all(|t| lower.contains(t))
+        })
+        .take(300)
+        .collect()
+}
+
 /// The sound labels a fighter can plausibly play, for the Sounds picker.
 ///
 /// Three families, because those are the three the corpus's `sound_` scripts draw on: the
@@ -16178,6 +16222,56 @@ mod live_effect_capture_tests {
                 "se_kirby_step_right_m".to_string()
             ]
         );
+    }
+
+    /// The picker filters on every typed token, in any order, anywhere in the name.
+    ///
+    /// The names are underscore-joined, so a user typing two words is describing two parts of one
+    /// name rather than a literal substring — `kirby step` has to find `se_kirby_step_left_m`,
+    /// which a plain `contains` would not.
+    #[test]
+    fn the_sound_filter_matches_tokens_anywhere_in_the_name() {
+        let all: Vec<String> = [
+            "se_kirby_step_left_m",
+            "se_kirby_step_right_m",
+            "se_kirby_swing_l",
+            "se_common_smash_start",
+            "vc_kirby_attack01",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let names =
+            |q: &str| -> Vec<String> { matching_sounds(&all, q).into_iter().cloned().collect() };
+
+        // A token from the middle of the name.
+        assert_eq!(names("swing"), vec!["se_kirby_swing_l".to_string()]);
+        // Two tokens, and in the opposite order to the name itself.
+        assert_eq!(
+            names("step kirby"),
+            vec![
+                "se_kirby_step_left_m".to_string(),
+                "se_kirby_step_right_m".to_string()
+            ]
+        );
+        // Case-insensitive.
+        assert_eq!(names("SWING"), vec!["se_kirby_swing_l".to_string()]);
+        // Empty query offers everything — that is what makes the list useful on first click.
+        assert_eq!(names("").len(), all.len());
+        // No match is empty rather than everything, so a typo does not look like a full list.
+        assert!(names("nosuchsound").is_empty());
+    }
+
+    /// The list is capped, because egui builds every row it is handed.
+    ///
+    /// Kirby's three banks come to about 360 names and other fighters are larger. The cap is well
+    /// above any real search, so it only ever bites on the unfiltered list.
+    #[test]
+    fn the_sound_filter_caps_an_unfiltered_list() {
+        let all: Vec<String> = (0..1000).map(|i| format!("se_kirby_{i:04}")).collect();
+        assert_eq!(matching_sounds(&all, "").len(), 300);
+        assert_eq!(matching_sounds(&all, "se_kirby_0001").len(), 1);
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
