@@ -4774,6 +4774,7 @@ impl VisionaryApp {
                     extra_args: None,
                     raw_line: None,
                     trail_off: None,
+                    trail_bone2: None,
                     rate: None,
                     tint: None,
                     alpha: None,
@@ -4821,6 +4822,7 @@ impl VisionaryApp {
                     extra_args: None,
                     raw_line: None,
                     trail_off: None,
+                    trail_bone2: None,
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
                     rate: None,
@@ -5044,7 +5046,13 @@ impl VisionaryApp {
                             ui.end_row();
 
                             if !is_color {
-                                ui.label("Bone");
+                                // Named "Bone 1" only when there is a second one to tell it
+                                // apart from, so every non-trail spawn keeps the plain label.
+                                ui.label(if ec.trail_bone2.is_some() {
+                                    "Bone 1"
+                                } else {
+                                    "Bone"
+                                });
                                 if bone_names.is_empty() {
                                     changed |= ui
                                         .add(
@@ -5078,6 +5086,52 @@ impl VisionaryApp {
                                     ui.label("");
                                 }
                                 ui.end_row();
+
+                                // A trail is a ribbon stretched between two joints, so this is
+                                // not a duplicate of the row above even though every vanilla
+                                // call names the same joint in both: they separate the two
+                                // edges by offset instead. Shown only when the call's layout is
+                                // one the parser will vouch for — see `EffectCall::trail_bone2`.
+                                if let Some(mut bone2) = ec.trail_bone2.clone() {
+                                    ui.label("Bone 2");
+                                    if bone_names.is_empty() {
+                                        changed |= ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut bone2)
+                                                    .desired_width(140.0),
+                                            )
+                                            .changed();
+                                    } else {
+                                        egui::ComboBox::from_id_salt("effect_bone2_select")
+                                            .selected_text(&bone2)
+                                            .width(140.0)
+                                            .show_ui(ui, |ui| {
+                                                for name in &bone_names {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut bone2,
+                                                            name.clone(),
+                                                            name,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        changed = true;
+                                                        respawn_needed = true;
+                                                    }
+                                                }
+                                            });
+                                    }
+                                    if ec.trail_bone2.as_deref() != Some(bone2.as_str()) {
+                                        ec.trail_bone2 = Some(bone2);
+                                    }
+                                    match pristine.as_ref().and_then(|p| p.trail_bone2.as_deref()) {
+                                        Some(was) => orig(ui, format!("orig {was}")),
+                                        None => {
+                                            ui.label("");
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
                             }
 
                             if let Some(color) = ec.color.clone() {
@@ -5208,8 +5262,8 @@ impl VisionaryApp {
                                 )
                                 .on_hover_text(
                                     "A trail has no position, rotation, or scale arguments — it \
-                                     is drawn between the joints named in the call. Change the \
-                                     joint above to move it.",
+                                     is drawn between the two joints named in the call. Change \
+                                     the joints above to move it.",
                                 );
                                 ui.label("");
                                 ui.end_row();
@@ -7351,6 +7405,7 @@ impl VisionaryApp {
             }),
             raw_line: None,
             trail_off: None,
+            trail_bone2: None,
             // A spawn call carries none of the three modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
@@ -7417,6 +7472,7 @@ impl VisionaryApp {
             extra_args: None,
             raw_line: None,
             trail_off: None,
+            trail_bone2: None,
             rate: None,
             tint: None,
             alpha: None,

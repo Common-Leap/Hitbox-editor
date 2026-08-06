@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**389 green after C2's first half closed**), including the eight corpus
+- [ ] `cargo test` passes (**395 green after C2 closed**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -916,7 +916,7 @@ one of these by name.
   `has_macro_wrapper` in [data.rs](src/data.rs).
 - Whatever is added, return its unbound lines from `to_effect_calls_reporting_losses`. See C1.
 
-### [~] C2 — Sword trails
+### [x] C2 — Sword trails (done 2026-08-05)
 
 `AFTER_IMAGE4_ON` / `_arg29` / `AFTER_IMAGE_ON`. Read-only today: the trail shows on the
 timeline with its graphic and joint, and write-back explicitly refuses it
@@ -1038,9 +1038,45 @@ what the work found:
   corpus.** The fabricated `_arg29` test fixtures remain; they are not evidence and no new work
   was built on them.
 
-**Still open here:** expose `trail_bone2` (slot 8) as a second editable joint, which completes
-"changing a trail's joints rewrites those arguments and nothing else". The transform refusal at
-[acmd_src.rs:803](src/acmd_src.rs:803) stays correct and stays.
+**Closed 2026-08-05 — `trail_bone2` is editable and the done-when is met.** A trail's two joints
+now parse from slots 4 and 8, show as `Bone 1` / `Bone 2`, rewrite exactly their own arguments on
+export, and are reported rather than written when syncing into the user's own source. The
+transform refusal at [acmd_src.rs:803](src/acmd_src.rs:803) is unchanged and still fires.
+
+- **The `_arg29` fixture this entry twice told its successors not to reuse was still in the
+  tests, and reading slot 8 turned it from dead weight into a wrong answer.** It put `sword2` at
+  slot 5 — a `Hash40` where `trail_x1` goes — and `0.75` at slot 8, so the moment the parser
+  looked there, the editor offered `0.75` as an editable joint. It is replaced with a
+  29-argument call shaped by the declaration. The lesson is not "the warning was ignored": the
+  warning *was* heeded, nothing was built on the fixture, and it was still load-bearing enough to
+  produce a bug. **A wrong fixture is not made safe by nobody relying on it yet.**
+- **A verification gap fell out, and it dates from C2's first half, not this one.**
+  `check_effect_values` skipped a trail's graphic and joint names, reasoning that a trail's line
+  rides through verbatim and is never re-quoted. That was true when written and stopped being
+  true the moment `retarget_trail_line` began splicing edited names back in through `hash_arg`.
+  Since then, typing a `"` into a trail's graphic or joint produced `Hash40::new("to"er")` — not
+  Rust — with the verifier reporting nothing. All three names are checked now. **The comment
+  justifying the skip is what went stale; the code around it still read as correct.**
+- **Eight mutations, two survivors, both of them weak assertions of mine rather than dead code.**
+  Dropping `trail_bone2` from `identity_matches` survived a test asserting the report contained
+  `joint` — because the *other* skip message contains it too. And letting a call too short to
+  reach slot 8 yield `Some("")` survived because nothing tested a truncated trail. Both now fail.
+- **`identity_matches` is a message-quality guarantee here, not a safety one, and the test says
+  so.** Both guards skip the call; only the wording differs. Recorded so nobody later reads that
+  test as proof the source is protected — `differs`, a plain `!=` over the whole call, is what
+  protects it.
+
+**Named exceptions (the first half's, plus one).**
+
+- **Live is still untouched.** The plugin has no trail primitive; nothing here ran on hardware.
+- **The flare bone (slot 14) is parsed past, not exposed.** It is not a trail edge — it places a
+  separate flare effect — so it is not part of "a trail's joints" and is deliberately out of
+  scope. Nothing reads or writes it; it rides through.
+- **`macros::AFTER_IMAGE4_ON` and `macros::AFTER_IMAGE_ON` get no second joint.** Neither name is
+  declared by `smash-script` and neither appears in the corpus, so nothing says what sits at slot
+  8 of a call that could not have been written. They still parse for round-trip only. Offering a
+  field there would be guessing a layout from position — the trap this entry has now been caught
+  by twice.
 
 ### [x] C2a — `AFTER_IMAGE_OFF` is exported without its argument (done 2026-08-04)
 

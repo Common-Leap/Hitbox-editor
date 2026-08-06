@@ -2350,6 +2350,10 @@ pub enum EffectMacro {
     AfterImage {
         effect_name: String,
         bone_name: String,
+        /// The trail's second edge joint. See [`EffectCall::trail_bone2`] for why it is
+        /// separate from `bone_name` and why it is optional.
+        #[serde(default)]
+        bone_name2: Option<String>,
         /// The call verbatim. A trail's arguments are textures and per-frame trail
         /// parameters, not a transform, so there is nothing to recompose it from.
         #[serde(default)]
@@ -2577,6 +2581,23 @@ pub struct EffectCall {
     /// the corpus does not agree on it: two calls write `0` and two write `3`.
     #[serde(default)]
     pub trail_off: Option<f32>,
+    /// The trail's second joint — `trail_bone2`, argument 8 — when the call's layout is known.
+    ///
+    /// A trail is a ribbon stretched between *two* edges, each an offset from a named joint, so
+    /// [`bone_name`](Self::bone_name) alone does not place it. All four vanilla calls name the
+    /// same joint twice and separate the edges by offset — `haver` at `(0, 3, 0.25)` and `haver`
+    /// again at `(0, 26, 0.5)`, the base and tip of Kirby's cutter — which is exactly why this
+    /// has to be its own field rather than a second read of the first: **the corpus cannot tell
+    /// the two slots apart.** Reading slot 8 where slot 4 was meant returns the right string on
+    /// every vanilla call and only diverges on a mod that points the edges at different bones.
+    ///
+    /// `None` is "this call has no second joint the editor can vouch for", which covers both a
+    /// non-trail and the `macros::AFTER_IMAGE4_ON` / `AFTER_IMAGE_ON` spellings — neither is
+    /// declared by `smash-script` and neither appears in the corpus, so nothing says what sits
+    /// at slot 8 of a call that could not have been written. The panel shows no second joint
+    /// there rather than one guessed from position.
+    #[serde(default)]
+    pub trail_bone2: Option<String>,
     /// Playback rate from a `LAST_EFFECT_SET_RATE` line following this spawn.
     ///
     /// `None` means the script sets no rate and the export writes no line — which is not the
@@ -2881,6 +2902,7 @@ fn eval_effect_stmts(
                                 extra_args: Some(extra_args.clone()),
                                 raw_line: None,
                                 trail_off: None,
+                                trail_bone2: None,
                                 rate: None,
                                 tint: None,
                                 alpha: None,
@@ -2904,6 +2926,7 @@ fn eval_effect_stmts(
                         EffectMacro::AfterImage {
                             effect_name,
                             bone_name,
+                            bone_name2,
                             raw,
                         } => {
                             // Sword/weapon trail — active until AfterImageOff
@@ -2922,6 +2945,7 @@ fn eval_effect_stmts(
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
                                 trail_off: None,
+                                trail_bone2: bone_name2.clone(),
                                 rate: None,
                                 tint: None,
                                 alpha: None,
@@ -3034,6 +3058,7 @@ fn eval_effect_stmts(
                                 extra_args: None,
                                 raw_line: None,
                                 trail_off: None,
+                                trail_bone2: None,
                                 rate: None,
                                 tint: None,
                                 alpha: None,

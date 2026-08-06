@@ -495,15 +495,31 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                 "macros::AFTER_IMAGE_ON("
             };
             if let Some(t) = try_extract(prefix) {
-                // t[1] = tex1 (effect name), t[4] = bone
-                let effect_name = extract_hash40_string(t.get(1).map(|s| s.as_str()).unwrap_or(""))
-                    .unwrap_or_else(|| t.get(1).map(|s| s.trim().to_string()).unwrap_or_default());
-                let bone_name = extract_hash40_string(t.get(4).map(|s| s.as_str()).unwrap_or(""))
-                    .unwrap_or_else(|| t.get(4).map(|s| s.trim().to_string()).unwrap_or_default());
+                let read = |i: usize| {
+                    extract_hash40_string(t.get(i).map(|s| s.as_str()).unwrap_or(""))
+                        .unwrap_or_else(|| {
+                            t.get(i).map(|s| s.trim().to_string()).unwrap_or_default()
+                        })
+                };
+                let effect_name = read(TRAIL_GRAPHIC_SLOT);
+                let bone_name = read(TRAIL_JOINT_SLOT);
+                // The second joint is read only from `_arg29`, the one spelling here that
+                // `smash-script` actually declares. `AFTER_IMAGE4_ON` and `AFTER_IMAGE_ON` are
+                // names no wrapper defines and no corpus script calls, so there is no signature
+                // saying slot 8 is a joint in them — this branch parses them at all only so a
+                // source file containing one survives a round trip. Claiming a joint there would
+                // put an editable field on a call whose layout nothing establishes.
+                let bone_name2 = if prefix.contains("_arg29") {
+                    let name = read(TRAIL_JOINT2_SLOT);
+                    (!name.is_empty()).then_some(name)
+                } else {
+                    None
+                };
                 if !effect_name.is_empty() {
                     macros.push(EffectMacro::AfterImage {
                         effect_name,
                         bone_name,
+                        bone_name2,
                         raw: line.to_string(),
                     });
                     continue;
@@ -529,9 +545,13 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             };
             let effect_name = slot(TRAIL_GRAPHIC_SLOT);
             if !effect_name.is_empty() {
+                let bone_name2 = slot(TRAIL_JOINT2_SLOT);
                 macros.push(EffectMacro::AfterImage {
                     effect_name,
                     bone_name: slot(TRAIL_JOINT_SLOT),
+                    // Absent rather than empty when the call is too short to reach slot 8, so
+                    // the panel offers a second joint only where there is one to rewrite.
+                    bone_name2: (!bone_name2.is_empty()).then_some(bone_name2),
                     raw: line.to_string(),
                 });
                 continue;
@@ -2122,18 +2142,29 @@ fn emit_color_call(command: &str, color: &crate::data::ColorCall, indent: &str) 
 }
 
 /// Argument slots of an AFTER_IMAGE trail that the editor surfaces as editable fields: the
-/// first texture stands in for the effect name, and argument 4 is the joint. Matches what
-/// `parse_excute_block_effects` reads back out of the same call.
+/// first texture stands in for the effect name, and arguments 4 and 8 are the two joints the
+/// ribbon is stretched between. Matches what `parse_excute_block_effects` reads back out of
+/// the same call.
+///
+/// Slots 4 and 8 are `trail_bone1` and `trail_bone2` on the strength of the `smash-script`
+/// declaration, not of the corpus — every vanilla call writes the same joint into both (and
+/// into `flare_bone` at 14), so no real call can tell them apart. Anything asserting which of
+/// these is which must vary the values itself; a corpus-shaped fixture agrees with a swap.
 const TRAIL_GRAPHIC_SLOT: usize = 1;
 const TRAIL_JOINT_SLOT: usize = 4;
+const TRAIL_JOINT2_SLOT: usize = 8;
 
-/// Re-render the two trail arguments the panels let the user change.
+/// Re-render the trail arguments the panels let the user change.
 ///
 /// The rest of a trail call is textures and per-frame trail parameters that no editor field
-/// maps to, so it rides along untouched — but the graphic and joint ARE editable, and
+/// maps to, so it rides along untouched — but the graphic and the two joints ARE editable, and
 /// replaying the line unconditionally dropped those edits with nothing to say so. Only slots
 /// whose value actually differs are spliced, so an untouched trail comes back byte-identical
 /// and a round trip through the emitter still reproduces the original line exactly.
+///
+/// The second joint is spliced only when the call carried one. A trail whose layout the parser
+/// would not vouch for stores `None`, and writing slot 8 of such a call would edit whatever
+/// argument happens to sit there.
 fn retarget_trail_line(raw: &str, call: &crate::data::EffectCall) -> String {
     let Some(site) = crate::acmd_src::scan_macro_sites(raw, 0..raw.len())
         .into_iter()
@@ -2144,10 +2175,14 @@ fn retarget_trail_line(raw: &str, call: &crate::data::EffectCall) -> String {
 
     let mut out = raw.to_string();
     // Descending, so an earlier splice cannot shift a later slot's span out from under it.
-    for (slot, wanted) in [
-        (TRAIL_JOINT_SLOT, call.bone_name.to_ascii_lowercase()),
-        (TRAIL_GRAPHIC_SLOT, call.effect_name.clone()),
-    ] {
+    let slots = [
+        call.trail_bone2
+            .as_ref()
+            .map(|bone| (TRAIL_JOINT2_SLOT, bone.to_ascii_lowercase())),
+        Some((TRAIL_JOINT_SLOT, call.bone_name.to_ascii_lowercase())),
+        Some((TRAIL_GRAPHIC_SLOT, call.effect_name.clone())),
+    ];
+    for (slot, wanted) in slots.into_iter().flatten() {
         let Some(span) = site.args.get(slot) else {
             continue;
         };
@@ -2984,7 +3019,7 @@ pub fn export_acmd_source(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// `AttackModule::clear_all` used to end a hitbox the frame *before* it started when the
@@ -3934,6 +3969,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 ),
                 raw_line: None,
                 trail_off: None,
+                trail_bone2: None,
                 rate: None,
                 tint: None,
                 alpha: None,
@@ -3957,6 +3993,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
                 extra_args: Some(vec!["true".into()]),
                 raw_line: None,
                 trail_off: None,
+                trail_bone2: None,
                 rate: None,
                 tint: None,
                 alpha: None,
@@ -4986,9 +5023,9 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {{
     /// 26 arguments after the command id — C2's own note said 27, having counted the id itself.
     /// Slot 1 is the texture and slot 4 the joint, the same numbering as a `macros::` call,
     /// because the command id sits where `agent` does.
-    const CORPUS_TRAIL: &str = r#"        effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, Hash40::new("tex_kirby_cutter"), Hash40::new("tex_kirby_cutter"), 12, Hash40::new("haver"), 0, 3, 0.25, Hash40::new("haver"), 0, 26, 0.5, true, Hash40::new("null"), Hash40::new("haver"), 0, 0, 0, 0, 0, 0, 1, 0, *EFFECT_AXIS_X, 0, *TRAIL_BLEND_BLEND_SRC_ONE, 1);"#;
+    pub(crate) const CORPUS_TRAIL: &str = r#"        effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, Hash40::new("tex_kirby_cutter"), Hash40::new("tex_kirby_cutter"), 12, Hash40::new("haver"), 0, 3, 0.25, Hash40::new("haver"), 0, 26, 0.5, true, Hash40::new("null"), Hash40::new("haver"), 0, 0, 0, 0, 0, 0, 1, 0, *EFFECT_AXIS_X, 0, *TRAIL_BLEND_BLEND_SRC_ONE, 1);"#;
 
-    fn corpus_trail_script() -> String {
+    pub(crate) fn corpus_trail_script() -> String {
         format!(
             r#"
 unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
@@ -5030,7 +5067,7 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
         );
     }
 
-    /// The graphic and joint come from slots 1 and 4 specifically, not from their twins.
+    /// The graphic and joints come from slots 1, 4 and 8 specifically, not from their twins.
     ///
     /// **The corpus cannot prove this, and tests built only from it silently did not.** Every
     /// vanilla call writes `Hash40::new("tex_kirby_cutter")` at both slot 1 (`trail1`) and slot 2
@@ -5045,7 +5082,7 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
     /// declaration: `AFTER_IMAGE4_ON_arg29(agent, trail1, trail2, trail_length, trail_bone1,
     /// trail_x1, trail_y1, trail_z1, trail_bone2, …)`.
     #[test]
-    fn a_raw_trails_graphic_and_joint_are_read_from_the_first_of_each_duplicated_slot() {
+    fn a_raw_trails_graphic_and_joints_are_read_from_the_slots_the_declaration_names() {
         // Slot 2 is the second texture; slot 8 the trail's other edge.
         let line = CORPUS_TRAIL
             .trim()
@@ -5077,6 +5114,14 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
         assert_eq!(
             calls[0].bone_name, "haver",
             "slot 4 is `trail_bone1`; slot 8 is the trail's other edge and slot 14 the flare's"
+        );
+        // The same fixture, read the other way round. Asserting both directions is what makes
+        // the pair a statement about *which* slot each field comes from: either assertion alone
+        // still passes with the two reads swapped, because on any vanilla call they agree.
+        assert_eq!(
+            calls[0].trail_bone2.as_deref(),
+            Some("sword"),
+            "slot 8 is `trail_bone2`; slot 14 is the flare's bone and is not a trail edge"
         );
     }
 
@@ -5110,6 +5155,110 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
             line.trim(),
             expected,
             "only the joint slot may change; slots 8 and 14 are also `haver` and must not"
+        );
+    }
+
+    /// Retargeting the *second* joint rewrites slot 8 and nothing else.
+    ///
+    /// The mirror of the test above, and it has to be its own case rather than a second edit in
+    /// that one: applied together, an emitter that wrote both edits into a single slot would
+    /// still leave a line containing `top` and `blade`, and asserting on the whole line is only
+    /// decisive when exactly one slot is expected to move. Slot 8 sits between two other
+    /// `haver` hashes, so a splice that got the span even slightly wrong lands on a neighbour.
+    #[test]
+    fn editing_a_raw_trails_second_joint_rewrites_only_that_argument() {
+        let mut calls = parse_effect_script(&corpus_trail_script()).to_effect_calls();
+        let trail = calls
+            .iter_mut()
+            .find(|call| call.spawn_func == "AFTER_IMAGE_ON")
+            .expect("trail call");
+        assert_eq!(
+            trail.trail_bone2.as_deref(),
+            Some("haver"),
+            "the corpus call must carry a second joint, or this edits nothing"
+        );
+        trail.trail_bone2 = Some("blade".into());
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        let line = emitted
+            .lines()
+            .find(|line| line.contains("AFTER_IMAGE3_ON"))
+            .expect("the trail line must still be emitted");
+
+        // Anchored on the preceding `trail_z1` value, which is what distinguishes slot 8 from
+        // the identical hashes at 4 and 14.
+        let expected = CORPUS_TRAIL.trim().replacen(
+            r#"0.25, Hash40::new("haver")"#,
+            r#"0.25, Hash40::new("blade")"#,
+            1,
+        );
+        assert_eq!(
+            line.trim(),
+            expected,
+            "only `trail_bone2` may change; `trail_bone1` and `flare_bone` hold the same hash"
+        );
+    }
+
+    /// A trail call with no slot 8 gets no second joint, rather than an empty one.
+    ///
+    /// The distinction is `Some(String::new())` versus `None`, and only the second is right: a
+    /// `Some` puts a `Bone 2` row in the panel holding nothing, which invites the user to fill
+    /// in a joint that has no argument to be written to. The export would then find no slot 8 to
+    /// splice and drop the edit without a word.
+    ///
+    /// Truncated calls are not hypothetical here — the editor loads whatever a modder's source
+    /// contains, and a hand-written trail is exactly where a short one comes from.
+    #[test]
+    fn a_trail_too_short_to_reach_slot_eight_offers_no_second_joint() {
+        let short = r#"        effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, Hash40::new("tex_kirby_cutter"), Hash40::new("tex_kirby_cutter"), 12, Hash40::new("haver"));"#;
+        let src = format!(
+            "unsafe extern \"C\" fn effect_t(agent: &mut L2CAgentBase) {{\n    \
+             if macros::is_excute(agent) {{\n{short}\n    }}\n}}\n"
+        );
+        let calls = parse_effect_script(&src).to_effect_calls();
+        assert_eq!(calls.len(), 1, "the call must still parse as a trail");
+        assert_eq!(calls[0].bone_name, "haver", "slot 4 is present and is read");
+        assert_eq!(
+            calls[0].trail_bone2, None,
+            "there is no slot 8 in this call, so there is no second joint to offer"
+        );
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "t", &Default::default());
+        assert!(
+            emitted.contains(short.trim()),
+            "a short trail must still ride through verbatim:\n{emitted}"
+        );
+    }
+
+    /// The two trail spellings nothing declares get no second joint to edit.
+    ///
+    /// `macros::AFTER_IMAGE4_ON` and `macros::AFTER_IMAGE_ON` are not in `smash-script` and not
+    /// in the corpus, so no signature says what slot 8 of such a call holds. They are parsed so
+    /// that a source file containing one survives a round trip — offering a `Bone 2` field on
+    /// them would invite an edit to an argument the editor has guessed the meaning of.
+    #[test]
+    fn an_undeclared_trail_spelling_offers_no_second_joint() {
+        let undeclared = r#"        macros::AFTER_IMAGE_ON(agent, Hash40::new("tex_a"), Hash40::new("tex_b"), 12, Hash40::new("haver"), 0, 3, 0.25, Hash40::new("sword"), 0, 26, 0.5);"#;
+        let src = format!(
+            "unsafe extern \"C\" fn effect_t(agent: &mut L2CAgentBase) {{\n    \
+             if macros::is_excute(agent) {{\n{undeclared}\n    }}\n}}\n"
+        );
+        let calls = parse_effect_script(&src).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].bone_name, "haver",
+            "the first joint is read from these spellings, as it always was"
+        );
+        assert_eq!(
+            calls[0].trail_bone2, None,
+            "slot 8 holds `sword` here, but nothing declares this call's layout"
+        );
+
+        // And the line still round-trips, which is the only reason the branch exists.
+        let (_, emitted) = emit_effect_move_fn(&calls, "t", &Default::default());
+        assert!(
+            emitted.contains(undeclared.trim()),
+            "an undeclared spelling must ride through verbatim:\n{emitted}"
         );
     }
 
@@ -5323,6 +5472,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             extra_args: None,
             raw_line: None,
             trail_off: None,
+            trail_bone2: None,
             rate: None,
             tint: None,
             alpha: None,

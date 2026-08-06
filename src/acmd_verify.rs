@@ -1003,16 +1003,23 @@ fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report)
             check_color_values(subject, &label, &call.spawn_func, color, report);
             continue;
         }
-        // A trail rides along as its own source line, so its names are never re-quoted and its
-        // transform is not emitted at all.
+        // Checked for a trail too. Its *transform* is genuinely never emitted — the line rides
+        // through as written — but its graphic and joints are not: `retarget_trail_line` splices
+        // an edited one back in through `hash_arg`, which re-quotes it. So a quote or backslash
+        // here yields `Hash40::new("to"er")`, which is not Rust. The guard below used to cover
+        // these two names as well, on the strength of a comment that said a trail was never
+        // re-quoted; that stopped being true when the splice landed and the comment did not.
+        check_hash_name(
+            subject,
+            &format!("{label} graphic"),
+            &call.effect_name,
+            report,
+        );
+        check_hash_name(subject, &format!("{label} joint"), &call.bone_name, report);
+        if let Some(bone2) = &call.trail_bone2 {
+            check_hash_name(subject, &format!("{label} second joint"), bone2, report);
+        }
         if call.raw_line.is_none() {
-            check_hash_name(
-                subject,
-                &format!("{label} graphic"),
-                &call.effect_name,
-                report,
-            );
-            check_hash_name(subject, &format!("{label} joint"), &call.bone_name, report);
             if let Some(alt) = &call.effect_name_alt {
                 check_hash_name(subject, &format!("{label} second graphic"), alt, report);
             }
@@ -1495,6 +1502,42 @@ mod tests {
             "{}",
             messages(&report)
         );
+    }
+
+    /// A trail's names are re-quoted on export, so a quote in one must be refused there too.
+    ///
+    /// The skip in `check_effect_values` was written when a trail's line rode through verbatim
+    /// and nothing about it was re-emitted — true then, and stale the moment C2 taught the
+    /// export to splice the graphic and joint slots back in through `hash_arg`. Since then an
+    /// edit putting a quote into any of the three has produced `Hash40::new("to"er")`, which is
+    /// not Rust, with the verifier reporting nothing.
+    ///
+    /// All three names are checked in one test because they share the one splice path and the
+    /// one skip: whichever of them is left out is left out silently.
+    #[test]
+    fn a_quote_in_a_trails_graphic_or_either_joint_is_refused() {
+        for field in ["graphic", "joint", "second joint"] {
+            let mut calls =
+                crate::acmd::parse_effect_script(&crate::acmd::tests::corpus_trail_script())
+                    .to_effect_calls();
+            let trail = calls
+                .iter_mut()
+                .find(|call| call.spawn_func == "AFTER_IMAGE_ON")
+                .expect("trail call");
+            match field {
+                "graphic" => trail.effect_name = "to\"er".into(),
+                "joint" => trail.bone_name = "to\"er".into(),
+                _ => trail.trail_bone2 = Some("to\"er".into()),
+            }
+
+            let mut report = Report::default();
+            check_effect_values("t", &calls, &mut report);
+            assert!(
+                messages(&report).contains("quote or backslash"),
+                "a trail's {field} reaches the emitted source and must be checked: {}",
+                messages(&report)
+            );
+        }
     }
 
     /// A wind command's arity is part of its name. One argument short is a call that does not

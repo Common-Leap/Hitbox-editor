@@ -1520,6 +1520,8 @@ fn identity_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) ->
     a.effect_name.eq_ignore_ascii_case(&b.effect_name)
         && a.effect_name_alt == b.effect_name_alt
         && a.bone_name.eq_ignore_ascii_case(&b.bone_name)
+        // A trail's second edge is a joint like the first, and no transform rewrite reaches it.
+        && a.trail_bone2 == b.trail_bone2
         && a.spawn_func == b.spawn_func
         && a.active_start == b.active_start
         && a.active_end == b.active_end
@@ -3651,17 +3653,27 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(after.contains("*ATTACK_SETOFF_KIND_ON"), "{after}");
     }
 
+    /// A wrapper-form trail, in the shape `smash-script` actually declares.
+    ///
+    /// Hand-written, because no corpus script calls this spelling — the four vanilla trails are
+    /// the raw `effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …)` form. So its *layout* is taken
+    /// from the declaration rather than invented: 29 arguments, `trail_bone1` at 4 with
+    /// `trail_x1/y1/z1` at 5..=7, `trail_bone2` at 8. The version this replaced put `sword2` at
+    /// slot 5 and `0.75` at slot 8 — a `Hash40` where a coordinate goes and a float where the
+    /// second joint goes — which was harmless only for as long as nothing read slot 8. It now
+    /// does, and a fixture whose shape is made up would have had the editor offering `0.75` as
+    /// an editable joint.
     const TRAIL: &str = r#"unsafe extern "C" fn effect_attacks4(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 5.0);
     if macros::is_excute(agent) {
-        macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), Hash40::new("sword2"), 3, 8, 0.75, 1, 2, 3);
+        macros::AFTER_IMAGE4_ON_arg29(agent, Hash40::new("tex1"), Hash40::new("tex2"), 4, Hash40::new("sword1"), 0, 3, 0.25, Hash40::new("sword2"), 0, 26, 0.5, true, Hash40::new("null"), Hash40::new("haver"), 0, 0, 0, 0, 0, 0, 1, 0, *EFFECT_AXIS_X, 0, *TRAIL_BLEND_BLEND_SRC_ONE, 1, 0, 0.0, 0.0);
     }
 }
 "#;
 
-    /// A trail's arguments are textures and trail parameters, and slots 3..9 are NOT the
-    /// spawn transform. Writing the spawn layout into them replaced the trail's own count
-    /// and parameters (`4, ... 3, 8, 0.75`) with position values and reported success.
+    /// A trail's arguments are textures and trail parameters, and slots 5..=7 are its first
+    /// edge's offset, NOT the spawn transform. Writing the spawn layout into them replaced the
+    /// trail's own parameters with position values and reported success.
     #[test]
     fn a_trail_is_never_written_to_through_the_spawn_transform_layout() {
         let pristine = crate::acmd::parse_effect_script(TRAIL).to_effect_calls();
@@ -3675,6 +3687,48 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(report.changed, 0);
         assert_eq!(report.skipped.len(), 1, "{report:?}");
         assert!(report.skipped[0].contains("no position"), "{report:?}");
+    }
+
+    /// The declared wrapper form yields both joints, from the slots the declaration names.
+    ///
+    /// This is the fixture's own guard: it reads the two joints out of positions holding
+    /// *different* values, so a parser taking `trail_bone2` from slot 4, or `trail_bone1` from
+    /// slot 8, fails here. On any vanilla call the two agree and no such test is possible.
+    #[test]
+    fn the_declared_wrapper_trail_yields_both_of_its_joints() {
+        let calls = crate::acmd::parse_effect_script(TRAIL).to_effect_calls();
+        assert_eq!(calls[0].bone_name, "sword1");
+        assert_eq!(calls[0].trail_bone2.as_deref(), Some("sword2"));
+    }
+
+    /// Moving only the second joint is reported as the edit it is.
+    ///
+    /// **This pins the wording, and that is the whole of what it pins.** A trail meets two
+    /// guards in sequence — `identity_matches` first, the "no transform to write" check second —
+    /// and either alone leaves the source untouched, so nothing about *safety* distinguishes
+    /// them. What differs is the sentence the user gets after editing `Bone 2` and syncing:
+    /// "you changed a joint, and syncing only rewrites transform values", or "this call has no
+    /// transform", which is true of the call and says nothing about their edit.
+    ///
+    /// Asserting on the substring `joint` does not separate those — both messages contain it,
+    /// and dropping `trail_bone2` from `identity_matches` survived a version of this test that
+    /// did. Whether the edit is *seen* at all is covered elsewhere: `differs` is a plain `!=`
+    /// over the whole call and catches it either way.
+    #[test]
+    fn moving_only_the_second_joint_is_reported_as_a_change_source_syncing_will_not_make() {
+        let pristine = crate::acmd::parse_effect_script(TRAIL).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].trail_bone2 = Some("blade".into());
+
+        let (after, report) = rewrite_effect_calls(TRAIL, "t", &pristine, &edited).unwrap();
+        assert_eq!(after, TRAIL, "a trail call must come back untouched");
+        assert_eq!(report.changed, 0);
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert!(
+            report.skipped[0].contains("changed graphic, joint, timing, or enablement"),
+            "the report must name what the user changed, not the transform this call never \
+             had: {report:?}"
+        );
     }
 
     /// Kirby's down attack, verbatim: two spawns, each with its own rate, in one block. The
