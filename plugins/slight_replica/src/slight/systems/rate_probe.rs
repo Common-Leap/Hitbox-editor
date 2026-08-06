@@ -38,7 +38,7 @@ use smash::app::BattleObjectModuleAccessor;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Enough samples to see the step and its recovery, few enough to read by eye.
-const MAX_SAMPLES: u32 = 40;
+const MAX_SAMPLES: u32 = 90;
 
 /// The move being measured. Everything else is ignored outright.
 ///
@@ -47,7 +47,33 @@ const MAX_SAMPLES: u32 = 40;
 /// continuously during locomotion — measured values from 0.73 to 3.17 while simply moving — so
 /// an off-default rate is the *normal* state for a walking fighter and says nothing about
 /// `FT_MOTION_RATE`. Exactly one of ~300 logged lines was the move the entry is about.
-const TARGET_MOTION: &str = "attack_lw4";
+/// Every rate-carrying Kirby move in the corpus, with the argument its script passes and how
+/// many motion frames the slowed span covers.
+///
+/// **`attack_lw4` alone was not enough and the first clean run showed why.** Its
+/// `FT_MOTION_RATE(0.25)` spans script frames 0 to 4 — four motion frames — which under the
+/// reading the data supports is a *single game frame*, so the whole measurement rested on one
+/// sample. `special_n_start` holds 0.5 from frame 1 to 18, a seventeen-frame span that cannot be
+/// crossed in one tick under either reading, and that is the confirmation.
+const TARGET_MOTIONS: &[(&str, f32)] = &[
+    ("attack_lw4", 0.25),
+    ("attack_11", 0.5),
+    ("special_n_start", 0.5),
+    ("special_air_n_start", 0.5),
+    ("attack_hi4", 0.6),
+    ("attack_air_n", 0.75),
+    ("attack_air_hi", 0.75),
+    ("special_lw", 0.75),
+    ("cliff_escape", 0.91),
+];
+
+/// The name of the motion being sampled, or `None` if it is not one of ours.
+fn target_of(motion: u64) -> Option<(&'static str, f32)> {
+    TARGET_MOTIONS
+        .iter()
+        .copied()
+        .find(|(name, _)| smash::phx::Hash40::new(name).hash == motion)
+}
 
 static SAMPLES: AtomicU32 = AtomicU32::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
@@ -103,13 +129,13 @@ pub fn tick(boid: u32, boma: *mut BattleObjectModuleAccessor) {
         )
     };
 
-    // Only the move under test. See [`TARGET_MOTION`] for why "any off-default rate" was the
+    // Only the moves under test. See [`TARGET_MOTIONS`] for why "any off-default rate" was the
     // wrong trigger — locomotion runs at a continuously varying rate as a matter of course.
-    if motion != smash::phx::Hash40::new(TARGET_MOTION).hash {
+    let Some((target, arg)) = target_of(motion) else {
         return;
-    }
+    };
 
-    // Lock to the first agent seen performing it, so the other fighter's ticks cannot interleave.
+    // Lock to the first agent seen performing one, so the other fighter's ticks cannot interleave.
     let locked = PROBE_BOID.load(Ordering::Relaxed);
     if locked == u32::MAX {
         PROBE_BOID.store(boid, Ordering::Relaxed);
@@ -119,8 +145,8 @@ pub fn tick(boid: u32, boma: *mut BattleObjectModuleAccessor) {
 
     if !ARMED.swap(true, Ordering::Relaxed) {
         crate::slight::diag::note(format!(
-            "RATE probe armed on {TARGET_MOTION} boid={boid} — E2. delta is how far \
-             MotionModule::frame moved in ONE game frame."
+            "RATE probe armed boid={boid} — E2. delta is how far MotionModule::frame moved in \
+             ONE game frame."
         ));
         crate::slight::diag::note(
             "RATE  reading A (rate is playback speed): delta == the FT_MOTION_RATE argument. \
@@ -139,7 +165,7 @@ pub fn tick(boid: u32, boma: *mut BattleObjectModuleAccessor) {
     // not visible in `MotionModule::rate` at all.
     if prev_motion != motion {
         crate::slight::diag::note(format!(
-            "RATE -- {TARGET_MOTION} started, frame={frame:.4} (no delta yet)"
+            "RATE -- {target} started (script sets {arg}), frame={frame:.4} (no delta yet)"
         ));
         return;
     }
@@ -147,13 +173,9 @@ pub fn tick(boid: u32, boma: *mut BattleObjectModuleAccessor) {
     let delta = frame - prev;
     let n = SAMPLES.fetch_add(1, Ordering::Relaxed);
     crate::slight::diag::note(format!(
-        "RATE {n:02} boid={boid} motion={motion:#x} frame={frame:.4} delta={delta:.4} \
-         rate={rate:.4} whole={whole:.4} => A_predicts={rate:.4} B_predicts={:.4}",
-        if rate.abs() > f32::EPSILON {
-            1.0 / rate
-        } else {
-            f32::INFINITY
-        }
+        "RATE {n:02} {target} frame={frame:.4} delta={delta:.4} rate={rate:.4} \
+         whole={whole:.4} | script arg={arg} => A_predicts={arg:.4} B_predicts={:.4}",
+        1.0 / arg
     ));
     if n + 1 == MAX_SAMPLES {
         crate::slight::diag::note(

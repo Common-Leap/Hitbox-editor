@@ -2267,7 +2267,36 @@ That leaves the original question open and narrows it usefully: the measurement 
 frame *delta* during a rate-carrying move, because the rate itself is not observable through that
 accessor. The probe now targets `attack_lw4` by motion hash and logs every frame of it.
 
-**A probe is deployed and the entry is one boot from the rest of the answer (2026-08-06).**
+**The first clean trace favours reading B, on one sample, and it needs confirming (2026-08-06).**
+`attack_lw4` measured live, `build=2026-08-06f-rate-lw4`:
+
+```
+RATE -- attack_lw4 started, frame=0.0000 (no delta yet)
+RATE 00 frame=4.0000 delta=4.0000    <- the FT_MOTION_RATE(0.25) window
+RATE 01 frame=5.0000 delta=1.0000    <- and 39 more, all exactly 1.0
+```
+
+The script holds `0.25` from script frame 0 to 4 and restores `1.0` there. Reading A predicts
+`delta == 0.25`; reading B predicts `delta == 1/0.25 == 4.0`. **The measured delta across that
+window is exactly 4.0**, and every frame after the restore is exactly 1.0 — so the probe is
+sampling once per game frame and the 4.0 is real rather than a missed tick. Thirty-nine
+consecutive deltas of exactly 1.0 is what makes the cadence trustworthy.
+
+Reading B also matches `FT_MOTION_RATE_RANGE`'s own arithmetic, which was the original argument
+for it: `rate = game_frames / (motion_end - motion_start)`. A rate *below* 1 therefore makes the
+animation play **faster**, compressing motion frames into fewer game frames — which is
+counter-intuitive enough that it is worth stating outright, and is the opposite of the community
+reading this entry recorded as reading A.
+
+**One sample is not enough to close this**, because `attack_lw4`'s slowed span is four motion
+frames and reading B crosses it in a single game frame. `build=2026-08-06g-rate-multi` now targets
+nine rate-carrying Kirby moves; **`special_n_start` is the decisive one** — it holds `0.5` from
+script frame 1 to 18, a seventeen-frame span no reading crosses in one tick. Reading A predicts
+~34 samples at `delta=0.5`, reading B ~8 samples at `delta=2.0`.
+
+**Do not model the multiplier until that second measurement agrees with this one.**
+
+
 `systems/rate_probe.rs`, in `build=2026-08-06d-rate-probe`, samples `MotionModule::frame` on
 consecutive game frames and writes at most 40 `RATE` lines to `sd:/slight/diag.txt`. It arms only
 when a rate away from 1.0 appears, so it is silent until a rate-carrying move is performed.
