@@ -4463,10 +4463,27 @@ impl VisionaryApp {
              the bank does not have is silent rather than an error, so a typo here plays nothing \
              and the game says nothing about it.",
         );
-        ui.weak(format!(
-            "{} sounds known for {fighter}. Click a name to pick from the list, or type a new one.",
-            candidates.len()
-        ));
+        // Names the vocabulary and where it comes from. The banks are worth spelling out: a
+        // modder looking for a voice clip will not guess that `vc_` is the prefix, and a
+        // fighter's own bank being separate from the shared one is not obvious either.
+        if candidates.is_empty() {
+            ui.weak("No hash labels loaded yet, so there is nothing to browse — typing works.");
+        } else {
+            let own = candidates
+                .iter()
+                .filter(|c| c.starts_with(&format!("se_{fighter}_")))
+                .count();
+            let voice = candidates
+                .iter()
+                .filter(|c| c.starts_with(&format!("vc_{fighter}_")))
+                .count();
+            let common = candidates.len() - own - voice;
+            ui.weak(format!(
+                "{} names: {own} se_{fighter}_ · {common} se_common_ · {voice} vc_{fighter}_ — \
+                 press Browse to search them.",
+                candidates.len()
+            ));
+        }
 
         // Collected and applied after the loop, so the mutable borrow of the script does not
         // overlap the event list it was derived from — the hurtbox section's reason exactly.
@@ -14374,19 +14391,20 @@ fn nothing_to_load(
     None
 }
 
-/// One editable sound name: a text field that is also a searchable list.
+/// One editable sound name: a text field for typing, and a Browse list for finding.
 ///
-/// **The first design put a separate `▾` button and a shared filter box beside the field**, which
-/// meant three controls to change one name and a filter that applied to every row at once. This
-/// is one control: the field holds the name, and what is typed in it *is* the filter, so a user
-/// who types `step` sees every step sound without having to know there is a list at all.
+/// **Three designs, and the reasons for landing here are worth keeping.** The first had a filter
+/// box shared by every row, so filtering one call filtered all of them. The second folded the
+/// list into the text field as a focus-triggered popup — one control, and it did not open
+/// reliably, which is worse than clunky: the user could not select a sound at all and had no way
+/// to discover that a list existed.
+///
+/// So: a plain `TextEdit` (any name is allowed — the label dump is incomplete and real scripts
+/// play names missing from it) beside a `ComboBox` labelled **Browse**, which is a standard
+/// widget that opens on click and cannot fail to. The filter lives *inside* the dropdown and is
+/// per row, so it is scoped to the call being edited.
 ///
 /// Returns whether the name changed.
-///
-/// The list stays open while typing rather than closing on the first keystroke — an
-/// as-you-type filter that dismisses itself is worse than no list. Matching is on any substring,
-/// case-insensitively, because the useful token is usually in the middle: `swing` in
-/// `se_kirby_swing_l`, `step` in `se_common_step_left_m`.
 fn sound_name_picker(
     ui: &mut Ui,
     name: &mut String,
@@ -14394,12 +14412,13 @@ fn sound_name_picker(
     salt: (usize, usize),
 ) -> bool {
     let mut changed = false;
-    let field = ui.add(
-        egui::TextEdit::singleline(name)
-            .id_salt(("sound_name", salt.0, salt.1))
-            .desired_width(230.0),
-    );
-    changed |= field.changed();
+    changed |= ui
+        .add(
+            egui::TextEdit::singleline(name)
+                .id_salt(("sound_name", salt.0, salt.1))
+                .desired_width(230.0),
+        )
+        .changed();
 
     let known = candidates.iter().any(|c| c == name);
     // A tick for a name the dump knows, a question mark for one it does not. **Not an error
@@ -14421,43 +14440,48 @@ fn sound_name_picker(
          check the spelling."
     });
 
-    let popup = ui.make_persistent_id(("sound_pick", salt.0, salt.1));
-    if field.gained_focus() {
-        egui::Popup::open_id(ui.ctx(), popup);
+    // An empty list is a *loading* problem, not an absence of sounds, and it has to say so —
+    // silently offering nothing is how the previous design failed.
+    if candidates.is_empty() {
+        ui.weak("(no names loaded)").on_hover_text(
+            "The hash label dump has not loaded, so there is nothing to browse. Set the data \
+             root, or wait for ParamLabels.csv to finish downloading. Typing a name still works.",
+        );
+        return changed;
     }
-    if egui::Popup::is_id_open(ui.ctx(), popup) {
-        let matches = matching_sounds(candidates, name);
-        let inner = egui::Popup::from_response(&field)
-            .id(popup)
-            // The field keeps focus while the list is open, so typing keeps filtering. A
-            // dropdown that steals focus on the first keystroke is worse than no dropdown.
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                ui.set_min_width(240.0);
-                let mut picked: Option<String> = None;
-                egui::ScrollArea::vertical()
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        if matches.is_empty() {
-                            ui.weak("No sound contains that. It will still be written as typed.");
+
+    let filter_id = ui.make_persistent_id(("sound_filter", salt.0, salt.1));
+    let mut filter: String = ui.data(|d| d.get_temp(filter_id).unwrap_or_default());
+    egui::ComboBox::from_id_salt(("sound_browse", salt.0, salt.1))
+        .selected_text("Browse")
+        .width(80.0)
+        .show_ui(ui, |ui| {
+            ui.set_min_width(260.0);
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text("type to filter…")
+                    .desired_width(f32::INFINITY),
+            );
+            if field.changed() {
+                ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+            }
+            let matches = matching_sounds(candidates, &filter);
+            ui.weak(format!("{} of {}", matches.len(), candidates.len()));
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    if matches.is_empty() {
+                        ui.weak("Nothing contains that.");
+                    }
+                    for cand in &matches {
+                        if ui.selectable_label(*cand == name, *cand).clicked() {
+                            *name = (*cand).clone();
+                            changed = true;
                         }
-                        for cand in &matches {
-                            if ui.selectable_label(*cand == name, *cand).clicked() {
-                                picked = Some((*cand).clone());
-                            }
-                        }
-                    });
-                picked
-            });
-        if let Some(picked) = inner.and_then(|r| r.inner) {
-            *name = picked;
-            changed = true;
-            egui::Popup::close_id(ui.ctx(), popup);
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            egui::Popup::close_id(ui.ctx(), popup);
-        }
-    }
+                    }
+                });
+        });
     changed
 }
 
