@@ -2254,7 +2254,7 @@ there. It survived because the consolidation moved the *pollers* and never audit
 the source: the current hook is a workaround to keep the core effect viewer usable. Wants
 either a proper 13.0.4 hook or a run on real hardware.
 
-### [ ] R4 — Guard against the double-plugin footgun
+### [~] R4 — Guard against the double-plugin footgun
 
 Skyline loads **every file** in `romfs:/skyline/plugins/` as a plugin regardless of extension.
 A `.bak` beside the real `.nro` runs two full copies: double ACMD hooks, double per-frame
