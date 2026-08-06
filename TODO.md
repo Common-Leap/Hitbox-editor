@@ -43,6 +43,19 @@ Two export paths, different rules — do not conflate them:
 
 ### Traps that have already cost real time
 
+- **A guard that enumerates "everything that exists" is correct when written and drops the next
+  family silently.** Four instances in two days, none of which failed loudly and none of which any
+  test caught: the move list filtered to six substrings and hid 65% of the corpus's sound scripts
+  (R5); `load_from_captures` returned early on hitboxes and effects being empty and discarded
+  captured hurtboxes and sounds (R7); `select_move` cleared four per-move fields and left the
+  sound ones populated (R8); and `rebuild_script_from_hitboxes` retained only `Raw` and deleted
+  every `HIT_NODE` the moment B4 typed them. In every case the code was *right* when written and
+  nothing re-examined it. The compiler cannot help — these are `is_empty()` chains and
+  `starts_with` lists, not matches. **Two things that do: make the decision a free function over
+  its inputs so a test can drive it** (inline in a `&mut self` method it is unreachable, which is
+  why all four survived full suites), **and assert the user-facing message names every family**,
+  which turns an invisible drop into a wrong string. Be honest that the second is a reminder and
+  not a proof: a fifth family only fails the test if someone adds its name to the expected list.
 - **Argument slots are per family.** An id that means one thing in `ATTACK` means something
   else in `CATCH` or `AREA_WIND`. Never reuse a slot table across families — a cross-family
   write silently corrupts a different call. Give each new family its own table.
@@ -2587,6 +2600,34 @@ written and nothing re-examined it.
   there, so the test is a reminder rather than a proof. Said plainly in the test's own comment.
 - Two mutations, both caught: restoring the two-family guard fails three tests, and reverting the
   message to the old wording fails the fourth.
+
+### [x] R8 — Switching moves kept the previous move's sounds (done 2026-08-06)
+
+Found immediately after R7, by opening a second move. The sounds from the first one stayed on
+screen, and a **⟳ Live** on the new move did not replace them.
+
+`select_move` clears the hitboxes, the game script, the effect script and the effect list. Sound
+arrived in D1c and was never added, so `sound_script`, `sounds` and `sounds_pristine` survived the
+move change. **Two failures compounded**: the stale list was displayed as if it belonged to the
+new move, *and* `adopt_captured_sounds` declines to overwrite a non-empty sound script — a
+deliberate rule, so a capture cannot clobber a fetched script — so the new move's live capture was
+then refused and the old data kept looking authoritative.
+
+**The fourth guard of this shape in two days**, after the move-list filter (R5), the capture
+early-return (R7), and `rebuild_script_from_hitboxes` (B4). Every one is an enumeration of "all
+the things that exist" that was accurate when written. See the traps list.
+
+- **Fixed** as `clear_move_state(&mut AppState)`, a free function, so the enumeration can be
+  asserted. It goes through `set_script` rather than assigning the field, because that also
+  derives `hurtboxes_pristine` and `attack_mods_pristine` and reimplementing it here is one more
+  place to drift.
+- **Deliberately not `AppState::default()`**, which would also drop the fighter, the loaded
+  labels, the project and the edit log. The test asserts a label survives, so a later
+  simplification to `default()` fails rather than silently resetting the session.
+- **`switching_moves_clears_every_per_move_field` is an exhaustiveness test the compiler cannot
+  write.** A per-move field added to `AppState` has to be cleared there and asserted there, and
+  nothing else will catch it. Both mutations caught: dropping the sound clear fails it and fails
+  `a_cleared_move_accepts_a_captured_sound_script_again`.
 
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 

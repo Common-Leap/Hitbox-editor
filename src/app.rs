@@ -1803,14 +1803,7 @@ impl VisionaryApp {
             }
         }
         self.state.total_frames = move_entry.frame_count;
-        self.state.hitboxes.clear();
-        self.state.set_script(crate::data::AcmdScript::default());
-        // No `record_dropped_effect_lines` here, unlike the other resets of this field.
-        // `selected_move` is still the *previous* move on this line, so recording would file
-        // this blank script under that move's name and erase a note that is still true — its
-        // spawn snapshot in `effect_call_full` outlives this clear for the same reason.
-        self.state.effect_script = crate::data::EffectScript::default();
-        self.state.effects = Vec::new();
+        clear_move_state(&mut self.state);
         self.acmd_error = None;
         // Path was resolved at move list build time — no disk scan needed
         self.current_anim_path = move_entry.anim_path.clone();
@@ -14389,6 +14382,40 @@ pub fn synthesize_script_from_hitboxes(
     AcmdScript { stmts }
 }
 
+/// Drop everything that belongs to the move being navigated away from.
+///
+/// **A free function over `AppState` so a test can assert it is exhaustive**, which is the whole
+/// point: this is an enumeration of "every per-move field", and it was wrong. Sound arrived in
+/// D1c and was never added, so switching moves carried the previous move's sounds across — and
+/// worse, `adopt_captured_sounds` refuses to overwrite a non-empty sound script, so a live
+/// capture of the new move was then declined and the stale list stayed on screen looking correct.
+///
+/// That is the fourth guard of this shape to go wrong in two days, after the move-list filter,
+/// the capture early-return, and `rebuild_script_from_hitboxes`. The compiler cannot help — there
+/// is no exhaustive match to write — so the defence is
+/// `switching_moves_clears_every_per_move_field`, which fails on a field left populated.
+///
+/// Deliberately *not* `AppState::default()`: this state also holds the fighter, the loaded
+/// labels, the project and the edit log, none of which belong to a move.
+fn clear_move_state(state: &mut crate::data::AppState) {
+    state.hitboxes.clear();
+    state.hitboxes_pristine.clear();
+    // Through `set_script`, not by assigning the field: it also derives `hurtboxes_pristine`
+    // and `attack_mods_pristine`, and reimplementing that here is one more place to drift.
+    state.set_script(crate::data::AcmdScript::default());
+    // No `record_dropped_effect_lines` here, unlike the other resets of this field.
+    // `selected_move` is still the *previous* move at this point, so recording would file this
+    // blank script under that move's name and erase a note that is still true — its spawn
+    // snapshot in `effect_call_full` outlives this clear for the same reason.
+    state.effect_script = crate::data::EffectScript::default();
+    state.effects = Vec::new();
+    state.effects_pristine = Vec::new();
+    state.sound_script = crate::data::AcmdScript::default();
+    state.sounds = Vec::new();
+    state.sounds_pristine = Vec::new();
+    state.acmd_source = String::new();
+}
+
 /// The status message for a capture that carried nothing this editor can show, or `None` to load.
 ///
 /// A free function taking four counts so a test can reach it. The decision it makes is one line
@@ -16038,6 +16065,119 @@ mod live_effect_capture_tests {
         assert!(nothing_to_load(0, 1, 0, 0).is_none());
         assert!(nothing_to_load(0, 0, 1, 0).is_none());
         assert!(nothing_to_load(0, 0, 0, 1).is_none());
+    }
+
+    /// Switching moves drops every field that belonged to the previous one.
+    ///
+    /// **This is an exhaustiveness test for an enumeration the compiler cannot check**, and it
+    /// exists because that enumeration was wrong: sound arrived in D1c and was never added to
+    /// `select_move`, so the previous move's footsteps stayed on screen. Worse than merely stale
+    /// — `adopt_captured_sounds` declines to overwrite a non-empty sound script, so a live
+    /// capture of the *new* move was then refused and the old list looked authoritative.
+    ///
+    /// A field added to `AppState` that belongs to a move and not to a fighter has to be cleared
+    /// here and asserted here. Nothing else will catch it.
+    #[test]
+    fn switching_moves_clears_every_per_move_field() {
+        let script = crate::acmd::parse_sound_script(
+            "unsafe extern \"C\" fn sound_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 6.0);\n    if macros::is_excute(agent) {\n        \
+             macros::PLAY_SE(agent, Hash40::new(\"se_kirby_swing_l\"));\n    }\n}\n",
+        );
+        let effect_fixture = crate::acmd::parse_effect_script(
+            "unsafe extern \"C\" fn effect_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 3.0);\n    if macros::is_excute(agent) {\n        \
+             macros::EFFECT(agent, Hash40::new(\"sys_smash_flash\"), Hash40::new(\"top\"), 0, 0, \
+             0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false);\n    }\n}\n",
+        )
+        .to_effect_calls();
+        assert!(!effect_fixture.is_empty(), "effect fixture must parse");
+        let mut state = crate::data::AppState {
+            hitboxes: vec![crate::data::Hitbox::default()],
+            hitboxes_pristine: vec![crate::data::Hitbox::default()],
+            effects: effect_fixture.clone(),
+            effects_pristine: effect_fixture.clone(),
+            sound_script: script.clone(),
+            sounds: script.to_sound_events(),
+            sounds_pristine: script.to_sound_events(),
+            acmd_source: "Live capture".into(),
+            ..Default::default()
+        };
+        // A field that belongs to the *fighter*, not the move, and must survive.
+        state.labels.insert(1, "se_kirby_swing_l".into());
+        assert!(!state.sounds.is_empty(), "fixture must actually populate");
+
+        clear_move_state(&mut state);
+
+        assert!(state.hitboxes.is_empty(), "hitboxes");
+        assert!(state.hitboxes_pristine.is_empty(), "hitboxes_pristine");
+        assert!(state.effects.is_empty(), "effects");
+        assert!(state.effects_pristine.is_empty(), "effects_pristine");
+        assert!(state.script.stmts.is_empty(), "script");
+        assert!(state.effect_script.stmts.is_empty(), "effect_script");
+        assert!(state.sound_script.stmts.is_empty(), "sound_script");
+        assert!(state.sounds.is_empty(), "sounds");
+        assert!(state.sounds_pristine.is_empty(), "sounds_pristine");
+        assert!(state.hurtboxes_pristine.0.is_empty(), "hurtboxes_pristine");
+        assert!(
+            state.attack_mods_pristine.is_empty(),
+            "attack_mods_pristine"
+        );
+        assert!(state.acmd_source.is_empty(), "acmd_source");
+
+        // The fighter's own data is untouched — this is not `AppState::default()`.
+        assert_eq!(
+            state.labels.len(),
+            1,
+            "labels belong to the fighter, not the move"
+        );
+    }
+
+    /// A cleared move accepts a live capture again.
+    ///
+    /// The consequence that made the stale sounds hard to spot rather than merely wrong:
+    /// `adopt_captured_sounds` refuses a non-empty sound script, so without the clear the new
+    /// move's capture is declined and the old move's sounds keep looking like the answer.
+    #[test]
+    fn a_cleared_move_accepts_a_captured_sound_script_again() {
+        let old = crate::acmd::parse_sound_script(
+            "unsafe extern \"C\" fn sound_x(agent: &mut L2CAgentBase) {\n    \
+             frame(agent.lua_state_agent, 6.0);\n    if macros::is_excute(agent) {\n        \
+             macros::PLAY_SE(agent, Hash40::new(\"se_kirby_swing_l\"));\n    }\n}\n",
+        );
+        let mut state = crate::data::AppState {
+            sound_script: old.clone(),
+            sounds: old.to_sound_events(),
+            sounds_pristine: old.to_sound_events(),
+            ..Default::default()
+        };
+        let rev = sound_rev(&["se_kirby_step_left_m", "se_kirby_step_right_m"]);
+        let captures = vec![sound_capture(
+            "PLAY_STEP_FLIPPABLE",
+            12.0,
+            vec![
+                A::Hash(hash40::hash40("se_kirby_step_left_m").0),
+                A::Hash(hash40::hash40("se_kirby_step_right_m").0),
+            ],
+        )];
+        let captured = VisionaryApp::sound_script_from_captures(&captures, &rev);
+
+        // Before the clear: refused, and the old move's sound is still what is shown.
+        assert!(!adopt_captured_sounds(captured.clone(), &mut state));
+        assert_eq!(
+            state.sounds[0].call.sounds,
+            vec!["se_kirby_swing_l".to_string()]
+        );
+
+        clear_move_state(&mut state);
+        assert!(adopt_captured_sounds(captured, &mut state));
+        assert_eq!(
+            state.sounds[0].call.sounds,
+            vec![
+                "se_kirby_step_left_m".to_string(),
+                "se_kirby_step_right_m".to_string()
+            ]
+        );
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
