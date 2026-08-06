@@ -88,7 +88,18 @@ fn sound_action(motion: u64, hash: u64, frame: f32, func: &str) -> Option<(bool,
 /// states for its target.
 unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaArg]) -> bool {
     record(lua_state, func, args);
-    super::SOUND_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let seen = super::SOUND_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if seen == 0 {
+        // One line per boot, on the first sound this session. `write_capture_diag` only runs at
+        // install and at drain, so its counters are a *boot snapshot* until the editor pulls
+        // captures — `recorded=0` there means "nothing has drained yet", not "nothing fired",
+        // and reading it the other way is what made D1f's second boot unreadable. This is the
+        // one signal that says a hook fired without needing the editor connected at all.
+        //
+        // `diag::note` buffers rather than writing, so this is safe on an ACMD path, and the
+        // one-shot keeps it bounded the way `handle_kill_hash` is bounded.
+        crate::slight::diag::note(format!("SND first captured sound: {func}"));
+    }
     if !any_rules() {
         return false;
     }

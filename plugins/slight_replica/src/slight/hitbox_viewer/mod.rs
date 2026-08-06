@@ -1792,7 +1792,6 @@ pub unsafe fn inject_tick(lua_state: u64) {
 }
 
 pub fn install() {
-    write_capture_diag("installed");
     skyline::install_hooks!(
         hook_attack,
         hook_attack_ignore_throw,
@@ -1818,6 +1817,12 @@ pub fn install() {
     // do with collisions. Its own banner also makes "did the sound hooks load" answerable from
     // the log without counting names.
     sound_hooks::install();
+    // **After the hooks, not before.** This used to be the first statement in the function, which
+    // was harmless while it only reported a stage — and became a lie the moment it started
+    // reporting `sound_hooks`, because that flag is set by the call two lines up. It read `false`
+    // on every boot no matter what, which is the worst possible answer: a flag that exists to
+    // distinguish "did not install" from "installed but silent", stuck on the first.
+    write_capture_diag("installed");
     skyline::println!(
         "[SLight] ACMD ATTACK/CATCH/SEARCH/WIND/CLEAR/HURT/ATKMOD hooks installed (capture + rules)"
     );
