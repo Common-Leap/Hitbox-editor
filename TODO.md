@@ -2134,7 +2134,7 @@ it backwards is worse than today's "not modelled" — the entry's own done-when 
 - **Trap:** branches (`if(WorkModule::is_flag(…)){`) are excluded from timing checks for the
   same reason and are **not** in scope here. Leave that exclusion alone.
 
-### [ ] E3 — Camera and zoom
+### [~] E3 — Camera and zoom
 
 `CAM_ZOOM_IN_arg5`/`_arg6`, `CAM_ZOOM_IN_FINAL_arg13`, `CAM_ZOOM_OUT`, `CAM_ZOOM_OUT_FINAL`,
 `REQ_MOTION_CAMERA`, `FT_START_CUTIN`, `FILL_SCREEN_MODEL_COLOR`, `CANCEL_FILL_SCREEN`.
