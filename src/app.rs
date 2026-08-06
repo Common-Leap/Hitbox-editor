@@ -1740,41 +1740,35 @@ impl VisionaryApp {
                 return;
             };
 
+            let anim_index = index_nuanmb(&motion_dir);
             let mut moves: Vec<MoveEntry> = mlist
                 .list
                 .iter()
-                .filter_map(|(hash_key, _)| {
+                // `.map`, not `.filter_map`: nothing is dropped any more. That is the whole
+                // change — every motion in the list reaches the panel now.
+                .map(|(hash_key, _)| {
                     let hash_val = hash_key.0;
                     let name = labels
                         .get(&hash_val)
                         .cloned()
                         .unwrap_or_else(|| format!("{:#018x}", hash_val));
 
-                    // Filter early to avoid reading files for non-attack moves
-                    let n = name.to_lowercase();
-                    if !(n.contains("attack")
-                        || n.contains("special")
-                        || n.contains("throw")
-                        || n.contains("catch")
-                        || n.contains("cliff")
-                        || n.contains("final"))
-                    {
-                        return None;
-                    }
+                    // **No family filter.** This used to keep only six substrings — attack,
+                    // special, throw, catch, cliff, final — which hid 65% of the corpus's sound
+                    // scripts and every `PLAY_FLY_VOICE` in the game. It was a guard against the
+                    // `AnimData` parse below, not a statement about relevance, and that parse is
+                    // now deferred instead. See [R5](../TODO.md).
+                    let anim_path = find_nuanmb(&motion_dir, &anim_index, &name, hash_val);
 
-                    let anim_path = find_nuanmb(&motion_dir, &name, hash_val);
-                    let frame_count = anim_path
-                        .as_deref()
-                        .and_then(|p| ssbh_data::anim_data::AnimData::from_file(p).ok())
-                        .map(|a| a.final_frame_index as u32 + 1)
-                        .unwrap_or(0);
-
-                    Some(MoveEntry {
+                    MoveEntry {
                         name,
                         hash: hash_val,
-                        frame_count,
+                        // Read on selection rather than here. Parsing ~460 `.nuanmb` files up
+                        // front is what the old filter existed to avoid, and the count is only
+                        // ever shown for the move a user has actually opened.
+                        frame_count: 0,
                         anim_path,
-                    })
+                    }
                 })
                 .collect();
 
@@ -1783,8 +1777,27 @@ impl VisionaryApp {
         });
     }
 
-    fn select_move(&mut self, move_entry: MoveEntry) {
+    fn select_move(&mut self, mut move_entry: MoveEntry) {
         self.state.current_frame = FIRST_GAME_FRAME;
+        // The frame count is parsed here rather than when the list was built. Reading ~460
+        // `.nuanmb` files up front is what the old six-substring family filter existed to avoid,
+        // and hiding most of the roster's moves was too high a price for it — see R5. One parse
+        // on selection is imperceptible, and it is the only moment the number is used.
+        if move_entry.frame_count == 0 {
+            move_entry.frame_count = move_entry
+                .anim_path
+                .as_deref()
+                .and_then(|p| ssbh_data::anim_data::AnimData::from_file(p).ok())
+                .map(|a| a.final_frame_index as u32 + 1)
+                .unwrap_or(0);
+            if let Some(cached) = self
+                .move_list
+                .iter_mut()
+                .find(|m| m.hash == move_entry.hash)
+            {
+                cached.frame_count = move_entry.frame_count;
+            }
+        }
         self.state.total_frames = move_entry.frame_count;
         self.state.hitboxes.clear();
         self.state.set_script(crate::data::AcmdScript::default());
@@ -3689,9 +3702,13 @@ impl VisionaryApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Group the (filtered) moves into the familiar move families, preserving order.
-                let mut groups: Vec<Vec<MoveEntry>> = (0..MOVE_CATEGORY_LABELS.len())
-                    .map(|_| Vec::new())
+                use crate::move_kinds::MoveGroup;
+                let order: Vec<MoveGroup> = MoveGroup::ORDER
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(MoveGroup::Other))
                     .collect();
+                let mut groups: Vec<Vec<MoveEntry>> = order.iter().map(|_| Vec::new()).collect();
                 for m in self.move_list.iter().filter(|m| {
                     move_query.is_empty()
                         || m.name.to_lowercase().contains(&move_query)
@@ -3699,7 +3716,12 @@ impl VisionaryApp {
                             .to_lowercase()
                             .contains(&move_query)
                 }) {
-                    groups[move_category_index(&m.name)].push(m.clone());
+                    let g = crate::move_kinds::group_of(&m.name);
+                    let idx = order
+                        .iter()
+                        .position(|o| *o == g)
+                        .unwrap_or(order.len() - 1);
+                    groups[idx].push(m.clone());
                 }
                 let mut to_select: Option<MoveEntry> = None;
                 for (ci, group) in groups.iter().enumerate() {
@@ -3708,7 +3730,7 @@ impl VisionaryApp {
                     }
                     let mut header = egui::CollapsingHeader::new(format!(
                         "{} ({})",
-                        MOVE_CATEGORY_LABELS[ci],
+                        order[ci].label(),
                         group.len()
                     ))
                     .id_salt(("movecat", ci))
@@ -3728,8 +3750,14 @@ impl VisionaryApp {
                                 .as_ref()
                                 .map(|sm| sm.hash == m.hash)
                                 .unwrap_or(false);
-                            let label =
-                                format!("{} ({}f)", format_move_name(&m.name), m.frame_count);
+                            // The count is 0 until the move is opened, because the parse is
+                            // deferred. Showing "(0f)" for every unopened move would read as a
+                            // move with no animation rather than as a number not yet known.
+                            let label = if m.frame_count > 0 {
+                                format!("{} ({}f)", format_move_name(&m.name), m.frame_count)
+                            } else {
+                                format_move_name(&m.name)
+                            };
                             if ui.selectable_label(selected, &label).clicked() && !selected {
                                 to_select = Some(m.clone());
                             }
@@ -13674,28 +13702,45 @@ impl Hitbox {
     }
 }
 
-fn find_nuanmb(motion_dir: &Path, label: &str, hash: u64) -> Option<PathBuf> {
+/// Every `.nuanmb` in a motion directory, lowercased stem to path.
+///
+/// Built once per move-list load and handed to each [`find_nuanmb`] call. The lookup used to
+/// `read_dir` the whole directory *per move*, which was tolerable while the list was filtered to
+/// about a hundred attacks and is not now that it is the fighter's whole motion list: Kirby has
+/// 398 animations against ~460 moves, so the old shape was heading for ~180,000 directory
+/// entries walked on the load thread. Indexing once makes it linear, and the widened list now
+/// loads faster than the filtered one did.
+fn index_nuanmb(motion_dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(motion_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("nuanmb"))
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_str()?.to_lowercase();
+            Some((stem, p))
+        })
+        .collect()
+}
+
+fn find_nuanmb(
+    motion_dir: &Path,
+    index: &[(String, PathBuf)],
+    label: &str,
+    hash: u64,
+) -> Option<PathBuf> {
     let p = motion_dir.join(format!("{}.nuanmb", label));
     if p.exists() {
         return Some(p);
     }
 
+    // Same rule as before: animation files carry a slot prefix (`a00wait1.nuanmb`), so the match
+    // is on the *end* of the stem with the label's underscores removed.
     let suffix = label.replace('_', "").to_lowercase();
-    if let Ok(entries) = std::fs::read_dir(motion_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("nuanmb") {
-                continue;
-            }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if stem.ends_with(&suffix) {
-                return Some(path);
-            }
-        }
+    if let Some((_, path)) = index.iter().find(|(stem, _)| stem.ends_with(&suffix)) {
+        return Some(path.clone());
     }
 
     let p = motion_dir.join(format!("{:#018x}.nuanmb", hash));
@@ -14234,68 +14279,6 @@ pub fn synthesize_script_from_hitboxes(
 }
 
 /// Display labels for the move-list categories, indexed by `move_category_index`.
-const MOVE_CATEGORY_LABELS: [&str; 12] = [
-    "Specials",
-    "Aerials",
-    "Tilts",
-    "Smashes",
-    "Jabs",
-    "Dash Attack",
-    "Grabs & Throws",
-    "Dodges & Rolls",
-    "Ledge",
-    "Get-ups",
-    "Movement",
-    "Other",
-];
-
-/// Bucket a raw motion name (e.g. "special_air_hi", "attack_s3_s") into a category index
-/// matching `MOVE_CATEGORY_LABELS`, so the move list groups by the familiar move families.
-fn move_category_index(name: &str) -> usize {
-    let n = name;
-    if n.starts_with("special") {
-        0
-    } else if n.starts_with("attack_air") {
-        1
-    } else if n.starts_with("attack_s3")
-        || n.starts_with("attack_hi3")
-        || n.starts_with("attack_lw3")
-    {
-        2 // tilts
-    } else if n.starts_with("attack_s4")
-        || n.starts_with("attack_hi4")
-        || n.starts_with("attack_lw4")
-    {
-        3 // smashes
-    } else if n.starts_with("attack_dash") {
-        5 // dash attack
-    } else if n.starts_with("attack_1") || n.starts_with("attack_9") {
-        4 // jabs (attack_11/12/13, rapid-jab attack_100*)
-    } else if n.starts_with("catch") || n.starts_with("throw") {
-        6
-    } else if n.starts_with("escape") {
-        7 // spot dodge / rolls
-    } else if n.starts_with("cliff") {
-        8 // ledge
-    } else if n.starts_with("down") || n.starts_with("lie") || n.starts_with("passive") {
-        9 // get-ups
-    } else if n.starts_with("walk")
-        || n.starts_with("run")
-        || n.starts_with("dash")
-        || n.starts_with("turn")
-        || n.starts_with("jump")
-        || n.starts_with("fall")
-        || n.starts_with("landing")
-        || n.starts_with("step")
-        || n.starts_with("guard")
-        || n.starts_with("wait")
-    {
-        10 // movement / defense
-    } else {
-        11 // other
-    }
-}
-
 fn format_move_name(name: &str) -> String {
     let stripped = if name.len() > 3 {
         let b = name.as_bytes();

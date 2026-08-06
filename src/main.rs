@@ -15,6 +15,7 @@ mod effects;
 mod game_link;
 mod mod_export;
 mod mod_project;
+mod move_kinds;
 mod param_labels;
 mod renderer;
 mod scratch_dirs;
