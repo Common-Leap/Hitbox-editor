@@ -2478,6 +2478,64 @@ there. It survived because the consolidation moved the *pollers* and never audit
   frame-budget risk, but they ship enabled and write to the SD root. Worth folding into the trace
   gate if that area is touched again; not worth a commit of its own.
 
+### [~] R5 — The move list shows only attacks (in progress 2026-08-06)
+
+**Found while trying to verify D1f live: the walk cycle cannot be opened in the editor at all.**
+[app.rs:1755](src/app.rs:1755) filters the motion list to six substrings — `attack`, `special`,
+`throw`, `catch`, `cliff`, `final` — before a move is even considered. `walk_middle`, `landing`,
+`dash`, `jump`, `wait`, `entry`, `win`: none survive it.
+
+Measured against the corpus, this is most of D1's own subject matter:
+
+| | total | reachable |
+|---|---|---|
+| scripts with sound | 301 | **107 (35%)** |
+| sound calls | 610 | **260 (42%)** |
+
+Per macro it is worse. Unreachable: `PLAY_FLY_VOICE` **5 of 5**, `PLAY_DOWN_SE` 9 of 11,
+`PLAY_LANDING_SE` 9 of 12, `PLAY_STEP_FLIPPABLE` 28 of 38. The very first sound the plugin
+captured in a real boot was a `PLAY_STEP_FLIPPABLE` from walking — a call whose move the editor
+cannot open.
+
+**The filter is not a bug in itself; it is a perf guard that became a capability limit.** Its own
+comment says so: "Filter early to avoid reading files for non-attack moves", i.e. avoid parsing a
+`.nuanmb` per move for frame counts. That was correct while the editor only did hitboxes, because
+non-attack moves mostly have none. Sound landing in D1c changed what "relevant" means and nothing
+failed, because the moves simply never appear. **This is the `Raw`-filter trap from B4 and D1c in
+a third place: a filter that is correct under one assumption becomes a silent restriction when a
+new family arrives.** Added to the traps list.
+
+- **Work order:** widen the list to every motion, keep the frame-count read lazy so load time
+  does not regress, and group the result — 458 distinct move names in the corpus is not a flat
+  list anyone can use.
+- **Categories are derived from the corpus, not invented.** Ground attacks, aerials, specials,
+  grabs and throws, ledge, Final Smash, movement, jumps and landing, idle and crouch, defense,
+  damage and knockdown, items, taunts and results, situational.
+- **Item weapon movesets are their own cluster and are large.** `scope_*` alone is ~50 names
+  (Super Scope), plus `bat_swing*`, `club_swing*`, `death_scythe_swing*`, `l_gun_shoot*`,
+  `steel_diver_shoot*`, `f_flower_shoot*`, `genesis_*`, `magic_pot_*`, `drill_shoot*`. Folding
+  these into "Items" beside `item_light_get` is the difference between a usable list and a wall.
+- **Kirby copy abilities appear on two different axes, and only one is in scope.** Names like
+  `cloud_special_n` / `cloud_special_air_n` sit in the ordinary motion list and are a category
+  here. The *other* axis is bigger: Kirby has **209 motion directories** (`copy_koopa_cap`,
+  `copy_shulk_sword`, `*body`, …) and the editor only ever loads `motion/body/c00`. That changes
+  which `motion_list.bin` is read and how a move is keyed, so it is **its own task** — see R6.
+  Do not let it ride along here.
+- **Test bar:** a corpus test over every distinct move name asserting the uncategorised bucket
+  stays small and that named examples land in the right group. A categoriser silently dumping
+  everything into "Other" is the failure mode, and it looks like success.
+
+### [ ] R6 — Kirby copy abilities live in motion directories the editor never loads
+
+Split out of R5. `fighter/kirby/motion/` has **209 directories**; the editor reads only
+`body/c00`. The copy abilities (`copy_koopa_cap`, `copy_shulk_sword`, `copy_dedede_crown`, …) and
+the donor bodies (`peachbody`, `snakebody`, …) each carry their own `motion_list.bin`.
+
+Not scheduled yet, and it needs a measurement first: whether those directories carry their own
+ACMD scripts, or only animations that the `body/c00` scripts drive. If it is the second, this is
+an animation-picker feature and not an ACMD one, and the entry should say so rather than being
+taken as written.
+
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
