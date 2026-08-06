@@ -2908,6 +2908,33 @@ was then dropped by the claim**, silently.
   invisible from this crate and its failure is silent by construction: a dropped capture line
   looks exactly like a call the game never made.
 
+### [ ] R12 — Exporting from a live capture silently drops the branches that were not taken
+
+**Not a capture bug — a provenance hazard, found while explaining one.** `effect_attacklw4`
+chooses between `sys_whirlwind_l` and `sys_whirlwind_r` on `SO_VAR_FLOAT_LR`, the facing
+direction. Exactly one runs, so a capture holds exactly one, correctly. The GitHub fetch holds
+both because it is the source.
+
+That difference is fine on screen and **not fine on export.** With provenance "Live capture" the
+effect list is the whole model — there are no `Raw` lines to carry through, because the branch was
+never parsed, it was never *there*. So exporting a move loaded from a capture writes a script with
+one arm of the branch and no condition, and the mod then plays the wrong whirlwind in half of all
+cases. Same for any ground/air, flag, or costume branch, and `RawBlock` is common in the corpus:
+**107 of 432 functions carry at least one unmodelled line** (measured for E2).
+
+- **The user cannot currently tell.** "Live capture" appears as a provenance string; nothing says
+  it is a *partial* view of a branching script.
+- **Cheapest useful fix:** when a cached GitHub script exists for the same move, compare its
+  branch count against the capture and warn on export — the editor already fetches it for
+  `capture_vs_script_offset`, so the data is at hand and needs no network.
+- **Do not try to merge the two sources automatically.** Which arm a captured call came from is
+  not recoverable, so a merge would have to guess where to reinsert it, and a wrong guess writes a
+  condition the author never had. Warning is honest; merging is not.
+- **Related and already true:** performing the move under both conditions in one capture window
+  records both arms (R11 made repeat performances land in the same run), but they arrive as two
+  unconditional calls, not as a branch — which is *worse* than one arm, because the export would
+  then play both at once.
+
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
