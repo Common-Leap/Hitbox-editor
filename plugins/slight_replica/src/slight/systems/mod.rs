@@ -14,6 +14,7 @@ pub mod main_module;
 pub mod multipliers;
 pub mod overload_timer;
 pub mod pattern_match;
+pub mod rate_probe;
 pub mod skyline_hook;
 pub mod time_counting;
 pub mod timed_action;

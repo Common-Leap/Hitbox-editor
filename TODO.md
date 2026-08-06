@@ -2255,6 +2255,27 @@ Nothing on this machine distinguishes them: the smashline docs say only that rat
 speed of the animation and how fast the script playback is", and the corpus cannot be used as
 an oracle because it contains no independent statement of when a move actually hits.
 
+**A probe is now deployed and the entry is one boot from an answer (2026-08-06).**
+`systems/rate_probe.rs`, in `build=2026-08-06d-rate-probe`, samples `MotionModule::frame` on
+consecutive game frames and writes at most 40 `RATE` lines to `sd:/slight/diag.txt`. It arms only
+when a rate away from 1.0 appears, so it is silent until a rate-carrying move is performed.
+
+Both readings are statements about how far the motion frame moves in one game frame, so the delta
+distinguishes them outright — no hitbox timing or script correlation needed. Perform **Kirby's
+down smash** (`attack_lw4`, `FT_MOTION_RATE(agent, 0.25)`), the largest separation in the corpus:
+reading A predicts `delta ≈ 0.25`, reading B predicts `delta ≈ 4.0`. The probe prints both
+predictions on each line so the comparison needs no arithmetic.
+
+**There is already a standing prediction, and it favours reading A.**
+`animation_sequencer::at_end_frame` computes `end <= frame + rate` and `update_predict_checker`
+steps by `frame + rate * step` — working code that treats rate as motion frames advanced per game
+frame. That settles what `MotionModule::rate` *means*; it does not settle whether that number is
+the argument `FT_MOTION_RATE` was handed, which is the actual question. The probe logs `rate` and
+`whole_rate` beside the delta so both halves are answered at once.
+
+Delete `rate_probe.rs` and its call in the animation-sequencer facade once the answer is recorded
+here — it is a measurement, not a feature.
+
 **Do not take this entry until the direction is settled**, and settle it by *measuring*, not by
 reasoning: the plugin already reports `MotionModule::frame`, so capturing a rate-carrying move
 live and comparing the reported frame against the script frame answers it in one run. Getting
