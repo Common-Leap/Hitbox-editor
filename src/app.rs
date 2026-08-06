@@ -16298,6 +16298,39 @@ mod live_effect_capture_tests {
         assert_eq!(matching_sounds(&all, "se_kirby_0001").len(), 1);
     }
 
+    /// What frame window a rename of Kirby's walk footstep actually goes out with.
+    ///
+    /// Written while a live sound edit was failing with no explanation, to settle the frame half
+    /// offline instead of spending another game restart on it. `sound_walkfast` opens with
+    /// `wait_loop_sync_mot()` — an unmodelled line — and the question is whether the frame walk
+    /// still lands the two calls on 6 and 20 the way the source reads.
+    #[test]
+    fn the_walk_footsteps_resolve_to_the_frames_their_source_names() {
+        const BODY: &str = r#"unsafe extern "C" fn sound_walkfast(agent: &mut L2CAgentBase) {
+    wait_loop_sync_mot();
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_left_m"), Hash40::new("se_kirby_step_right_m"));
+    }
+    frame(agent.lua_state_agent, 20.0);
+    macros::PLAY_STEP_FLIPPABLE(agent, Hash40::new("se_kirby_step_right_m"), Hash40::new("se_kirby_step_left_m"));
+}
+"#;
+        let events = crate::acmd::parse_sound_script(BODY).to_sound_events();
+        let frames: Vec<u32> = events.iter().map(|e| e.frame).collect();
+        assert_eq!(
+            frames,
+            vec![6, 20],
+            "the two footsteps sit where the source says"
+        );
+
+        // And the window each rule goes out with, in MOTION frames — what the plugin matches
+        // `MotionModule::frame` against.
+        let (start, end) = VisionaryApp::sound_rule_window(&events, events[0].site);
+        assert_eq!(start, Some(4.5));
+        assert_eq!(end, Some(5.5));
+    }
+
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
     /// as statements rather than as spans — the panel, the export, and the source sync all read
     /// the script, and spans alone would show on screen and reach none of them.

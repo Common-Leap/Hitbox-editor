@@ -117,6 +117,14 @@ fn sound_action(motion: u64, hash: u64, frame: f32, func: &str) -> Option<(bool,
 static MISSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const MAX_MISS_REPORTS: u32 = 12;
 
+/// Report an early return, bounded, sharing the miss budget.
+fn bail(func: &str, why: &str) {
+    let seen = MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if seen < MAX_MISS_REPORTS {
+        crate::slight::diag::note(format!("SND bail {func}: {why}"));
+    }
+}
+
 /// Capture one sound call and apply any rule matching it. `true` means suppress it entirely.
 ///
 /// The rule is keyed on the sound the *script* names, not on the one the editor wants played —
@@ -136,12 +144,19 @@ unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaA
         // one-shot keeps it bounded the way `handle_kill_hash` is bounded.
         crate::slight::diag::note(format!("SND first captured sound: {func}"));
     }
+    // **Every early return below reports itself.** The first version of this diagnostic only
+    // logged a rule *miss*, and the failure turned out to be upstream of the rule lookup — no
+    // `SND miss` line appeared at all, which proved only that the diagnostic did not cover the
+    // path that was taken. A branch that bails silently is invisible in exactly the case you are
+    // trying to debug.
     if !any_rules() {
+        bail(func, "no rules loaded at all (any_rules() is false)");
         return false;
     }
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
         as *mut smash::app::BattleObjectModuleAccessor;
     if boma.is_null() {
+        bail(func, "battle_object_module_accessor was null");
         return false;
     }
     let key = match args.first() {
@@ -149,7 +164,13 @@ unsafe fn sound_action_for_call(lua_state: u64, func: &'static str, args: &[LuaA
         // Every member declares slot 0 as `Hash40`. Anything else means the call was written by
         // hand with the wrong type, and there is no key to match on — leave it alone rather than
         // coercing a number into a hash and firing a rule meant for a different sound.
-        _ => return false,
+        other => {
+            bail(
+                func,
+                &format!("slot 0 is not a Hash40, it is {other:?} (all {} args: {args:?})", args.len()),
+            );
+            return false;
+        }
     };
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);

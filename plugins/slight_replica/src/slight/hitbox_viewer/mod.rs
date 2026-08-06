@@ -798,7 +798,38 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
         *guard = rules;
     }
     HAVE_RULES.store(n != 0, std::sync::atomic::Ordering::Release);
-    crate::slight::diag::note(format!("hitbox_rules set: {n} rule(s)"));
+    // Categories, not just a count. "2 rule(s)" is true whether they are two hitbox rules or a
+    // hitbox rule and a sound rule, and those need different answers when a live edit does
+    // nothing — one says the editor never sent the family, the other says it sent it and the
+    // plugin did not match it.
+    let by_cat: Vec<String> = {
+        let guard = RULES.lock();
+        let mut cats: Vec<u8> = guard.iter().map(|r| r.category).collect();
+        cats.sort_unstable();
+        cats.dedup();
+        cats.iter()
+            .map(|c| {
+                let count = guard.iter().filter(|r| r.category == *c).count();
+                let name = match *c {
+                    CAT_ATTACK => "attack",
+                    CAT_GRAB => "grab",
+                    CAT_WIND => "wind",
+                    CAT_HURT => "hurt",
+                    CAT_ABS => "abs",
+                    CAT_ATK_POWER => "atk_power",
+                    CAT_ATK_SETOFF_MUL => "atk_setoff",
+                    CAT_SEARCH => "search",
+                    CAT_SOUND => "sound",
+                    _ => "unknown",
+                };
+                format!("{name}={count}")
+            })
+            .collect()
+    };
+    crate::slight::diag::note(format!(
+        "hitbox_rules set: {n} rule(s) [{}]",
+        by_cat.join(" ")
+    ));
 }
 
 fn any_rules() -> bool {
