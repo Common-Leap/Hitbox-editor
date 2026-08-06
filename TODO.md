@@ -1708,7 +1708,7 @@ the detach half fails; do not schedule them on their own.
 
 ## New script categories
 
-### [~] D1 — `sound_` scripts (D1a–D1e done; D1f in progress 2026-08-06)
+### [~] D1 — `sound_` scripts (D1a–D1e done; D1f built, live edit unverified)
 
 Blocked by: nothing, but it is the largest task here — treat it as its own project.
 
@@ -1741,7 +1741,7 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   5. **[x] D1e (done 2026-08-05)** — Let write-back *create* the category function a
      project does not have. This is the one surface D1b left open, and D1d turned it from an
      edge case into the ordinary one.
-  6. **[x] D1f (built 2026-08-06 — not yet exercised in game)** — Plugin hooks for the sound
+  6. **[~] D1f (built 2026-08-06; install and capture confirmed in game, live edit not yet)** — Plugin hooks for the sound
      primitives, capture, then live. See the sub-entry below.
 
 **Work order revised 2026-08-05, and this is the correction Rule 5 asks for.** The old steps 4
@@ -2078,7 +2078,7 @@ It is now its own pass, guarded on its own script.
 *fighter* is still out of scope and still an error: a project that mentions the character nowhere
 has no file to write into and nothing to attribute a new function to.
 
-#### [x] D1f — Hook, capture and preview the sound family (built 2026-08-06)
+#### [~] D1f — Hook, capture and preview the sound family (built 2026-08-06; live edit unverified)
 
 **Taken now because the "needs hardware" deferral was measured and found false.** D1d and D1c
 both say this machine has no emulator. Eden and Ryujinx are installed with SSBU under each, both
@@ -2152,9 +2152,38 @@ nothing**, which is exactly what B5b cost two tasks to find, and none of them is
 oracle in this project: the export is unaffected, the write-back is unaffected, and the panel
 looks right.
 
-**Named exception — not verified in game.** The plugin builds and the binary contains the hooks
-and the banner, but nothing here has been run. That is what the boot session is for, and it is
-the last thing standing between this and a `[x]` that means what it says.
+**Partly verified in game, 2026-08-06.** `build=2026-08-06c-sound-firstline` on Eden:
+
+```
+ACMD SOUND hooks installed (12 macros, capture + rules)
+SND first captured sound: PLAY_STEP_FLIPPABLE
+```
+
+Confirmed by that: the twelve hooks install on a real boot, and a hook fires. That it fired as
+`PLAY_STEP_FLIPPABLE` is worth more than a bare "a sound was seen" — it is one of only two
+members taking a *pair* of hashes and its name is a prefix of `PLAY_STEP`, so the call resolved
+to the right macro at the right arity rather than through its shorter sibling's layout.
+
+**Still not verified, and none of it follows from the above:** the capture reaching the editor
+(needs a drain, which needs the editor open and fetching), the rename rule applying live, and
+suppress. Those are the halves that can be silently dead, and they are what
+`sound_rules_for`'s four surviving mutations were about.
+
+**Two diagnostic bugs cost two boots, and both are the same shape.** The install banner first
+went out through `skyline::println!`, which reaches the Skyline log, while `sd:/slight/diag.txt`
+is written by `diag::note` — so the check written for it ("grep diag.txt for the banner")
+returned zero and proved nothing. Then `write_capture_diag("installed")`, being the first
+statement of `install()`, snapshot a `sound_hooks` flag that a call twenty lines below it sets,
+so it read `false` on every boot regardless; and its `recorded=` counter only refreshes at
+install and at drain, so `recorded=0` meant "the editor has not pulled yet" rather than "nothing
+fired". A working boot read as a broken one, twice.
+
+**The lesson is [[verification-findings-need-a-channel]] pointed at the boot itself: a signal
+that costs nothing to emit is worthless if it lands somewhere nobody reads, and a flag is worse
+than no flag when it is sampled before the thing it reports.** Check *when* a diagnostic file is
+written before reading a number out of it. The one-shot `SND first captured sound:` line is the
+shape that worked: it names what happened, it does not depend on the editor being connected, and
+it is one buffered write per boot.
 
 ### [ ] D2 — `expression_` scripts
 
