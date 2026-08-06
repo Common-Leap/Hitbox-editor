@@ -2172,7 +2172,7 @@ capstone using the ADRP+ADD/LDR technique `xref_scan.py` already uses, and read 
 loads. **Validate the method by re-deriving the known `EFFECT_MANAGER_OFFSET = 0x5333920`
 first — if it does not reproduce that number, do not trust the new one.**
 
-### [ ] R2 — Windows path and frame-path audit
+### [~] R2 — Windows path and frame-path audit (started 2026-08-05)
 
 The dev machine runs Eden on Linux; a chunk of the tester base is on Windows. Two bug classes
 are structurally invisible here and have shipped before:
