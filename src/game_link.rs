@@ -2152,12 +2152,21 @@ mod tests {
         )
         .expect("read the plugin's hitbox_viewer");
         assert!(
-            source.contains("Some(held) if held.boid == boid => held.run,"),
+            source.contains("Some(h) if h.boid == boid && !h.ended => h.run,"),
             "the same-object resume arm is gone — a charged smash attack will lose every call \
              after its hold, silently"
         );
-        // The other half: a claim held by a *different* object is still a real conflict and must
-        // still be refused, or one fighter's capture absorbs another's.
+        // **`!h.ended` is the other half, and each half alone is a bug that was shipped.**
+        // Resuming on `boid` alone piles every later performance into one snapshot: a charged
+        // smash releases at a different motion frame each time, so the frame in the dedupe key
+        // differs, nothing collapses, and the timeline fills with duplicate effects.
+        assert!(
+            source.contains("ended: bool") && source.contains("claim.ended = true"),
+            "the claim no longer records whether a playback finished — captures will accumulate \
+             across performances instead of the newest run winning"
+        );
+        // The third: a claim held by a *different* object is a real conflict and must still be
+        // refused, or one fighter's capture absorbs another's.
         assert!(
             source.contains("claimed by another object"),
             "the cross-object refusal is gone — captures from two objects can now merge"

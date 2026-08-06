@@ -262,6 +262,15 @@ static END_PENDING: LazyLock<Mutex<Vec<CaptureEnd>>> = LazyLock::new(|| Mutex::n
 struct CaptureClaim {
     boid: u32,
     run: u32,
+    /// Whether this run's playback reached `end_frame` — the move genuinely finished, as opposed
+    /// to being suspended part-way by a charge hold.
+    ///
+    /// **This is what separates resuming a capture from starting a new one, and both mistakes
+    /// are visible.** Never resuming loses everything after a smash attack's charge (R11). Always
+    /// resuming piles every later performance into one snapshot — and they do not collapse into
+    /// each other, because a charged smash releases at a different motion frame each time, so the
+    /// dedupe key differs and the timeline fills with duplicates (R13).
+    ended: bool,
 }
 
 /// Bounded report budget for the claim-collision drop in `mark_capture_motion`.
@@ -559,7 +568,10 @@ fn mark_capture_motion(
 
     let run = {
         let mut claims = CAPTURE_CLAIMS.lock();
-        match claims.get(&(kind, motion)) {
+        // Copied out so the refusal arm can read the holder while the insert arms take a
+        // mutable borrow.
+        let held = claims.get(&(kind, motion)).copied();
+        match held {
             // **The same object returning to a motion it already owns — resume its run.**
             //
             // This is what a charged smash attack does. `attack_lw4` sets
@@ -574,27 +586,54 @@ fn mark_capture_motion(
             // A tilt has no hold and never hit this, which is why the same fetch looked correct
             // on one move and broken on the next.
             //
-            // Resuming rather than opening a new run is deliberate: a charge is one performance
-            // of one move and belongs in one capture, and the dedupe key (motion, frame, func,
-            // args) folds a genuine repeat — a jab thrown twice — into the same lines it already
-            // holds. A *different* object claiming the same motion is a real conflict and is
-            // still refused.
-            Some(held) if held.boid == boid => held.run,
-            Some(held) => {
+            // **Only while that playback is still going.** The first version of this resumed on
+            // `boid` alone, reasoning that the dedupe key (motion, frame, func, args) would fold
+            // a genuine repeat into the lines already held. **That is false for exactly the move
+            // this fix exists for:** a charged smash releases at a different motion frame every
+            // time, so the frame in the key differs, nothing collapses, and each extra
+            // performance stacks another copy of every effect onto the timeline. Reported
+            // immediately as "doing both directions adds a whole bunch of junk effects".
+            //
+            // So a finished playback starts a fresh run instead. The editor reads only the
+            // newest run for a motion (`latest_run_for`), so the last complete performance wins
+            // and a capture is always one performance — which is also the only thing a script
+            // can faithfully represent.
+            Some(h) if h.boid == boid && !h.ended => h.run,
+            // Same object, previous playback finished: a new performance, so a new run.
+            Some(h) if h.boid == boid => {
+                let run = next_run();
+                claims.insert(
+                    (kind, motion),
+                    CaptureClaim {
+                        boid,
+                        run,
+                        ended: false,
+                    },
+                );
+                run
+            }
+            Some(h) => {
                 // The remaining drop, now genuinely rare. Bounded, and it names the call so a
                 // whole family going missing can never again be silent.
                 if CLAIM_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
                     crate::slight::diag::note(format!(
                         "CAP drop {func} motion={motion:#x} frame={frame:.2} boid={boid} — \
                          claimed by another object boid={} run={}; not in any capture",
-                        held.boid, held.run
+                        h.boid, h.run
                     ));
                 }
                 return None;
             }
             None => {
                 let run = next_run();
-                claims.insert((kind, motion), CaptureClaim { boid, run });
+                claims.insert(
+                    (kind, motion),
+                    CaptureClaim {
+                        boid,
+                        run,
+                        ended: false,
+                    },
+                );
                 run
             }
         }
@@ -682,6 +721,8 @@ pub unsafe fn capture_tick(lua_state: u64) {
     let boid = (*boma).battle_object_id;
 
     let mut finished: Option<(i32, u64, u32)> = None;
+    // Set only when the playback reached `end_frame` — a charge hold must not look like this.
+    let mut ended_naturally: Option<(i32, u64, u32)> = None;
     {
         let mut watch = MOTION_WATCH.lock();
         // Resolve the entry BEFORE querying MotionModule: an object nobody captured from
@@ -707,10 +748,27 @@ pub unsafe fn capture_tick(lua_state: u64) {
             // last frame still gets recorded before the editor is told to adopt.
             if w.captured && !w.ended && end > 0.0 && frame >= end {
                 w.ended = true;
+                // Applied *after* this block, not here: taking `CAPTURE_CLAIMS` while holding
+                // `MOTION_WATCH` would be the only nested acquisition of that pair anywhere, and
+                // a lock-order hazard on a game thread is a frozen console rather than a failed
+                // test. Recorded as a value and spent below.
+                ended_naturally = Some((w.kind, w.motion, w.run));
                 finished = Some((w.kind, w.motion, w.run));
             }
         }
         MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
+    }
+    // The claim outlives the watch entry, and that is the point: the entry is dropped the moment
+    // the motion frame steps backwards, so by the time the *next* playback records a line there
+    // is nothing left to say whether the previous one finished or was only suspended by a charge.
+    // Only the claim can answer, and that answer decides between resuming this run and opening a
+    // fresh one.
+    if let Some((kind, motion, run)) = ended_naturally {
+        if let Some(claim) = CAPTURE_CLAIMS.lock().get_mut(&(kind, motion)) {
+            if claim.run == run {
+                claim.ended = true;
+            }
+        }
     }
     if let Some((kind, motion, run)) = finished {
         finish_capture(boid, kind, motion, run);

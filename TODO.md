@@ -2935,6 +2935,44 @@ cases. Same for any ground/air, flag, or costume branch, and `RawBlock` is commo
   unconditional calls, not as a branch — which is *worse* than one arm, because the export would
   then play both at once.
 
+**Confirmed in practice by R13**: capturing both arms was tried and produced "a whole bunch of
+junk effects". The capture is now one performance by construction, so this is no longer reachable
+by accident — but an export from a captured branching move still writes one arm with no condition,
+which is what this entry is for.
+
+### [x] R13 — R11's fix made every later performance pile into one capture (done 2026-08-06)
+
+**A regression from R11, reported one message later: "doing both directions adds a whole bunch of
+junk effects into the timeline."**
+
+R11 resumed a capture run whenever the same object re-entered a claimed motion, and justified it
+in its own commit message: *"a genuine repeat — a jab thrown twice — folds into the lines already
+held, because the dedupe key is (motion, frame, func, args)."* **That is false for exactly the
+move R11 existed to fix.** A charged smash releases at a different motion frame every time, so the
+`frame` in the key differs between performances, nothing collapses, and each repeat stacks another
+copy of every spawn onto the timeline.
+
+- **The claim now records whether its playback reached `end_frame`.** Suspended part-way (a
+  charge) → resume the run. Finished → open a fresh one. The editor already reads only the newest
+  run per motion (`latest_run_for`), so the last complete performance wins and **a capture is
+  always one performance** — which is also the only thing a script can faithfully represent.
+- **The flag lives on the claim, not the watch entry**, because the watch entry is dropped the
+  instant the motion frame steps backwards. By the time the next playback records a line there is
+  nothing left to say whether the previous one finished or was merely held; only the claim
+  outlives that gap.
+- **Applied as a value spent after the lock is released.** Setting it inline would have been the
+  only nested acquisition of `MOTION_WATCH` → `CAPTURE_CLAIMS` in the plugin, and a lock-order
+  hazard on a game thread is a frozen console, not a failed test.
+- **Both halves are pinned now, and each alone is a bug that shipped**: dropping `!h.ended` loses
+  everything after a charge (R11); keeping the resume without the claim flag accumulates
+  performances (R13). `the_plugin_resumes_a_capture_claim_held_by_the_same_object` fails under
+  either mutation.
+- **The lesson is about the justification, not the code.** R11's reasoning named the dedupe key
+  and asserted it would collapse repeats — without checking that the key's `frame` component is
+  stable across performances, which for a *charged* move is exactly what it is not. A claim about
+  why a change is safe is a claim to be measured like any other. This one was written confidently
+  in a commit message and was wrong within the hour.
+
 ### [ ] R3 — Robust Skyline 13.0.4 hook
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
