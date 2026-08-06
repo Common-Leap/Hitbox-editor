@@ -1733,7 +1733,7 @@ the detach half fails; do not schedule them on their own.
 
 ## New script categories
 
-### [~] D1 — `sound_` scripts (D1a–D1f done; D1g fixes the live edit, awaiting confirmation)
+### [x] D1 — `sound_` scripts (done 2026-08-06 — all five surfaces, live verified in game)
 
 Blocked by: nothing, but it is the largest task here — treat it as its own project.
 
@@ -2103,7 +2103,7 @@ It is now its own pass, guarded on its own script.
 *fighter* is still out of scope and still an error: a project that mentions the character nowhere
 has no file to write into and nothing to attribute a new function to.
 
-#### [~] D1f — Hook, capture and preview the sound family (built 2026-08-06; live edit unverified)
+#### [x] D1f — Hook, capture and preview the sound family (done 2026-08-06)
 
 **Taken now because the "needs hardware" deferral was measured and found false.** D1d and D1c
 both say this machine has no emulator. Eden and Ryujinx are installed with SSBU under each, both
@@ -2177,7 +2177,11 @@ nothing**, which is exactly what B5b cost two tasks to find, and none of them is
 oracle in this project: the export is unaffected, the write-back is unaffected, and the panel
 looks right.
 
-**Partly verified in game, 2026-08-06.** `build=2026-08-06c-sound-firstline` on Eden:
+**Verified in game 2026-08-06**, after D1g fixed the one branch that stopped it working.
+Renaming Kirby's up-tilt sound to the electric hit plays the new sound live. All five surfaces
+are now coherent for the `PLAY_SE` family, which closes D1.
+
+The staged confirmation, `build=2026-08-06c-sound-firstline` on Eden:
 
 ```
 ACMD SOUND hooks installed (12 macros, capture + rules)
@@ -2189,10 +2193,9 @@ Confirmed by that: the twelve hooks install on a real boot, and a hook fires. Th
 members taking a *pair* of hashes and its name is a prefix of `PLAY_STEP`, so the call resolved
 to the right macro at the right arity rather than through its shorter sibling's layout.
 
-**Still not verified, and none of it follows from the above:** the capture reaching the editor
-(needs a drain, which needs the editor open and fetching), the rename rule applying live, and
-suppress. Those are the halves that can be silently dead, and they are what
-`sound_rules_for`'s four surviving mutations were about.
+Capture reaching the editor and the rename applying live are both confirmed since. **Suppress is
+still unexercised** — the code path is shared with the rename and differs only in returning early
+instead of rewriting, but nothing has pressed it.
 
 **Two diagnostic bugs cost two boots, and both are the same shape.** The install banner first
 went out through `skyline::println!`, which reaches the Skyline log, while `sd:/slight/diag.txt`
@@ -2342,8 +2345,8 @@ Withdrawn.
 - **Trap, from the measurement:** a move can *restart* without the motion hash changing —
   `attack_11` jabbed twice and the frame went 5 → 0, a negative delta. Anything walking frames
   forward has to treat a backwards step as a restart rather than as a rate.
-- **Delete the probe** — `plugins/slight_replica/src/slight/systems/rate_probe.rs` and its call in
-  the animation-sequencer facade. It is a measurement and its job is done.
+- **~~Delete the probe~~** — done 2026-08-06, along with its call in the animation-sequencer
+  facade. The measurement it existed for is recorded above.
 
 ### [x] E3 — Camera and zoom (done 2026-08-06 — as a placement fix, not a camera panel)
 
