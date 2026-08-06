@@ -72,6 +72,19 @@ above. A backup kept beside the plugin — `lib_effect_viewer.nro.bak`, a rename
 copy, an older build — is loaded as a second plugin, so the hooks run twice and
 the frame rate halves. Keep spare builds somewhere else entirely.
 
+The deployment helper below refuses to deploy while a second copy is present and
+names the file, so following it is enough to avoid this. Two things catch it
+after the fact, for a directory that was populated by hand:
+
+- `diag.txt` opens with `!!!! SLIGHT: PORT ALREADY BOUND`. Only the copy that
+  loses the race for the port can see this, so it appears once no matter how
+  many copies are loaded.
+- `SRV thread entered` appears once per loaded copy. Two of them is the proof.
+
+The build recorded at the top of `diag.txt` is written by whichever copy loads
+last, so it can name a build other than the one just deployed. That is a symptom
+of the same problem, not evidence the deployment failed.
+
 The cross-platform deployment helper uses the normal application-data location
 for the selected emulator. A portable or customized install can declare its mod
 root explicitly:

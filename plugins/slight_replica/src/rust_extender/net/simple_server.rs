@@ -126,7 +126,7 @@ fn server_loop(port: u16) {
         );
         crate::slight::diag::note(format!("SRV bind :{port} rc={bind_rc}"));
         if bind_rc != 0 {
-            skyline::println!("[SLight] bind :{port} failed");
+            report_bind_failure(port, bind_rc);
             return;
         }
 
@@ -155,6 +155,54 @@ fn server_loop(port: u16) {
             }
         }
     }
+}
+
+/// The one line a reader should be able to grep `diag.txt` for. Kept short and unmistakable so
+/// it survives being pasted out of a chat log; the deploy script prints the same phrase.
+pub const DOUBLE_PLUGIN_BANNER: &str = "!!!! SLIGHT: PORT ALREADY BOUND — A SECOND COPY OF THIS \
+                                        PLUGIN IS PROBABLY LOADED";
+
+/// Say out loud what a failed bind almost always means, because the silent version of this cost
+/// about six rounds of misdiagnosis.
+///
+/// Skyline loads **every file** in `romfs:/skyline/plugins/` as a plugin, extension ignored, so a
+/// `lib_effect_viewer.nro.bak` left beside the real one runs a second full copy of us: two sets of
+/// ACMD hooks, two per-frame drivers, and two servers racing for this port. The visible symptom is
+/// a hard 60→30 fps drop on entering training mode, which looks like a performance regression in
+/// whatever was last changed and is not one.
+///
+/// The bind failure was already logged — as `SRV bind :7878 rc=-1`, one lowercase line among
+/// thousands, which nobody reads as "you have two plugins installed". What makes this loud is not
+/// the flush; it is naming the cause, the remedy, and a second check the reader can run.
+///
+/// **The second check is the honest part.** A bind can fail for other reasons (a port set in
+/// `gateway.txt` that something else owns), so the banner does not assert the diagnosis, it points
+/// at the corroborating evidence: each instance runs its own server thread and its own diag flush,
+/// so `SRV thread entered` appears **once per loaded copy**. Two of them is the proof.
+///
+/// It also explains the tell that misled us the first time. [`diag::start_session`] truncates and
+/// rewrites the header, and both copies do it during plugin init, so whichever loads *second* wins
+/// the `build=` line — a reader who just deployed build X sees build Y at the top of the file and
+/// concludes their deploy did not take.
+///
+/// [`diag::start_session`]: crate::slight::diag::start_session
+fn report_bind_failure(port: u16, rc: u32) {
+    use crate::slight::diag;
+    let build = crate::slight::effect_viewer::live_eff::BUILD_TAG;
+    diag::note(DOUBLE_PLUGIN_BANNER);
+    diag::note(format!("     bind :{port} failed rc={rc}; this copy is build={build}"));
+    diag::note("     check: `SRV thread entered` appears once per loaded copy — two = two plugins");
+    diag::note("     note:  the build= header is written by whichever copy loads LAST, not yours");
+    diag::note("     fix:   romfs:/skyline/plugins/ must hold ONE lib_effect_viewer.nro and no");
+    diag::note("            copies of it under any other name — Skyline loads every file there,");
+    diag::note("            .bak and .old included. Re-run the deploy script; it now refuses.");
+    diag::note("     without this server there is no live preview; the game is otherwise fine.");
+    // Flush here rather than leaving it to the per-frame driver. This runs once, on the server
+    // thread, and the buffer it would otherwise sit in is capped at 40000 lines and shared with
+    // two chatty instances — the one message that must not be dropped should not queue behind
+    // 30 frames of SPAWN lines from a plugin the reader does not know is running.
+    diag::flush();
+    skyline::println!("[SLight] bind :{port} failed rc={rc} — second plugin copy? build={build}");
 }
 
 unsafe fn handshake(client: i32) -> u64 {

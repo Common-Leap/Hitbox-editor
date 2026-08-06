@@ -20,6 +20,52 @@ RUNTIME_DEPENDENCIES = (
     "libsmashline_plugin.nro",
 )
 SKYLINE_EXEFS = ("subsdk9", "main.npdm")
+INSTALLED_NAME = "lib_effect_viewer.nro"
+LEGACY_NAME = "libeffect_viewer.nro"
+
+# Any file in the plugins directory whose bytes contain this is a copy of us.
+#
+# Skyline loads EVERY file in romfs:/skyline/plugins/ as a plugin, extension ignored. A
+# `lib_effect_viewer.nro.bak` left beside the real one therefore runs a second full copy: two sets
+# of ACMD hooks, two per-frame drivers, two servers racing for :7878, both writing the same
+# sd:/slight/ diag files. It presents as a hard 60->30 fps drop on entering training mode, which
+# looks like a performance regression in whatever was last changed and is not one. It also
+# invalidates every A/B test run while it is there, which is how it cost ~6 rounds once.
+#
+# Matched on content, not on filename, because the name is exactly what varies -- `.bak`, `.old`,
+# `lib_effect_viewer (1).nro`, a hand-renamed known-good build. It is the path constant from the
+# plugin's diag module, which every build compiles into rodata; `tests/deploy_plugin.rs` pins that
+# the string is still in the source it comes from.
+#
+# It also matches upstream Jorge SLight builds, and that is deliberate rather than a false
+# positive: they bind the same port and write the same files, so having one installed alongside
+# this plugin is the same conflict under a different name.
+PLUGIN_MARKER = b"sd:/slight/diag.txt"
+
+
+def is_plugin_copy(path: Path) -> bool:
+    """True when `path` is some build of this plugin, whatever it has been renamed to."""
+    try:
+        return PLUGIN_MARKER in path.read_bytes()
+    except OSError:
+        return False
+
+
+def scan_plugins_dir(plugins: Path) -> tuple[list[Path], list[Path]]:
+    """Split the files in `plugins` into (strays, unrecognised).
+
+    A stray is a second copy of this plugin under any name. Unrecognised files are reported but
+    never block a deploy -- an unrelated Skyline plugin living in the same directory is a normal,
+    supported thing to have, and refusing to deploy over one would be wrong.
+    """
+    known = {INSTALLED_NAME, LEGACY_NAME, *RUNTIME_DEPENDENCIES}
+    strays: list[Path] = []
+    unrecognised: list[Path] = []
+    for entry in sorted(plugins.iterdir()):
+        if not entry.is_file() or entry.name in known:
+            continue
+        (strays if is_plugin_copy(entry) else unrecognised).append(entry)
+    return strays, unrecognised
 
 
 def default_nro() -> Path:
@@ -59,6 +105,11 @@ def main() -> None:
         help="optional existing mod root from which Ryujinx dependencies are copied",
     )
     parser.add_argument("--nro", type=Path, default=default_nro())
+    parser.add_argument(
+        "--remove-strays",
+        action="store_true",
+        help="delete other copies of this plugin found in the target directory",
+    )
     args = parser.parse_args()
 
     mod_dir = args.mod_dir or (
@@ -87,10 +138,37 @@ def main() -> None:
         )
         copy_missing(source_plugins, plugins, RUNTIME_DEPENDENCIES)
 
-    legacy = plugins / "libeffect_viewer.nro"
+    legacy = plugins / LEGACY_NAME
     if legacy.is_file():
         legacy.unlink()
-    installed = plugins / "lib_effect_viewer.nro"
+
+    strays, unrecognised = scan_plugins_dir(plugins)
+    for entry in unrecognised:
+        print(f"  -- not one of ours, left alone: {entry.name}")
+    if strays and not args.remove_strays:
+        # Refuse BEFORE copying, so a refusal changes nothing and can be re-run after the user
+        # has looked at the files themselves. Deleting anything in someone's mod directory
+        # without being asked is not this script's call to make -- one of these is quite
+        # plausibly a known-good build somebody parked there on purpose.
+        print()
+        print("REFUSING TO DEPLOY: a second copy of this plugin is already installed.")
+        for entry in strays:
+            print(f"  {entry}")
+        print()
+        print(
+            "Skyline loads every file in this directory as a plugin, extension ignored, so each\n"
+            "of the above runs a second full copy: double ACMD hooks, double per-frame ticks,\n"
+            "two servers fighting over :7878. It shows up as a 60->30 fps drop in training mode\n"
+            "and it invalidates any A/B test run while it is there."
+        )
+        print()
+        print("Move them somewhere outside this directory, or re-run with --remove-strays.")
+        raise SystemExit(2)
+    for entry in strays:
+        entry.unlink()
+        print(f"  Removed second plugin copy: {entry}")
+
+    installed = plugins / INSTALLED_NAME
     shutil.copy2(nro, installed)
     print(f"Deployed {installed}")
 

@@ -243,8 +243,9 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**400 green after R2 closed**), including the eight corpus
-      oracles — run
+- [ ] `cargo test` passes (**400 unit + 6 integration after R4 closed**; the integration ones
+      are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
+      including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
       `cargo test is_typed_rather_than` and `cargo test lands_on_a_call`:
@@ -2254,7 +2255,7 @@ there. It survived because the consolidation moved the *pollers* and never audit
 the source: the current hook is a workaround to keep the core effect viewer usable. Wants
 either a proper 13.0.4 hook or a run on real hardware.
 
-### [~] R4 — Guard against the double-plugin footgun
+### [x] R4 — Guard against the double-plugin footgun (done 2026-08-05)
 
 Skyline loads **every file** in `romfs:/skyline/plugins/` as a plugin regardless of extension.
 A `.bak` beside the real `.nro` runs two full copies: double ACMD hooks, double per-frame
@@ -2263,8 +2264,54 @@ files. Symptom is a hard 60→30 fps drop on entering training mode. It cost ~6 
 misdiagnosis once, because it invalidates every A/B test and makes `diag.txt` show the old
 build's header.
 
-- **Work order:** have the plugin detect that a second instance of itself is already live
-  (the port bind already fails — make that failure loud in `diag.txt` instead of silent) and
-  make the deploy script refuse to leave strays behind.
-- **Done when:** deploying over a stray `.bak` produces a visible warning rather than a
-  mysterious halved framerate.
+**Two halves, and only one of them is verifiable from this machine. Both were done; the entry
+says which is which.**
+
+**Deploy script (verified).** `deploy_plugin.py` scans the target plugins directory before
+copying anything and refuses, exit 2, if a second copy of this plugin is already there. It
+matches on **content, not filename** — the bytes `sd:/slight/diag.txt`, the path constant every
+build compiles into rodata — because the filename is exactly the thing that varies: `.bak`,
+`.old`, `lib_effect_viewer (1).nro`, a hand-renamed known-good build. Confirmed against a real
+release `.nro`. `--remove-strays` deletes them instead; nothing is deleted without it, because
+one of those files is quite plausibly a build somebody parked there deliberately.
+
+An **unrelated** Skyline plugin in the same directory is reported and does not block the
+deploy. A guard that fires on a legitimate setup is one users route around, and then it
+protects nobody.
+
+**Plugin (not verified — needs hardware).** The bind failure was already logged, as
+`SRV bind :7878 rc=-1`: one lowercase line among thousands, which nobody reads as "you have two
+plugins installed". It is now a banner naming the cause, the remedy, and — the honest part — a
+**second check the reader can run**, because a bind can fail for other reasons and the banner
+does not assert its own diagnosis. `SRV thread entered` appears once per loaded copy; two of
+them is the proof. The banner also explains the tell that misled us the first time: both copies
+truncate and rewrite the diag header during plugin init, so whichever loads *last* wins the
+`build=` line, and a reader who just deployed build X sees build Y and concludes their deploy
+did not take.
+
+Only the copy that *loses* the race can see any of this, so the banner appears exactly once no
+matter how many copies are loaded. That is sufficient — it is one file.
+
+**Tests:** [tests/deploy_plugin.rs](tests/deploy_plugin.rs), a new integration test that drives
+the real script in a throwaway directory. It lives on the host side, in Rust, because
+`cargo test` is the gate this project actually runs — a Python test suite nothing invokes is a
+comment. Four mutations, each caught by the test that claims the property: never refuse; drift
+the marker; refuse *after* copying (breaks the "a refusal changes nothing" claim); treat
+unrecognised files as strays.
+
+The `refuses_the_deploy_and_changes_nothing` assertion is a negative, so
+`a_clean_plugins_directory_deploys` is there as its paired positive — otherwise a broken script
+path or a Python syntax error would look exactly like a successful refusal.
+
+`the_marker_the_script_greps_for_is_still_in_the_plugin_source` is the one that matters most
+and is the weakest. Every other test synthesises its own fixture bytes containing the marker,
+so if the plugin ever stops writing `sd:/slight/diag.txt` they all stay green while the scan
+matches nothing real and the guard goes quietly dead. That test asserts the literal is still in
+`diag.rs` and still matches the script's copy. It does **not** prove the string survives into
+the linked `.nro` — it does today, checked by hand against a release build, but a built plugin
+does not exist in a fresh clone and a check that skips when the artefact is missing would pass
+vacuously in exactly the case that matters.
+
+**Not done:** the plugin cannot detect a second copy that *wins* the race, and neither half has
+been seen on hardware. The deploy script closes the path a user actually walks; the banner is
+for a directory populated by hand. Documented in the plugin README under Install.
