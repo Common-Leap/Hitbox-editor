@@ -2447,6 +2447,43 @@ pub fn is_color_command(name: &str) -> bool {
     color_command_layout(name).is_some()
 }
 
+/// Trail commands the corpus writes as a raw `effect(*MA_MSC_CMD_…, …)` call rather than
+/// through a `macros::` wrapper, mapped to the name the rest of the editor knows them by.
+///
+/// C2 assumed sword trails were `macros::AFTER_IMAGE4_ON`/`_arg29`/`AFTER_IMAGE_ON`, and all
+/// three have zero corpus calls. The four real trail-ON calls — kirby `SpecialHi2` and
+/// `SpecialAirHi2`, twice each — are `effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …)`. There is
+/// no `macros::AFTER_IMAGE3_ON` to call: `lua_const` declares the command, smash-script never
+/// wrapped it, so the game is reached through the command id and an export must re-emit that
+/// same form.
+///
+/// **The command id sits in the argument slot `agent` occupies in a `macros::` call**, so slot
+/// numbering is shared with the wrapper form and `acmd::TRAIL_GRAPHIC_SLOT` and
+/// `TRAIL_JOINT_SLOT` address both. That is measured against the real calls, not assumed — see
+/// the round-trip tests in `acmd.rs`.
+///
+/// **This table is the single source of truth for two sets that must not drift.** The effect
+/// parser produces an `EffectMacro::AfterImage` for exactly these commands, and
+/// `acmd_src::scan_macro_sites` produces a rewritable site for exactly these commands. A
+/// command in one and not the other shifts every later call ordinal onto the wrong line of the
+/// user's source, which is silent and writes edits into an unrelated call.
+///
+/// `MA_MSC_CMD_EFFECT_AFTER_IMAGE2_ON` is declared by `lua_const` and deliberately absent: it
+/// has zero corpus calls, so its argument layout is unverified, and adding it here would claim
+/// slot 1 is a texture and slot 4 a joint on the strength of nothing. It stays an unmodelled
+/// line and rides through the export verbatim, which is what it does today.
+pub const RAW_TRAIL_COMMANDS: &[(&str, &str)] =
+    &[("MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON", "AFTER_IMAGE3_ON")];
+
+/// The trail site name for a raw command id, accepting it with or without the leading `*`.
+pub fn raw_trail_command(id: &str) -> Option<&'static str> {
+    let id = id.trim().trim_start_matches('*').trim();
+    RAW_TRAIL_COMMANDS
+        .iter()
+        .find(|(command, _)| *command == id)
+        .map(|(_, name)| *name)
+}
+
 /// The argument slot each part of a colour call occupies, counting `agent` as slot 0.
 ///
 /// One layout for the whole family: the transition length comes first where there is one, and
@@ -2906,13 +2943,40 @@ fn eval_effect_stmts(
                             anchor = None;
                         }
                         EffectMacro::AfterImageOff { arg } => {
-                            // Close the most recent open after-image effect, keeping the
-                            // argument this call wrote so the export can write it back.
-                            if let Some(call) =
-                                calls.iter_mut().rev().find(|c| c.active_end == 9999)
+                            // Close the most recent open *trail*, keeping the argument this call
+                            // wrote so the export can write it back.
+                            //
+                            // Not merely the most recent open call. A trail routinely runs while
+                            // an ordinary spawn from the same block is still open — kirby
+                            // `SpecialHi2` starts a trail and an `EFFECT_FOLLOW` in one
+                            // `is_excute` — and `rev()` then picks the follow. That closed the
+                            // wrong call twice over: the `AFTER_IMAGE_OFF` vanished, so the
+                            // exported trail ran forever, *and* the follow acquired an end frame
+                            // it never had, so the export invented an `EFFECT_OFF_KIND` killing
+                            // an effect the script leaves running. Invisible until C2 made trails
+                            // parse, because with no trail call the wrong answer was the only
+                            // answer.
+                            match calls
+                                .iter_mut()
+                                .rev()
+                                .find(|c| c.active_end == 9999 && c.spawn_func == "AFTER_IMAGE_ON")
                             {
-                                call.active_end = script_frame(frame);
-                                call.trail_off = Some(*arg);
+                                Some(call) => {
+                                    call.active_end = script_frame(frame);
+                                    call.trail_off = Some(*arg);
+                                }
+                                // A trail this script did not start. Kirby `SpecialHi4` and
+                                // `SpecialAirHi4` end the trail `SpecialHi2` began — the two
+                                // halves of one move, in separate scripts — so there is no call
+                                // here to close and no way to make one. Dropping the line would
+                                // leave the trail running, so it is carried verbatim.
+                                None => walk.residue(
+                                    &format!(
+                                        "macros::AFTER_IMAGE_OFF(agent, {});",
+                                        crate::acmd::attack_mod_num(*arg)
+                                    ),
+                                    calls,
+                                ),
                             }
                             anchor = None;
                         }

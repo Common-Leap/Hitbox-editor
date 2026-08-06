@@ -473,17 +473,23 @@ mod tests {
     /// saved, reloaded, and exported again.
     ///
     /// The fixture is lifted from the corpus rather than written here, because a hand-made
-    /// "lossy" script only proves that this test can construct one. `SpecialHi2` is a real
+    /// "lossy" script only proves that this test can construct one. `Run` is a real
     /// script that really loses a line, and the assertion below is that a user who saves that
     /// project, closes Visionary, reopens it and exports without ever opening the move again is
     /// still told so — which before C6c they were not, twice over: the project had nowhere to
     /// keep the list, and the export threw its whole report away bar the blockers.
+    ///
+    /// **Repointed from `SpecialHi2` by C2, which is the guard below doing its job.** Modelling
+    /// the raw-command sword trail made `SpecialHi2` lossless, so it stopped exercising anything
+    /// and said so instead of passing quietly. `Run` loses a `wait_loop_sync_mot`, which
+    /// the `EffectStmt::Raw` arm drops on purpose and has no plan to ever carry — a deliberately
+    /// unmodelled line is a steadier fixture than one that is merely unmodelled yet.
     #[test]
     fn a_reloaded_project_still_reports_the_lines_its_export_deletes() {
         let script_path = crate::scratch_dirs::app_storage_root()
             .join("script-cache")
             .join("kirby")
-            .join("SpecialHi2.txt");
+            .join("Run.txt");
         let Ok(body) = std::fs::read_to_string(&script_path) else {
             return;
         };
@@ -495,7 +501,7 @@ mod tests {
         // nothing and should be repointed at a move that still does, not deleted.
         assert!(
             !calls.is_empty() && !lost.is_empty(),
-            "SpecialHi2 no longer exercises a loss; repoint this test at a move that does"
+            "Run no longer exercises a loss; repoint this test at a move that does"
         );
 
         let build = |dropped: HashMap<String, Vec<String>>| {
@@ -507,7 +513,7 @@ mod tests {
             project.fighters.insert(
                 "kirby".into(),
                 FighterMod {
-                    effect_calls_full: HashMap::from([("special_hi2".into(), calls.clone())]),
+                    effect_calls_full: HashMap::from([("run".into(), calls.clone())]),
                     effect_dropped_lines: dropped,
                     ..Default::default()
                 },
@@ -523,7 +529,7 @@ mod tests {
                 .join("\n")
         };
 
-        let said = build(HashMap::from([("special_hi2".into(), lost.clone())]));
+        let said = build(HashMap::from([("run".into(), lost.clone())]));
         let first = lost[0].trim();
         assert!(
             said.contains(first),

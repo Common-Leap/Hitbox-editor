@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**382 green after C6d closed**), including the eight corpus
+- [ ] `cargo test` passes (**389 green after C2's first half closed**), including the eight corpus
       oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
       `cargo test unbalanced`, `cargo test survives_a_round_trip`,
@@ -978,6 +978,69 @@ kirby/SpecialAirHi2.txt:39, :54   effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, …
 
 That is the "real call in hand" this entry was waiting for. It does not make the joint-pair work
 *done*, and it changes what that work is — but it is no longer blocked on evidence.
+
+**Done 2026-08-05 — the raw-command trail is modelled end to end.** All four vanilla trail-ON
+calls now parse, export byte-identically, and take a joint edit. What the entry got wrong, and
+what the work found:
+
+- **26 arguments after the command id, not 27.** The note above counted the id itself. An
+  off-by-one here shifts every slot, which is the whole hazard the `_arg29` bullet warns about,
+  so it is corrected rather than left as a stale number.
+- **The layout is `AFTER_IMAGE4_ON_arg29`'s, three arguments short** (no `cull`, `unk16`,
+  `unk17`). That is not assumed from the name: eight independent positions agree by *type* —
+  `Hash40` at 1, 2, 4, 8, 13, 14; `u64` at 3; `bool` at 12; and the two `i32` `lua_const`s at 23
+  and 25. So the "three joint hashes" above are `trail_bone1` (4), `trail_bone2` (8) and
+  `flare_bone` (14) — the pair this entry originally assumed is real, and the third is the
+  flare's bone, a different thing.
+- **The command id sits in the slot `agent` occupies in a wrapper call**, so `TRAIL_GRAPHIC_SLOT`
+  and `TRAIL_JOINT_SLOT` address both forms unchanged.
+- **The parser and the write-back scanner had to be extended together.** `call_macro_ordinals`
+  counts the calls the parser makes and `rewrite_effect_calls` indexes sites by that ordinal, so
+  typing a line the scanner cannot see would not fail — it would splice a later edit into a
+  *different* call. Both now go through `data::RAW_TRAIL_COMMANDS` and the same
+  `acmd_src::raw_trail_line`, and a corpus oracle asserts the two lists agree across all 461
+  scripts.
+- **A real bug fell out, invisible until trails parsed.** `AFTER_IMAGE_OFF` resolved against the
+  most recent open *call*, not the most recent open *trail*. Kirby `SpecialHi2` opens a trail and
+  an `EFFECT_FOLLOW` in one `is_excute`, so the close landed on the follow: the `AFTER_IMAGE_OFF`
+  vanished (exported trail runs forever) **and** the follow gained an end frame the script never
+  wrote, so the export invented an `EFFECT_OFF_KIND` killing an effect early. With no trail call
+  in the model the wrong answer had been the only answer. A close with no local trail — kirby
+  `SpecialHi4` ends what `SpecialHi2` began, two scripts, one move — is now carried verbatim
+  instead of dropped.
+- **The loss ratchet moved further than predicted: 15 scripts → 13, 20 lines → 16.** The bullet
+  above expected 18/15 because `pop()` sits in the same two files. It was wrong in the useful
+  direction: each `methodlib::L2CAgent::pop()` shares its `is_excute` block with a trail and had
+  no spawn to ride on until the trail became one, so both went too. `SpecialHi2` and
+  `SpecialAirHi2` are now clean. The audit's composition table and the `lossy <= 13` ratchet are
+  updated; `mod_export`'s reloaded-loss test had to be repointed off `SpecialHi2` — its own guard
+  said so rather than passing quietly — onto kirby `Run`, which loses a `wait_loop_sync_mot` the
+  export drops on purpose and so will not churn again.
+- **Seven mutations run; two survived first time and are the finding worth keeping.** Moving the
+  graphic read to slot 2 and the joint read to slot 8 both passed all 388 tests, because every
+  vanilla call writes the same `tex_kirby_cutter` at slots 1 and 2 and the same `haver` at 4, 8
+  and 14. **The corpus cannot distinguish the slots the editor reads.** The fixture that closes
+  this keeps the corpus's 26-argument layout and varies only the twin slots' values, with the
+  declaration as the independent evidence for which is which.
+
+**Named exceptions.**
+
+- **Live is untouched.** Trails have no transform and the plugin has no trail primitive; nothing
+  was sent or captured, and nothing here was verified on hardware.
+- **The second trail joint (slot 8) and the flare bone (slot 14) are parsed past, not exposed.**
+  The panel still shows one joint. Editing `trail_bone2` is the remaining half of this entry's
+  done-when and is now cheap — the slot is addressable and the round-trip proven — but it needs
+  a panel field and a `retarget_trail_line` slot, so it stays open below.
+- **`MA_MSC_CMD_EFFECT_AFTER_IMAGE2_ON` is deliberately not modelled.** `lua_const` declares it,
+  the corpus never calls it, so its layout is unverified; adding it to `RAW_TRAIL_COMMANDS` would
+  claim slot 1 is a texture on the strength of nothing. It rides through verbatim, as today.
+- **`macros::AFTER_IMAGE4_ON`/`AFTER_IMAGE_ON` parsing is unchanged and still unexercised by the
+  corpus.** The fabricated `_arg29` test fixtures remain; they are not evidence and no new work
+  was built on them.
+
+**Still open here:** expose `trail_bone2` (slot 8) as a second editable joint, which completes
+"changing a trail's joints rewrites those arguments and nothing else". The transform refusal at
+[acmd_src.rs:803](src/acmd_src.rs:803) stays correct and stays.
 
 ### [x] C2a — `AFTER_IMAGE_OFF` is exported without its argument (done 2026-08-04)
 

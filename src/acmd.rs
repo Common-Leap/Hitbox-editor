@@ -511,6 +511,33 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // The same trail, written as a raw command instead of a wrapper: there is no
+        // `macros::AFTER_IMAGE3_ON` for the caller to have used. All four trail-ON calls in the
+        // corpus take this form, so this branch — not the one above it — is the one that fires
+        // on real vanilla code. The command id occupies slot 0, where `agent` sits in a wrapper
+        // call, so the graphic and joint are read from slots 1 and 4 exactly as above.
+        // Read the slots off the site the rewriter would find, not off a second, looser scan of
+        // the same text — that is what keeps "the parser made a call here" and "the rewriter can
+        // edit a call here" the same statement.
+        if let Some(site) = crate::acmd_src::raw_trail_line(line) {
+            let slot = |i: usize| {
+                site.arg(line, i)
+                    .map(|value| {
+                        extract_hash40_string(value).unwrap_or_else(|| value.trim().to_string())
+                    })
+                    .unwrap_or_default()
+            };
+            let effect_name = slot(TRAIL_GRAPHIC_SLOT);
+            if !effect_name.is_empty() {
+                macros.push(EffectMacro::AfterImage {
+                    effect_name,
+                    bone_name: slot(TRAIL_JOINT_SLOT),
+                    raw: line.to_string(),
+                });
+                continue;
+            }
+        }
+
         // AFTER_IMAGE_OFF — turns off a sword trail. Its one argument is undocumented but
         // required by the macro, so it is read and carried rather than discarded.
         if line.contains("macros::AFTER_IMAGE_OFF(") {
@@ -700,6 +727,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::AFTER_IMAGE4_ON")
             || line.contains("macros::AFTER_IMAGE_ON")
             || line.contains("macros::AFTER_IMAGE_OFF(")
+            || crate::acmd_src::raw_trail_line(line).is_some()
             || line.contains("macros::LAST_EFFECT_SET_RATE(")
             || line.contains("macros::LAST_EFFECT_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_ALPHA(")
@@ -4947,6 +4975,256 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {{
         }
     }
 
+    // ── C2: trails written as a raw command ──────────────────────────────────
+    //
+    // Every fixture below is the real kirby `SpecialHi2` text, not a shape invented here. The
+    // entry's earlier `_arg29` fixture was fabricated, put a `Hash40` where a coordinate goes,
+    // and would have pinned joint work to a call the game never makes.
+
+    /// The first trail-ON call of kirby `SpecialHi2`, verbatim.
+    ///
+    /// 26 arguments after the command id — C2's own note said 27, having counted the id itself.
+    /// Slot 1 is the texture and slot 4 the joint, the same numbering as a `macros::` call,
+    /// because the command id sits where `agent` does.
+    const CORPUS_TRAIL: &str = r#"        effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, Hash40::new("tex_kirby_cutter"), Hash40::new("tex_kirby_cutter"), 12, Hash40::new("haver"), 0, 3, 0.25, Hash40::new("haver"), 0, 26, 0.5, true, Hash40::new("null"), Hash40::new("haver"), 0, 0, 0, 0, 0, 0, 1, 0, *EFFECT_AXIS_X, 0, *TRAIL_BLEND_BLEND_SRC_ONE, 1);"#;
+
+    fn corpus_trail_script() -> String {
+        format!(
+            r#"
+unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {{
+{CORPUS_TRAIL}
+        macros::EFFECT_FOLLOW(agent, Hash40::new("kirby_fcut_rise"), Hash40::new("haver"), 0, 3, 0.3, 0, 0, 0, 1, true);
+    }}
+    frame(agent.lua_state_agent, 7.0);
+    if macros::is_excute(agent) {{
+        macros::AFTER_IMAGE_OFF(agent, 3);
+    }}
+}}
+"#
+        )
+    }
+
+    /// The trail form the corpus actually uses parses, and comes back out byte-identical.
+    ///
+    /// All four vanilla trail-ON calls are this raw `effect(*MA_MSC_CMD_…, …)` command; the three
+    /// `macros::` names C2 was written around have zero. Before this the line was untyped, so it
+    /// was carried only when a spawn happened to share its frame block and deleted otherwise.
+    #[test]
+    fn the_raw_command_trail_the_corpus_writes_round_trips_byte_identically() {
+        let calls = parse_effect_script(&corpus_trail_script()).to_effect_calls();
+        let trail = calls
+            .iter()
+            .find(|call| call.spawn_func == "AFTER_IMAGE_ON")
+            .expect("the raw command form must produce a trail call");
+        // Slot 1 and slot 4, read through the same constants the wrapper form uses.
+        assert_eq!(trail.effect_name, "tex_kirby_cutter");
+        assert_eq!(trail.bone_name, "haver");
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        assert!(
+            emitted.contains(CORPUS_TRAIL.trim()),
+            "the trail must be re-emitted exactly as written — there is no \
+             `macros::AFTER_IMAGE3_ON` to fall back to:\n{emitted}"
+        );
+    }
+
+    /// The graphic and joint come from slots 1 and 4 specifically, not from their twins.
+    ///
+    /// **The corpus cannot prove this, and tests built only from it silently did not.** Every
+    /// vanilla call writes `Hash40::new("tex_kirby_cutter")` at both slot 1 (`trail1`) and slot 2
+    /// (`trail2`), and `Hash40::new("haver")` at slots 4 (`trail_bone1`), 8 (`trail_bone2`) and
+    /// 14 (`flare_bone`) — so reading the wrong member of either group returns the same string.
+    /// Mutations moving the graphic read to slot 2 and the joint read to slot 8 both passed the
+    /// entire suite.
+    ///
+    /// The layout below is still the corpus's, 26 arguments in vanilla order; only the twin
+    /// slots' *values* are varied, which is what a modder pointing the two trail edges at
+    /// different bones would write. The independent evidence for which slot is which is the
+    /// declaration: `AFTER_IMAGE4_ON_arg29(agent, trail1, trail2, trail_length, trail_bone1,
+    /// trail_x1, trail_y1, trail_z1, trail_bone2, …)`.
+    #[test]
+    fn a_raw_trails_graphic_and_joint_are_read_from_the_first_of_each_duplicated_slot() {
+        // Slot 2 is the second texture; slot 8 the trail's other edge.
+        let line = CORPUS_TRAIL
+            .trim()
+            .replacen(
+                r#"tex_kirby_cutter"), Hash40::new("tex_kirby_cutter")"#,
+                r#"tex_kirby_cutter"), Hash40::new("tex_other")"#,
+                1,
+            )
+            .replacen(
+                r#"0.25, Hash40::new("haver")"#,
+                r#"0.25, Hash40::new("sword")"#,
+                1,
+            );
+        assert!(
+            line.contains(r#"Hash40::new("tex_other")"#)
+                && line.contains(r#"Hash40::new("sword")"#),
+            "the fixture must actually differ at slots 2 and 8, or this proves nothing:\n{line}"
+        );
+        let src = format!(
+            "unsafe extern \"C\" fn effect_t(agent: &mut L2CAgentBase) {{\n    \
+             if macros::is_excute(agent) {{\n{line}\n    }}\n}}\n"
+        );
+        let calls = parse_effect_script(&src).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].effect_name, "tex_kirby_cutter",
+            "slot 1 is `trail1`; slot 2 is the second texture"
+        );
+        assert_eq!(
+            calls[0].bone_name, "haver",
+            "slot 4 is `trail_bone1`; slot 8 is the trail's other edge and slot 14 the flare's"
+        );
+    }
+
+    /// Retargeting the joint rewrites slot 4 and leaves the other 25 arguments alone.
+    ///
+    /// The paired half matters: an emitter that dropped the whole line would also "not contain
+    /// the old joint", so the assertion that the edit landed is checked together with the
+    /// assertion that its neighbours — including the *other* two `haver` hashes at slots 8 and
+    /// 14 — did not move.
+    #[test]
+    fn editing_a_raw_trails_joint_rewrites_only_that_argument() {
+        let mut calls = parse_effect_script(&corpus_trail_script()).to_effect_calls();
+        let trail = calls
+            .iter_mut()
+            .find(|call| call.spawn_func == "AFTER_IMAGE_ON")
+            .expect("trail call");
+        trail.bone_name = "top".into();
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        let line = emitted
+            .lines()
+            .find(|line| line.contains("AFTER_IMAGE3_ON"))
+            .expect("the trail line must still be emitted");
+
+        let expected = CORPUS_TRAIL.trim().replacen(
+            r#"12, Hash40::new("haver")"#,
+            r#"12, Hash40::new("top")"#,
+            1,
+        );
+        assert_eq!(
+            line.trim(),
+            expected,
+            "only the joint slot may change; slots 8 and 14 are also `haver` and must not"
+        );
+    }
+
+    /// `AFTER_IMAGE_OFF` ends the trail, not whatever spawn happens to still be open.
+    ///
+    /// Kirby `SpecialHi2` starts a trail and an `EFFECT_FOLLOW` in one `is_excute`, then closes
+    /// the trail four frames later. Resolving that close against the most recent open *call*
+    /// picks the follow, which loses the `AFTER_IMAGE_OFF` — the trail then runs forever — and
+    /// gives the follow an end frame the script never wrote, so the export invents an
+    /// `EFFECT_OFF_KIND` that kills an effect early. Both halves are asserted, because either
+    /// alone passes with the other still broken.
+    #[test]
+    fn a_trail_off_closes_the_trail_and_not_a_spawn_still_running() {
+        let calls = parse_effect_script(&corpus_trail_script()).to_effect_calls();
+        let trail = calls
+            .iter()
+            .find(|call| call.spawn_func == "AFTER_IMAGE_ON")
+            .expect("trail call");
+        assert_eq!(trail.active_end, 7, "the trail is what frame 7 closes");
+        assert_eq!(
+            trail.trail_off,
+            Some(3.0),
+            "and it keeps the written argument"
+        );
+
+        let follow = calls
+            .iter()
+            .find(|call| call.effect_name == "kirby_fcut_rise")
+            .expect("follow call");
+        assert_eq!(
+            follow.active_end, 9999,
+            "the follow is never closed by this script and must stay open"
+        );
+
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi2", &Default::default());
+        assert!(
+            emitted.contains("macros::AFTER_IMAGE_OFF(agent, 3);"),
+            "the close must survive to the export:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("EFFECT_OFF_KIND"),
+            "no end was written for the follow, so none may be invented:\n{emitted}"
+        );
+    }
+
+    /// A trail this script did not start is carried, not dropped.
+    ///
+    /// Kirby splits the move: `SpecialHi2` turns the trail on, `SpecialHi4` turns it off. The
+    /// off-script has no trail call to close and cannot be given one, and deleting the line
+    /// would leave the trail running for the rest of the match.
+    #[test]
+    fn a_trail_off_with_no_trail_open_is_carried_rather_than_dropped() {
+        let src = r#"
+unsafe extern "C" fn effect_specialhi4(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("kirby_fcut_rise"), Hash40::new("haver"), 0, 3, 0.3, 0, 0, 0, 1, true);
+        macros::AFTER_IMAGE_OFF(agent, 0);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        let (_, emitted) = emit_effect_move_fn(&calls, "specialhi4", &Default::default());
+        assert!(
+            emitted.contains("macros::AFTER_IMAGE_OFF(agent, 0);"),
+            "a close with nothing local to close still has to reach the export:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("EFFECT_OFF_KIND"),
+            "and it must not be resolved against the follow instead:\n{emitted}"
+        );
+    }
+
+    /// Only a whole `effect` identifier starts a raw trail call.
+    ///
+    /// The parser and `scan_macro_sites` have to accept exactly the same lines: the parser's
+    /// call consumes an ordinal and the scanner's site is what a write-back edits, so a line one
+    /// accepts and the other refuses shifts every later call onto the wrong piece of source. The
+    /// positive control is the point — without it this passes for a parser that recognises
+    /// nothing at all.
+    #[test]
+    fn only_a_whole_effect_identifier_starts_a_raw_trail_call() {
+        let real = CORPUS_TRAIL.trim();
+        let embedded = real.replacen("effect(", "sub_effect(", 1);
+
+        assert!(
+            crate::acmd_src::raw_trail_line(real).is_some(),
+            "the corpus line must be recognised, or the negative below proves nothing"
+        );
+        assert!(
+            crate::acmd_src::raw_trail_line(&embedded).is_none(),
+            "`sub_effect(` is a different function and must not be read as a trail"
+        );
+
+        // And the parser agrees with the scanner on both, which is the invariant that matters.
+        let wrap = |line: &str| {
+            format!(
+                "unsafe extern \"C\" fn effect_t(agent: &mut L2CAgentBase) {{\n    \
+                 if macros::is_excute(agent) {{\n{line}\n    }}\n}}\n"
+            )
+        };
+        assert_eq!(
+            parse_effect_script(&wrap(real)).to_effect_calls().len(),
+            1,
+            "the real line must produce exactly one call"
+        );
+        assert_eq!(
+            parse_effect_script(&wrap(&embedded))
+                .to_effect_calls()
+                .len(),
+            0,
+            "and the embedded one none, matching the scanner"
+        );
+    }
+
     /// A trail the editor ends itself still exports a call that compiles.
     ///
     /// There is no closing line to take the argument from — the trail was retimed or added in
@@ -5825,6 +6103,67 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// Across the whole corpus, the calls the parser makes and the sites the rewriter can edit
+    /// are the same list.
+    ///
+    /// `rewrite_effect_calls` looks a call up by its ordinal among the scanned sites, so the two
+    /// have to agree not just in count but position-for-position. When they do not, write-back
+    /// does not fail — it splices the user's edit into a *different* call, which is why this is
+    /// asserted over every script rather than left to the four trail lines that motivated it.
+    ///
+    /// The guard on the trail count is the part that keeps this honest: C2 made the raw command
+    /// form produce a call, and if a later change stops it doing so, every other script here
+    /// still agrees trivially and this test would go on passing while covering nothing.
+    #[test]
+    fn every_corpus_script_scans_to_exactly_the_calls_it_parses_to() {
+        let cache = crate::scratch_dirs::app_storage_root().join("script-cache");
+        if !cache.is_dir() {
+            return;
+        }
+        let mut checked = 0usize;
+        let mut trails = 0usize;
+        let mut mismatched = Vec::new();
+        for fighter in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
+            for script in std::fs::read_dir(fighter.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let Ok(body) = std::fs::read_to_string(script.path()) else {
+                    continue;
+                };
+                let ordinals = parse_effect_script(&body).call_macro_ordinals();
+                let sites = crate::acmd_src::spawn_site_names(&body);
+                trails += sites
+                    .iter()
+                    .filter(|name| name.starts_with("AFTER_IMAGE3"))
+                    .count();
+                if ordinals.iter().copied().max().map(|n| n + 1).unwrap_or(0) > sites.len() {
+                    mismatched.push(format!(
+                        "{:?}: {} calls but only {} sites",
+                        script.path(),
+                        ordinals.len(),
+                        sites.len()
+                    ));
+                }
+                checked += 1;
+            }
+        }
+        if checked == 0 {
+            return;
+        }
+        assert!(
+            mismatched.is_empty(),
+            "a call with no site behind it renumbers every later one:\n{}",
+            mismatched.join("\n")
+        );
+        assert_eq!(
+            trails, 4,
+            "the corpus holds four raw-command trails; if they stopped scanning as sites this \
+             test would agree with itself and cover nothing"
+        );
+    }
+
     /// Audit the emitter against every script in the local fetch cache: each spawn must come
     /// back out under the same macro name and with the same number of arguments it went in
     /// with. Skipped when nothing has been fetched yet, so a clean machine still passes.
@@ -5983,10 +6322,10 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         eprintln!("[audit] {lossy} of {with_calls} effect scripts still lose a line");
         assert!(
-            lossy <= 15,
+            lossy <= 13,
             "the export deletes lines from {lossy} of {with_calls} effect scripts; C5 measured \
-             28, C6 brought it to 19, and C6b's COL_NORMAL to 15. Something started dropping \
-             user code again."
+             28, C6 brought it to 19, C6b's COL_NORMAL to 15, and C2's raw-command trail to 13. \
+             Something started dropping user code again."
         );
 
         // The count alone was not enough. C6b wrote its remainder down as a table of which
@@ -5995,12 +6334,17 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         // and nothing could notice because only the script count was asserted. An entry that
         // says "here is exactly what is left" has to be pinned to what is left, not to how much
         // of it there is.
+        //
+        // C2 removed four entries at once, which is more than it set out to. Typing the two raw
+        // trail calls was the point; the two `methodlib::L2CAgent::pop()` lines went with them
+        // because each sits in the same `is_excute` block as a trail and had no spawn to ride on
+        // until the trail became one. C2's own estimate — 20 lines to 18, 15 scripts staying 15 —
+        // assumed `pop()` would keep those two files lossy, and it was wrong in the useful
+        // direction: kirby `SpecialHi2` and `SpecialAirHi2` are now clean.
         let expected: std::collections::BTreeMap<String, usize> = [
             ("wait_loop_sync_mot", 7),
             ("else {", 5),
-            ("effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON)", 2),
             ("macros::CANCEL_FILL_SCREEN", 2),
-            ("methodlib::L2CAgent::pop", 2),
             ("EffectModule::remove_screen", 2),
         ]
         .into_iter()

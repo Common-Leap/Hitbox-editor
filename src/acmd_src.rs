@@ -65,6 +65,16 @@ pub fn scan_macro_sites(text: &str, range: Range<usize>) -> Vec<MacroSite> {
             continue;
         }
         if !text[i..range.end].starts_with(PREFIX) {
+            // A trail written in the raw `effect(*MA_MSC_CMD_…, …)` form is a rewritable call
+            // too, and it has to be scanned here rather than anywhere else: `call_macro_ordinals`
+            // counts the `EffectCall` the parser makes from it, so a site missing here would
+            // renumber every later call and land the next edit on the wrong line. See
+            // `data::RAW_TRAIL_COMMANDS`.
+            if let Some(site) = scan_raw_trail_site(text, i, range.end) {
+                i = site.span.end;
+                sites.push(site);
+                continue;
+            }
             i += 1;
             while i < range.end && !text.is_char_boundary(i) {
                 i += 1;
@@ -94,6 +104,49 @@ pub fn scan_macro_sites(text: &str, range: Range<usize>) -> Vec<MacroSite> {
         i = close + 1;
     }
     sites
+}
+
+/// A raw `effect(*MA_MSC_CMD_…, …)` trail call starting at `i`, as a site the rewriters can use.
+///
+/// Only the commands in [`crate::data::RAW_TRAIL_COMMANDS`] match, and the returned `args`
+/// include the command id at index 0 — the slot `agent` fills in a `macros::` call — so a trail
+/// written either way is addressed by the same slot numbers.
+fn scan_raw_trail_site(text: &str, i: usize, limit: usize) -> Option<MacroSite> {
+    const HEAD: &str = "effect";
+    let rest = text.get(i..limit)?;
+    let after = rest.strip_prefix(HEAD)?;
+    // `effect` has to be the whole identifier. Without this, `my_effect(`, `sub_effect(` and a
+    // qualified `foo::effect(` all match and produce a site in the middle of another call.
+    if text[..i]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':')
+    {
+        return None;
+    }
+    let open = i + HEAD.len() + (after.len() - after.trim_start().len());
+    if text.as_bytes().get(open) != Some(&b'(') {
+        return None;
+    }
+    let (args, close) = split_call_args(text, open + 1, limit)?;
+    let id = args.first().map(|span| &text[span.clone()])?;
+    let name = crate::data::raw_trail_command(id)?;
+    Some(MacroSite {
+        name: name.to_string(),
+        span: i..close + 1,
+        args,
+    })
+}
+
+/// The raw trail call on `line`, if it holds one, as the site the rewriters would find.
+///
+/// The effect parser uses this to decide whether to type a line, so it types exactly the lines
+/// `scan_macro_sites` can locate a site in. A looser test on the parser side (`contains`, say)
+/// would accept `sub_effect(*MA_MSC_CMD_…)` that the scanner rejects, produce an `EffectCall`
+/// with no site behind it, and shift every later call ordinal onto the wrong line.
+pub fn raw_trail_line(line: &str) -> Option<MacroSite> {
+    line.match_indices("effect(")
+        .find_map(|(i, _)| scan_raw_trail_site(line, i, line.len()))
 }
 
 /// If `i` starts a comment, string, or char literal, the offset just past it.
@@ -1366,6 +1419,17 @@ struct ModifierSites {
 /// A modifier does *not* break the run for the modifiers after it: a script that writes a tint
 /// and then a rate has both of them naming the spawn above the pair, and `eval_effect_stmts`
 /// reads them that way too.
+/// The spawn sites of `text`, in order, by name — the list `rewrite_effect_calls` indexes by
+/// call ordinal. Exposed so a corpus oracle can check it against what the parser produces.
+#[cfg(test)]
+pub fn spawn_site_names(text: &str) -> Vec<String> {
+    spawn_and_modifier_sites(text)
+        .0
+        .into_iter()
+        .map(|site| site.name)
+        .collect()
+}
+
 fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) {
     let mut spawns: Vec<MacroSite> = Vec::new();
     let mut modifiers: Vec<ModifierSites> = Vec::new();
@@ -1422,7 +1486,13 @@ fn is_spawn_macro(name: &str) -> bool {
 /// keep call ordinals aligned with the source — but their arguments share none of the spawn
 /// layout, so nothing may be written into them positionally.
 fn is_trail_macro(name: &str) -> bool {
-    name.starts_with("AFTER_IMAGE4_ON") || name == "AFTER_IMAGE_ON"
+    name.starts_with("AFTER_IMAGE4_ON")
+        || name == "AFTER_IMAGE_ON"
+        // The raw-command trails, under the name `scan_raw_trail_site` gives them. These are the
+        // only trail-ON calls that actually occur in the corpus.
+        || crate::data::RAW_TRAIL_COMMANDS
+            .iter()
+            .any(|(_, site)| *site == name)
 }
 
 /// Everything a value rewrite CAN change about a call — the test for whether every iteration
