@@ -32,6 +32,8 @@ use std::sync::LazyLock;
 use parking_lot::Mutex;
 use smash::lib::{L2CValue, L2CValueType};
 
+mod sound_hooks;
+
 // ── Typed lua args (wire + capture form) ─────────────────────────────────────
 
 /// One lua argument, typed — losslessly round-trips capture → editor → inject.
@@ -170,6 +172,21 @@ pub const CAT_ATK_SETOFF_MUL: u8 = 6;
 /// stopped agreeing at `ATTACK_ABS`, and the editor now converts with
 /// `game_link::wire_category`. A category on the wire is not a `Hitbox.category`.
 pub const CAT_SEARCH: u8 = 7;
+
+/// The `PLAY_SE` family — a sound the script starts or stops. **Must equal the editor's
+/// `game_link::CAT_SOUND`.**
+///
+/// One category for all twelve members, which is the opposite of the choice
+/// [`CAT_ATK_POWER`] records, and the reason is worth stating because it looks inconsistent.
+/// There the two members' slot 1 meant *different things*, so a misapplied rule wrote damage
+/// into a shield multiplier — a wrong value in a real field. Here every member declares a
+/// `Hash40` in slot 0 and nothing else is ever written, so a misapplied rule can only ever put
+/// a sound where a sound goes. Twelve categories to keep in step across the wire is a worse
+/// trade than one name comparison, so the *macro name* travels on the rule instead and
+/// `sound_hooks::sound_action` requires it to agree.
+///
+/// Not in [`is_collision_func`], for the reason `SEARCH` is not: nothing clears a sound.
+pub const CAT_SOUND: u8 = 8;
 
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
@@ -694,6 +711,14 @@ pub struct HbOverrides {
     /// The modifier's value — slot 1 for both members. A float on the wire because the slot is
     /// declared `ToF32`; the editor's exporter puts the vanilla integer spelling back.
     pub atk_mod_value: Option<f32>,
+    // ── Sound (CAT_SOUND only) ───────────────────────────────────────────────
+    /// The sound hashes to play instead, positional into the call's leading `Hash40` slots.
+    ///
+    /// A list rather than one hash because two members take a pair — `PLAY_STEP_FLIPPABLE`
+    /// names the left and right footstep, `PLAY_FLY_VOICE` two alternative clips — and the
+    /// editor holds them as a list for the same reason. Applied only as far as the member
+    /// actually declares hash slots; see `sound_hooks::hash_slots`.
+    pub sound_hashes: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -730,6 +755,17 @@ pub struct HitboxRule {
     pub overrides: Option<HbOverrides>,
     #[serde(default)]
     pub inject: Option<InjectRule>,
+    /// The exact ACMD macro this rule is for, when the category alone does not identify it.
+    ///
+    /// Only [`CAT_SOUND`] sends it — its twelve members share a category and all of them carry
+    /// a `Hash40` in slot 0, so without this a rule for one applies silently to another. Every
+    /// other family either has a category per macro or an argument layout that makes a
+    /// cross-member write impossible.
+    ///
+    /// `None` matches any member, which is what an editor older than this build sends. Read
+    /// that way round on purpose: too broad is recoverable, silently dead is not.
+    #[serde(default)]
+    pub func: Option<String>,
 }
 
 impl HitboxRule {
@@ -1768,6 +1804,11 @@ pub fn install() {
         hook_atk_power,
         hook_atk_set_shield_setoff_mul
     );
+    // Installed separately rather than folded into the list above: `install_hooks!` takes a
+    // fixed list, and the sound family is twelve more names for a surface that has nothing to
+    // do with collisions. Its own banner also makes "did the sound hooks load" answerable from
+    // the log without counting names.
+    sound_hooks::install();
     skyline::println!(
         "[SLight] ACMD ATTACK/CATCH/SEARCH/WIND/CLEAR/HURT/ATKMOD hooks installed (capture + rules)"
     );

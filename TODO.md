@@ -243,7 +243,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**404 unit + 6 integration after E3 closed**; the integration ones
+- [ ] `cargo test` passes (**422 unit + 6 integration after D1f**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -1741,16 +1741,8 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   5. **[x] D1e (done 2026-08-05)** — Let write-back *create* the category function a
      project does not have. This is the one surface D1b left open, and D1d turned it from an
      edge case into the ordinary one.
-  6. **[~] D1f (in progress 2026-08-06)** — Plugin hooks for the sound primitives, capture,
-     then live.
-
-     **Taken now because the "needs hardware" deferral was measured and found false.** Eden
-     and Ryujinx are both installed on this machine with SSBU under each, and the last session
-     ran 2026-08-05. The deployed plugin is `build=2026-08-03f`, **66 commits stale** — so the
-     live surface of A2, A3, B1, B3, B4, B5, B5b, C1, C2 and C3 has never run either. This step
-     is written *before* the boot so one session verifies sound alongside all ten of those.
-     See the note under D1d that says this machine has no emulator; it is wrong and this
-     entry is the correction Rule 5 asks for.
+  6. **[x] D1f (built 2026-08-06 — not yet exercised in game)** — Plugin hooks for the sound
+     primitives, capture, then live. See the sub-entry below.
 
 **Work order revised 2026-08-05, and this is the correction Rule 5 asks for.** The old steps 4
 and 5 were "plugin hooks, capture, then live" followed by "export + write-back", and *both
@@ -2085,6 +2077,84 @@ It is now its own pass, guarded on its own script.
 **Named exceptions.** Live is untouched and unaffected — this is a disk surface. Creating a
 *fighter* is still out of scope and still an error: a project that mentions the character nowhere
 has no file to write into and nothing to attribute a new function to.
+
+#### [x] D1f — Hook, capture and preview the sound family (built 2026-08-06)
+
+**Taken now because the "needs hardware" deferral was measured and found false.** D1d and D1c
+both say this machine has no emulator. Eden and Ryujinx are installed with SSBU under each, both
+carry a plugins directory holding this plugin, and the last session ran 2026-08-05. The deferral
+was never checked. The DoD now carries the one-line command that checks it.
+
+**The deployed build was `2026-08-03f`, 66 commits stale**, so the live surface of A2, A3, B1,
+B3, B4, B5, B5b, C1, C2 and C3 had never run either. This step was written *before* the boot so
+one session verifies sound alongside all ten of those, which is the whole reason it was
+scheduled ahead of the rest.
+
+**Result.** `hitbox_viewer/sound_hooks.rs` hooks all twelve members, records every call into the
+existing capture stream, and applies rename and suppress rules.
+`VisionaryApp::sound_script_from_captures` reads them back, `sound_rules_for` builds the rules,
+and `CAT_SOUND` = 8 carries them. 422 unit + 6 integration green, clippy 0, plugin builds at
+2334720 bytes with `build=2026-08-06a-sound-hooks`.
+
+- **No member is missing a wrapper, checked both ways.** All twelve are declared in `sv_animcmd`
+  *and* in `smash-script`'s `macros.rs`, so unlike A1's `AREA_WIND_2ND` there is no primitive the
+  plugin can hook but an export cannot write. The arities agree with what D1c read.
+- **One category for twelve members, which is the opposite of the `CAT_ATK_POWER` decision and
+  is not an inconsistency.** There, slot 1 meant a different thing in each member, so a
+  misapplied rule wrote damage into a shield multiplier. Here every member declares a `Hash40` in
+  slot 0 and nothing else is ever written, so the worst a misapplied rule can do is put a sound
+  where a sound goes. Twelve categories to keep in step across the wire is a worse trade than one
+  name comparison, so the macro name travels on `HitboxRuleWire::func` and the plugin requires it
+  to agree. A rule with no `func` matches any member — which is what an older editor sends, read
+  in the only safe direction: too broad rather than silently dead.
+- **`SET_PLAY_INHIVIT`'s trailing argument is never writable**, and that is what `hash_slots`
+  exists for. It is a `ToF32` duration, not a sound; bounding the write by the vector's length
+  instead of the member's declared hash count would put a hash40 there and suppress the sound for
+  an absurd number of frames.
+- **An unnameable sound is dropped, not kept as a number** — the rule the bone path states, and a
+  live case rather than a hypothetical: `ParamLabels.csv` names about ten thousand `se_*` labels
+  and is missing real ones, `se_common_step_left_m` among them. A half-nameable
+  `PLAY_STEP_FLIPPABLE` is dropped whole, because a one-argument call of it is a different
+  signature that does not compile.
+- **Scope is D1d's scope: which sound a call plays.** Retiming, adding and deleting stay out, so
+  a rule only ever rewrites hash arguments or suppresses the call. Write-back and export are
+  unchanged — D1d and D1e already own them.
+
+**The plugin's own tests were deleted rather than written.** That crate is not a workspace
+member, so `cargo test` never builds it and a `#[test]` there is a comment that looks like a
+gate — the same shape as D1e's unregistered function. Everything checkable off the source is
+checked from `game_link.rs` instead: the plugin's `SOUND_FUNCS` is compared row for row against
+the editor's, and every `sound_hook!` arity literal against the declared one. Both tables are
+deliberately spelled the same way so the comparison is literal.
+
+**Ten mutations, four of which survived the first round of tests** — and all four are the same
+failure, which is the one this family is most exposed to:
+
+- Plugin table drifts, hook reads the wrong arity, plugin `CAT_SOUND` drifts, unnameable hash
+  kept, half-pair accepted, duration re-spelled as a float, window covering only the first
+  iteration — all caught.
+- **The rule keyed on the edited sound instead of the pristine one.** Survived the whole suite.
+  It produces a rule that is well-formed, serialises, sends, deserialises, and never matches.
+- **The macro name dropped from the rule.** Survived. A `PLAY_SE` rule then also applies to a
+  `PLAY_SE_REMAIN` naming the same sound in the same frame, cleanly, because slot 0 is a hash in
+  both.
+- **The capture adoption never setting a baseline.** Survived. Fails in both directions: no
+  baseline reads as "every call is edited" and sends a rule for each; a baseline taken from the
+  edited list reads as "nothing is edited" and sends none.
+- **Adoption overwriting a fetched sound script.** Survived. A capture only sees the calls that
+  actually ran, so it is a lossy trade that also discards every verbatim line the export carries.
+
+All four lived inside `push_sound_rules(&mut self)` and the capture-adoption block, which no test
+could reach. They are now `sound_rules_for` and `adopt_captured_sounds`, free functions taking
+what they decide over — the `record_effect_script_notes` move from E3, made for the same reason
+and after the same four survivors. **Every one of them is a live edit that silently does
+nothing**, which is exactly what B5b cost two tasks to find, and none of them is visible to any
+oracle in this project: the export is unaffected, the write-back is unaffected, and the panel
+looks right.
+
+**Named exception — not verified in game.** The plugin builds and the binary contains the hooks
+and the banner, but nothing here has been run. That is what the boot session is for, and it is
+the last thing standing between this and a `[x]` that means what it says.
 
 ### [ ] D2 — `expression_` scripts
 

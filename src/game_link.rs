@@ -319,6 +319,16 @@ pub const CAT_ATK_POWER: u8 = 5;
 /// Wire category for `ATK_SET_SHIELD_SETOFF_MUL`. **Must equal the plugin's value.**
 pub const CAT_ATK_SETOFF_MUL: u8 = 6;
 
+/// Wire category for the whole `PLAY_SE` family. **Must equal the plugin's value.**
+///
+/// One category for all twelve members, which reads as inconsistent beside the two above and
+/// is a different situation. There, slot 1 meant a different thing in each member, so a
+/// misapplied rule wrote damage into a shield multiplier — a wrong value in a real field.
+/// Here every member declares a `Hash40` in slot 0 and nothing else is ever written, so the
+/// worst a misapplied rule can do is put a sound where a sound goes. The macro name travels on
+/// [`HitboxRuleWire::func`] to close even that.
+pub const CAT_SOUND: u8 = 8;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -435,6 +445,18 @@ pub struct HbOverridesWire {
     pub atk_mod_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atk_mod_value: Option<f32>,
+    // ── Sound (category 8 only) ──────────────────────────────────────────────
+    //
+    // The hashes to play instead, positional into the call's leading `Hash40` slots. A list
+    // because `PLAY_STEP_FLIPPABLE` and `PLAY_FLY_VOICE` each name a pair, which is why
+    // `SoundCall::sounds` is a list too.
+    //
+    // The plugin bounds the write by the member's own declared hash-slot count rather than by
+    // this vector's length, so a longer list cannot reach `SET_PLAY_INHIVIT`'s trailing
+    // duration argument. Sending a shorter one leaves the remaining slots as the script wrote
+    // them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound_hashes: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -470,6 +492,17 @@ pub struct HitboxRuleWire {
     pub overrides: Option<HbOverridesWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject: Option<InjectRuleWire>,
+    /// The exact ACMD macro this rule is for, when the category alone does not identify it.
+    ///
+    /// Only [`CAT_SOUND`] sets it. Its twelve members share one category and every one of them
+    /// carries a `Hash40` in slot 0, so a rule for `PLAY_SE` would otherwise apply cleanly and
+    /// silently to a `PLAY_SE_REMAIN` on the same frame naming the same sound. Twelve
+    /// categories to keep in step across the wire is a worse trade than one name.
+    ///
+    /// A plugin predating this field ignores it and matches on the category alone — too broad
+    /// rather than silently dead, which is the right way round for a preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub func: Option<String>,
 }
 
 // ── Shared live-override store ───────────────────────────────────────────────
@@ -1782,6 +1815,7 @@ mod tests {
                     ..Default::default()
                 }),
                 inject: None,
+                func: None,
             },
             HitboxRuleWire {
                 motion: 0x99,
@@ -1796,6 +1830,7 @@ mod tests {
                     args: vec![LuaArgWire::Int(2), LuaArgWire::Hash(0xabc), LuaArgWire::Nil],
                     command: None,
                 }),
+                func: None,
             },
             HitboxRuleWire {
                 motion: 0x99,
@@ -1813,6 +1848,7 @@ mod tests {
                     args: vec![LuaArgWire::Num(3.0), LuaArgWire::Num(1.0)],
                     command: Some("AREA_WIND_2ND".into()),
                 }),
+                func: None,
             },
         ]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
@@ -1884,6 +1920,7 @@ mod tests {
                 ..Default::default()
             }),
             inject: None,
+            func: None,
         }]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
@@ -1997,5 +2034,163 @@ mod tests {
         assert_eq!(edit["scale"].as_f64(), Some(1.75));
         assert!(edit.get("pos").is_none());
         assert!(edit.get("rot").is_none());
+    }
+
+    // ── The sound family's two-sided constants ───────────────────────────────
+    //
+    // The plugin crate is not a member of this workspace, so `cargo test` never builds it and a
+    // `#[test]` written over there would be a comment that looks like a gate. These read the
+    // plugin's source as text instead. That is weaker than compiling against it — it pins the
+    // source, not the linked `.nro` — but it is the only mechanism that runs, and the failure it
+    // guards against (the two tables drifting) is silent in every other check: a rule with the
+    // wrong arity still serialises, still sends, and still deserialises.
+
+    fn plugin_sound_hooks_source() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer/sound_hooks.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// The plugin's copy of the sound arity table still says what the editor's says.
+    ///
+    /// Deliberately spelled the same way on both sides so this is a literal comparison. If they
+    /// diverge, the plugin bounds an override by the wrong number of hash slots: too few and a
+    /// rename silently only takes on the first sound of a pair, too many and it writes a hash40
+    /// into `SET_PLAY_INHIVIT`'s duration argument.
+    #[test]
+    fn the_plugin_sound_table_still_matches_the_editors() {
+        let source = plugin_sound_hooks_source();
+        // Split on the `= &[`, not on the declaration: the first `]` after `const SOUND_FUNCS`
+        // closes the *type* — `&[(&str, usize, bool)]` — and slicing there leaves an empty
+        // table that every `contains` then fails against for the wrong reason.
+        let table = source
+            .split_once("const SOUND_FUNCS")
+            .expect("plugin still declares SOUND_FUNCS")
+            .1
+            .split_once("= &[")
+            .expect("the table is a slice literal")
+            .1
+            .split_once("];")
+            .expect("the table is closed")
+            .0;
+        for (func, hashes, has_tail) in crate::acmd::SOUND_FUNCS {
+            let row = format!("(\"{func}\", {hashes}, {has_tail})");
+            assert!(
+                table.contains(&row),
+                "plugin's SOUND_FUNCS is missing or disagrees on {row}"
+            );
+        }
+        // The other direction: a member the plugin hooks but the editor does not model would
+        // capture into a stream nothing reads, and take rules the editor can never send.
+        let plugin_rows = table.matches("(\"").count();
+        assert_eq!(
+            plugin_rows,
+            crate::acmd::SOUND_FUNCS.len(),
+            "the two tables have different lengths"
+        );
+    }
+
+    /// Every hook reads exactly as many lua arguments as its macro declares.
+    ///
+    /// The arity is a literal in each `sound_hook!` invocation, separate from the table above,
+    /// so the two can disagree. They must not: `read_args_exact` short by one hands slot 0 of
+    /// the wrong value to the rule matcher, and long by one reads whatever the stack happens to
+    /// hold past the call. Neither shows up as an error anywhere — the rule simply stops
+    /// matching, or matches the wrong call.
+    #[test]
+    fn every_sound_hook_reads_its_macros_declared_arity() {
+        let source = plugin_sound_hooks_source();
+        let mut checked = 0;
+        for (func, hashes, has_tail) in crate::acmd::SOUND_FUNCS {
+            let argc = hashes + usize::from(*has_tail);
+            let needle = format!("\"{func}\",\n    {argc}\n);");
+            let one_line = format!("\"{func}\", {argc});");
+            assert!(
+                source.contains(&needle) || source.contains(&one_line),
+                "no sound_hook! for {func} at arity {argc}"
+            );
+            checked += 1;
+        }
+        // Guard against the whole loop passing because the table went empty.
+        assert_eq!(checked, 12, "the sound family is 12 members");
+    }
+
+    /// The wire category the editor sends is the one the plugin matches on.
+    #[test]
+    fn the_sound_wire_category_matches_the_plugin() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs");
+        let source = std::fs::read_to_string(path).expect("read the plugin's hitbox_viewer");
+        assert!(
+            source.contains(&format!("pub const CAT_SOUND: u8 = {CAT_SOUND};")),
+            "plugin's CAT_SOUND disagrees with the editor's {CAT_SOUND}"
+        );
+        // The categories are one flat space shared by every family, so a new one colliding with
+        // an existing one would route sound rules into another family's hook.
+        for other in [CAT_ATK_POWER, CAT_ATK_SETOFF_MUL, CAT_ABS, CAT_SEARCH] {
+            assert_ne!(CAT_SOUND, other, "CAT_SOUND collides with another family");
+        }
+    }
+
+    /// A sound rule serialises under the field names the plugin deserialises.
+    #[test]
+    fn outbound_sound_rules_match_plugin_field_names() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_SOUND,
+            hitbox_id: Some(0xabc),
+            suppress: false,
+            frame_start: Some(5.5),
+            frame_end: Some(6.5),
+            overrides: Some(HbOverridesWire {
+                sound_hashes: Some(vec![0xdef, 0x123]),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("PLAY_STEP_FLIPPABLE".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &v["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_SOUND as u64));
+        assert_eq!(rule["func"].as_str(), Some("PLAY_STEP_FLIPPABLE"));
+        let hashes = rule["overrides"]["sound_hashes"].as_array().unwrap();
+        assert_eq!(hashes[0].as_u64(), Some(0xdef));
+        assert_eq!(hashes[1].as_u64(), Some(0x123));
+    }
+
+    /// A rule for any other family carries no `func`, and the field is omitted entirely.
+    ///
+    /// The plugin reads an absent `func` as "match any member of this category", which is only
+    /// safe because no other family needs the discrimination. If some other rule started
+    /// emitting `func: null` or an empty string, an old plugin build would still ignore it but a
+    /// current one would compare against a name no macro has and match nothing — a live edit
+    /// that silently does nothing, which is the failure B5b cost two tasks to find.
+    #[test]
+    fn only_sound_rules_carry_a_macro_name() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_ATK_POWER,
+            hitbox_id: Some(0),
+            suppress: false,
+            frame_start: None,
+            frame_end: None,
+            overrides: Some(HbOverridesWire {
+                atk_mod_value: Some(12.0),
+                ..Default::default()
+            }),
+            inject: None,
+            func: None,
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        assert!(v["hitbox_rules"][0].get("func").is_none());
+        assert!(v["hitbox_rules"][0]["overrides"]
+            .get("sound_hashes")
+            .is_none());
     }
 }

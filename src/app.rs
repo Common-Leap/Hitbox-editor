@@ -120,6 +120,36 @@ fn merge_fetched_body(
 /// Returns `(script, shown, baseline)`. The baseline is derived from `parsed` here rather than
 /// left to the caller precisely so that the mutation above is not available to it: a caller that
 /// only ever assigns all three from this cannot accidentally use the edited list for both.
+/// Adopt a sound script rebuilt from a live capture, if there is one and nothing to lose.
+///
+/// A free function taking `&mut AppState` for the reason [`resolve_sound_state`] is one: the
+/// decision it makes is not reachable through an `App`, and every mistake available here is a
+/// silent one. Setting no baseline reads as "every sound is edited", and the first diff then
+/// sends a rule for every call in the move; setting the baseline to the *edited* list reads as
+/// "nothing is edited", and no rule is ever sent at all. Both compile, both look right on
+/// screen, and neither shows up anywhere but in the game.
+///
+/// Returns whether the capture was adopted.
+fn adopt_captured_sounds(
+    captured: crate::data::AcmdScript,
+    state: &mut crate::data::AppState,
+) -> bool {
+    // Guarded on the *sound* script rather than on `state.script`: the two are fetched
+    // independently, so a move can have a real `game_` function and no `sound_` one. Gating on
+    // the wrong emptiness either drops the live sounds or overwrites a fetched sound script with
+    // a capture-only copy, which is lossier — a capture only sees the calls that actually ran.
+    if !state.sound_script.stmts.is_empty() || captured.stmts.is_empty() {
+        return false;
+    }
+    state.sound_script = captured;
+    state.sounds = state.sound_script.to_sound_events();
+    // The capture *is* the baseline. There is no parsed file to diff against, so a live-captured
+    // sound starts unedited, and setting these equal is what makes the user's first rename read
+    // as one change rather than as a whole list of them.
+    state.sounds_pristine = state.sounds.clone();
+    true
+}
+
 fn resolve_sound_state(
     parsed: &crate::data::AcmdScript,
     saved: Option<crate::data::AcmdScript>,
@@ -4432,8 +4462,135 @@ impl VisionaryApp {
                         .sound_script_edits
                         .insert(key, self.state.sound_script.clone());
                 }
+                self.push_sound_rules();
             }
         }
+    }
+
+    /// Send the sounds the editor has changed to the running game.
+    ///
+    /// Diffed by site against `sounds_pristine`, on the same terms as the hurtbox and modifier
+    /// rules, and stored under its own key in the shared rule store so that renaming a sound
+    /// does not wipe another family's rules on the way out.
+    ///
+    /// **Keyed on the hash of the sound the script names, not the one the user typed.** The rule
+    /// has to match the call the *game* makes; keying on the edit would never fire. That is the
+    /// same rule the hurtbox path states for its target, and the reason both of them keep a
+    /// pristine list at all.
+    ///
+    /// Two calls in one move can legally name the same sound, so the frame window is what tells
+    /// them apart — exactly the `COL_PRI` situation. A looped call is one site and several
+    /// events, and every event carries the same site, so the first event's frame would scope the
+    /// rule to the first iteration alone; the window is widened to span them instead.
+    fn push_sound_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let rules = Self::sound_rules_for(motion, &self.state.sounds_pristine, &self.state.sounds);
+
+        let key = format!("{mv_key}#sound");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+    }
+
+    /// The live rules for a set of sound edits: one per site whose call the user changed.
+    ///
+    /// A free function taking both lists rather than a method reading `self`, so that a test can
+    /// reach it. That is not a style preference — the three mistakes this most invites all
+    /// survived a full suite when the body lived inside `push_sound_rules`: keying the rule on
+    /// the edited sound instead of the pristine one, dropping the macro name, and never setting a
+    /// baseline. Every one of them is a live edit that silently does nothing, which is the
+    /// failure B5b cost two tasks to find and the one the wire is least able to report.
+    fn sound_rules_for(
+        motion: u64,
+        pristine: &[crate::data::SoundEvent],
+        shown: &[crate::data::SoundEvent],
+    ) -> Vec<crate::game_link::HitboxRuleWire> {
+        let mut rules = Vec::new();
+        for now in shown {
+            let Some(was) = pristine.iter().find(|s| s.site == now.site) else {
+                // No baseline for this site: the list changed shape under us. Live editing
+                // rewrites arguments in place, so it says nothing rather than guessing at a rule
+                // that would fire on the wrong call.
+                continue;
+            };
+            if was.call == now.call {
+                continue;
+            }
+            if was.call.func != now.call.func {
+                // A different macro is a different hook. The panel offers no way to do this, but
+                // a project loaded from disk could carry one; leave it to the export.
+                continue;
+            }
+            // **The key is the sound the SCRIPT names, not the one the user typed.** The rule has
+            // to match the call the game makes; keying on the edit would never fire, and nothing
+            // downstream can tell a rule that never fires from a rule that was never sent.
+            let Some(key_name) = was.call.sounds.first() else {
+                // A member always has at least one sound, but a hand-written project could carry
+                // an empty list, and a rule with no key matches every call of that macro.
+                continue;
+            };
+            // Every event sharing this site is one source line unrolled, so the window has to
+            // cover all of their frames or a looped rename takes only on the first iteration.
+            let (frame_start, frame_end) = Self::sound_rule_window(shown, now.site);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_SOUND,
+                hitbox_id: Some(effect_name_hash(key_name)),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(crate::game_link::HbOverridesWire {
+                    sound_hashes: Some(
+                        now.call
+                            .sounds
+                            .iter()
+                            .map(|s| effect_name_hash(s))
+                            .collect(),
+                    ),
+                    ..Default::default()
+                }),
+                inject: None,
+                // Twelve members share this category and every one of them carries a hash in slot
+                // 0, so the name is what keeps a rule for one off the others.
+                func: Some(now.call.func.clone()),
+            });
+        }
+        rules
+    }
+
+    /// The frame window a sound rule covers: every event that came from the given source line.
+    ///
+    /// One event for an ordinary call, and `count` of them for a call inside a `for`. Widening
+    /// to span them is what makes a looped rename take on every iteration rather than the first.
+    fn sound_rule_window(
+        events: &[crate::data::SoundEvent],
+        site: usize,
+    ) -> (Option<f32>, Option<f32>) {
+        let frames: Vec<u32> = events
+            .iter()
+            .filter(|e| e.site == site)
+            .map(|e| e.frame)
+            .collect();
+        let (Some(first), Some(last)) = (frames.iter().min(), frames.iter().max()) else {
+            return (None, None);
+        };
+        let (start, _) = Self::rule_frame_window(*first);
+        let (_, end) = Self::rule_frame_window(*last);
+        (start, end)
     }
 
     /// Post-hoc tuning of hitboxes that are already out, below the hurtbox section.
@@ -6999,6 +7156,14 @@ impl VisionaryApp {
                 self.state.set_script(hurt);
             }
         }
+        // Guarded on the *sound* script rather than on `state.script`, because the two are
+        // fetched independently: a move can have a real `game_` function and no `sound_` one,
+        // and gating on the wrong emptiness would then either drop live sounds or overwrite a
+        // fetched sound script with a capture-only copy.
+        adopt_captured_sounds(
+            Self::sound_script_from_captures(&captures, &self.state.labels),
+            &mut self.state,
+        );
         if !effects.is_empty() {
             self.state.effects_pristine = effects.clone();
             self.state.effects = effects;
@@ -7775,6 +7940,77 @@ impl VisionaryApp {
         }
     }
 
+    /// Rebuild a `sound_` script from the captured `PLAY_SE`-family calls.
+    ///
+    /// Its own script rather than statements merged into the captured `game_` one, because that
+    /// is where the export and the write-back look for them: a sound lives in
+    /// `sound_attackairn`, and a `PLAY_SE` emitted into `game_attackairn` would play twice —
+    /// once from each function — the moment the user also had the vanilla sound script.
+    ///
+    /// **A sound whose hash this build cannot name is dropped, not kept as a number.** That is
+    /// the rule the bone path states: the emitter writes `Hash40::new("…")`, so a call it cannot
+    /// spell would either fail to build or, worse, be written against a name that hashes
+    /// differently. `ParamLabels.csv` names about ten thousand of them and misses some real ones
+    /// — `se_common_step_left_m` is absent — so this is a live case, not a hypothetical.
+    fn sound_script_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+        sound_rev: &HashMap<u64, String>,
+    ) -> crate::data::AcmdScript {
+        use crate::data::{AcmdStmt, ExcuteStmt, SoundCall};
+        let mut by_frame: std::collections::BTreeMap<u32, Vec<ExcuteStmt>> = Default::default();
+        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
+
+        for (_, line) in ordered {
+            // The arity table is the editor's own, so a member the parser knows and this reader
+            // does not cannot exist. `hashes` is how many leading arguments are sounds;
+            // `SET_PLAY_INHIVIT`'s trailing duration is not one and is read separately.
+            let Some(&(_, hashes, has_tail)) = crate::acmd::SOUND_FUNCS
+                .iter()
+                .find(|(name, _, _)| *name == line.func)
+            else {
+                continue;
+            };
+            let names: Vec<String> = (0..hashes)
+                .filter_map(|i| sound_rev.get(&line.args.get(i)?.as_hash()?).cloned())
+                .collect();
+            // All or nothing. A `PLAY_STEP_FLIPPABLE` with one nameable side would otherwise be
+            // written as a one-argument call, which is a different macro's signature.
+            if names.len() != hashes {
+                continue;
+            }
+            // The wire carries a `ToF32` slot as a number, and the corpus writes these as bare
+            // integers. `num_text` keeps `5` spelled `5` rather than `5.0`, matching what the
+            // emitter would write for a parsed call — otherwise adopting a capture would rewrite
+            // a line the user never touched.
+            let tail = if has_tail {
+                match line.args.get(hashes).and_then(|a| a.as_f32()) {
+                    Some(v) => Some(crate::acmd::attack_mod_num(v)),
+                    // The signature says an argument is here. If the capture does not carry one,
+                    // the call cannot be written back at its declared arity.
+                    None => continue,
+                }
+            } else {
+                None
+            };
+            by_frame
+                .entry(Self::motion_to_script_frame(line.frame))
+                .or_default()
+                .push(ExcuteStmt::Sound(SoundCall {
+                    func: line.func.clone(),
+                    sounds: names,
+                    tail,
+                }));
+        }
+
+        crate::data::AcmdScript {
+            stmts: by_frame
+                .into_iter()
+                .flat_map(|(frame, stmts)| [AcmdStmt::Frame(frame as f32), AcmdStmt::Excute(stmts)])
+                .collect(),
+        }
+    }
+
     /// Reconstruct effect timeline spans from the locked playback's spawn and stop events.
     /// Every distinct spawn from that one execution is retained; time ordering and kill-kind
     /// semantics are then applied to the complete snapshot.
@@ -7896,6 +8132,7 @@ impl VisionaryApp {
             frame_end,
             overrides: None,
             inject: None,
+            func: None,
         });
         rules.push(crate::game_link::HitboxRuleWire {
             motion,
@@ -7910,6 +8147,7 @@ impl VisionaryApp {
                 args,
                 command: edited.wind.as_ref().map(|wind| wind.command.clone()),
             }),
+            func: None,
         });
         if let Some(end) = Self::collision_end_injection(edited) {
             rules.push(crate::game_link::HitboxRuleWire {
@@ -7921,6 +8159,7 @@ impl VisionaryApp {
                 frame_end: None,
                 overrides: None,
                 inject: Some(end),
+                func: None,
             });
         }
         true
@@ -7997,6 +8236,7 @@ impl VisionaryApp {
                             frame_end: fe,
                             overrides: Some(Self::hitbox_overrides(h, p)),
                             inject: None,
+                            func: None,
                         });
                     }
                 }
@@ -8018,6 +8258,7 @@ impl VisionaryApp {
                 frame_end: fe,
                 overrides: None,
                 inject: None,
+                func: None,
             });
         }
 
@@ -8049,6 +8290,7 @@ impl VisionaryApp {
                             args,
                             command,
                         }),
+                        func: None,
                     });
                     if let Some(end) = Self::collision_end_injection(h) {
                         rules.push(crate::game_link::HitboxRuleWire {
@@ -8060,6 +8302,7 @@ impl VisionaryApp {
                             frame_end: None,
                             overrides: None,
                             inject: Some(end),
+                            func: None,
                         });
                     }
                 }
@@ -8118,6 +8361,7 @@ impl VisionaryApp {
                 frame_end,
                 overrides: Some(overrides),
                 inject: None,
+                func: None,
             }
         };
 
@@ -8249,6 +8493,7 @@ impl VisionaryApp {
                     ..Default::default()
                 }),
                 inject: None,
+                func: None,
             });
         }
 
@@ -8350,6 +8595,7 @@ impl VisionaryApp {
                                 frame_end,
                                 overrides: Some(Self::hitbox_overrides(edited, original)),
                                 inject: None,
+                                func: None,
                             });
                         }
                     }
@@ -8369,6 +8615,7 @@ impl VisionaryApp {
                     frame_end,
                     overrides: None,
                     inject: None,
+                    func: None,
                 });
             }
             for (index, edited) in current.iter().enumerate() {
@@ -8395,6 +8642,7 @@ impl VisionaryApp {
                             args,
                             command,
                         }),
+                        func: None,
                     });
                     if let Some(end) = Self::collision_end_injection(edited) {
                         rules.push(crate::game_link::HitboxRuleWire {
@@ -8406,6 +8654,7 @@ impl VisionaryApp {
                             frame_end: None,
                             overrides: None,
                             inject: Some(end),
+                            func: None,
                         });
                     }
                 } else {
@@ -8506,6 +8755,9 @@ impl VisionaryApp {
             // frame, so `push_attack_mod_rules` builds those and this override leaves them be.
             atk_mod_id: None,
             atk_mod_value: None,
+            // Nor is a sound. It lives in a different script entirely — `sound_attackairn`, not
+            // `game_attackairn` — so nothing about a hitbox diff can reach one.
+            sound_hashes: None,
         }
     }
 
@@ -15112,6 +15364,406 @@ mod live_effect_capture_tests {
             exported.contains("macros::ATTACK_ABS(agent, 0, 0, 5.0, 75, 125, 0, 40,"),
             "{exported}"
         );
+    }
+
+    // ── D1f: sound capture and live rules ────────────────────────────────────
+
+    fn sound_capture(func: &str, frame: f32, args: Vec<A>) -> CaptureLine {
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        }
+    }
+
+    fn sound_rev(names: &[&str]) -> HashMap<u64, String> {
+        names
+            .iter()
+            .map(|n| (hash40::hash40(n).0, n.to_string()))
+            .collect()
+    }
+
+    /// A live-captured sound comes back as an editable statement in its own `sound_` script.
+    ///
+    /// Its own script, not merged into the captured `game_` one: the export installs per
+    /// category, so a `PLAY_SE` emitted into `game_attackairn` would play twice for any user who
+    /// also has the vanilla sound script.
+    #[test]
+    fn a_captured_sound_comes_back_as_an_editable_statement() {
+        let rev = sound_rev(&[
+            "se_kirby_swing_l",
+            "se_kirby_step_left_m",
+            "se_kirby_step_right_m",
+        ]);
+        let captures = vec![
+            sound_capture(
+                "PLAY_SE",
+                6.0,
+                vec![A::Hash(hash40::hash40("se_kirby_swing_l").0)],
+            ),
+            sound_capture(
+                "PLAY_STEP_FLIPPABLE",
+                12.0,
+                vec![
+                    A::Hash(hash40::hash40("se_kirby_step_left_m").0),
+                    A::Hash(hash40::hash40("se_kirby_step_right_m").0),
+                ],
+            ),
+        ];
+
+        let script = VisionaryApp::sound_script_from_captures(&captures, &rev);
+        let events = script.to_sound_events();
+
+        assert_eq!(events.len(), 2, "both calls should survive");
+        assert_eq!(events[0].call.func, "PLAY_SE");
+        assert_eq!(events[0].call.sounds, vec!["se_kirby_swing_l".to_string()]);
+        // The pair keeps both sides and keeps them in order — a flipped pair is a different
+        // footstep on each foot, which sounds fine and is wrong.
+        assert_eq!(
+            events[1].call.sounds,
+            vec![
+                "se_kirby_step_left_m".to_string(),
+                "se_kirby_step_right_m".to_string()
+            ]
+        );
+        // Every statement is a real `Sound`, not a `Raw` that happens to render the same.
+        assert!(script.stmts.iter().any(|s| matches!(
+            s,
+            crate::data::AcmdStmt::Excute(stmts)
+                if stmts.iter().any(|s| matches!(s, crate::data::ExcuteStmt::Sound(_)))
+        )));
+    }
+
+    /// A sound whose hash this build cannot name is dropped rather than kept as a number.
+    ///
+    /// The emitter writes `Hash40::new("…")`. A call kept with a bare hash would either fail to
+    /// build or be written against a name that hashes to something else — the same rule the bone
+    /// path states, and a live case rather than a hypothetical: `ParamLabels.csv` is missing
+    /// real sound labels such as `se_common_step_left_m`.
+    #[test]
+    fn a_sound_whose_name_is_unknown_is_dropped_rather_than_guessed() {
+        let rev = sound_rev(&["se_kirby_swing_l"]);
+        let captures = vec![
+            sound_capture(
+                "PLAY_SE",
+                6.0,
+                vec![A::Hash(hash40::hash40("se_kirby_swing_l").0)],
+            ),
+            sound_capture("PLAY_SE", 8.0, vec![A::Hash(0xdead_beef)]),
+        ];
+
+        let events = VisionaryApp::sound_script_from_captures(&captures, &rev).to_sound_events();
+
+        assert_eq!(events.len(), 1, "the unnameable call must not survive");
+        assert_eq!(events[0].call.sounds, vec!["se_kirby_swing_l".to_string()]);
+    }
+
+    /// A pair with only one nameable side is dropped whole, not written as a one-hash call.
+    ///
+    /// `PLAY_STEP_FLIPPABLE(a)` is not a shorter form of the macro — it is a different
+    /// signature that does not compile. Half a pair has to be no call at all.
+    #[test]
+    fn a_half_nameable_pair_is_dropped_whole() {
+        let rev = sound_rev(&["se_kirby_step_left_m"]);
+        let captures = vec![sound_capture(
+            "PLAY_STEP_FLIPPABLE",
+            12.0,
+            vec![
+                A::Hash(hash40::hash40("se_kirby_step_left_m").0),
+                A::Hash(0xdead_beef),
+            ],
+        )];
+
+        let events = VisionaryApp::sound_script_from_captures(&captures, &rev).to_sound_events();
+
+        assert!(
+            events.is_empty(),
+            "a call missing one of its two sounds must not be written at all"
+        );
+    }
+
+    /// `SET_PLAY_INHIVIT`'s trailing duration survives the round trip spelled as an integer.
+    ///
+    /// It arrives as an f32 because the slot is `ToF32`, and every vanilla call writes a bare
+    /// `5`. Re-spelling it `5.0` would rewrite a line the user never touched on the next export
+    /// — the trap `attack_mod_num` exists for, reached here from the capture side.
+    #[test]
+    fn the_suppression_window_comes_back_spelled_the_way_the_corpus_writes_it() {
+        let rev = sound_rev(&["se_kirby_swing_l"]);
+        let captures = vec![sound_capture(
+            "SET_PLAY_INHIVIT",
+            3.0,
+            vec![A::Hash(hash40::hash40("se_kirby_swing_l").0), A::Num(5.0)],
+        )];
+
+        let events = VisionaryApp::sound_script_from_captures(&captures, &rev).to_sound_events();
+
+        let [event] = &events[..] else {
+            panic!("expected one call, got {}", events.len());
+        };
+        assert_eq!(event.call.tail.as_deref(), Some("5"));
+        // And the duration is not read as a sound: one hash slot, not two.
+        assert_eq!(event.call.sounds.len(), 1);
+    }
+
+    /// A macro outside the family is left for whichever builder owns it.
+    ///
+    /// Every capture builder filters one shared stream by macro name, so a name claimed by two
+    /// builders is exported into two different functions. This one takes only the twelve.
+    #[test]
+    fn the_sound_reader_claims_only_the_sound_family() {
+        let rev = sound_rev(&["se_kirby_swing_l"]);
+        let captures = vec![
+            sound_capture("ATTACK", 6.0, vec![A::Int(0), A::Hash(0x1)]),
+            sound_capture("HIT_NODE", 6.0, vec![A::Hash(0x2), A::Int(1)]),
+            sound_capture("EFFECT", 6.0, vec![A::Hash(0x3)]),
+        ];
+
+        let script = VisionaryApp::sound_script_from_captures(&captures, &rev);
+
+        assert!(
+            script.stmts.is_empty(),
+            "no non-sound macro should produce a sound statement"
+        );
+    }
+
+    /// A looped call is one site and several events, and the rule window covers all of them.
+    ///
+    /// Every event from a `for` body carries the same site, so scoping the rule to the first
+    /// event's frame would rename only the first iteration and leave the rest playing the
+    /// original — visible in game as a stutter rather than as a failure.
+    #[test]
+    fn a_looped_sound_rule_spans_every_iteration() {
+        let events = vec![
+            crate::data::SoundEvent {
+                frame: 4,
+                call: crate::data::SoundCall {
+                    func: "PLAY_SE".into(),
+                    sounds: vec!["se_kirby_swing_l".into()],
+                    tail: None,
+                },
+                site: 0,
+            },
+            crate::data::SoundEvent {
+                frame: 12,
+                call: crate::data::SoundCall {
+                    func: "PLAY_SE".into(),
+                    sounds: vec!["se_kirby_swing_l".into()],
+                    tail: None,
+                },
+                site: 0,
+            },
+            // A different site on a frame between them, which must not widen site 0's window.
+            crate::data::SoundEvent {
+                frame: 40,
+                call: crate::data::SoundCall {
+                    func: "PLAY_SE".into(),
+                    sounds: vec!["se_kirby_swing_l".into()],
+                    tail: None,
+                },
+                site: 1,
+            },
+        ];
+
+        // The window is in MOTION-frame space, which is not the script frames above — the rule
+        // is matched against `MotionModule::frame` in the game. Comparing against the script
+        // numbers is off by exactly the conversion, which is close enough to look right.
+        let motion_of = VisionaryApp::script_to_motion_frame;
+        let (start, end) = VisionaryApp::sound_rule_window(&events, 0);
+        let start = start.expect("a window with events has a start");
+        let end = end.expect("a window with events has an end");
+        assert!(
+            start <= motion_of(4),
+            "window must reach the first iteration"
+        );
+        assert!(end >= motion_of(12), "window must reach the last iteration");
+        assert!(
+            end < motion_of(40),
+            "site 0's window must not swallow site 1's call at frame 40"
+        );
+
+        let (other_start, _) = VisionaryApp::sound_rule_window(&events, 1);
+        assert!(other_start.expect("site 1 has a window") > motion_of(12));
+    }
+
+    /// A site with no events at all yields no window rather than an empty range.
+    ///
+    /// `(None, None)` means "any frame" to the plugin, which is the wrong default here but the
+    /// only honest one: a site the event list does not contain cannot be scoped, and the caller
+    /// never builds a rule for one. Pinned so that a later change to return `Some(0.0)` — which
+    /// would silently scope every such rule to frame zero — has to be deliberate.
+    #[test]
+    fn a_site_with_no_events_has_no_frame_window() {
+        assert_eq!(VisionaryApp::sound_rule_window(&[], 3), (None, None));
+    }
+
+    fn sound_event(
+        site: usize,
+        frame: u32,
+        func: &str,
+        sounds: &[&str],
+    ) -> crate::data::SoundEvent {
+        crate::data::SoundEvent {
+            frame,
+            call: crate::data::SoundCall {
+                func: func.into(),
+                sounds: sounds.iter().map(|s| s.to_string()).collect(),
+                tail: None,
+            },
+            site,
+        }
+    }
+
+    /// A renamed sound sends a rule keyed on the sound the SCRIPT names, carrying the new one.
+    ///
+    /// The single most important property here and the one nothing else can observe. The rule is
+    /// matched in the game against the argument the script passes, so keying it on the user's new
+    /// name produces a rule that is well-formed, serialises, sends, deserialises — and never
+    /// matches. There is no error anywhere; the sound simply does not change.
+    #[test]
+    fn a_renamed_sound_is_keyed_on_the_original_and_carries_the_replacement() {
+        let pristine = vec![sound_event(0, 6, "PLAY_SE", &["se_kirby_swing_l"])];
+        let shown = vec![sound_event(0, 6, "PLAY_SE", &["se_common_swing_m"])];
+
+        let rules = VisionaryApp::sound_rules_for(0x99, &pristine, &shown);
+
+        let [rule] = &rules[..] else {
+            panic!("expected exactly one rule, got {}", rules.len());
+        };
+        assert_eq!(
+            rule.hitbox_id,
+            Some(effect_name_hash("se_kirby_swing_l")),
+            "the key must be the sound the game will actually pass"
+        );
+        assert_ne!(
+            rule.hitbox_id,
+            Some(effect_name_hash("se_common_swing_m")),
+            "keying on the edit produces a rule that can never fire"
+        );
+        let overrides = rule
+            .overrides
+            .as_ref()
+            .expect("a rename carries an override");
+        assert_eq!(
+            overrides.sound_hashes,
+            Some(vec![effect_name_hash("se_common_swing_m")])
+        );
+        assert_eq!(rule.category, crate::game_link::CAT_SOUND);
+    }
+
+    /// Every sound rule names its macro, because twelve members share one category.
+    ///
+    /// Without it a rule for `PLAY_SE` applies to a `PLAY_SE_REMAIN` naming the same sound in the
+    /// same frame window — and it applies *cleanly*, because slot 0 is a `Hash40` in both. The
+    /// wrong sound plays from the wrong call and nothing reports it.
+    #[test]
+    fn every_sound_rule_names_the_macro_it_is_for() {
+        let pristine = vec![
+            sound_event(0, 6, "PLAY_SE", &["se_kirby_swing_l"]),
+            sound_event(1, 6, "PLAY_SE_REMAIN", &["se_kirby_swing_l"]),
+        ];
+        let shown = vec![
+            sound_event(0, 6, "PLAY_SE", &["se_common_swing_m"]),
+            sound_event(1, 6, "PLAY_SE_REMAIN", &["se_kirby_swing_l"]),
+        ];
+
+        let rules = VisionaryApp::sound_rules_for(0x99, &pristine, &shown);
+
+        let [rule] = &rules[..] else {
+            panic!(
+                "only the edited call should produce a rule, got {}",
+                rules.len()
+            );
+        };
+        assert_eq!(
+            rule.func.as_deref(),
+            Some("PLAY_SE"),
+            "a rule that does not name its macro also matches the untouched PLAY_SE_REMAIN, \
+             which keys on the same sound in the same frame"
+        );
+    }
+
+    /// An unedited move sends no rules at all.
+    ///
+    /// The paired positive for the assertions above: without it, a `sound_rules_for` that always
+    /// returned an empty vector would pass every "the rule is keyed correctly" test by never
+    /// producing one to check.
+    #[test]
+    fn an_unedited_sound_list_sends_nothing() {
+        let events = vec![
+            sound_event(0, 6, "PLAY_SE", &["se_kirby_swing_l"]),
+            sound_event(1, 9, "STOP_SE", &["se_kirby_swing_l"]),
+        ];
+        assert!(VisionaryApp::sound_rules_for(0x99, &events, &events).is_empty());
+    }
+
+    /// A site with no baseline is left alone rather than sent as a rule against a guessed key.
+    #[test]
+    fn a_sound_site_with_no_baseline_sends_no_rule() {
+        let shown = vec![sound_event(7, 6, "PLAY_SE", &["se_common_swing_m"])];
+        assert!(VisionaryApp::sound_rules_for(0x99, &[], &shown).is_empty());
+    }
+
+    /// Adopting a live capture sets the baseline equal to what it adopted.
+    ///
+    /// The half that does nothing if it is forgotten, and it fails in both directions: no
+    /// baseline means the first diff reports every call in the move as edited and sends a rule
+    /// for each, and a baseline taken from an already-edited list means no rule is ever sent.
+    #[test]
+    fn adopting_a_captured_sound_list_leaves_it_reading_as_unedited() {
+        let rev = sound_rev(&["se_kirby_swing_l"]);
+        let captures = vec![sound_capture(
+            "PLAY_SE",
+            6.0,
+            vec![A::Hash(hash40::hash40("se_kirby_swing_l").0)],
+        )];
+        let script = VisionaryApp::sound_script_from_captures(&captures, &rev);
+        let mut state = crate::data::AppState::default();
+
+        assert!(adopt_captured_sounds(script, &mut state));
+
+        assert_eq!(state.sounds.len(), 1);
+        assert_eq!(
+            state.sounds, state.sounds_pristine,
+            "a freshly captured sound has not been edited yet"
+        );
+        // And therefore nothing is sent until the user changes something.
+        assert!(
+            VisionaryApp::sound_rules_for(0x99, &state.sounds_pristine, &state.sounds).is_empty()
+        );
+    }
+
+    /// A fetched sound script is never overwritten by a capture.
+    ///
+    /// A capture only sees the calls that actually ran — a branch not taken leaves no line — so
+    /// replacing a real parsed script with one is a lossy trade that also discards every verbatim
+    /// line the export carries.
+    #[test]
+    fn a_capture_never_replaces_a_sound_script_that_was_fetched() {
+        let rev = sound_rev(&["se_kirby_swing_l"]);
+        let captures = vec![sound_capture(
+            "PLAY_SE",
+            6.0,
+            vec![A::Hash(hash40::hash40("se_kirby_swing_l").0)],
+        )];
+        let mut state = crate::data::AppState {
+            sound_script: crate::data::AcmdScript {
+                stmts: vec![crate::data::AcmdStmt::Frame(1.0)],
+            },
+            ..Default::default()
+        };
+
+        let adopted = adopt_captured_sounds(
+            VisionaryApp::sound_script_from_captures(&captures, &rev),
+            &mut state,
+        );
+
+        assert!(!adopted, "a fetched script must win over a capture");
+        assert_eq!(state.sound_script.stmts.len(), 1);
+        assert!(state.sounds.is_empty());
     }
 
     /// A move captured live has no script file anywhere, so the hurtbox lines have to come back
