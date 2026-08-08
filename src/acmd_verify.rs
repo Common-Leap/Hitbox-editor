@@ -959,8 +959,8 @@ fn check_dropped_lines(subject: &str, lost: &[String], report: &mut Report) {
 /// A warning, on the same reasoning as the dropped-line check: refusing the export helps nobody
 /// who can read the message and fix the line. A known `smash-script` wrapper gap is the one
 /// exception: the generated source is not buildable in that case, so it is a blocker rather than
-/// a warning. The decompiler's zero-argument `LAST_PARTICLE_SET_COLOR(agent)` spelling and
-/// one-value `LAST_EFFECT_SET_SCALE_W` spelling are the known non-buildable C7 shapes;
+/// a warning. The decompiler's zero-argument `LAST_PARTICLE_SET_COLOR(agent)` spelling is the
+/// remaining known non-buildable C7 shape;
 /// `LAST_EFFECT_SET_WORK_INT` uses the generated local primitive helper emitted by the effect
 /// exporter.
 fn check_carried_lines(
@@ -1013,8 +1013,8 @@ fn check_carried_lines(
 /// be a real game call while still naming no callable wrapper in an exported Skyline project.
 /// The particle colour wrapper does exist, but the real dump's stack-form line has no explicit RGB
 /// arguments; emitting it unchanged would call a three-argument wrapper with only `agent`. The
-/// same applies to the measured scale-W dump line, which has one value after `agent` even though
-/// its wrapper requires three. Do not broaden this to all opaque lines: a decompiled condition or
+/// measured scale-W dump line is handled by the generated dynamic-arity helper. Do not broaden
+/// this to all opaque lines: a decompiled condition or
 /// a project-specific raw helper is a warning, not enough evidence for a new compile rule.
 fn carried_line_blocker(line: &str) -> Option<String> {
     if line == "macros::LAST_PARTICLE_SET_COLOR(agent);" {
@@ -1024,20 +1024,6 @@ fn carried_line_blocker(line: &str) -> Option<String> {
              inputs before exporting"
                 .to_string(),
         );
-    }
-    if let Some(args) = line
-        .strip_prefix("macros::LAST_EFFECT_SET_SCALE_W(")
-        .and_then(|rest| rest.strip_suffix(");"))
-    {
-        let args: Vec<_> = args.split(',').map(str::trim).collect();
-        if args.len() == 2 && args[0] == "agent" {
-            return Some(
-                "the generated script carries the dump's one-value `LAST_EFFECT_SET_SCALE_W`, \
-                 but smash-script's wrapper requires three scale arguments; resolve its Lua-stack \
-                 inputs before exporting"
-                    .to_string(),
-            );
-        }
     }
     None
 }
@@ -1348,6 +1334,25 @@ fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report)
                 );
             }
         }
+        if let Some(values) = &call.scale_w {
+            if !(1..=3).contains(&values.len()) {
+                report.blocker(
+                    subject,
+                    format!(
+                        "{label} has {} LAST_EFFECT_SET_SCALE_W values; the native primitive accepts one to three",
+                        values.len()
+                    ),
+                );
+            }
+            for (index, value) in values.iter().copied().enumerate() {
+                check_finite(
+                    subject,
+                    &format!("{label} scale W value {}", index + 1),
+                    value,
+                    report,
+                );
+            }
+        }
         if call.active_end < call.active_start {
             report.warn(
                 subject,
@@ -1599,10 +1604,10 @@ mod tests {
     }
 
     /// The property the whole module exists for, checked against every script the app has ever
-    /// fetched. The intentional exceptions are the corpus's malformed zero-argument
-    /// `LAST_PARTICLE_SET_COLOR` line and one-value `LAST_EFFECT_SET_SCALE_W` line: they are
-    /// carried faithfully but cannot compile against their three-argument wrappers, so the
-    /// verifier must report those blockers rather than let this oracle hide them. Everything else
+    /// fetched. The intentional exception is the corpus's malformed zero-argument
+    /// `LAST_PARTICLE_SET_COLOR` line: it is carried faithfully but cannot compile against its
+    /// three-argument wrapper, so the verifier must report that blocker rather than let this
+    /// oracle hide it. Everything else
     /// still has to be a faithful inverse of the parser across a thousand real functions.
     #[test]
     fn every_cached_script_survives_its_own_export() {
@@ -1657,14 +1662,11 @@ mod tests {
         let blockers: Vec<String> = report.blockers().map(|f| f.to_string()).collect();
         let unexpected: Vec<&String> = blockers
             .iter()
-            .filter(|line| {
-                !line.contains("LAST_PARTICLE_SET_COLOR(agent);")
-                    && !line.contains("LAST_EFFECT_SET_SCALE_W")
-            })
+            .filter(|line| !line.contains("LAST_PARTICLE_SET_COLOR(agent);"))
             .collect();
         assert!(
             unexpected.is_empty(),
-            "{} unexpected blockers among {checked} scripts; only the malformed C7 wrapper lines are intentional:\n{}",
+            "{} unexpected blockers among {checked} scripts; only the malformed particle wrapper line is intentional:\n{}",
             unexpected.len(),
             unexpected
                 .iter()
@@ -1675,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_scale_w_stack_form_is_reported_as_unbuildable() {
+    fn dynamic_scale_w_stack_form_is_exportable_with_its_authored_arity() {
         let source = r#"unsafe extern "C" fn effect_scale_w(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 23.0);
     if macros::is_excute(agent) {
@@ -1690,7 +1692,11 @@ mod tests {
             "the stack-form fixture has no effect spawn"
         );
         let emitted = crate::acmd::preview_effect_fn(&calls, "scale_w", &[], &residue);
-        assert!(emitted.contains("macros::LAST_EFFECT_SET_SCALE_W(agent, 1821741189);"));
+        assert!(
+            emitted.contains("visionary_last_effect_set_scale_w(agent, &[")
+                && emitted.contains("]);"),
+            "dynamic scale-W helper call missing:\n{emitted}"
+        );
 
         let mut report = Report::default();
         verify_effect_move(
@@ -1703,11 +1709,10 @@ mod tests {
             &mut report,
         );
         assert!(
-            report.blockers().any(|finding| {
-                finding.message.contains("one-value")
-                    && finding.message.contains("LAST_EFFECT_SET_SCALE_W")
-            }),
-            "the wrapper mismatch must be explicit: {report:?}"
+            !report
+                .blockers()
+                .any(|finding| finding.message.contains("LAST_EFFECT_SET_SCALE_W")),
+            "the dynamic helper must remove the former wrapper blocker: {report:?}"
         );
         assert!(carried_line_blocker("macros::LAST_EFFECT_SET_SCALE_W(agent, 1, 2, 3);").is_none());
     }

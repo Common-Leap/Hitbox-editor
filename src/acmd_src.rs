@@ -1414,6 +1414,18 @@ pub fn rewrite_effect_calls(
             &mut edits,
             &mut report,
         );
+        modifier_edits(
+            text,
+            label,
+            "scale W",
+            "LAST_EFFECT_SET_SCALE_W",
+            macro_site,
+            was.scale_w.clone(),
+            target.scale_w.clone(),
+            sites.and_then(|s| s.scale_w.as_ref()),
+            &mut edits,
+            &mut report,
+        );
     }
 
     report.changed = edits.len();
@@ -1472,7 +1484,7 @@ fn sync_script(
 /// Write one `LAST_EFFECT_SET_*` modifier back, or say why it could not be.
 ///
 /// Each of these lives on its own line, so turning one on or off is a call added or removed —
-/// structural, and reported. Only retuning an existing one is a value edit. The four differ
+/// structural, and reported. Only retuning an existing one is a value edit. The modifiers differ
 /// only in which property they carry — rate, camera offset, opacity, effect tint, or
 /// particle tint —
 /// and every rule around them is the same. `noun` names the property in the user's terms and
@@ -1491,6 +1503,56 @@ fn modifier_edits(
     report: &mut SyncReport,
 ) {
     if was == now {
+        return;
+    }
+    if command == "LAST_EFFECT_SET_SCALE_W"
+        && site.is_some_and(|site| site.name == "visionary_last_effect_set_scale_w")
+    {
+        match (was.as_ref(), now.as_ref(), site) {
+            (Some(_), Some(values), Some(site)) => {
+                if let Some(span) = site.args.get(1) {
+                    let current = text[span.clone()].trim();
+                    let current_values = current
+                        .strip_prefix("&[")
+                        .and_then(|value| value.strip_suffix(']'))
+                        .map(|value| {
+                            value
+                                .split(',')
+                                .filter_map(|value| value.trim().parse::<f32>().ok())
+                                .collect::<Vec<_>>()
+                        });
+                    if current_values.as_ref() != Some(values) {
+                        edits.push(Replacement {
+                            span: span.clone(),
+                            value: format!(
+                                "&[{}]",
+                                values
+                                    .iter()
+                                    .map(|value| format_float(*value))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        });
+                    }
+                }
+            }
+            (None, Some(_), _) => report.skipped.push(format!(
+                "{label}: `{}` gained a {noun} — that is a new {command} line, which source \
+                 syncing does not add",
+                macro_site.name
+            )),
+            (Some(_), None, _) => report.skipped.push(format!(
+                "{label}: `{}` lost its {noun} — source syncing does not delete the {command} \
+                 line that sets it",
+                macro_site.name
+            )),
+            (Some(_), Some(_), None) => report.skipped.push(format!(
+                "{label}: `{}` has a {noun} in the editor but no {command} directly beneath it \
+                 in the source — reload the move from source",
+                macro_site.name
+            )),
+            (None, None, _) => {}
+        }
         return;
     }
     match (was, now, site) {
@@ -1572,7 +1634,7 @@ fn work_int_edits(
 /// The `LAST_EFFECT_SET_*` / `LAST_PARTICLE_SET_COLOR` lines a spawn can carry, in the spelling
 /// `scan_macro_sites` reports.
 ///
-/// Only these six break nothing when they sit between a spawn and a later modifier of its
+/// Only these seven break nothing when they sit between a spawn and a later modifier of its
 /// own; every other macro ends the run. Adding a member of the family to
 /// [`crate::data::EffectCall`] means adding it here too, or its line will end the run and the
 /// modifier after it will be reported as unfindable.
@@ -1583,6 +1645,8 @@ const MODIFIER_COMMANDS: &[&str] = &[
     "LAST_EFFECT_SET_COLOR",
     "LAST_PARTICLE_SET_COLOR",
     "LAST_EFFECT_SET_ALPHA",
+    "LAST_EFFECT_SET_SCALE_W",
+    "visionary_last_effect_set_scale_w",
 ];
 
 /// The last-target modifier lines belonging to one spawn, each present only if the source has it.
@@ -1594,6 +1658,7 @@ struct ModifierSites {
     tint: Option<MacroSite>,
     particle_tint: Option<MacroSite>,
     alpha: Option<MacroSite>,
+    scale_w: Option<MacroSite>,
 }
 
 /// The spawn calls in `text`, in ordinal order, each paired with its `LAST_EFFECT_SET_*` lines.
@@ -1623,7 +1688,14 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
     let mut spawns: Vec<MacroSite> = Vec::new();
     let mut modifiers: Vec<ModifierSites> = Vec::new();
     let mut adjacent = false;
-    for site in scan_macro_sites(text, 0..text.len()) {
+    let mut sites = scan_macro_sites(text, 0..text.len());
+    sites.extend(scan_named_sites(
+        text,
+        "visionary_last_effect_set_scale_w",
+        0..text.len(),
+    ));
+    sites.sort_by_key(|site| site.span.start);
+    for site in sites {
         if is_spawn_macro(&site.name) {
             // A trail is a spawn for ordinal purposes but never anchors a modifier, matching
             // the parser — see the `AfterImage` arm of `eval_effect_stmts`. A colour command is
@@ -1647,6 +1719,21 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
         };
         let valid_arity = match site.name.as_str() {
             "LAST_EFFECT_SET_COLOR" | "LAST_PARTICLE_SET_COLOR" => site.args.len() == 4,
+            "LAST_EFFECT_SET_SCALE_W" => (2..=4).contains(&site.args.len()),
+            "visionary_last_effect_set_scale_w" => site
+                .args
+                .get(1)
+                .and_then(|span| text.get(span.clone()))
+                .and_then(|value| value.trim().strip_prefix("&["))
+                .and_then(|value| value.strip_suffix(']'))
+                .map(|value| {
+                    let values = value
+                        .split(',')
+                        .filter_map(|value| value.trim().parse::<f32>().ok())
+                        .count();
+                    (1..=3).contains(&values)
+                })
+                .unwrap_or(false),
             _ => site.args.len() == 2,
         };
         if !valid_arity {
@@ -1661,6 +1748,7 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
             "LAST_EFFECT_SET_COLOR" => &mut entry.tint,
             "LAST_PARTICLE_SET_COLOR" => &mut entry.particle_tint,
             "LAST_EFFECT_SET_ALPHA" => &mut entry.alpha,
+            "LAST_EFFECT_SET_SCALE_W" | "visionary_last_effect_set_scale_w" => &mut entry.scale_w,
             _ => &mut entry.rate,
         };
         *slot = Some(site);
@@ -1719,6 +1807,7 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
         && a.tint == b.tint
         && a.particle_tint == b.particle_tint
         && a.alpha == b.alpha
+        && a.scale_w == b.scale_w
         && a.color == b.color
         && a.control == b.control
 }
@@ -7756,6 +7845,27 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(report.changed, 1);
         assert!(after.contains("macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 0.5, 0.3);"));
         assert!(!after.contains("LAST_EFFECT_SET_COLOR"));
+    }
+
+    #[test]
+    fn a_dynamic_scale_w_edit_rewrites_only_its_native_value_list() {
+        const SCALE_W: &str = r#"unsafe extern "C" fn effect_scale_w(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 7.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_hit"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_SCALE_W(agent, 1, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(SCALE_W).to_effect_calls();
+        assert_eq!(pristine[0].scale_w, Some(vec![1.0, 2.0]));
+        let mut edited = pristine.clone();
+        edited[0].scale_w = Some(vec![1.0, 3.5]);
+
+        let (after, report) = rewrite_effect_calls(SCALE_W, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(after.contains("macros::LAST_EFFECT_SET_SCALE_W(agent, 1, 3.5);"));
     }
 
     /// Two spawns, each with a different mix of the three modifiers, and a rate written *after*

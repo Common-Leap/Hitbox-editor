@@ -8509,6 +8509,7 @@ impl VisionaryApp {
                     tint: None,
                     particle_tint: None,
                     alpha: None,
+                    scale_w: None,
                     color: Some(crate::data::ColorCall {
                         transition: None,
                         rgba: Some([1.0, 1.0, 1.0, 0.5]),
@@ -8563,6 +8564,7 @@ impl VisionaryApp {
                     tint: None,
                     particle_tint: None,
                     alpha: None,
+                    scale_w: None,
                     // This button adds a spawn. Colour commands are added by their own button
                     // below, because the two share a list but nothing else.
                     color: None,
@@ -9419,6 +9421,74 @@ impl VisionaryApp {
                                 });
                                 match pristine.as_ref().map(|p| p.alpha) {
                                     Some(Some(was)) => orig(ui, format!("orig {was:.3}")),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+
+                                // Native dynamic-arity scale-W — the game reads one, two, or
+                                // three Lua values. Keep that count visible and editable rather
+                                // than padding a one-value dump into a different call shape.
+                                ui.label("Scale W");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.scale_w.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Set the last effect's W scale. The native call accepts one to three values; + and - preserve the Lua-stack arity.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.scale_w = on.then_some(vec![1.0]);
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(values) = ec.scale_w.as_mut() {
+                                        for value in values.iter_mut() {
+                                            if ui
+                                                .add(egui::DragValue::new(value).speed(0.01))
+                                                .changed()
+                                            {
+                                                changed = true;
+                                                respawn_needed = true;
+                                            }
+                                        }
+                                        if values.len() < 3
+                                            && ui.small_button("+").on_hover_text("Add one native scale-W value").clicked()
+                                        {
+                                            values.push(1.0);
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                        if values.len() > 1
+                                            && ui.small_button("-").on_hover_text("Remove the last native scale-W value").clicked()
+                                        {
+                                            values.pop();
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.scale_w.as_deref()) {
+                                    Some(Some(values)) => orig(
+                                        ui,
+                                        format!(
+                                            "orig [{}]",
+                                            values
+                                                .iter()
+                                                .map(|value| format!("{value:.3}"))
+                                                .collect::<Vec<_>>()
+                                                .join(" ")
+                                        ),
+                                    ),
                                     Some(None) => orig(ui, "orig none".to_string()),
                                     None => {
                                         ui.label("");
@@ -11929,7 +11999,7 @@ impl VisionaryApp {
             raw_line: None,
             trail_off: None,
             trail_bone2: None,
-            // A spawn call carries none of the six modifiers of its own — each arrives as its
+            // A spawn call carries none of the seven modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
             rate: None,
@@ -11938,6 +12008,7 @@ impl VisionaryApp {
             tint: None,
             particle_tint: None,
             alpha: None,
+            scale_w: None,
             // `effect_capture_layout` above only matches spawn families, so nothing that
             // reaches here is a colour command; those are built by `color_call_from_capture`.
             color: None,
@@ -12006,6 +12077,7 @@ impl VisionaryApp {
             tint: None,
             particle_tint: None,
             alpha: None,
+            scale_w: None,
             color: Some(crate::data::ColorCall { transition, rgba }),
             control: None,
             guard: None,
@@ -12073,6 +12145,7 @@ impl VisionaryApp {
             tint: None,
             particle_tint: None,
             alpha: None,
+            scale_w: None,
             color: None,
             control: Some(control),
             guard: None,
@@ -12743,7 +12816,7 @@ impl VisionaryApp {
             // spawned last, so each binds to the capture line above it exactly as the parser
             // binds it to the macro above it in a script. The sort is stable and the lines share
             // a frame, so the spawn is still the previous entry here. `anchor` survives all
-            // six, because a second modifier line targets the same spawn and the later one
+            // seven, because a second modifier line targets the same spawn and the later one
             // wins — and a tint followed by a rate or camera offset is still one spawn's data.
             if line.func == "LAST_EFFECT_SET_WORK_INT" {
                 if let (Some(work), Some(index)) =
@@ -12795,6 +12868,21 @@ impl VisionaryApp {
                     (line.args.first().and_then(|arg| arg.as_f32()), anchor)
                 {
                     effects[index].alpha = Some(alpha);
+                }
+                continue;
+            }
+            if line.func == "LAST_EFFECT_SET_SCALE_W" {
+                let values = (1..=3)
+                    .contains(&line.args.len())
+                    .then(|| {
+                        line.args
+                            .iter()
+                            .map(|arg| arg.as_f32())
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .flatten();
+                if let (Some(values), Some(index)) = (values, anchor) {
+                    effects[index].scale_w = Some(values);
                 }
                 continue;
             }
@@ -18990,6 +19078,7 @@ impl VisionaryApp {
                                 tint: None,
                                 particle_tint: None,
                                 alpha: None,
+                                scale_w: None,
                                 color: None,
                                 transition: None,
                                 inject: None,
@@ -19008,6 +19097,7 @@ impl VisionaryApp {
                                 tint: None,
                                 particle_tint: None,
                                 alpha: None,
+                                scale_w: None,
                                 color: None,
                                 transition: None,
                                 inject: Some(inject),
@@ -19177,6 +19267,7 @@ impl VisionaryApp {
                     tint: None,
                     particle_tint: None,
                     alpha: None,
+                    scale_w: None,
                     color: None,
                     transition: None,
                     inject: None,
@@ -19202,6 +19293,7 @@ impl VisionaryApp {
                     tint: None,
                     particle_tint: None,
                     alpha: None,
+                    scale_w: None,
                     color: None,
                     transition: None,
                     inject: Some(Self::build_effect_stop_inject(ec)),
@@ -19245,6 +19337,7 @@ impl VisionaryApp {
                         tint: None,
                         particle_tint: None,
                         alpha: None,
+                        scale_w: None,
                         color: None,
                         transition: None,
                         inject: None,
@@ -19270,6 +19363,7 @@ impl VisionaryApp {
                         tint: ec.tint,
                         particle_tint: ec.particle_tint,
                         alpha: ec.alpha,
+                        scale_w: ec.scale_w.clone(),
                         color: None,
                         transition: None,
                         inject: Some(inject),
@@ -19283,7 +19377,7 @@ impl VisionaryApp {
             let moved = pristine
                 .map(|p| p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale)
                 .unwrap_or(true);
-            // The five live-rewritable last-target modifiers ride along on the same rule, and each is
+            // The six live-rewritable last-target modifiers ride along on the same rule, and each is
             // sent on its own terms: a spawn whose rate changed but which has not been moved
             // still needs a rule, and one that moved but kept its rate must not claim to set
             // one. Sending a modifier unconditionally would override the script's own line
@@ -19305,7 +19399,10 @@ impl VisionaryApp {
             let camera_offset_changed = pristine
                 .map(|p| p.camera_offset != ec.camera_offset)
                 .unwrap_or(ec.camera_offset.is_some());
-            if moved || retuned || retinted || refaded || camera_offset_changed {
+            let scale_w_changed = pristine
+                .map(|p| p.scale_w != ec.scale_w)
+                .unwrap_or(ec.scale_w.is_some());
+            if moved || retuned || retinted || refaded || camera_offset_changed || scale_w_changed {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
@@ -19320,6 +19417,7 @@ impl VisionaryApp {
                     tint: retinted.then_some(ec.tint).flatten(),
                     particle_tint: particle_retinted.then_some(ec.particle_tint).flatten(),
                     alpha: refaded.then_some(ec.alpha).flatten(),
+                    scale_w: scale_w_changed.then_some(ec.scale_w.clone()).flatten(),
                     color: None,
                     transition: None,
                     inject: None,
@@ -19686,6 +19784,7 @@ impl VisionaryApp {
             tint: None,
             particle_tint: None,
             alpha: None,
+            scale_w: None,
             color: None,
             transition: None,
             inject: None,
@@ -27602,6 +27701,25 @@ mod live_effect_capture_tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tint, None);
         assert_eq!(calls[0].particle_tint, Some([0.1, 1.2, 0.3]));
+    }
+
+    #[test]
+    fn a_captured_dynamic_scale_w_preserves_the_native_arity() {
+        let smoke = hash40::hash40("sys_atk_smoke").0;
+        let scale_w = CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame: 5.0,
+            func: "LAST_EFFECT_SET_SCALE_W".into(),
+            args: vec![A::Num(1.0), A::Num(2.0)],
+            run: 1,
+        };
+        let captures = vec![spawn("EFFECT", 5.0, smoke), scale_w];
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([(smoke, "sys_atk_smoke".into())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].scale_w, Some(vec![1.0, 2.0]));
     }
 
     /// A move captured live used to come back without its screen or body colouring at all —

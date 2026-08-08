@@ -131,6 +131,10 @@ pub struct SpawnRuleWire {
     pub particle_tint: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
+    /// Per-spawn values for the native dynamic-arity `LAST_EFFECT_SET_SCALE_W` modifier. The
+    /// vector preserves the authored one-to-three-value Lua stack shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_w: Option<Vec<f32>>,
     /// Live values for a colour command. For such a rule `eff_hash` is hash40 of the
     /// lowercased command name — `burn_color`, not an effect kind — because these macros name
     /// no effect at all; see `SpawnRule::color` in the plugin for why that field is reused.
@@ -2526,6 +2530,7 @@ mod tests {
             tint: None,
             particle_tint: Some([0.1, 1.2, 0.3]),
             alpha: None,
+            scale_w: Some(vec![0.75]),
             color: None,
             transition: None,
             inject: None,
@@ -2554,6 +2559,17 @@ mod tests {
             Some(vec![0.1, 1.2, 0.3]),
             "the particle tint must use its own wire field"
         );
+        assert_eq!(
+            v["spawn_rules"][0]["scale_w"].as_array().map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_f64)
+                    .map(|value| value as f32)
+                    .collect::<Vec<_>>()
+            }),
+            Some(vec![0.75]),
+            "the dynamic scale-W values must use their own wire field"
+        );
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/slight_replica/src/slight/effect_viewer");
@@ -2563,7 +2579,9 @@ mod tests {
             rules.contains("pub camera_offset: Option<f32>,")
                 && rules.contains("pub fn camera_offset_for")
                 && rules.contains("pub particle_tint: Option<[f32; 3]>")
-                && rules.contains("pub fn particle_tint_for"),
+                && rules.contains("pub fn particle_tint_for")
+                && rules.contains("pub scale_w: Option<Vec<f32>>")
+                && rules.contains("pub fn scale_w_for"),
             "the plugin no longer exposes the camera-flat rule field and lookup"
         );
         let hooks = std::fs::read_to_string(root.join("acmd_hooks.rs"))
@@ -2574,7 +2592,9 @@ mod tests {
             ) && hooks.contains("hook_last_effect_set_offset_to_camera_flat")
                 && hooks.contains("apply_pending_camera_offset")
                 && hooks.contains("LAST_PARTICLE_SET_COLOR")
-                && hooks.contains("apply_pending_particle_tint"),
+                && hooks.contains("apply_pending_particle_tint")
+                && hooks.contains("LAST_EFFECT_SET_SCALE_W")
+                && hooks.contains("apply_pending_scale_w"),
             "the plugin no longer rewrites the camera-flat modifier hook"
         );
     }

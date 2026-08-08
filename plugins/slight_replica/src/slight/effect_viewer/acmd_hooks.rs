@@ -816,6 +816,10 @@ static PENDING_TINT: [PendingValue; 3] =
     [PendingValue::new(), PendingValue::new(), PendingValue::new()];
 static PENDING_PARTICLE_TINT: [PendingValue; 3] =
     [PendingValue::new(), PendingValue::new(), PendingValue::new()];
+static PENDING_SCALE_W: [PendingValue; 3] =
+    [PendingValue::new(), PendingValue::new(), PendingValue::new()];
+static PENDING_SCALE_W_COUNT: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
 
 fn set_pending_rate(rate: Option<f32>) {
     PENDING_RATE.set(rate);
@@ -860,6 +864,29 @@ fn pending_particle_tint() -> Option<[f32; 3]> {
         PENDING_PARTICLE_TINT[1].get()?,
         PENDING_PARTICLE_TINT[2].get()?,
     ])
+}
+
+fn set_pending_scale_w(values: Option<Vec<f32>>) {
+    let values = values.filter(|values| {
+        (1..=3).contains(&values.len()) && values.iter().all(|value| value.is_finite())
+    });
+    for (slot, pending) in PENDING_SCALE_W.iter().enumerate() {
+        pending.set(values.as_ref().and_then(|values| values.get(slot)).copied());
+    }
+    PENDING_SCALE_W_COUNT.store(
+        values.map_or(0, |values| values.len() as u8),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn pending_scale_w() -> Option<Vec<f32>> {
+    let count = PENDING_SCALE_W_COUNT.load(std::sync::atomic::Ordering::Relaxed) as usize;
+    if !(1..=3).contains(&count) {
+        return None;
+    }
+    (0..count)
+        .map(|slot| PENDING_SCALE_W[slot].get())
+        .collect::<Option<Vec<_>>>()
 }
 
 /// The editor's per-spawn modifiers, applied to the handle the spawn just produced.
@@ -922,6 +949,24 @@ unsafe fn apply_pending_particle_tint(lua_state: u64) {
     agent.clear_lua_stack();
 }
 
+/// Apply the native dynamic-arity scale-W modifier even when the edited source has no authored
+/// `LAST_EFFECT_SET_SCALE_W` line, or when a retime injection replays only the captured spawn.
+/// The same hooked primitive is used so the live path and exported source share one ABI.
+unsafe fn apply_pending_scale_w(lua_state: u64) {
+    let Some(values) = pending_scale_w() else {
+        return;
+    };
+    let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    for value in values {
+        let mut value = L2CValue::new_num(value);
+        agent.push_lua_stack(&mut value);
+    }
+    hook_last_effect_set_scale_w(lua_state);
+    agent.clear_lua_stack();
+}
+
 /// Overwrite the arguments of a `LAST_EFFECT_SET_*` call with the editor's own values.
 ///
 /// Rewriting the arguments beats calling the `EffectModule` setter after the original: the
@@ -942,6 +987,20 @@ unsafe fn override_modifier_args(lua_state: u64, values: &[f32]) {
     agent.clear_lua_stack();
     for v in vals.iter_mut() {
         agent.push_lua_stack(v);
+    }
+}
+
+/// Replace the complete dynamic scale-W stack. Its native contract is exactly the one-to-three
+/// values represented by the editor, so changing arity is intentional and safe here.
+unsafe fn override_scale_w_args(lua_state: u64, values: &[f32]) {
+    if !(1..=3).contains(&values.len()) || values.iter().any(|value| !value.is_finite()) {
+        return;
+    }
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    for value in values {
+        let mut value = L2CValue::new_num(*value);
+        agent.push_lua_stack(&mut value);
     }
 }
 
@@ -1078,6 +1137,21 @@ unsafe fn hook_last_effect_set_alpha(lua_state: u64) {
     original!()(lua_state);
 }
 
+/// `LAST_EFFECT_SET_SCALE_W` reads one through three values from the Lua stack on the pinned
+/// game build. Capture the exact arity and replace the complete stack when a live rule supplies
+/// edited values, including rules for a source that had no authored line.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_SCALE_W)]
+unsafe fn hook_last_effect_set_scale_w(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 3);
+    crate::slight::hitbox_viewer::record(lua_state, "LAST_EFFECT_SET_SCALE_W", &typed);
+
+    if let Some(values) = pending_scale_w() {
+        override_scale_w_args(lua_state, &values);
+    }
+
+    original!()(lua_state);
+}
+
 /// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` — recorded and overridden on the same terms as the
 /// other per-spawn modifier lines. The original applies the value to the last effect handle, so
 /// rewriting its one numeric argument is enough; no guessed EffectModule setter is needed here.
@@ -1115,6 +1189,7 @@ unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_befor
     // which is why each `hook_last_effect_set_*` rewrites its arguments as well.
     apply_pending_modifiers(boma, h_before, h_after);
     apply_pending_camera_offset(lua_state);
+    apply_pending_scale_w(lua_state);
     if h_after != 0 && h_after != h_before {
         apply_pending_particle_tint(lua_state);
     }
@@ -1174,6 +1249,7 @@ macro_rules! effect_hook {
                 set_pending_camera_offset(None);
                 set_pending_tint(None, None);
                 set_pending_particle_tint(None);
+                set_pending_scale_w(None);
                 // Eff-editor spawn rules: suppression + PER-SPAWN transform, both scoped to
                 // (motion, frame window) so editing one spawn doesn't affect the others.
                 let mut scoped_transform = false;
@@ -1248,6 +1324,13 @@ macro_rules! effect_hook {
                     set_pending_tint(tint, alpha);
                     set_pending_particle_tint(
                         crate::slight::effect_viewer::spawn_rules::particle_tint_for(
+                            args.eff_hash,
+                            motion,
+                            frame,
+                        ),
+                    );
+                    set_pending_scale_w(
+                        crate::slight::effect_viewer::spawn_rules::scale_w_for(
                             args.eff_hash,
                             motion,
                             frame,
@@ -1992,6 +2075,7 @@ pub fn install() {
         hook_last_effect_set_color,
         hook_last_particle_set_color,
         hook_last_effect_set_alpha,
+        hook_last_effect_set_scale_w,
         hook_flash,
         hook_flash_frm,
         hook_burn_color,
@@ -2001,7 +2085,7 @@ pub fn install() {
         hook_col_normal,
     );
     skyline::println!(
-        "[SLight] ACMD effect hooks installed (39 spawn/stop/colour/control variants)"
+        "[SLight] ACMD effect hooks installed (40 spawn/stop/colour/control variants)"
     );
     crate::slight::diag::note("ACMD hooks installed");
 }

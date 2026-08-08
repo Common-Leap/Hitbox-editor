@@ -5750,6 +5750,11 @@ pub enum EffectMacro {
     LastParticleSetColor { rgb: [f32; 3] },
     /// LAST_EFFECT_SET_ALPHA — sets the opacity of the last spawned effect.
     LastEffectSetAlpha { alpha: f32 },
+    /// LAST_EFFECT_SET_SCALE_W — scales the last spawned effect with the native primitive's
+    /// dynamic one-to-three-value Lua stack contract. The vendored smash-script wrapper only
+    /// exposes the three-value spelling, so the exporter uses a local stack helper while
+    /// retaining the authored arity here.
+    LastEffectSetScaleW { values: Vec<f32> },
     /// A detach or area-state point command. These are not effect spawns and never close one.
     Control(EffectControl),
     /// FLASH / BURN_COLOR and their relatives — see [`ColorCall`].
@@ -6017,6 +6022,14 @@ pub struct EffectCall {
     /// never asked for.
     #[serde(default)]
     pub alpha: Option<f32>,
+    /// Values from a `LAST_EFFECT_SET_SCALE_W` line following this spawn.
+    ///
+    /// The native primitive reads one, two, or three Lua values. Keeping a vector rather than
+    /// padding to three is load-bearing: missing values are defaulted by the game primitive,
+    /// and changing a one-value call into a three-value call changes its native stack contract.
+    /// Valid values contain one to three finite floats; malformed source remains residue.
+    #[serde(default)]
+    pub scale_w: Option<Vec<f32>>,
     /// Set when this entry is a colour command rather than a spawn — `FLASH`, `BURN_COLOR`,
     /// and the rest of [`COLOR_COMMANDS`], with `spawn_func` naming which one.
     ///
@@ -6330,6 +6343,7 @@ fn eval_effect_stmts(
                                 tint: None,
                                 particle_tint: None,
                                 alpha: None,
+                                scale_w: None,
                                 color: None,
                                 control: None,
                                 guard: walk.guard.clone(),
@@ -6377,6 +6391,7 @@ fn eval_effect_stmts(
                                 tint: None,
                                 particle_tint: None,
                                 alpha: None,
+                                scale_w: None,
                                 color: None,
                                 control: None,
                                 guard: walk.guard.clone(),
@@ -6496,6 +6511,20 @@ fn eval_effect_stmts(
                                 calls,
                             ),
                         },
+                        EffectMacro::LastEffectSetScaleW { values } => match anchor {
+                            Some(index) => calls[index].scale_w = Some(values.clone()),
+                            None => walk.residue(
+                                &format!(
+                                    "visionary_last_effect_set_scale_w(agent, &[{}]);",
+                                    values
+                                        .iter()
+                                        .map(|value| crate::acmd::num(*value))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                                calls,
+                            ),
+                        },
                         EffectMacro::Control(control) => {
                             // A control is a point event. It must not close or shorten a
                             // following effect, and it must not become the anchor for a
@@ -6523,6 +6552,7 @@ fn eval_effect_stmts(
                                 tint: None,
                                 particle_tint: None,
                                 alpha: None,
+                                scale_w: None,
                                 color: None,
                                 control: Some(control.clone()),
                                 guard: walk.guard.clone(),
@@ -6559,6 +6589,7 @@ fn eval_effect_stmts(
                                 tint: None,
                                 particle_tint: None,
                                 alpha: None,
+                                scale_w: None,
                                 color: Some(color.clone()),
                                 control: None,
                                 guard: walk.guard.clone(),

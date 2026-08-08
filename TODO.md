@@ -991,7 +991,7 @@ repeat this exactly.
   matching each macro's own spelling is what keeps a re-exported vanilla script textually
   identical to its source.
 
-### [!] C7 — The last four `LAST_EFFECT_SET_*` members (one wrapper-shape boundary and one runtime boundary remain)
+### [x] C7 — The last four `LAST_EFFECT_SET_*` members (completed 2026-08-08; live runtime unverified)
 
 What C1 left. Local cache counts and wrapper status, verified against the full `macros.rs`
 declaration list. A separate public dumped-script corpus was checked read-only for shape and
@@ -1008,9 +1008,10 @@ The external `LAST_EFFECT_SET_SCALE_W` hit has one argument rather than the thre
 `smash-script` wrapper shape. Static inspection of the version-matched 13.0.4 primitive shows
 that the game itself reads one through three stack values and supplies zeroes for missing values,
 so the line is a valid native dynamic-arity form, not proof of a three-value typed editor field.
-The offset member is the one slice taken from that oracle so far.
+The offset and dynamic scale members are now represented without collapsing their native stack
+shapes.
 
-**Boundary added 2026-08-08, without claiming C7 complete.** Remaining evidence-bounded C7 lines
+**Completed 2026-08-08.** Remaining evidence-bounded C7 lines
 inside an `is_excute` block were already carried by C6; bare forms now take that same frame-residue
 path instead of becoming statement-level losses. `LAST_EFFECT_SET_WORK_INT` is now typed through
 the parser/IR, editor, capture reconstruction, generated export, and source write-back: because
@@ -1021,10 +1022,10 @@ portable symbolic-to-runtime mapping is verified. The valid three-value
 `LAST_PARTICLE_SET_COLOR` shape is typed below, but the local `SetInkColor` call still uses the
 dump's zero-argument spelling after three preceding `WorkModule::get_float` stack inputs; that
 malformed form remains explicitly carried and the export verifier reports its wrapper mismatch.
-`LAST_EFFECT_SET_SCALE_W` still has only one native dynamic-arity external hit, while the vendored
-Rust wrapper emits only its three-value form. C7 therefore remains open for a local stack helper,
-typed arity-preserving editor field, and runtime capture contract; the current exporter reports
-the wrapper mismatch without inventing the missing scale values.
+`LAST_EFFECT_SET_SCALE_W` now preserves its measured native one-to-three-value stack arity through
+a local export helper, a typed arity-preserving editor field, capture reconstruction, the live rule
+wire/plugin hook, and value-only source write-back. No emulator, game, or UI automation was run,
+so in-game hook behaviour remains unverified.
 
 #### [x] C7a — `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` (completed 2026-08-08; live runtime unverified)
 
@@ -1037,12 +1038,6 @@ their own spawn, and old projects deserialize with no authored value through `se
 Offline regression coverage includes source parse/export read-back, source write-back, live
 capture reconstruction, wire-field parity, and a standalone plugin release build. No emulator,
 game, or UI automation was run, so live in-game behavior remains unverified.
-
-The remaining member stays separately bounded:
-
-- `LAST_EFFECT_SET_SCALE_W` has one native one-value hit, but the vendored wrapper only accepts
-  the measured three-value shape; the native primitive's dynamic arity is not yet represented by
-  the editor or live capture.
 
 #### [x] C7b — `LAST_PARTICLE_SET_COLOR` (completed 2026-08-08; live runtime unverified)
 
@@ -1070,6 +1065,21 @@ swapping a Work ID-bearing spawn reports the limitation instead of guessing a ru
 Offline tests cover source parse/export read-back, source write-back, capture binding, verifier
 fidelity, and the generated helper. No emulator, game, or UI automation was run, so the runtime
 symbolic mapping remains unverified.
+
+#### [x] C7d — `LAST_EFFECT_SET_SCALE_W` native dynamic arity (completed 2026-08-08; live runtime unverified)
+
+The version-matched native primitive reads one through three Lua-stack values and supplies zeroes
+for missing values, while the vendored Rust wrapper only exposes three typed arguments. The parser
+and `EffectCall` retain a one-to-three `Vec<f32>` instead of padding the call. The panel keeps that
+arity editable, capture reconstruction records it exactly, the JSON/Skyline rule path replaces the
+complete stack, and generated export/source write-back preserve the value list.
+
+Generated source uses a local helper that pushes exactly the requested number of values before
+calling the linked primitive; malformed arities remain carried and reported rather than guessed.
+Offline coverage includes parser/IR and export read-back, source write-back, live capture
+reconstruction, wire/plugin parity, verifier finite/arity checks, the full desktop test suite, and
+the Skyline release build. No emulator, game, or UI automation was run, so live in-game behaviour
+remains unverified.
 
 ### [x] C2 — Sword trails (done 2026-08-05)
 

@@ -70,6 +70,10 @@ pub struct SpawnRule {
     pub particle_tint: Option<[f32; 3]>,
     #[serde(default)]
     pub alpha: Option<f32>,
+    /// Per-spawn values for the native dynamic-arity `LAST_EFFECT_SET_SCALE_W` primitive.
+    /// Keep one to three values rather than padding the stack to three.
+    #[serde(default)]
+    pub scale_w: Option<Vec<f32>>,
     /// Live values for a colour command — `FLASH`, `BURN_COLOR`, and the rest of the family.
     ///
     /// These name no effect kind, so for such a rule `eff_hash` is hash40 of the lowercased
@@ -218,6 +222,23 @@ pub fn particle_tint_for(
             !r.suppress && r.particle_tint.is_some() && r.matches(eff_hash, motion, motion_frame)
         })
         .and_then(|r| r.particle_tint)
+}
+
+/// Per-spawn dynamic-arity scale-W values for the FIRST non-suppress rule matching this spawn.
+pub fn scale_w_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<Vec<f32>> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| !r.suppress && r.scale_w.is_some() && r.matches(eff_hash, motion, motion_frame))
+        .and_then(|r| {
+            r.scale_w
+                .as_ref()
+                .filter(|values| {
+                    (1..=3).contains(&values.len())
+                        && values.iter().all(|value| value.is_finite())
+                })
+                .cloned()
+        })
 }
 
 /// Live colour and interpolation length for the FIRST non-suppress rule matching this colour

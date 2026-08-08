@@ -902,6 +902,42 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // The linked primitive accepts one through three values from the Lua stack, while the
+        // vendored smash-script wrapper only exposes the three-value spelling. Keep the exact
+        // dynamic arity in the IR; generated exports call a local helper that pushes exactly
+        // this many values before dispatching the primitive.
+        let scale_w_prefix = if line.contains("macros::LAST_EFFECT_SET_SCALE_W(") {
+            Some("macros::LAST_EFFECT_SET_SCALE_W(")
+        } else if line.contains("visionary_last_effect_set_scale_w(") {
+            Some("visionary_last_effect_set_scale_w(")
+        } else {
+            None
+        };
+        if let Some(prefix) = scale_w_prefix {
+            if let Some(t) = try_extract(prefix) {
+                if (2..=4).contains(&t.len()) && t[0].trim() == "agent" {
+                    let values = t[1..]
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            let mut value = value.trim();
+                            if index == 0 {
+                                value = value.strip_prefix("&[").unwrap_or(value);
+                            }
+                            if index + 1 == t.len() - 1 {
+                                value = value.strip_suffix(']').unwrap_or(value);
+                            }
+                            value.parse::<f32>().ok()
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(values) = values {
+                        macros.push(EffectMacro::LastEffectSetScaleW { values });
+                        continue;
+                    }
+                }
+            }
+        }
+
         // FLASH / BURN_COLOR and friends: not spawns, but they belong to the effect timeline
         // and the export regenerates that timeline from scratch, so a line left unmodelled
         // here is a line the export drops.
@@ -993,7 +1029,10 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         // Generated effect exports may contain the linked-primitive helper immediately inside
         // the function. It is emitter scaffolding, not a runtime ACMD branch, so skip its whole
         // nested definition before the generic block parser can turn it into a conditional.
-        if line.contains("fn visionary_last_effect_set_work_int(") && line.ends_with('{') {
+        if (line.contains("fn visionary_last_effect_set_work_int(")
+            || line.contains("fn visionary_last_effect_set_scale_w("))
+            && line.ends_with('{')
+        {
             let (body_end, _) = find_block_end(lines, pos);
             pos = body_end + 1;
             continue;
@@ -1062,6 +1101,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::LAST_PARTICLE_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
             || line.contains("macros::LAST_EFFECT_SET_SCALE_W(")
+            || line.contains("visionary_last_effect_set_scale_w(")
             // C4's detach/area controls are typed point events. Keep the names in this routing
             // table because the parser is intentionally line-oriented: the typed parser below
             // will claim measured forms, while malformed forms remain carried residue.
@@ -3595,6 +3635,19 @@ fn emit_effect_move_fn(
             out.push('\n');
         }
     }
+    if calls
+        .iter()
+        .any(|call| !call.disabled && call.scale_w.is_some())
+        || residue
+            .values()
+            .flatten()
+            .any(|line| line.contains("visionary_last_effect_set_scale_w("))
+    {
+        for line in emit_last_effect_set_scale_w_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     for (frame, (stops, starts)) in events {
         out.push_str(&format!("    frame(agent.lua_state_agent, {frame}.0);\n"));
 
@@ -3756,6 +3809,16 @@ fn emit_effect_move_fn(
                         num(alpha)
                     ));
                 }
+                if let Some(values) = &call.scale_w {
+                    out.push_str(&format!(
+                        "{body}visionary_last_effect_set_scale_w(agent, &[{}]);\n",
+                        values
+                            .iter()
+                            .map(|value| num(*value))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 // One rate line, never two. A live speed tweak is a deliberate override of this
                 // kind's playback rate, so it wins over the spawn's own — emitting both would
                 // leave the second one winning anyway, and reading the pair back would attribute
@@ -3810,6 +3873,32 @@ fn emit_last_effect_set_work_int_helper(indent: &str) -> Vec<String> {
         format!("{indent}    lua_args!(agent, work);"),
         format!(
             "{indent}    smash::app::sv_animcmd::LAST_EFFECT_SET_WORK_INT(agent.lua_state_agent);"
+        ),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}}}"),
+    ]
+}
+
+/// The native `LAST_EFFECT_SET_SCALE_W` primitive consumes one to three values from the Lua
+/// stack, but the vendored `smash-script` wrapper only exposes three typed arguments. Generated
+/// effect projects therefore push the authored number of values directly and call the linked
+/// primitive, preserving the dump's dynamic-arity semantics.
+fn emit_last_effect_set_scale_w_helper(indent: &str) -> Vec<String> {
+    vec![
+        format!("{indent}#[inline]"),
+        format!("{indent}#[allow(dead_code)]"),
+        format!(
+            "{indent}unsafe fn visionary_last_effect_set_scale_w(agent: &mut L2CAgentBase, values: &[f32]) {{"
+        ),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}    for value in values {{"),
+        format!(
+            "{indent}        let mut value = smash::lib::L2CValue::new_num(*value);"
+        ),
+        format!("{indent}        agent.push_lua_stack(&mut value);"),
+        format!("{indent}    }}"),
+        format!(
+            "{indent}    smash::app::sv_animcmd::LAST_EFFECT_SET_SCALE_W(agent.lua_state_agent);"
         ),
         format!("{indent}    agent.clear_lua_stack();"),
         format!("{indent}}}"),
@@ -6069,6 +6158,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 tint: None,
                 particle_tint: None,
                 alpha: None,
+                scale_w: None,
                 color: None,
                 control: None,
                 guard: None,
@@ -6097,6 +6187,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 tint: None,
                 particle_tint: None,
                 alpha: None,
+                scale_w: None,
                 color: None,
                 control: None,
                 guard: None,
@@ -6646,7 +6737,6 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         for name in [
             "LAST_PARTICLE_SET_COLOR",
             "LAST_EFFECT_SET_WORK_INT",
-            "LAST_EFFECT_SET_SCALE_W",
             "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
         ] {
             assert!(
@@ -6654,6 +6744,12 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 "{name} was not carried: {lines:?}"
             );
         }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("visionary_last_effect_set_scale_w")),
+            "LAST_EFFECT_SET_SCALE_W was not carried through its dynamic helper: {lines:?}"
+        );
         let emitted = preview_effect_fn(&calls, "c7", &[], &residue);
         for name in [
             "LAST_PARTICLE_SET_COLOR",
@@ -6667,6 +6763,11 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 "{name} must be emitted once:\n{emitted}"
             );
         }
+        assert_eq!(
+            emitted.matches("LAST_EFFECT_SET_SCALE_W").count(),
+            1,
+            "the dynamic scale-W primitive must be emitted once:\n{emitted}"
+        );
     }
 
     /// Kirby's `SetInkColor` is the one corpus use of `LAST_PARTICLE_SET_COLOR`. The dump emits
@@ -8131,6 +8232,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             tint: None,
             particle_tint: None,
             alpha: None,
+            scale_w: None,
             color: None,
             control: None,
             guard: None,
