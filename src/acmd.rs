@@ -10424,6 +10424,44 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     }
 
     #[test]
+    fn motion_module_set_frame_partial_binding_mismatch_remains_raw() {
+        let source = r#"unsafe extern "C" fn expression_appeallwl(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);
+    }
+    frame(agent.lua_state_agent, 13.0);
+    if is_excute(agent) {
+        MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3);
+    }
+    frame(agent.lua_state_agent, 18.0);
+    if is_excute(agent) {
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);
+    }
+}
+"#;
+        let script = parse_expression_script(source);
+        let emitted = preview_expression_fn(&script, "appeal_lw_l");
+
+        // The public corpus supplies three arguments, while the pinned native binding requires
+        // a fourth boolean. Neither shape is safe to type until that boolean's source/runtime
+        // contract is measured, so source export must preserve each call verbatim.
+        let round_tripped =
+            preview_expression_fn(&parse_expression_script(&emitted), "appeal_lw_l");
+        for line in [
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);",
+            "MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);",
+        ] {
+            assert!(emitted.contains(line), "raw partial-frame call was lost: {line}");
+            assert!(
+                round_tripped.contains(line),
+                "raw partial-frame call was lost on reparse: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_set_speed_ex_dump_shapes_remain_raw() {
         let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {

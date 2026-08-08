@@ -2786,6 +2786,10 @@ source value, and no direct text callers were found for these exported symbols. 
 ABI shape without closing the source/runtime evidence gap, so the three-argument calls remain
 source-preserved and untyped.
 
+The parser/export regression test also keeps measured three-argument calls and a native-shaped
+four-argument call raw and round-trippable, including the corpus's `boma` receiver spelling. This
+guards the evidence boundary without pretending that the fourth boolean has been identified.
+
 #### [x] E1s — direct `WorkModule::on_flag` / `off_flag` points (completed 2026-08-08; live runtime unverified)
 
 The retained public dumped-script corpus contains 9,855 exact `on_flag` calls and 2,091 exact
