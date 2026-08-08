@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**512 unit + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**564 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2352,7 +2352,7 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 ## Gameplay
 
-### [ ] E1 — Movement and kinetics (the measured `REVERSE_LR` slice is complete)
+### [ ] E1 — Movement and kinetics (the measured ACMD point slices are complete; status-module sources remain)
 
 `sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today.
 `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, and `SET_SPEED_EX` now have measured, value-editable slices
@@ -2470,8 +2470,8 @@ from the read-only public dump used for the coverage decision.
 
 Structural placement and add/remove changes remain export/source operations, and malformed or
 non-numeric shapes remain raw. Live in-game behavior is unverified because no emulator, game, or UI
-automation was run. The parent E1 entry remains open for `CLR_SPEED`, `SET_AIR`, status-module
-kinetics, and other unmeasured or unsupported sources.
+automation was run. The parent E1 entry remains open for status-module kinetics and other
+unmeasured or unsupported sources.
 
 #### [x] E1f — measured `FT_START_ADJUST_MOTION_FRAME_arg1` point events (completed 2026-08-08; live runtime unverified)
 
@@ -2506,7 +2506,7 @@ refuses branches, loops, and site mismatches rather than guessing placement, whi
 shapes remain raw. The 190 external `KineticModule::change_kinetic` calls remain raw
 status-module statements and are not part of this ACMD macro slice.
 
-Offline validation passed: focused and full desktop tests (563 tests, 1 ignored), strict Clippy,
+Offline validation passed: focused and full desktop tests (564 tests, 1 ignored), strict Clippy,
 format/diff checks, the debug build-check wrapper, the locked release build, and the Skyline
 plugin release build. No emulator, game, or UI automation was run, so live in-game behavior
 remains unverified.

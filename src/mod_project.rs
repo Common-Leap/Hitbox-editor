@@ -594,6 +594,47 @@ mod tests {
         assert_eq!(back.one_slot_slots, vec![8, 15, 16, 99, 255]);
     }
 
+    #[test]
+    fn kinetic_acmd_points_survive_project_round_trip() {
+        use crate::data::{AcmdScript, AcmdStmt, ClrSpeedCall, ExcuteStmt};
+
+        let script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(4.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::ClrSpeed(ClrSpeedCall {
+                        kinetic_kind: "*FIGHTER_KINETIC_ENERGY_ID_GRAVITY".into(),
+                    }),
+                    ExcuteStmt::SetAir,
+                ]),
+            ],
+        };
+        let mut project = ModProjectFile::default();
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                acmd: HashMap::from([(
+                    "attack_air_n".into(),
+                    EditRecord {
+                        fighter: "mario".into(),
+                        fighter_display: "Mario".into(),
+                        move_name: "attack_air_n".into(),
+                        script: script.clone(),
+                        hitboxes_pristine: Vec::new(),
+                        hitboxes: Vec::new(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+
+        let written = serde_json::to_string(&project).unwrap();
+        let reloaded: ModProjectFile = serde_json::from_str(&written).unwrap();
+        let loaded = &reloaded.fighters["mario"].acmd["attack_air_n"].script;
+        assert_eq!(loaded.to_clr_speed_events(), script.to_clr_speed_events());
+        assert_eq!(loaded.to_set_air_events(), script.to_set_air_events());
+    }
+
     /// The plugin hardcodes this prefix (`acmd_hooks::EDIT_CLONE_PREFIX`) because it cannot
     /// depend on this crate. At spawn time it is the only signal that tells an authored edit's
     /// redirect apart from a transplant's — and they need opposite fallback behaviour when the

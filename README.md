@@ -398,13 +398,24 @@ section of the editor:
 - `SET_SPEED_EX` edits the x/y velocity written to the selected kinetic reserve.
 - `ADD_SPEED_NO_LIMIT` edits an x/y velocity addition.
 - `CORRECT` edits the ground-correction kind while preserving named source constants.
+- `FT_CATCH_STOP` edits its two numeric catch-stop values.
+- `FT_START_ADJUST_MOTION_FRAME_arg1` edits the numeric motion-frame adjustment.
+- `CLR_SPEED` edits the authored kinetic-reserve ID token.
+- `SET_AIR` places, moves, or removes the point that switches the fighter to air kinetics.
 
-These controls edit point values while keeping their source frame. Named
+Value controls edit their point values while keeping their source frame. Placement
+controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.
+Named
 `CORRECT` constants can be exported and written back to a linked source project;
 live correction changes require a numeric capture so Visionary can identify the
-call safely. Kinetic commands that are not shown remain preserved in the source
-and are not rewritten. Movement changes are not simulated in the desktop
-viewport; connect the Skyline plugin or export the project to apply them in game.
+call safely. `CLR_SPEED` keeps named source tokens for export and source sync;
+its live replacement is available only when a numeric capture identifies the
+kinetic reserve. `SET_AIR` presence and placement are structural edits: the
+generated export applies them freely, while linked-source sync edits only a
+verified flat call layout and reports branches, loops, or ambiguous sites.
+Kinetic commands that are not shown remain preserved in the source and are not
+rewritten. Movement changes are not simulated in the desktop viewport; connect
+the Skyline plugin or export the project to apply them in game.
 
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
