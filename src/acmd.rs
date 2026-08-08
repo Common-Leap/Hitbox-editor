@@ -347,6 +347,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_set_speed_ex_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_reverse_lr_call(line) {
             stmts.push(stmt);
             continue;
@@ -1656,6 +1660,29 @@ fn parse_reverse_lr_call(line: &str) -> Option<ExcuteStmt> {
     (tokens.as_slice() == ["agent"]).then_some(ExcuteStmt::ReverseLr)
 }
 
+/// Parse the buildable `SET_SPEED_EX(agent, x, y, kinetic_kind)` shape.
+///
+/// The local smash-script wrapper takes exactly three arguments after `agent`. Dumped files also
+/// contain short and over-arity artifacts; those intentionally remain `Raw` so export never
+/// manufactures a call that the checked-in wrapper cannot compile.
+fn parse_set_speed_ex_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "macros::SET_SPEED_EX(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, speed_x, speed_y, kinetic_kind] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" {
+        return None;
+    }
+    Some(ExcuteStmt::SetSpeedEx(crate::data::SetSpeedExCall {
+        speed_x: speed_x.trim().parse::<f32>().ok()?,
+        speed_y: speed_y.trim().parse::<f32>().ok()?,
+        kinetic_kind: kinetic_kind.trim().to_string(),
+    }))
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2142,6 +2169,12 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::ReverseLr => {
                 format!("{indent}macros::REVERSE_LR(agent);")
             }
+            crate::data::ExcuteStmt::SetSpeedEx(call) => format!(
+                "{indent}macros::SET_SPEED_EX(agent, {}, {}, {});",
+                num(call.speed_x),
+                num(call.speed_y),
+                call.kinetic_kind
+            ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -8196,5 +8229,50 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert_eq!(hash_arg("0x1234abcd"), "Hash40::new_raw(0x1234abcd)");
         assert_eq!(hash_arg("*EFFECT_KIND"), "*EFFECT_KIND");
         assert_eq!(hash_arg("Hash40::new(\"x\")"), "Hash40::new(\"x\")");
+    }
+
+    #[test]
+    fn set_speed_ex_parses_exports_and_preserves_the_kinetic_token() {
+        let source = r#"unsafe extern "C" fn game_attackairlw(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::SET_SPEED_EX(agent, 0, -3.8, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_speed_ex_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame, 4);
+        assert_eq!(events[0].call.speed_x, 0.0);
+        assert_eq!(events[0].call.speed_y, -3.8);
+        assert_eq!(
+            events[0].call.kinetic_kind,
+            "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN"
+        );
+
+        let emitted = preview_game_fn(&script, "attack_air_lw");
+        assert!(emitted.contains(
+            "macros::SET_SPEED_EX(agent, 0.0, -3.8, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+        ));
+        assert_eq!(parse_acmd_script(&emitted).to_speed_ex_events(), events);
+    }
+
+    #[test]
+    fn malformed_set_speed_ex_dump_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SET_SPEED_EX(agent, 0, 1);
+        macros::SET_SPEED_EX(agent, 0, 1, 0, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_speed_ex_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("macros::SET_SPEED_EX(agent, 0, 1);"));
+        assert!(emitted.contains(
+            "macros::SET_SPEED_EX(agent, 0, 1, 0, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+        ));
     }
 }

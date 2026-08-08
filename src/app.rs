@@ -71,6 +71,7 @@ fn timeline_content_height(
     hurtboxes: usize,
     sounds: usize,
     reverse_lr: usize,
+    speed_ex: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
@@ -81,8 +82,14 @@ fn timeline_content_height(
             4.0 + rows as f32 * thin
         }
     };
-    (24.0 + hitbox_band + band(effects) + band(hurtboxes) + band(sounds) + band(reverse_lr))
-        .max(24.0)
+    (24.0
+        + hitbox_band
+        + band(effects)
+        + band(hurtboxes)
+        + band(sounds)
+        + band(reverse_lr)
+        + band(speed_ex))
+    .max(24.0)
 }
 
 /// Merge a finished mirror fetch with the project scripts that were waiting on it, and say
@@ -254,6 +261,7 @@ fn timeline_frame_extent(
     sounds: &[crate::data::SoundEvent],
     expressions: &[crate::data::ExpressionEvent],
     reverse_lr: &[crate::data::ReverseLrEvent],
+    speed_ex: &[crate::data::SetSpeedExEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -277,11 +285,13 @@ fn timeline_frame_extent(
     let sound_frames = sounds.iter().map(|sound| sound.frame);
     let expression_frames = expressions.iter().map(|expression| expression.frame);
     let reverse_lr_frames = reverse_lr.iter().map(|event| event.frame);
+    let speed_ex_frames = speed_ex.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
         .chain(expression_frames)
         .chain(reverse_lr_frames)
+        .chain(speed_ex_frames)
         .max()
         .unwrap_or(0)
 }
@@ -962,6 +972,7 @@ type SourceMirror = (
     Vec<crate::data::SoundEvent>,
     Vec<crate::data::ExpressionEvent>,
     Vec<crate::data::ReverseLrEvent>,
+    Vec<crate::data::SetSpeedExEvent>,
 );
 
 /// One ACMD function checked out of the linked project for editing.
@@ -2354,12 +2365,13 @@ impl VisionaryApp {
         // a couple of dozen structs carrying eight owned strings apiece.
         let buffer = self.acmd_src_buffer.as_mut().expect("checked above");
         let had_baseline = match &buffer.mirrored {
-            Some((hitboxes, effects, sounds, expressions, reverse_lr)) => {
+            Some((hitboxes, effects, sounds, expressions, reverse_lr, speed_ex)) => {
                 if *hitboxes == self.state.hitboxes
                     && *effects == self.state.effects
                     && *sounds == self.state.sounds
                     && *expressions == self.state.expressions
                     && *reverse_lr == self.state.script.to_reverse_lr_events()
+                    && *speed_ex == self.state.script.to_speed_ex_events()
                 {
                     return;
                 }
@@ -2373,6 +2385,7 @@ impl VisionaryApp {
             self.state.sounds.clone(),
             self.state.expressions.clone(),
             self.state.script.to_reverse_lr_events(),
+            self.state.script.to_speed_ex_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
@@ -2444,6 +2457,7 @@ impl VisionaryApp {
             &self.state.sounds,
             &self.state.expressions,
             &self.state.script.to_reverse_lr_events(),
+            &self.state.script.to_speed_ex_events(),
         ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -2478,7 +2492,20 @@ impl VisionaryApp {
                             report.changed += reverse_report.changed;
                             report.files.extend(reverse_report.files);
                             report.skipped.extend(reverse_report.skipped);
-                            Ok((updated, report))
+                            match crate::acmd_src::rewrite_speed_ex(
+                                &updated,
+                                &label,
+                                &self.state.speed_ex_pristine,
+                                &self.state.script.to_speed_ex_events(),
+                            ) {
+                                Ok((updated, speed_report)) => {
+                                    report.changed += speed_report.changed;
+                                    report.files.extend(speed_report.files);
+                                    report.skipped.extend(speed_report.skipped);
+                                    Ok((updated, report))
+                                }
+                                Err(error) => Err(error),
+                            }
                         }
                         Err(error) => Err(error),
                     }
@@ -2666,6 +2693,21 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_speed_ex(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.speed_ex_pristine,
+                &self.state.script.to_speed_ex_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
         // Sounds get a pass of their own, and unlike the three above it writes a *different
         // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
@@ -2758,6 +2800,7 @@ impl VisionaryApp {
             || state.script.to_hurtboxes() != state.hurtboxes_pristine
             || state.script.to_attack_mods() != state.attack_mods_pristine
             || state.script.to_reverse_lr_events() != state.reverse_lr_pristine
+            || state.script.to_speed_ex_events() != state.speed_ex_pristine
         {
             edited.push("game_");
         }
@@ -3043,6 +3086,7 @@ impl VisionaryApp {
                         self.push_hitbox_rules();
                     }
                     self.push_reverse_lr_rules();
+                    self.push_speed_ex_rules();
 
                     self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
                         &self.state.hitboxes,
@@ -3050,6 +3094,7 @@ impl VisionaryApp {
                         &self.state.sounds,
                         &self.state.expressions,
                         &self.state.script.to_reverse_lr_events(),
+                        &self.state.script.to_speed_ex_events(),
                     ));
 
                     self.jump_to_earliest_active_frame();
@@ -3083,6 +3128,7 @@ impl VisionaryApp {
                 self.state.expression_script = crate::data::AcmdScript::default();
                 self.state.expressions = Vec::new();
                 self.state.expressions_pristine = Vec::new();
+                self.state.speed_ex_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
         }
@@ -4470,6 +4516,7 @@ impl VisionaryApp {
                         &self.state.sounds,
                         &self.state.expressions,
                         &self.state.script.to_reverse_lr_events(),
+                        &self.state.script.to_speed_ex_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -4838,6 +4885,7 @@ impl VisionaryApp {
 
             self.draw_hurtbox_section(ui);
             self.draw_reverse_lr_section(ui);
+            self.draw_speed_ex_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
             self.draw_sound_section(ui);
@@ -5528,6 +5576,7 @@ impl VisionaryApp {
                     &self.state.sounds,
                     &self.state.expressions,
                     &self.state.script.to_reverse_lr_events(),
+                    &self.state.script.to_speed_ex_events(),
                 ));
                 self.state.status = if destination.is_some() {
                     "REVERSE_LR edit staged — export or sync it into the linked source project."
@@ -5536,6 +5585,72 @@ impl VisionaryApp {
                 }
                 .into();
                 self.push_reverse_lr_rules();
+            }
+        }
+    }
+
+    /// Editable x/y velocity points from the verified `SET_SPEED_EX` family.
+    ///
+    /// The kinetic-energy kind remains visible but read-only: the source token is often a named
+    /// constant whose numeric value is not part of the editor's portable label table. Values are
+    /// carried by the parsed game statement, so the same edit reaches export and source sync.
+    fn draw_speed_ex_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_speed_ex_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(egui::Color32::from_rgb(110, 190, 255), "SET_SPEED_EX");
+        })
+        .response
+        .on_hover_text(
+            "SET_SPEED_EX writes x/y velocity into a named kinetic-energy reserve at one point. \
+             The kinetic kind stays as authored source text; x and y are editable here.",
+        );
+
+        let mut edit: Option<(usize, f32, f32)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut x = event.call.speed_x;
+            let mut y = event.call.speed_y;
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    if active {
+                        egui::Color32::from_rgb(110, 190, 255)
+                    } else {
+                        egui::Color32::from_gray(140)
+                    },
+                    if active { "◆" } else { "◇" },
+                );
+                ui.label(format!("f{}", event.frame));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut x).speed(0.1).prefix("x "))
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(&mut y).speed(0.1).prefix("y "))
+                    .changed();
+                ui.colored_label(
+                    egui::Color32::from_gray(150),
+                    format!("kind {}", event.call.kinetic_kind),
+                );
+            });
+            if changed {
+                edit = Some((event.site, x, y));
+            }
+        }
+
+        if let Some((site, speed_x, speed_y)) = edit {
+            if let Some(call) = self.state.script.speed_ex_stmt_mut(site) {
+                call.speed_x = speed_x;
+                call.speed_y = speed_y;
+                self.state.status =
+                    "SET_SPEED_EX edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_speed_ex_rules();
             }
         }
     }
@@ -8316,6 +8431,7 @@ impl VisionaryApp {
         let captured_expressions = Self::expression_script_from_captures(&captures);
         let n_expr = captured_expressions.to_expression_events().len();
         let n_reverse_lr = hurt.to_reverse_lr_events().len();
+        let n_speed_ex = hurt.to_speed_ex_events().len();
 
         if let Some(message) = nothing_to_load(
             hitboxes.len(),
@@ -8324,6 +8440,7 @@ impl VisionaryApp {
             n_snd,
             n_expr,
             n_reverse_lr,
+            n_speed_ex,
         ) {
             self.state.status = message;
             return;
@@ -8368,12 +8485,14 @@ impl VisionaryApp {
             self.push_hitbox_rules();
         }
         self.push_reverse_lr_rules();
+        self.push_speed_ex_rules();
         self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
             &self.state.sounds,
             &self.state.expressions,
             &self.state.script.to_reverse_lr_events(),
+            &self.state.script.to_speed_ex_events(),
         ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
@@ -9247,6 +9366,17 @@ impl VisionaryApp {
                     id: line.args.first()?.as_i64()?,
                     value: line.args.get(1)?.as_f32()?,
                 }),
+                "SET_SPEED_EX" if line.args.len() == 3 => {
+                    Some(ExcuteStmt::SetSpeedEx(crate::data::SetSpeedExCall {
+                        speed_x: line.args.first()?.as_f32()?,
+                        speed_y: line.args.get(1)?.as_f32()?,
+                        kinetic_kind: line.args.get(2).and_then(|arg| {
+                            arg.as_i64()
+                                .map(|value| value.to_string())
+                                .or_else(|| arg.as_f32().map(|value| value.to_string()))
+                        })?,
+                    }))
+                }
                 "REVERSE_LR" if line.args.is_empty() => Some(ExcuteStmt::ReverseLr),
                 _ => None,
             }
@@ -9988,6 +10118,125 @@ impl VisionaryApp {
         };
     }
 
+    /// Find the captured `SET_SPEED_EX` line corresponding to one source event. Calls at the
+    /// same frame are matched by their occurrence, while the plugin's kinetic-kind argument
+    /// provides the final live key when it is numeric.
+    fn speed_ex_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::SetSpeedExEvent],
+        index: usize,
+        event: &crate::data::SetSpeedExEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::SetSpeedExCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 3)
+            .nth(occurrence)
+    }
+
+    fn speed_ex_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::SetSpeedExEvent],
+        shown: &[crate::data::SetSpeedExEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame || was.call.kinetic_kind != now.call.kinetic_kind {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::speed_ex_capture_for(captures, pristine, index, was) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let kind = donor
+                .args
+                .get(2)
+                .and_then(|arg| arg.as_i64())
+                .map(|value| value as u64);
+            // An unkeyed rule is safe only when this frame has one speed point. Otherwise it
+            // would retune the first call of a same-frame pair and leave the other untouched.
+            if kind.is_none()
+                && pristine
+                    .iter()
+                    .filter(|event| event.frame == was.frame)
+                    .count()
+                    != 1
+            {
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_SPEED_EX,
+                hitbox_id: kind,
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    speed_x: (was.call.speed_x != now.call.speed_x).then_some(now.call.speed_x),
+                    speed_y: (was.call.speed_y != now.call.speed_y).then_some(now.call.speed_y),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::SetSpeedExCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    /// Send changed `SET_SPEED_EX` velocity values to the plugin.
+    fn push_speed_ex_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::speed_ex_rules_for(
+            motion,
+            &captures,
+            &self.state.speed_ex_pristine,
+            &self.state.script.to_speed_ex_events(),
+        );
+        let key = format!("{mv_key}#speed_ex");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "SET_SPEED_EX edit staged, but {unrepresentable} point(s) need a numeric live capture or an unambiguous frame"
+            );
+        }
+    }
+
     /// Send the post-hoc hitbox modifiers the editor has changed to the running game.
     ///
     /// Diffed by site against `attack_mods_pristine`, on the same terms as the hurtbox rules, and
@@ -10318,6 +10567,8 @@ impl VisionaryApp {
             // frame onward rather than of any one collision, so `push_motion_rate_rules` sends
             // it under its own category and this diff leaves it alone.
             motion_rate: None,
+            speed_x: None,
+            speed_y: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -13595,6 +13846,7 @@ impl VisionaryApp {
             &self.state.sounds,
             &self.state.expressions,
             &self.state.script.to_reverse_lr_events(),
+            &self.state.script.to_speed_ex_events(),
         ));
         if total == 0 {
             return;
@@ -13629,12 +13881,14 @@ impl VisionaryApp {
             .filter(|s| s.status != "HIT_STATUS_NORMAL")
             .collect();
         let reverse_lr = self.state.script.to_reverse_lr_events();
+        let speed_ex = self.state.script.to_speed_ex_events();
         let timeline_height = timeline_content_height(
             self.state.hitboxes.len(),
             n_fx,
             hurt_states.len(),
             self.state.sounds.len(),
             reverse_lr.len(),
+            speed_ex.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
@@ -13885,6 +14139,42 @@ impl VisionaryApp {
                         "REVERSE_LR",
                         egui::FontId::monospace(8.0),
                         egui::Color32::from_rgba_unmultiplied(190, 150, 245, 210),
+                    );
+                }
+            }
+
+            // Kinetic velocity points get their own lane rather than being folded into facing
+            // reversals: both are movement commands, but only this lane carries editable x/y
+            // payloads.
+            let speed_band_top = reverse_band_top
+                + if reverse_lr.is_empty() {
+                    0.0
+                } else {
+                    reverse_lr.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in speed_ex.iter().enumerate() {
+                let y_top = speed_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(110, 190, 255);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!(
+                            "SET_SPEED_EX ({:.2}, {:.2})",
+                            event.call.speed_x, event.call.speed_y
+                        ),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
                     );
                 }
             }
@@ -15539,6 +15829,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::Sound(_)
                 | ExcuteStmt::Expression(_)
                 | ExcuteStmt::ReverseLr
+                | ExcuteStmt::SetSpeedEx(_)
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -16093,7 +16384,7 @@ fn clear_move_state(state: &mut crate::data::AppState) {
 
 /// The status message for a capture that carried nothing this editor can show, or `None` to load.
 ///
-/// A free function taking six counts so a test can reach it. The decision it makes is one line
+/// A free function taking seven counts so a test can reach it. The decision it makes is one line
 /// and has been wrong once already: it used to ask only about hitboxes and effects, which was an
 /// accurate summary of what a capture produced when it was written and became a silent drop the
 /// moment hurtboxes (B4) and sounds (D1f) started arriving. A walk cycle has neither of the first
@@ -16107,6 +16398,7 @@ fn nothing_to_load(
     sounds: usize,
     expressions: usize,
     reverse_lr: usize,
+    speed_ex: usize,
 ) -> Option<String> {
     if hitboxes == 0
         && effects == 0
@@ -16114,9 +16406,11 @@ fn nothing_to_load(
         && sounds == 0
         && expressions == 0
         && reverse_lr == 0
+        && speed_ex == 0
     {
         return Some(
-            "Capture has no hitbox, effect, hurtbox, sound, expression or facing-reversal lines \
+            "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal or speed \
+             lines \
              for this move yet."
                 .into(),
         );
@@ -18061,13 +18355,13 @@ mod live_effect_capture_tests {
     /// rather than "I did not look for what you have".
     #[test]
     fn a_capture_with_only_sounds_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 0, 2, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 2, 0, 0, 0).is_none());
     }
 
     /// Likewise one carrying only hurtbox statements.
     #[test]
     fn a_capture_with_only_hurtboxes_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 4, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 4, 0, 0, 0, 0).is_none());
     }
 
     /// A direction-only capture is still meaningful: it has no collision payload, but its point
@@ -18075,7 +18369,7 @@ mod live_effect_capture_tests {
     /// guard.
     #[test]
     fn a_capture_with_only_facing_reversal_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 0, 0, 0, 1).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 1, 0).is_none());
     }
 
     /// A genuinely empty capture is refused, and says what it looked for.
@@ -18084,7 +18378,8 @@ mod live_effect_capture_tests {
     /// returned `None` would pass both of them and load an empty capture over the user's script.
     #[test]
     fn a_capture_with_nothing_in_it_is_refused_and_names_every_family() {
-        let message = nothing_to_load(0, 0, 0, 0, 0, 0).expect("an empty capture must be refused");
+        let message =
+            nothing_to_load(0, 0, 0, 0, 0, 0, 0).expect("an empty capture must be refused");
         for family in [
             "hitbox",
             "effect",
@@ -18092,6 +18387,7 @@ mod live_effect_capture_tests {
             "sound",
             "expression",
             "facing-reversal",
+            "speed",
         ] {
             assert!(
                 message.contains(family),
@@ -18104,12 +18400,13 @@ mod live_effect_capture_tests {
     /// Each family on its own is enough.
     #[test]
     fn any_single_family_is_enough_to_load() {
-        assert!(nothing_to_load(1, 0, 0, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 1, 0, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 1, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 1, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 0, 1, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 0, 0, 1).is_none());
+        assert!(nothing_to_load(1, 0, 0, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 1, 0, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 1, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 1, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 1, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 1, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 0, 1).is_none());
     }
 
     /// Switching moves drops every field that belonged to the previous one.
@@ -18795,6 +19092,67 @@ mod live_effect_capture_tests {
             2,
             "both captured points must reach generated ACMD"
         );
+    }
+
+    #[test]
+    fn a_captured_set_speed_ex_becomes_an_editable_game_statement() {
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_lw").0,
+            frame: 3.0,
+            func: "SET_SPEED_EX".into(),
+            args: vec![A::Num(0.0), A::Num(-3.8), A::Int(0)],
+            run: 1,
+        }];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        let events = script.to_speed_ex_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame, 4);
+        assert_eq!(events[0].call.speed_x, 0.0);
+        assert_eq!(events[0].call.speed_y, -3.8);
+        assert_eq!(events[0].call.kinetic_kind, "0");
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_air_lw");
+        assert!(exported.contains("macros::SET_SPEED_EX(agent, 0.0, -3.8, 0);"));
+    }
+
+    #[test]
+    fn set_speed_ex_live_rules_key_numeric_kinetic_kind_and_reject_ambiguous_fallback() {
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_lw").0,
+            frame: 3.0,
+            func: "SET_SPEED_EX".into(),
+            args: vec![A::Num(0.0), A::Num(-3.8), A::Int(7)],
+            run: 1,
+        }];
+        let pristine = crate::acmd::parse_acmd_script(
+            r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::SET_SPEED_EX(agent, 0, -3.8, 7);
+    }
+}
+"#,
+        )
+        .to_speed_ex_events();
+        let mut edited = pristine.clone();
+        edited[0].call.speed_x = 1.5;
+        let motion = hash40::hash40("attack_air_lw").0;
+        let (rules, unrepresentable) =
+            VisionaryApp::speed_ex_rules_for(motion, &captures, &pristine, &edited);
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].category, crate::game_link::CAT_SPEED_EX);
+        assert_eq!(rules[0].hitbox_id, Some(7));
+        assert_eq!(rules[0].overrides.as_ref().unwrap().speed_x, Some(1.5));
+
+        let mut ambiguous = pristine.clone();
+        ambiguous.push(pristine[0].clone());
+        ambiguous[1].site = 1;
+        let (rules, unrepresentable) =
+            VisionaryApp::speed_ex_rules_for(motion, &[], &pristine, &ambiguous);
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
     }
 
     fn attack_capture(id: i64, frame: f32, bone: u64) -> CaptureLine {
@@ -20289,14 +20647,14 @@ mod live_effect_capture_tests {
     /// than trusted to be like the two above it.
     #[test]
     fn each_thin_band_reserves_room_for_its_own_rows() {
-        let none = timeline_content_height(2, 0, 0, 0, 0);
+        let none = timeline_content_height(2, 0, 0, 0, 0, 0);
         // Same shape for each — 4px of padding, then one thin row apiece.
         let band = 4.0 + 3.0 * timeline_thin_row();
         for (label, height) in [
-            ("effect", timeline_content_height(2, 3, 0, 0, 0)),
-            ("hurtbox", timeline_content_height(2, 0, 3, 0, 0)),
-            ("sound", timeline_content_height(2, 0, 0, 3, 0)),
-            ("reverse_lr", timeline_content_height(2, 0, 0, 0, 3)),
+            ("effect", timeline_content_height(2, 3, 0, 0, 0, 0)),
+            ("hurtbox", timeline_content_height(2, 0, 3, 0, 0, 0)),
+            ("sound", timeline_content_height(2, 0, 0, 3, 0, 0)),
+            ("reverse_lr", timeline_content_height(2, 0, 0, 0, 3, 0)),
         ] {
             assert!(
                 (height - none - band).abs() < 0.01,
@@ -20304,14 +20662,14 @@ mod live_effect_capture_tests {
             );
         }
         // And they stack rather than sharing space.
-        let all = timeline_content_height(2, 3, 3, 3, 3);
+        let all = timeline_content_height(2, 3, 3, 3, 3, 0);
         assert!((all - none - 4.0 * band).abs() < 0.01, "{all} vs {none}");
     }
 
     #[test]
     fn dense_timeline_rows_scale_without_changing_frame_space() {
-        assert_eq!(timeline_content_height(0, 0, 0, 0, 0), 24.0);
-        assert_eq!(timeline_content_height(40, 0, 0, 0, 0), 504.0);
+        assert_eq!(timeline_content_height(0, 0, 0, 0, 0, 0), 24.0);
+        assert_eq!(timeline_content_height(40, 0, 0, 0, 0, 0), 504.0);
         assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
 
         let dense_capture: Vec<Hitbox> = (0..40)
@@ -20323,7 +20681,7 @@ mod live_effect_capture_tests {
             })
             .collect();
         assert_eq!(
-            timeline_frame_extent(&dense_capture, &[], &[], &[], &[]),
+            timeline_frame_extent(&dense_capture, &[], &[], &[], &[], &[]),
             45
         );
 
@@ -20341,7 +20699,7 @@ mod live_effect_capture_tests {
                 ui.allocate_exact_size(
                     egui::vec2(
                         ui.available_width(),
-                        timeline_content_height(40, 0, 0, 0, 0),
+                        timeline_content_height(40, 0, 0, 0, 0, 0),
                     ),
                     egui::Sense::hover(),
                 );
@@ -20375,14 +20733,14 @@ mod live_effect_capture_tests {
             active_end: 8,
             ..Default::default()
         }];
-        assert_eq!(timeline_frame_extent(&hitbox, &[], &[], &[], &[]), 8);
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[], &[], &[], &[]), 8);
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[sound(83)], &[], &[]),
+            timeline_frame_extent(&hitbox, &[], &[sound(83)], &[], &[], &[]),
             83
         );
         // And a sound inside the move does not shrink it.
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[sound(2)], &[], &[]),
+            timeline_frame_extent(&hitbox, &[], &[sound(2)], &[], &[], &[]),
             8
         );
         let expression = [crate::data::ExpressionEvent {
@@ -20391,11 +20749,14 @@ mod live_effect_capture_tests {
             site: 0,
         }];
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[], &expression, &[]),
+            timeline_frame_extent(&hitbox, &[], &[], &expression, &[], &[]),
             83
         );
         let reverse = [crate::data::ReverseLrEvent { frame: 91, site: 0 }];
-        assert_eq!(timeline_frame_extent(&hitbox, &[], &[], &[], &reverse), 91);
+        assert_eq!(
+            timeline_frame_extent(&hitbox, &[], &[], &[], &reverse, &[]),
+            91
+        );
     }
 
     #[test]

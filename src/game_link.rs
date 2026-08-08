@@ -381,6 +381,9 @@ pub const CAT_EXPRESSION: u8 = 10;
 /// Wire category for the argument-less `REVERSE_LR` facing-direction point.
 pub const CAT_REVERSE_LR: u8 = 11;
 
+/// Wire category for the verified three-argument `SET_SPEED_EX` velocity point.
+pub const CAT_SPEED_EX: u8 = 13;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -516,6 +519,11 @@ pub struct HbOverridesWire {
     /// freezes the animation and nothing below the call would run again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_rate: Option<f32>,
+    /// Replacement `SET_SPEED_EX` x/y velocity components.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_y: Option<f32>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2464,7 +2472,7 @@ mod tests {
                 "missing {func} hook"
             );
         }
-        for other in [0, CAT_SOUND, CAT_MOTION_RATE] {
+        for other in [0, CAT_SOUND, CAT_MOTION_RATE, CAT_SPEED_EX] {
             assert_ne!(
                 CAT_EXPRESSION, other,
                 "CAT_EXPRESSION collides with another family"
@@ -2493,12 +2501,64 @@ mod tests {
             CAT_SOUND,
             CAT_MOTION_RATE,
             CAT_EXPRESSION,
+            CAT_SPEED_EX,
         ] {
             assert_ne!(
                 CAT_REVERSE_LR, other,
                 "CAT_REVERSE_LR collides with {other}"
             );
         }
+    }
+
+    #[test]
+    fn the_set_speed_ex_category_and_hook_match_the_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer");
+        let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        assert!(module.contains(&format!("pub const CAT_SPEED_EX: u8 = {CAT_SPEED_EX};")));
+        assert!(module.contains("SET_SPEED_EX"));
+        assert!(module.contains("hook_set_speed_ex"));
+        assert!(module.contains("pub speed_x: Option<f32>"));
+        assert!(module.contains("pub speed_y: Option<f32>"));
+        for other in [
+            0,
+            CAT_SEARCH,
+            CAT_SOUND,
+            CAT_MOTION_RATE,
+            CAT_EXPRESSION,
+            CAT_REVERSE_LR,
+        ] {
+            assert_ne!(CAT_SPEED_EX, other, "CAT_SPEED_EX collides with {other}");
+        }
+    }
+
+    #[test]
+    fn outbound_set_speed_ex_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_SPEED_EX,
+            hitbox_id: Some(7),
+            suppress: false,
+            frame_start: Some(4.5),
+            frame_end: Some(5.5),
+            overrides: Some(HbOverridesWire {
+                speed_x: Some(1.5),
+                speed_y: Some(-3.8),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("SET_SPEED_EX".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_SPEED_EX as u64));
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(7));
+        assert_eq!(rule["func"].as_str(), Some("SET_SPEED_EX"));
+        assert_eq!(rule["overrides"]["speed_x"].as_f64(), Some(1.5));
+        assert!((rule["overrides"]["speed_y"].as_f64().unwrap() + 3.8).abs() < 1e-6);
     }
 
     /// Suppression and zero-argument injection use the same wire lane. The command discriminator

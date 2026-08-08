@@ -211,6 +211,9 @@ pub const CAT_EXPRESSION: u8 = 10;
 /// `REVERSE_LR` — an argument-less facing-direction point in a `game_` script.
 pub const CAT_REVERSE_LR: u8 = 11;
 
+/// `SET_SPEED_EX` — a verified three-argument velocity point.
+pub const CAT_SPEED_EX: u8 = 13;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -868,6 +871,9 @@ pub struct HbOverrides {
     /// if it is not finite and positive, because a zero rate freezes the animation and nothing
     /// below the call would ever run.
     pub motion_rate: Option<f32>,
+    /// Replacement `SET_SPEED_EX` x/y velocity components.
+    pub speed_x: Option<f32>,
+    pub speed_y: Option<f32>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -966,6 +972,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_SOUND => "sound",
                     CAT_EXPRESSION => "expression",
                     CAT_REVERSE_LR => "reverse_lr",
+                    CAT_SPEED_EX => "speed_ex",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1106,6 +1113,52 @@ unsafe fn hook_reverse_lr(lua_state: u64) {
             if let Some((suppress, _)) = action_for(CAT_REVERSE_LR, motion, 0, frame) {
                 if suppress {
                     return;
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
+/// Capture and sparsely override the verified `SET_SPEED_EX` shape.
+///
+/// The third argument is the kinetic-energy kind and is the rule key when the editor has a
+/// numeric capture. A rule with no key remains useful for a source-backed move with one call at
+/// a frame, while the editor refuses that fallback when several calls share the frame.
+#[skyline::hook(replace = smash::app::sv_animcmd::SET_SPEED_EX)]
+unsafe fn hook_set_speed_ex(lua_state: u64) {
+    let args = read_args_exact(lua_state, 3);
+    record(lua_state, "SET_SPEED_EX", &args);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            let kind = match args.get(2) {
+                Some(LuaArg::Int(value)) => *value as u64,
+                Some(LuaArg::Num(value)) => *value as u64,
+                _ => u64::MAX,
+            };
+            if let Some((suppress, overrides)) = action_for(CAT_SPEED_EX, motion, kind, frame) {
+                if suppress {
+                    return;
+                }
+                if let Some(overrides) = overrides {
+                    let mut values = args.clone();
+                    let set_speed = |slot: usize, value: Option<f32>, values: &mut Vec<LuaArg>| {
+                        let Some(value) = value else { return };
+                        let Some(current) = values.get(slot).cloned() else { return };
+                        values[slot] = match current {
+                            LuaArg::Int(_) => LuaArg::Int(value as i64),
+                            _ => LuaArg::Num(value),
+                        };
+                    };
+                    set_speed(0, overrides.speed_x, &mut values);
+                    set_speed(1, overrides.speed_y, &mut values);
+                    if values != args {
+                        rewrite_args(lua_state, &values);
+                    }
                 }
             }
         }
@@ -2228,7 +2281,8 @@ pub fn install() {
         hook_rumble_hit,
         hook_quake,
         hook_ft_attack_abs_camera_quake,
-        hook_reverse_lr
+        hook_reverse_lr,
+        hook_set_speed_ex
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

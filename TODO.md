@@ -9,7 +9,8 @@ it without prior conversation.
 1. Read **Working agreement** and **Definition of done** below. They apply to every task.
 2. Take the first task whose status is `[ ]` and whose **Blocked by** is satisfied.
 3. Set it to `[~]` with your date before starting, `[x]` when it meets the definition of done.
-4. Commit the code and the status flip together, on a branch, not on `main`.
+4. Commit the code and the status flip together on the consolidated `main` branch. Do not
+   create task branches; this repository intentionally keeps one working branch.
 5. If a task turns out to be wrong or impossible as written, do not silently drop it —
    rewrite the entry with what you learned and leave it `[ ]`.
 
@@ -2298,20 +2299,18 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 ### [ ] E1 — Movement and kinetics (the measured `REVERSE_LR` slice is complete)
 
-`sv_kinetic_energy`, `SET_SPEED_EX`, `ADD_SPEED_NO_LIMIT`, and `CORRECT` remain preserved
-verbatim today. High mod value — this is how a move's momentum is authored — and the editor
-already knows the frame each call lands on. `REVERSE_LR` is now handled in the measured slice
-below.
+`sv_kinetic_energy`, `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, and `CORRECT` remain preserved verbatim
+today. `SET_SPEED_EX` now has a measured, value-editable slice below. High mod value — this is
+how a move's momentum is authored — and the editor already knows the frame each call lands on.
+`REVERSE_LR` is handled in the separate measured slice below.
 
-**Measured 2026-08-05, and this is the Rule 5 correction: four of the five named macros have
-zero corpus calls, and the reason is structural.** `sv_kinetic_energy` 0, `SET_SPEED_EX` 0,
-`SET_SPEED` (any form) 0, `ADD_SPEED_NO_LIMIT` 0, `CORRECT` 0. The single `KineticModule` hit in
-the whole cache is `KineticModule::change_kinetic` in kirby `EscapeAir` — a raw module call, not
-a macro. Kinetics in Ultimate is overwhelmingly authored in *status* modules, not in ACMD
-scripts, so this entry is largely aimed at code the editor does not load and this task does not
-cover. That is a different problem from [B2](#-b2--attack_fp-fighter-position-hitboxes) and
-[C4](#-c4--effect-lifetime-control): those are macros that exist in ACMD and happen to be
-unused here, this is a family that mostly lives somewhere else.
+**Measured 2026-08-08, and this is the Rule 5 correction:** the local cache has no calls for
+`sv_kinetic_energy`, `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, or `CORRECT`; the single `KineticModule`
+hit in the whole cache is `KineticModule::change_kinetic` in Kirby `EscapeAir`, a raw status-module
+call rather than an ACMD macro. A read-only public dumped-script corpus has 144 textual
+`SET_SPEED_EX` calls: 122 match the vendored three-argument wrapper shape, while 22 are malformed
+dump artifacts (17 short and 5 with one extra argument). Kinetics outside that verified ACMD shape
+remain outside this editor's current input boundary.
 
 `REVERSE_LR` is the exception and the only schedulable part: **7 real calls**, all
 `macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,
@@ -2324,9 +2323,10 @@ the speed macros.
   `FIGHTER_DOLLY_STATUS_SPECIAL_HI_WORK_FLAG_REVERSE_LR` in `WorkModule::on_flag` — a flag name
   that ends in the macro name. Word-boundary the pattern and read the call site; see the
   `ACMD family prefix and const collisions` note.
-- **Scope decision.** `REVERSE_LR` is handled as its own small slice below. The four zero-count
-  speed/kinetic names remain parked behind a re-measure; status-module sources are outside this
-  ACMD editor's current input boundary, so the full E1 entry remains open.
+- **Scope decision.** `REVERSE_LR` and the verified three-argument `SET_SPEED_EX` shape are
+  handled as their own slices below. The remaining zero-count speed/kinetic names and malformed
+  `SET_SPEED_EX` shapes remain parked; status-module sources are outside the ACMD editor's
+  current input boundary, so the full E1 entry remains open.
 - **Trap:** these change where the fighter *is*, so previewing them means moving the model,
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
@@ -2345,6 +2345,23 @@ The desktop viewport does not simulate the fighter's facing change in this first
 emulator, game, or UI automation was run. The plugin builds and the offline contract tests cover
 parse/IR, timeline/capture conversion, panel model edits, wire parity, export read-back, and
 source write-back; live in-game behavior remains unverified.
+
+#### [x] E1b — verified `SET_SPEED_EX` velocity points (completed 2026-08-08; live runtime unverified)
+
+The three-argument wrapper shape — `SET_SPEED_EX(agent, speed_x, speed_y, kinetic_kind)` — now
+has a typed statement/event walk, one-based timeline points, an editable Movement panel, capture
+reconstruction, portable project persistence, category-13 wire rules, the matching Skyline hook,
+generated ACMD export, and value-only write-back of the two velocity arguments. The kinetic-kind
+token remains source-owned, so named constants are carried exactly rather than guessed into a
+portable numeric label.
+
+Malformed dump forms remain raw: the public corpus's 17 short calls and 5 over-arity calls are
+not padded or rewritten. Source syncing also refuses loop-unrolled or structurally changed sites.
+For live edits, a numeric captured kinetic kind is used as the rule key; an unkeyed call is only
+accepted when its frame has one speed point, and otherwise the UI reports the evidence gap.
+Offline tests cover parse/IR, panel/timeline/capture conversion, wire/plugin agreement, export
+read-back, and source write-back. No emulator, game, or UI automation was run, so live in-game
+behavior remains unverified.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

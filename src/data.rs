@@ -1265,6 +1265,8 @@ pub enum ExcuteStmt {
     /// the macro takes no arguments after `agent`, so the meaningful edits are whether it is
     /// present and which frame it runs on.
     ReverseLr,
+    /// `SET_SPEED_EX` — set the x/y velocity of one kinetic-energy reserve.
+    SetSpeedEx(SetSpeedExCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1322,6 +1324,20 @@ impl ExpressionCall {
     }
 }
 
+/// A parsed `macros::SET_SPEED_EX` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SetSpeedExCall {
+    pub speed_x: f32,
+    pub speed_y: f32,
+    /// The third argument after `agent`, retained as authored so named kinetic constants survive
+    /// parse -> edit -> export.
+    pub kinetic_kind: String,
+}
+
+impl SetSpeedExCall {
+    pub const FUNC: &'static str = "SET_SPEED_EX";
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1337,6 +1353,15 @@ pub struct ExpressionEvent {
 pub struct ReverseLrEvent {
     pub frame: u32,
     /// Source ordinal among reverse-facing calls, independent of every other family.
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `SET_SPEED_EX` point event at the one-based game frame it fires on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SetSpeedExEvent {
+    pub frame: u32,
+    pub call: SetSpeedExCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -1641,6 +1666,14 @@ impl AcmdScript {
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.reverse_lrs
     }
+
+    /// Flatten `SET_SPEED_EX` calls into editable point events at their one-based game frames.
+    pub fn to_speed_ex_events(&self) -> Vec<SetSpeedExEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.speed_exs
+    }
 }
 
 impl AcmdScript {
@@ -1797,6 +1830,47 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The `SET_SPEED_EX` call an event site's ordinal refers to, in source order.
+    pub fn speed_ex_stmt_mut(&mut self, site: usize) -> Option<&mut SetSpeedExCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut SetSpeedExCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::SetSpeedEx(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::SetSpeedEx(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove the `REVERSE_LR` source statement at an ordinal from
     /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
     ///
@@ -1894,6 +1968,7 @@ struct WalkAccum {
     sounds: Vec<SoundEvent>,
     expressions: Vec<ExpressionEvent>,
     reverse_lrs: Vec<ReverseLrEvent>,
+    speed_exs: Vec<SetSpeedExEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -1908,6 +1983,8 @@ struct WalkAccum {
     next_expression_site: usize,
     /// Site for the next `REVERSE_LR`, independent of every other point-event family.
     next_reverse_lr_site: usize,
+    /// Site for the next `SET_SPEED_EX`, independent of every other point-event family.
+    next_speed_ex_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -2021,6 +2098,26 @@ fn count_reverse_lr_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// `SET_SPEED_EX` calls in a subtree, counted in source order for loop/site resolution.
+fn count_speed_ex_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::SetSpeedEx(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::SetSpeedEx(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_speed_ex_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -2118,6 +2215,12 @@ impl WalkAccum {
     fn take_reverse_lr_site(&mut self) -> usize {
         let site = self.next_reverse_lr_site;
         self.next_reverse_lr_site += 1;
+        site
+    }
+
+    fn take_speed_ex_site(&mut self) -> usize {
+        let site = self.next_speed_ex_site;
+        self.next_speed_ex_site += 1;
         site
     }
 
@@ -2315,6 +2418,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::SetSpeedEx(call) => {
+            let site = hurt.take_speed_ex_site();
+            hurt.speed_exs.push(SetSpeedExEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -2352,12 +2463,14 @@ fn eval_stmts(
                 let sound_site_at_entry = hurt.next_sound_site;
                 let expression_site_at_entry = hurt.next_expression_site;
                 let reverse_lr_site_at_entry = hurt.next_reverse_lr_site;
+                let speed_ex_site_at_entry = hurt.next_speed_ex_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
                     hurt.next_sound_site = sound_site_at_entry;
                     hurt.next_expression_site = expression_site_at_entry;
                     hurt.next_reverse_lr_site = reverse_lr_site_at_entry;
+                    hurt.next_speed_ex_site = speed_ex_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -2365,6 +2478,7 @@ fn eval_stmts(
                 hurt.next_sound_site = sound_site_at_entry + count_sound_stmts(body);
                 hurt.next_expression_site = expression_site_at_entry + count_expression_stmts(body);
                 hurt.next_reverse_lr_site = reverse_lr_site_at_entry + count_reverse_lr_stmts(body);
+                hurt.next_speed_ex_site = speed_ex_site_at_entry + count_speed_ex_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -2566,6 +2680,8 @@ pub struct AppState {
     pub attack_mods_pristine: Vec<AttackModState>,
     /// `REVERSE_LR` point events as loaded, for sparse live suppression/injection rules.
     pub reverse_lr_pristine: Vec<ReverseLrEvent>,
+    /// `SET_SPEED_EX` point events as loaded, for sparse live velocity rules and source syncing.
+    pub speed_ex_pristine: Vec<SetSpeedExEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -2655,6 +2771,7 @@ impl Default for AppState {
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),
             reverse_lr_pristine: Vec::new(),
+            speed_ex_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -2681,6 +2798,7 @@ impl AppState {
         self.hurtboxes_pristine = script.to_hurtboxes();
         self.attack_mods_pristine = script.to_attack_mods();
         self.reverse_lr_pristine = script.to_reverse_lr_events();
+        self.speed_ex_pristine = script.to_speed_ex_events();
         self.script = script;
     }
 }
@@ -4405,5 +4523,40 @@ mod tests {
         let calls = script.to_effect_calls();
         let frames: Vec<u32> = calls.iter().map(|c| c.active_start).collect();
         assert_eq!(frames, vec![13, 18, 20]);
+    }
+
+    #[test]
+    fn set_speed_ex_is_a_timed_point_with_an_editable_source_site() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::SetSpeedEx(SetSpeedExCall {
+                    speed_x: 0.0,
+                    speed_y: -2.5,
+                    kinetic_kind: "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN".into(),
+                })]),
+                AcmdStmt::Wait(2.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::SetSpeedEx(SetSpeedExCall {
+                    speed_x: 1.0,
+                    speed_y: 0.5,
+                    kinetic_kind: "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN".into(),
+                })]),
+            ],
+        };
+        assert_eq!(
+            script
+                .to_speed_ex_events()
+                .iter()
+                .map(|event| (event.frame, event.site))
+                .collect::<Vec<_>>(),
+            vec![(3, 0), (5, 1)]
+        );
+        let call = script.speed_ex_stmt_mut(1).expect("second speed point");
+        call.speed_y = 1.25;
+        assert_eq!(script.to_speed_ex_events()[1].call.speed_y, 1.25);
+        assert_eq!(
+            script.to_speed_ex_events()[1].call.kinetic_kind,
+            "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN"
+        );
     }
 }
