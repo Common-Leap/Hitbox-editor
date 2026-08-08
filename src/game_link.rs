@@ -2447,6 +2447,8 @@ mod tests {
             "collision_id: i32",
             "flags: bool",
             "    bool,\n) -> u64;",
+            "#[skyline::hook(\n    replace = smash::app::lua_bind::FighterManager::notify_log_event_collision_hit\n)]",
+            "skyline::install_hook!(fallback_collision_hit_hook);",
             "orig(",
         ] {
             assert!(

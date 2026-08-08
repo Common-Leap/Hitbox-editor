@@ -3550,7 +3550,9 @@ previous Rust six-integer ABI mismatch.
 The pinned `skyline-smash` bindings do expose the exported wrapper, but the 13.0.4 dump shows that
 the wrapper branches to the scanned body and that other game sites call the body directly. A
 wrapper-only hook would therefore miss collision notifications; the body pattern remains the
-complete static target, with 10 direct `BL` callers found in the dump.
+complete static target, with 10 direct `BL` callers found in the dump. The plugin now keeps a
+binding-based wrapper fallback for the version-mismatch case, but labels it partial because those
+direct body callers remain outside its coverage.
 
 R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
 trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not

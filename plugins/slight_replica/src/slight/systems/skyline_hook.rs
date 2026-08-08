@@ -84,8 +84,10 @@ pub fn install() {
         Some(off) => off,
         None => {
             skyline::println!(
-                "[SLight] Skyline Hook: collision pattern not found in .text (version mismatch?)"
+                "[SLight] Skyline Hook: body pattern not found; installing wrapper fallback (partial coverage)"
             );
+            skyline::install_hook!(fallback_collision_hit_hook);
+            *INSTALLED.lock() = true;
             return;
         }
     };
@@ -142,6 +144,32 @@ fn scan_collision_pattern() -> Option<usize> {
     }
 }
 
+/// Binding-based fallback used only when the complete 13.0.4 body pattern is unavailable. The
+/// exported wrapper is version-pinned and has the same ABI, but static analysis shows that direct
+/// body callers bypass it, so this is intentionally reported as partial coverage.
+#[skyline::hook(
+    replace = smash::app::lua_bind::FighterManager::notify_log_event_collision_hit
+)]
+unsafe fn fallback_collision_hit_hook(
+    manager: *mut smash::app::FighterManager,
+    attacker_boid: u32,
+    defender_boid: u32,
+    damage: f32,
+    collision_id: i32,
+    flags: bool,
+) -> u64 {
+    let ctx = collision_context(
+        manager,
+        attacker_boid,
+        defender_boid,
+        damage,
+        collision_id,
+        flags,
+    );
+    run_callbacks(&ctx);
+    original!()(manager, attacker_boid, defender_boid, damage, collision_id, flags)
+}
+
 unsafe extern "C" fn collision_hit_hook(
     manager: *mut smash::app::FighterManager,
     attacker_boid: u32,
@@ -150,16 +178,14 @@ unsafe extern "C" fn collision_hit_hook(
     collision_id: i32,
     flags: bool,
 ) -> u64 {
-    let tick = crate::slight::frame_context::match_ticks();
-    let ctx = CollisionContext {
-        manager: manager as u64,
+    let ctx = collision_context(
+        manager,
         attacker_boid,
         defender_boid,
         damage,
-        collision_id: collision_id as u32,
-        flags: flags as u32,
-        tick,
-    };
+        collision_id,
+        flags,
+    );
 
     run_callbacks(&ctx);
 
@@ -174,6 +200,25 @@ unsafe extern "C" fn collision_hit_hook(
         )
     } else {
         0
+    }
+}
+
+fn collision_context(
+    manager: *mut smash::app::FighterManager,
+    attacker_boid: u32,
+    defender_boid: u32,
+    damage: f32,
+    collision_id: i32,
+    flags: bool,
+) -> CollisionContext {
+    CollisionContext {
+        manager: manager as u64,
+        attacker_boid,
+        defender_boid,
+        damage,
+        collision_id: collision_id as u32,
+        flags: flags as u32,
+        tick: crate::slight::frame_context::match_ticks(),
     }
 }
 
