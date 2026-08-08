@@ -2354,7 +2354,7 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 ## Gameplay
 
-### [ ] E1 — Movement and kinetics (the measured ACMD point slices are complete; broader status-module sources remain)
+### [~] E1 — Movement and kinetics (active 2026-08-08; broader status-module sources remain)
 
 Unmeasured `sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today; the exact
 direct `KineticModule::change_kinetic` call measured in the local `game_` corpus is covered by E1h below.
@@ -2699,6 +2699,30 @@ locked release build, the debug build-check wrapper, and the Skyline plugin rele
 emulator, game, or UI automation was run, so live in-game behavior remains unverified. The E1
 parent remains open for broader status-module calls and the absent `sv_kinetic_energy` corpus
 family.
+
+#### [x] E1p — direct `MotionModule::set_helper_calculation` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 20 exact direct
+`MotionModule::set_helper_calculation(receiver, bool)` calls in each of the standard and HDR
+trees. Every standard call uses `agent.module_accessor`, every HDR call uses the measured `boma`
+alias, and the values are evenly split between 10 `false` and 10 `true` calls per tree. The
+linked binding is the direct `(BattleObjectModuleAccessor, bool) -> ()` primitive.
+
+This is the next measured mutation-point slice. The remaining `KineticModule::get_sum_speed_y`
+calls are intentionally not folded into it: all 162 per tree feed conditional/status expressions
+and return runtime state rather than mutating it. `MotionModule::set_rate_partial` and
+`set_frame_partial` also remain separate until their part-kind and frame/bool payloads have their
+own source/live identity contract.
+
+The five-surface slice is complete. The typed parser accepts only the measured standard/HDR
+receiver forms and boolean literals; the panel exposes value edits and a timeline lane; the live
+wire uses category 30, a boolean override, and a numeric `0.0`/`1.0` identity derived from the
+captured value; export reproduces the direct call; and source write-back changes only an existing
+boolean argument. Structural add/remove/retime changes remain source/export-only, and malformed,
+symbolic, non-boolean, or unmeasured shapes remain raw or are reported as source-only. The
+desktop suite passed 619 tests plus 1 existing ignored benchmark, the six deployment tests passed,
+and the Skyline plugin release build passed. No live game runtime was used, so hook behavior on
+hardware remains explicitly unverified.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

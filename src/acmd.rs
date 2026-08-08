@@ -394,6 +394,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_motion_module_set_helper_calculation_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_clr_speed_call(line) {
             stmts.push(stmt);
             continue;
@@ -1991,6 +1995,31 @@ fn parse_motion_module_set_rate_call(line: &str) -> Option<ExcuteStmt> {
     ))
 }
 
+/// Parse the measured direct `MotionModule::set_helper_calculation` shapes:
+/// `MotionModule::set_helper_calculation(agent.module_accessor, bool)` and the HDR `boma` form.
+/// Only boolean literals are accepted; symbolic or malformed values stay raw rather than being
+/// emitted with a guessed runtime meaning.
+fn parse_motion_module_set_helper_calculation_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "MotionModule::set_helper_calculation(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [module_accessor, enabled] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let enabled = match enabled.trim() {
+        "false" => false,
+        "true" => true,
+        _ => return None,
+    };
+    Some(ExcuteStmt::MotionModuleSetHelperCalculation(
+        crate::data::MotionModuleSetHelperCalculationCall { enabled },
+    ))
+}
+
 /// Parse the exact measured `CLR_SPEED(agent, kinetic_id)` shape or its generated helper call.
 /// The vendored crate exposes only the generic kinetic primitive macro, so generated source uses
 /// the helper while editable source retains the corpus's `macros::CLR_SPEED` spelling.
@@ -2739,6 +2768,10 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::MotionModuleSetRate(call) => format!(
                 "{indent}MotionModule::set_rate(agent.module_accessor, {});",
                 num(call.rate)
+            ),
+            crate::data::ExcuteStmt::MotionModuleSetHelperCalculation(call) => format!(
+                "{indent}MotionModule::set_helper_calculation(agent.module_accessor, {});",
+                call.enabled
             ),
             crate::data::ExcuteStmt::ClrSpeed(call) => {
                 format!("{indent}visionary_clr_speed(agent, {});", call.kinetic_kind)
@@ -9726,6 +9759,72 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor, 0.8, 1.0);"));
         assert!(emitted.contains("MotionModule::set_rate(other.module_accessor, 0.8);"));
         assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor, -378992935);"));
+    }
+
+    #[test]
+    fn motion_module_set_helper_calculation_parse_export_round_trips_standard_and_hdr_shapes() {
+        let source = r#"unsafe extern "C" fn game_specialairhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_helper_calculation(agent.module_accessor, false);
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if is_excute(agent) {
+        MotionModule::set_helper_calculation(boma, true);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_motion_module_set_helper_calculation_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 3);
+        assert!(!events[0].call.enabled);
+        assert_eq!(events[1].frame, 6);
+        assert!(events[1].call.enabled);
+
+        let emitted = preview_game_fn(&script, "special_air_hi");
+        assert!(
+            emitted.contains("MotionModule::set_helper_calculation(agent.module_accessor, false);")
+        );
+        assert!(
+            emitted.contains("MotionModule::set_helper_calculation(agent.module_accessor, true);")
+        );
+        assert_eq!(
+            parse_acmd_script(&emitted).to_motion_module_set_helper_calculation_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_motion_module_set_helper_calculation_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        MotionModule::set_helper_calculation(agent.module_accessor);
+        MotionModule::set_helper_calculation(agent.module_accessor, 1);
+        MotionModule::set_helper_calculation(other.module_accessor, true);
+        MotionModule::set_helper_calculation(agent.module_accessor, enabled);
+        MotionModule::set_helper_calculation(agent.module_accessor, false, true);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script
+            .to_motion_module_set_helper_calculation_events()
+            .is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(
+            emitted.contains("MotionModule::set_helper_calculation(agent.module_accessor);")
+                && emitted
+                    .contains("MotionModule::set_helper_calculation(agent.module_accessor, 1);")
+                && emitted
+                    .contains("MotionModule::set_helper_calculation(other.module_accessor, true);")
+                && emitted.contains(
+                    "MotionModule::set_helper_calculation(agent.module_accessor, enabled);"
+                )
+                && emitted.contains(
+                    "MotionModule::set_helper_calculation(agent.module_accessor, false, true);"
+                )
+        );
     }
 
     #[test]

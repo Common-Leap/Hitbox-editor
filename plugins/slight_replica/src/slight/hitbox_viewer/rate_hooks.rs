@@ -18,7 +18,7 @@
 
 use super::{
     any_rules, read_args_exact, record, record_for_boma, HbOverrides, LuaArg, CAT_MOTION_RATE,
-    CAT_MOTION_MODULE_SET_RATE,
+    CAT_MOTION_MODULE_SET_HELPER_CALCULATION, CAT_MOTION_MODULE_SET_RATE,
 };
 
 /// Reports per rule set, not per boot.
@@ -211,6 +211,43 @@ unsafe fn hook_motion_module_set_rate(
     original!()(boma, rate)
 }
 
+/// Capture and sparsely override the direct helper-calculation toggle.
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::set_helper_calculation)]
+unsafe fn hook_motion_module_set_helper_calculation(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    enabled: bool,
+) {
+    let args = [LuaArg::Bool(enabled)];
+    record_for_boma(boma, "MotionModule::set_helper_calculation", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = super::numeric_point_key(
+            "MotionModule::set_helper_calculation",
+            &[if enabled { 1.0 } else { 0.0 }],
+        );
+        if let Some((suppress, overrides)) = super::action_for(
+            CAT_MOTION_MODULE_SET_HELPER_CALCULATION,
+            motion,
+            key,
+            frame,
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(replacement) =
+                overrides.and_then(|item| item.motion_module_helper_calculation)
+            {
+                if replacement != enabled {
+                    original!()(boma, replacement);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, enabled)
+}
+
 /// Set once the hook is in. Read by `write_capture_diag`.
 static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -219,13 +256,17 @@ pub(super) fn installed() -> bool {
 }
 
 pub fn install() {
-    skyline::install_hooks!(hook_ft_motion_rate, hook_motion_module_set_rate);
+    skyline::install_hooks!(
+        hook_ft_motion_rate,
+        hook_motion_module_set_rate,
+        hook_motion_module_set_helper_calculation
+    );
     INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
     // `diag::note`, not `skyline::println!` — the two go to different places and only one of
     // them is a file anybody reads afterwards. Telling someone to grep diag.txt for a banner
     // that was never written there cost a game boot once already.
     crate::slight::diag::note(
-        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate)",
+        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate, MotionModule::set_helper_calculation)",
     );
 }
 
