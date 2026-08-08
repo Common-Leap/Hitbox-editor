@@ -1853,6 +1853,8 @@ impl VisionaryApp {
 
         // Build move list on a background thread — reads many .nuanmb files for frame counts
         let labels = self.state.labels.clone();
+        let fighter_dir = fighter.fighter_dir.clone();
+        let base_slot = fighter.base_slot();
         let (tx, rx) = std::sync::mpsc::channel();
         self.move_list_receiver = Some(rx);
         self.state.status = "Loading moves...".to_string();
@@ -1864,12 +1866,18 @@ impl VisionaryApp {
             };
 
             let anim_index = index_nuanmb(&motion_dir);
+            // Kirby's body motion list points at copy-ability animations stored in sibling
+            // motion parts (`cloudbody`, `shulkbody`, ...). Index every part once so the
+            // animation named by the motion list wins over the old body-only suffix guess.
+            // Other fighters use the same layout for weapon and helper parts, so this is a
+            // fighter-data rule rather than a Kirby special case.
+            let animation_files = index_fighter_nuanmb(&fighter_dir, base_slot);
             let mut moves: Vec<MoveEntry> = mlist
                 .list
                 .iter()
                 // `.map`, not `.filter_map`: nothing is dropped any more. That is the whole
                 // change — every motion in the list reaches the panel now.
-                .map(|(hash_key, _)| {
+                .map(|(hash_key, motion)| {
                     let hash_val = hash_key.0;
                     let name = labels
                         .get(&hash_val)
@@ -1881,7 +1889,23 @@ impl VisionaryApp {
                     // scripts and every `PLAY_FLY_VOICE` in the game. It was a guard against the
                     // `AnimData` parse below, not a statement about relevance, and that parse is
                     // now deferred instead. See [R5](../TODO.md).
-                    let anim_path = find_nuanmb(&motion_dir, &anim_index, &name, hash_val);
+                    // The animation hash includes the `.nuanmb` suffix. It is the authoritative
+                    // path because one motion can select an animation from a sibling part, as
+                    // Kirby's copied specials do. The body-only lookup remains the compatibility
+                    // fallback for old or hand-built motion lists that omit that field.
+                    let animation_hashes: Vec<u64> = motion
+                        .animations
+                        .iter()
+                        .map(|animation| animation.name.0)
+                        .collect();
+                    let anim_path = find_motion_nuanmb(
+                        &animation_hashes,
+                        &animation_files,
+                        &motion_dir,
+                        &anim_index,
+                        &name,
+                        hash_val,
+                    );
 
                     MoveEntry {
                         name,
@@ -15046,6 +15070,69 @@ fn index_nuanmb(motion_dir: &Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+/// Index animation files from every motion part at one costume slot by the hash stored in a
+/// `motion_list.bin` animation entry.
+///
+/// The hash is over the complete lowercased filename, including `.nuanmb`, not over the stem.
+/// The distinction matters for copied animations: Kirby's `cloud_special_n` entry names
+/// `cloudd00specialn.nuanmb` under `motion/cloudbody/c00`, while the editor's old body-only scan
+/// could only see `motion/body/c00`. Body is visited first so a duplicate filename has a stable,
+/// unsurprising owner; the motion list remains the authority for which hash is requested.
+fn index_fighter_nuanmb(fighter_dir: &Path, slot: u8) -> HashMap<u64, PathBuf> {
+    let motion_root = fighter_dir.join("motion");
+    let slot_name = format!("c{slot:02}");
+    let Ok(entries) = std::fs::read_dir(&motion_root) else {
+        return HashMap::new();
+    };
+
+    let mut parts: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    parts.sort_by_key(|path| {
+        (
+            path.file_name().and_then(|name| name.to_str()) != Some("body"),
+            path.file_name().map(|name| name.to_os_string()),
+        )
+    });
+
+    let mut files = HashMap::new();
+    for part in parts {
+        let slot_dir = part.join(&slot_name);
+        let Ok(entries) = std::fs::read_dir(slot_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("nuanmb") {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let hash = hash40::hash40(&name.to_lowercase()).0;
+            files.entry(hash).or_insert(path);
+        }
+    }
+    files
+}
+
+/// Resolve a motion list's animation references before falling back to the historical body scan.
+fn find_motion_nuanmb(
+    animation_hashes: &[u64],
+    animation_files: &HashMap<u64, PathBuf>,
+    motion_dir: &Path,
+    index: &[(String, PathBuf)],
+    label: &str,
+    hash: u64,
+) -> Option<PathBuf> {
+    animation_hashes
+        .iter()
+        .find_map(|hash| animation_files.get(hash).cloned())
+        .or_else(|| find_nuanmb(motion_dir, index, label, hash))
+}
+
 fn find_nuanmb(
     motion_dir: &Path,
     index: &[(String, PathBuf)],
@@ -16589,6 +16676,79 @@ mod carrier_send_state_tests {
         assert!(!carrier_send_reached_goal(false, 0, 1, false, false, true));
         assert!(!carrier_send_reached_goal(false, 0, 0, true, false, true));
         assert!(!carrier_send_reached_goal(false, 2, 5, true, true, true));
+    }
+}
+
+#[cfg(test)]
+mod motion_animation_tests {
+    use super::{find_motion_nuanmb, index_fighter_nuanmb};
+    use std::fs::File;
+    use std::path::Path;
+
+    #[test]
+    fn motion_part_index_hashes_the_complete_animation_filename() {
+        let root = tempfile::tempdir().unwrap();
+        let body = root.path().join("motion/body/c00/attack11.nuanmb");
+        let donor = root
+            .path()
+            .join("motion/cloudbody/c00/cloudd00specialn.nuanmb");
+        for path in [&body, &donor] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap();
+        }
+
+        let files = index_fighter_nuanmb(root.path(), 0);
+        assert_eq!(
+            files.get(&hash40::hash40("cloudd00specialn.nuanmb").0),
+            Some(&donor)
+        );
+        assert!(
+            !files.contains_key(&hash40::hash40("cloudd00specialn").0),
+            "the motion-list hash includes the .nuanmb suffix"
+        );
+    }
+
+    #[test]
+    fn a_motion_reference_selects_a_sibling_part_before_body_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let body = root.path().join("motion/body/c00/cloud_special_n.nuanmb");
+        let donor = root
+            .path()
+            .join("motion/cloudbody/c00/cloudd00specialn.nuanmb");
+        for path in [&body, &donor] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            File::create(path).unwrap();
+        }
+
+        let files = index_fighter_nuanmb(root.path(), 0);
+        let selected = find_motion_nuanmb(
+            &[hash40::hash40("cloudd00specialn.nuanmb").0],
+            &files,
+            Path::new(&root.path().join("motion/body/c00")),
+            &[],
+            "cloud_special_n",
+            hash40::hash40("cloud_special_n").0,
+        );
+        assert_eq!(selected, Some(donor));
+    }
+
+    #[test]
+    fn old_body_lookup_remains_the_fallback_for_incomplete_motion_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let body = root.path().join("motion/body/c00/attack11.nuanmb");
+        std::fs::create_dir_all(body.parent().unwrap()).unwrap();
+        File::create(&body).unwrap();
+
+        let files = index_fighter_nuanmb(root.path(), 0);
+        let selected = find_motion_nuanmb(
+            &[],
+            &files,
+            Path::new(&root.path().join("motion/body/c00")),
+            &[],
+            "attack11",
+            hash40::hash40("attack11").0,
+        );
+        assert_eq!(selected, Some(body));
     }
 }
 

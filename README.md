@@ -39,6 +39,11 @@ Open this export root in Visionary when prompted. The `fighter` folder provides
 character models, motion data, and parameters; the `effect` folder provides the
 `.eff` files used by the effect editor.
 
+The viewport follows each motion list's animation references across the fighter's
+motion parts. This includes Kirby copy-ability animations stored in donor body
+directories, so copied specials preview with their intended animation when the
+corresponding files are present in the export.
+
 ## Desktop editor
 
 Build Visionary from the repository root with the script for your platform.

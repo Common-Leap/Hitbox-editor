@@ -2739,16 +2739,29 @@ into one "Items & weapons" group.
   hitting.
 - **Two categorisers already existed and this consolidated them rather than adding a third.**
 
-### [ ] R6 — Kirby copy abilities live in motion directories the editor never loads
+### [x] R6 — Kirby copy abilities live in motion directories the editor never loads (done 2026-08-08)
 
-Split out of R5. `fighter/kirby/motion/` has **209 directories**; the editor reads only
-`body/c00`. The copy abilities (`copy_koopa_cap`, `copy_shulk_sword`, `copy_dedede_crown`, …) and
-the donor bodies (`peachbody`, `snakebody`, …) each carry their own `motion_list.bin`.
+Split out of R5. The local extracted Kirby data has **208** motion parts. The body motion list
+contains the copied-special entries (`cloud_special_n`, `cloud_special_air_n`, and the other
+donor-prefixed motions), but their animation references point outside `motion/body/c00`:
+`cloud_special_n` names `cloudd00specialn.nuanmb` under `motion/cloudbody/c00`, for example.
+The old editor scanned only `body/c00`, so the ACMD panel could be correct while the viewport
+showed no animation for the same move.
 
-Not scheduled yet, and it needs a measurement first: whether those directories carry their own
-ACMD scripts, or only animations that the `body/c00` scripts drive. If it is the second, this is
-an animation-picker feature and not an ACMD one, and the entry should say so rather than being
-taken as written.
+This measurement also settled the scope. ACMD remains fighter-level script data; the motion list
+already carries the per-move animation hash, and the local script cache has no directory-qualified
+ACMD source to merge into the move. R6 is therefore an animation-resolution rough edge, not a new
+ACMD family or a reason to invent a second script key.
+
+**Done.** Move-list loading now indexes every `motion/<part>/cNN` directory once and resolves the
+animation hash over the complete `.nuanmb` filename before using the body-only compatibility
+fallback. That makes copied specials and other sibling-part animations available to the existing
+viewport without changing ACMD capture, live rules, exports, or source write-back. The README
+describes the required extracted-data layout and the behavior.
+
+The checked-out archive contains a `copy/` directory in the remote script index, but it was not
+part of the cached top-level script files and was not used to claim additional ACMD coverage. Any
+future work on those nested source files remains a separate measured source-index task.
 
 ### [x] R7 — A live capture threw away everything but hitboxes and effects (done 2026-08-06)
 
