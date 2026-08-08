@@ -2747,6 +2747,17 @@ explicitly unverified. The E1 parent remains open for broader status-module call
 `sv_kinetic_energy` corpus family, and the separately measured `get_sum_speed_y`/`set_frame_partial`
 shapes.
 
+#### [!] E1r — `MotionModule::set_frame_partial` binding mismatch (evidence-blocked 2026-08-08)
+
+The retained corpus has 33 exact textual `MotionModule::set_frame_partial` calls in each of the
+standard and HDR trees. They all use the three-argument source form
+`(receiver, part_kind, frame)`, with the same Pac-Man and Big Pac-Man material part families seen
+above. The pinned `skyline-smash` binding, however, is
+`(BattleObjectModuleAccessor, i32, f32, bool) -> ()`; the corpus supplies no fourth boolean, and
+there is no measured wrapper or capture contract that identifies its value. The calls therefore
+remain raw until a version-matched source or runtime capture establishes that missing argument;
+no parser, export helper, write-back slot, or live hook should guess it.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
