@@ -74,6 +74,7 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
     let mut dropped: HashMap<String, Vec<String>> = HashMap::new();
     let mut incomplete = Vec::new();
     let mut exported_effect_names = HashSet::new();
+    let mut capture_warnings = Vec::new();
 
     let mut fighters: Vec<_> = project.fighters.iter().collect();
     fighters.sort_by(|a, b| a.0.cmp(b.0));
@@ -121,6 +122,21 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
                 continue;
             }
             sound_edits.push((fighter.clone(), move_name.clone(), script.clone()));
+        }
+
+        // A provenance note is useful only beside a function this export actually ships. A
+        // saved project may retain a note for a move whose edit was later removed, and reporting
+        // that orphan would make the warning impossible to act on.
+        for (move_name, warning) in &edits.capture_branch_warnings {
+            let exported = edits.acmd.contains_key(move_name)
+                || edits.effect_calls_full.contains_key(move_name)
+                || edits
+                    .sound_scripts
+                    .get(move_name)
+                    .is_some_and(|script| !script.stmts.is_empty());
+            if exported {
+                capture_warnings.push(warning.clone());
+            }
         }
 
         for (move_name, deltas) in &edits.effect_calls {
@@ -185,9 +201,13 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
             report.blocker_summary()
         );
     }
+    let mut warnings = report.warning_summary();
+    warnings.extend(capture_warnings);
+    warnings.sort();
+    warnings.dedup();
     Ok(Some(GeneratedSource {
         project: built,
-        warnings: report.warning_summary(),
+        warnings,
     }))
 }
 
@@ -671,6 +691,61 @@ mod tests {
         );
         assert!(project.is_empty());
         assert!(source_project(&project).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_live_capture_branch_warning_survives_a_project_round_trip() {
+        let body = r#"
+unsafe extern "C" fn effect_x(agent: &mut L2CAgentBase) {
+    if WorkModule::is_flag(agent.module_accessor, *FLAG) {
+        if macros::is_excute(agent) {
+            macros::EFFECT(agent, Hash40::new("sys_flash"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+        }
+    }
+}
+"#;
+        let calls = crate::acmd::parse_effect_script(body).to_effect_calls();
+        assert!(
+            !calls.is_empty(),
+            "the fixture must ship an effect function"
+        );
+        let note = "Live capture is partial for kirby/effect_x: one observed path came from a cached source with 1 conditional branch(es). Export will write only the observed calls as unconditional code; inspect the source before shipping".to_string();
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "capture_provenance".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "kirby".into(),
+            FighterMod {
+                effect_calls_full: HashMap::from([(String::from("effect_x"), calls)]),
+                capture_branch_warnings: HashMap::from([(String::from("effect_x"), note.clone())]),
+                ..Default::default()
+            },
+        );
+
+        let json = serde_json::to_string(&project).unwrap();
+        let reloaded: ModProjectFile = serde_json::from_str(&json).unwrap();
+        let generated = source_project(&reloaded)
+            .unwrap()
+            .expect("the captured effect should still export");
+        assert!(
+            generated.warnings.contains(&note),
+            "{:?}",
+            generated.warnings
+        );
+
+        let orphan = FighterMod {
+            capture_branch_warnings: HashMap::from([(String::from("not_exported"), note)]),
+            ..Default::default()
+        };
+        let mut only_note = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "note_only".into(),
+            ..Default::default()
+        };
+        only_note.fighters.insert("kirby".into(), orphan);
+        assert!(source_project(&only_note).unwrap().is_none());
     }
 
     /// End to end: a script the user actually wrote → parsed → carried through a saved

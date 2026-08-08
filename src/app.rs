@@ -164,6 +164,57 @@ fn resolve_sound_state(
     (script, shown, baseline)
 }
 
+/// Count source branches that a single live performance cannot reveal.
+///
+/// The three parsed categories use their typed statement trees, which excludes the ubiquitous
+/// `is_excute` wrapper and counts only runtime conditions. Expression scripts are intentionally
+/// still raw while D2 is being staged, so their non-`is_excute` `if` headers are counted here as
+/// well. This is a warning metric, not an evaluator: it never tries to decide which arm ran.
+fn source_branch_count(body: &str) -> usize {
+    let known = crate::acmd::parse_acmd_script(body).branch_count()
+        + crate::acmd::parse_effect_script(body).branch_count()
+        + crate::acmd::parse_sound_script(body).branch_count();
+
+    let mut expression_depth = 0i32;
+    let mut in_expression = false;
+    let expression = body
+        .lines()
+        .map(str::trim)
+        .map(|line| {
+            if !in_expression && line.contains("fn expression_") {
+                in_expression = true;
+                expression_depth = 0;
+            }
+            let branch = in_expression
+                && !line.contains("is_excute")
+                && (line.starts_with("if(")
+                    || line.starts_with("if ")
+                    || line.starts_with("if!")
+                    || line.starts_with("if !"));
+            if in_expression {
+                expression_depth += line.chars().filter(|c| *c == '{').count() as i32;
+                expression_depth -= line.chars().filter(|c| *c == '}').count() as i32;
+                if expression_depth <= 0 {
+                    in_expression = false;
+                }
+            }
+            branch as usize
+        })
+        .sum::<usize>();
+    known + expression
+}
+
+/// Explain the provenance hazard of exporting a one-path live capture when cached source has
+/// branches. Kept pure so the warning can be tested without a running game or UI.
+fn live_capture_branch_warning(fighter: &str, move_name: &str, body: &str) -> Option<String> {
+    let branches = source_branch_count(body);
+    (branches > 0).then(|| {
+        format!(
+            "Live capture is partial for {fighter}/{move_name}: one observed path came from a cached source with {branches} conditional branch(es). Export will write only the observed calls as unconditional code; inspect the source before shipping"
+        )
+    })
+}
+
 fn timeline_frame_extent(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
@@ -2687,6 +2738,15 @@ impl VisionaryApp {
     ) {
         match body {
             Ok(body) => {
+                // A fresh mirror fetch replaces the live snapshot for this move, so any
+                // branch warning from that snapshot is no longer applicable. Project-source
+                // loads deliberately retain a saved note, allowing an exported project to
+                // preserve the provenance it was created from.
+                if source_label == "GitHub" {
+                    self.state
+                        .capture_branch_warnings
+                        .remove(&format!("{fighter_name}/{move_name}"));
+                }
                 let script = crate::acmd::parse_acmd_script(&body);
                 let effect_script = crate::acmd::parse_effect_script(&body);
                 // Read before the hitbox check below, and kept even when that check fails: a
@@ -3535,8 +3595,19 @@ impl VisionaryApp {
             record.script.clone(),
         )];
         let project = crate::acmd::build_mod_project(&edits, &plugin_name);
+        let capture_warning = self
+            .state
+            .capture_branch_warnings
+            .get(&format!("{fighter}/{move_name}"))
+            .cloned();
         match write_mod_project(&project, &dest) {
-            Ok(root) => self.state.status = format!("Exported project to {}", root.display()),
+            Ok(root) => {
+                self.state.status = format!("Exported project to {}", root.display());
+                if let Some(warning) = capture_warning {
+                    self.state.status.push_str(" — ⚠ ");
+                    self.state.status.push_str(&warning);
+                }
+            }
             Err(e) => self.state.status = format!("Export failed: {}", e),
         }
     }
@@ -3571,10 +3642,23 @@ impl VisionaryApp {
 
         let plugin_name = "visionary_mod";
         let project = crate::acmd::build_mod_project(&edits, plugin_name);
+        let capture_warnings: Vec<String> = edits
+            .iter()
+            .filter_map(|(fighter, move_name, _)| {
+                self.state
+                    .capture_branch_warnings
+                    .get(&format!("{fighter}/{move_name}"))
+                    .cloned()
+            })
+            .collect();
         match write_mod_project(&project, &dest) {
             Ok(root) => {
                 self.state.status =
-                    format!("Exported {} move(s) to {}", edits.len(), root.display())
+                    format!("Exported {} move(s) to {}", edits.len(), root.display());
+                for warning in capture_warnings {
+                    self.state.status.push_str(" — ⚠ ");
+                    self.state.status.push_str(&warning);
+                }
             }
             Err(e) => self.state.status = format!("Export failed: {}", e),
         }
@@ -6484,6 +6568,20 @@ impl VisionaryApp {
                 }
             }
         }
+        // Carry live-capture provenance alongside the edit that caused this move to be
+        // exported. The warning is not itself an edit, so it must not make an otherwise empty
+        // project non-empty; `mod_export::source_project` filters notes to functions it ships.
+        for (key, warning) in &self.state.capture_branch_warnings {
+            let Some((fighter, move_name)) = key.split_once('/') else {
+                continue;
+            };
+            project
+                .fighters
+                .entry(fighter.to_string())
+                .or_default()
+                .capture_branch_warnings
+                .insert(move_name.to_string(), warning.clone());
+        }
         project
     }
 
@@ -6737,6 +6835,7 @@ impl VisionaryApp {
         self.state.effect_dropped_lines.clear();
         self.state.effect_frame_residue.clear();
         self.state.sound_script_edits.clear();
+        self.state.capture_branch_warnings.clear();
         self.eff_mods.clear();
         self.live_overrides = crate::game_link::LiveOverrides::default();
         self.state.hitboxes = self.state.hitboxes_pristine.clone();
@@ -6793,6 +6892,11 @@ impl VisionaryApp {
                 self.state
                     .sound_script_edits
                     .insert(format!("{fighter}/{mv}"), script);
+            }
+            for (mv, warning) in fm.capture_branch_warnings {
+                self.state
+                    .capture_branch_warnings
+                    .insert(format!("{fighter}/{mv}"), warning);
             }
             if let Some(mut eff) = fm.eff {
                 // Older saves recorded mixed-case names ("SYS_ICE_os"); entry names are
@@ -7389,6 +7493,19 @@ impl VisionaryApp {
             &self.state.sounds,
         ));
         self.jump_to_earliest_active_frame();
+        let capture_warning = self.capture_branch_warning();
+        if let Some(key) = self.current_move_key() {
+            match &capture_warning {
+                Some(warning) => {
+                    self.state
+                        .capture_branch_warnings
+                        .insert(key, warning.clone());
+                }
+                None => {
+                    self.state.capture_branch_warnings.remove(&key);
+                }
+            }
+        }
         // **Names every family, and this comment said so while naming three of six.** Hurtboxes,
         // hitbox tuning and motion rate were all counted, adopted and then not mentioned, so a
         // capture that dropped them was indistinguishable from one that never had them — which
@@ -7412,6 +7529,10 @@ impl VisionaryApp {
             );
         }
         if let Some(note) = self.capture_vs_script_offset() {
+            status.push_str(" — ");
+            status.push_str(&note);
+        }
+        if let Some(note) = capture_warning {
             status.push_str(" — ");
             status.push_str(&note);
         }
@@ -7479,6 +7600,21 @@ impl VisionaryApp {
             "frames differ from the GitHub script by {lo}..{hi} frames across {matched} spawn(s) \
              — not a constant offset, so one of the two is wrong for this move"
         ))
+    }
+
+    /// Return the cached-source provenance warning for the move currently being captured.
+    ///
+    /// The cache is deliberately the only source consulted here. Live capture must stay
+    /// instantaneous and offline; the cached body is also the same body used by the frame-parity
+    /// diagnostic immediately above.
+    fn capture_branch_warning(&self) -> Option<String> {
+        let fighter = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))?;
+        let move_name = self.state.selected_move.as_ref()?;
+        let body = crate::acmd::cached_script_body(&fighter.name, &move_name.name)?;
+        live_capture_branch_warning(&fighter.name, &move_name.name, &body)
     }
 
     /// ATTACK capture args (positional, editor conventions) → display Hitbox.
@@ -18581,6 +18717,45 @@ mod live_effect_capture_tests {
         assert_eq!(args[20], A::Int(3));
         assert_eq!(args[21], A::Num(0.75));
         assert_eq!(args[32], A::Hash(hash40::hash40("collision_attr_fire").0));
+    }
+}
+
+#[cfg(test)]
+mod capture_branch_warning_tests {
+    use super::live_capture_branch_warning;
+
+    #[test]
+    fn one_path_capture_warns_about_cached_runtime_arms() {
+        let source = r#"
+unsafe extern "C" fn effect_x(agent: &mut L2CAgentBase) {
+    if condition() {
+        if macros::is_excute(agent) {
+            macros::EFFECT(agent, Hash40::new("sys_flash"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+        }
+    }
+}
+unsafe extern "C" fn expression_x(agent: &mut L2CAgentBase) {
+    if WorkModule::is_flag(agent.module_accessor, *FLAG) {
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_S);
+    }
+}
+"#;
+        let warning = live_capture_branch_warning("kirby", "special_hi", source)
+            .expect("the unobserved arms should be named");
+        assert!(warning.contains("kirby/special_hi"));
+        assert!(warning.contains("2 conditional branch(es)"), "{warning}");
+    }
+
+    #[test]
+    fn is_excute_wrappers_alone_are_not_a_branch_warning() {
+        let source = r#"
+unsafe extern "C" fn effect_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_flash"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }
+}
+"#;
+        assert!(live_capture_branch_warning("kirby", "attack", source).is_none());
     }
 }
 

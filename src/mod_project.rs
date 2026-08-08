@@ -96,6 +96,11 @@ pub struct FighterMod {
     /// loadable — they simply have no sounds, which is what was true when they were written.
     #[serde(default)]
     pub sound_scripts: HashMap<String, crate::data::AcmdScript>,
+    /// move name → warning recorded when the move was loaded from one live-capture path while
+    /// the cached source contained runtime branches. This is provenance, not an edit: it keeps
+    /// an export from presenting an observed arm as if it were the complete source.
+    #[serde(default)]
+    pub capture_branch_warnings: HashMap<String, String>,
     /// authored .eff edits for this fighter's effect file
     #[serde(default)]
     pub eff: Option<EffMod>,

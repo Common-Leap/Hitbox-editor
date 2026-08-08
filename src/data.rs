@@ -1110,6 +1110,26 @@ pub struct RateSpan {
 }
 
 impl AcmdScript {
+    /// Count runtime conditional blocks preserved in this script.
+    ///
+    /// A live capture observes one execution path, while a source script may contain several
+    /// arms. This count is intentionally structural: loops are not branches, and a branch nested
+    /// inside one is counted once because it is still one source condition. It is used only for
+    /// provenance warnings, never to pretend the editor can reconstruct an unobserved arm.
+    pub fn branch_count(&self) -> usize {
+        fn count(stmts: &[AcmdStmt]) -> usize {
+            stmts
+                .iter()
+                .map(|stmt| match stmt {
+                    AcmdStmt::RawBlock { body, .. } => 1 + count(body),
+                    AcmdStmt::Loop { body, .. } => count(body),
+                    _ => 0,
+                })
+                .sum()
+        }
+        count(&self.stmts)
+    }
+
     /// The script's motion-frame → game-frame mapping, one entry per rate change.
     ///
     /// Motion frames are what a script names and what every hitbox range is keyed to; game
@@ -1976,6 +1996,10 @@ pub struct AppState {
     pub attack_mods_pristine: Vec<AttackModState>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
+    /// "fighter/move" → the warning captured when a live performance observed only one arm of
+    /// a branched source script. Kept separately from `acmd_source` so a later project export can
+    /// carry the warning even after the move is no longer open.
+    pub capture_branch_warnings: HashMap<String, String>,
     /// The text every panel above was built from: the project's own functions where it has
     /// them, the mirror's for the categories it does not.
     ///
@@ -2053,6 +2077,7 @@ impl Default for AppState {
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),
             acmd_source: String::new(),
+            capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
             effect_call_edits: HashMap::new(),
             effect_call_full: HashMap::new(),
@@ -3290,6 +3315,25 @@ fn eval_effect_stmts(
 }
 
 impl EffectScript {
+    /// Count runtime conditional blocks in the effect source.
+    ///
+    /// `Cond` preserves a branch that a live capture cannot identify after the fact. Loops are
+    /// deliberately not branches; only the source conditions that can hide an effect matter to
+    /// the capture-provenance warning.
+    pub fn branch_count(&self) -> usize {
+        fn count(stmts: &[EffectStmt]) -> usize {
+            stmts
+                .iter()
+                .map(|stmt| match stmt {
+                    EffectStmt::Cond { body, .. } => 1 + count(body),
+                    EffectStmt::Loop { body, .. } => count(body),
+                    _ => 0,
+                })
+                .sum()
+        }
+        count(&self.stmts)
+    }
+
     /// For each call [`to_effect_calls`](Self::to_effect_calls) produces, the ordinal of the
     /// spawn macro in the script text that produced it.
     ///
