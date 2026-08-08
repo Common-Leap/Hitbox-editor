@@ -398,6 +398,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_kinetic_clear_speed_all_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_change_kinetic_call(line) {
             stmts.push(stmt);
             continue;
@@ -1997,6 +2001,22 @@ fn parse_set_air_call(line: &str) -> Option<ExcuteStmt> {
     (tokens.as_slice() == ["agent"]).then_some(ExcuteStmt::SetAir)
 }
 
+/// Parse the measured direct `KineticModule::clear_speed_all` shapes:
+/// `KineticModule::clear_speed_all(agent.module_accessor)` and the HDR `boma` form.
+/// Other receivers and arities remain `Raw` because this input boundary does not prove that the
+/// call belongs to a buildable ACMD game function.
+fn parse_kinetic_clear_speed_all_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "KineticModule::clear_speed_all(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [module_accessor] = tokens.as_slice() else {
+        return None;
+    };
+    matches!(module_accessor.trim(), "agent.module_accessor" | "boma")
+        .then_some(ExcuteStmt::KineticClearSpeedAll)
+}
+
 /// Parse the measured direct lua-bind shapes:
 /// `KineticModule::change_kinetic(agent.module_accessor, kinetic_type)` and the HDR dump form
 /// `KineticModule::change_kinetic(boma, kinetic_type)`, where the surrounding function declares
@@ -2659,6 +2679,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             }
             crate::data::ExcuteStmt::SetAir => {
                 format!("{indent}visionary_set_air(agent);")
+            }
+            crate::data::ExcuteStmt::KineticClearSpeedAll => {
+                format!(
+                    "{indent}KineticModule::clear_speed_all(agent.module_accessor);"
+                )
             }
             crate::data::ExcuteStmt::ChangeKinetic(call) => format!(
                 "{indent}KineticModule::change_kinetic(agent.module_accessor, {});",
@@ -9335,6 +9360,53 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let emitted = preview_game_fn(&script, "x");
         assert!(emitted.contains("KineticModule::suspend_energy(agent.module_accessor)"));
         assert!(emitted.contains("KineticModule::resume_energy(other"));
+    }
+
+    #[test]
+    fn kinetic_clear_speed_all_parses_standard_and_hdr_and_round_trips() {
+        let source = r#"unsafe extern "C" fn game_specialhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        KineticModule::clear_speed_all(agent.module_accessor);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_clear_speed_all_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame, 6);
+        assert_eq!(events[0].site, 0);
+        let emitted = preview_game_fn(&script, "special_hi");
+        assert!(emitted.contains("KineticModule::clear_speed_all(agent.module_accessor);"));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_kinetic_clear_speed_all_events(),
+            events
+        );
+
+        let hdr = source.replace("agent.module_accessor", "boma");
+        assert_eq!(
+            parse_acmd_script(&hdr).to_kinetic_clear_speed_all_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_kinetic_clear_speed_all_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::clear_speed_all(agent.module_accessor, 0);
+        KineticModule::clear_speed_all(other);
+        KineticModule::clear_speed_all(agent.module_accessor);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_clear_speed_all_events();
+        assert_eq!(events.len(), 1);
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("KineticModule::clear_speed_all(agent.module_accessor, 0);"));
+        assert!(emitted.contains("KineticModule::clear_speed_all(other);"));
+        assert!(emitted.contains("KineticModule::clear_speed_all(agent.module_accessor);"));
     }
 
     #[test]

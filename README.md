@@ -406,6 +406,7 @@ section of the editor:
 - `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and `unable_energy` edit
   the authored energy-ID token.
 - `KineticModule::add_speed` edits the x/y components of the supported zero-z velocity vector.
+- `KineticModule::clear_speed_all` places, moves, or removes the measured argument-less speed-clear point.
 
 Value controls edit their point values while keeping their source frame. Placement
 controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.
@@ -417,6 +418,8 @@ its live replacement is available only when a numeric capture identifies the
 kinetic reserve. `SET_AIR` presence and placement are structural edits: the
 generated export applies them freely, while linked-source sync edits only a
 verified flat call layout and reports branches, loops, or ambiguous sites.
+`KineticModule::clear_speed_all` is also a structural presence/frame edit; source sync preserves
+the verified standard or HDR receiver and reports unsupported layouts.
 The direct `KineticModule` controls preserve named source tokens for export and
 source sync; their live replacements require a numeric capture of the original
 energy or kinetic value. The supported `add_speed` shape keeps `z` at `0.0` and

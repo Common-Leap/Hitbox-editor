@@ -363,6 +363,9 @@ pub const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
 /// `WHOLE_HIT` or `COL_PRI` call in an older/current plugin. **Must equal the plugin's value.**
 pub const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
+/// Rule key for the targetless direct `KineticModule::clear_speed_all` kinetic point.
+pub const KINETIC_KEY_CLEAR_SPEED_ALL: u64 = u64::MAX - 3;
+
 /// Wire category for `ATTACK_ABS`. **Must equal the plugin's `CAT_ABS`.**
 ///
 /// Deliberately *not* [`crate::data::CAT_ABS`], which is `3`. These are two different numbering
@@ -476,6 +479,9 @@ pub const CAT_KINETIC_ENABLE_ENERGY: u8 = 25;
 
 /// Wire category for direct `KineticModule::unable_energy` points.
 pub const CAT_KINETIC_UNABLE_ENERGY: u8 = 26;
+
+/// Wire category for direct `KineticModule::clear_speed_all` points.
+pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = 27;
 
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
@@ -2832,6 +2838,9 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_KINETIC_UNABLE_ENERGY: u8 = {CAT_KINETIC_UNABLE_ENERGY};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = {CAT_KINETIC_CLEAR_SPEED_ALL};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
@@ -2848,6 +2857,8 @@ mod tests {
         assert!(module.contains("KineticModule::enable_energy,"));
         assert!(module.contains("hook_kinetic_unable_energy"));
         assert!(module.contains("KineticModule::unable_energy,"));
+        assert!(module.contains("replace = smash::app::lua_bind::KineticModule::clear_speed_all"));
+        assert!(module.contains("hook_kinetic_clear_speed_all"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
@@ -2863,10 +2874,12 @@ mod tests {
             (CAT_KINETIC_RESUME_ENERGY, CAT_CHANGE_KINETIC),
             (CAT_KINETIC_ENABLE_ENERGY, CAT_KINETIC_RESUME_ENERGY),
             (CAT_KINETIC_UNABLE_ENERGY, CAT_KINETIC_ENABLE_ENERGY),
+            (CAT_KINETIC_CLEAR_SPEED_ALL, CAT_KINETIC_UNABLE_ENERGY),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
         assert!(module.contains("const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;"));
+        assert!(module.contains("const KINETIC_KEY_CLEAR_SPEED_ALL: u64 = u64::MAX - 3;"));
 
         let link = GameLink::default();
         let clr_key = numeric_point_key("CLR_SPEED", &[7.0]);
@@ -3070,6 +3083,61 @@ mod tests {
             Some("KineticModule::unable_energy")
         );
         assert_eq!(rules[1]["suppress"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn outbound_kinetic_clear_speed_all_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_CLEAR_SPEED_ALL,
+                hitbox_id: Some(KINETIC_KEY_CLEAR_SPEED_ALL),
+                suppress: true,
+                frame_start: Some(4.0),
+                frame_end: Some(4.0),
+                overrides: None,
+                inject: None,
+                func: Some("KineticModule::clear_speed_all".into()),
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_CLEAR_SPEED_ALL,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(InjectRuleWire {
+                    frame: 8.0,
+                    args: Vec::new(),
+                    command: Some("KineticModule::clear_speed_all".into()),
+                }),
+                func: Some("KineticModule::clear_speed_all".into()),
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0]["category"].as_u64(),
+            Some(CAT_KINETIC_CLEAR_SPEED_ALL as u64)
+        );
+        assert_eq!(
+            rules[0]["hitbox_id"].as_u64(),
+            Some(KINETIC_KEY_CLEAR_SPEED_ALL)
+        );
+        assert_eq!(
+            rules[0]["func"].as_str(),
+            Some("KineticModule::clear_speed_all")
+        );
+        assert_eq!(rules[0]["suppress"].as_bool(), Some(true));
+        assert_eq!(
+            rules[1]["inject"]["command"].as_str(),
+            Some("KineticModule::clear_speed_all")
+        );
+        assert!(rules[1]["inject"]["args"].as_array().unwrap().is_empty());
     }
 
     #[test]

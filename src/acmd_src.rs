@@ -4430,6 +4430,23 @@ pub(crate) fn set_air_sites(text: &str) -> Vec<MacroSite> {
         .collect()
 }
 
+/// The buildable direct `KineticModule::clear_speed_all` calls in source order.
+pub(crate) fn kinetic_clear_speed_all_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(
+        text,
+        crate::data::KineticClearSpeedAllCall::FUNC,
+        0..text.len(),
+    )
+    .into_iter()
+    .filter(|site| {
+        site.args.len() == 1
+            && site
+                .arg(text, 0)
+                .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+    })
+    .collect()
+}
+
 fn remove_set_air_line(text: &str, site: &MacroSite) -> Replacement {
     let ranges = source_line_ranges(text);
     let Some(line) = ranges
@@ -4523,6 +4540,213 @@ fn insert_set_air_line(text: &mut String, frame: u32) -> bool {
     );
     text.insert_str(insert_at, &block);
     true
+}
+
+fn remove_kinetic_clear_speed_all_line(text: &str, site: &MacroSite) -> Replacement {
+    let ranges = source_line_ranges(text);
+    let Some(line) = ranges
+        .iter()
+        .find(|range| range.start <= site.span.start && site.span.start < range.end)
+    else {
+        return Replacement {
+            span: site.span.clone(),
+            value: String::new(),
+        };
+    };
+    let trimmed = text[line.clone()].trim();
+    if matches!(
+        trimmed,
+        "KineticModule::clear_speed_all(agent.module_accessor);"
+            | "KineticModule::clear_speed_all(boma);"
+    ) {
+        Replacement {
+            span: line.clone(),
+            value: String::new(),
+        }
+    } else {
+        let mut end = site.span.end;
+        if text[end..].starts_with(';') {
+            end += 1;
+        }
+        Replacement {
+            span: site.span.start..end,
+            value: String::new(),
+        }
+    }
+}
+
+fn insert_kinetic_clear_speed_all_line(text: &mut String, frame: u32) -> bool {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let call = if text.contains("let boma = agent.boma()") {
+        "KineticModule::clear_speed_all(boma);"
+    } else {
+        "KineticModule::clear_speed_all(agent.module_accessor);"
+    };
+    let ranges = source_line_ranges(text);
+    let frame_index = ranges.iter().position(|range| {
+        frame_literal(&text[range.clone()])
+            .is_some_and(|value| value.round().max(1.0) as u32 == frame)
+    });
+
+    if let Some(frame_index) = frame_index {
+        let frame_range = ranges[frame_index].clone();
+        for range in ranges.iter().skip(frame_index + 1) {
+            if frame_literal(&text[range.clone()]).is_some() {
+                break;
+            }
+            let line = &text[range.clone()];
+            if line.contains("if macros::is_excute") && line.contains('{') {
+                let open = range.start + line.find('{').unwrap();
+                if let Some(close) = matching_brace(text, open) {
+                    let body_indent = ranges
+                        .iter()
+                        .skip(frame_index + 1)
+                        .find(|body| {
+                            body.start > open && body.start < close && {
+                                let body_text = &text[body.start..body.end];
+                                !body_text.trim().is_empty() && !body_text.trim().starts_with('}')
+                            }
+                        })
+                        .map(|body| line_indent(text, body).to_string())
+                        .unwrap_or_else(|| format!("{}    ", line_indent(text, range)));
+                    text.insert_str(close, &format!("{body_indent}{call}{newline}"));
+                    return true;
+                }
+            }
+        }
+
+        let indent = line_indent(text, &frame_range);
+        let block = format!(
+            "{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+        );
+        text.insert_str(frame_range.end, &block);
+        return true;
+    }
+
+    let insert_at = ranges
+        .iter()
+        .find(|range| {
+            frame_literal(&text[range.start..range.end]).is_some_and(|value| value > frame as f32)
+        })
+        .map(|range| range.start)
+        .or_else(|| text.rfind('}'))
+        .unwrap_or(text.len());
+    let indent = ranges
+        .iter()
+        .find(|range| frame_literal(&text[range.start..range.end]).is_some())
+        .map(|range| line_indent(text, range).to_string())
+        .unwrap_or_else(|| "    ".into());
+    let block = format!(
+        "{indent}frame(agent.lua_state_agent, {frame}.0);{newline}{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+    );
+    text.insert_str(insert_at, &block);
+    true
+}
+
+/// Rewrite direct `KineticModule::clear_speed_all` presence and frame placement in a flat
+/// `game_` function. Structural changes in branches, loops, or mismatched source ordinals are
+/// reported rather than placed into an execution context the editor cannot prove.
+pub fn rewrite_kinetic_clear_speed_all(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::KineticClearSpeedAllEvent],
+    edited: &[crate::data::KineticClearSpeedAllEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = kinetic_clear_speed_all_sites(text);
+    let parsed = crate::acmd::parse_acmd_script(text);
+    fn contains_loop(stmts: &[crate::data::AcmdStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            crate::data::AcmdStmt::Loop { .. } => true,
+            crate::data::AcmdStmt::RawBlock { body, .. } => contains_loop(body),
+            _ => false,
+        })
+    }
+    let mut report = SyncReport::default();
+    let flat_sites = pristine.len() == sites.len()
+        && pristine
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.site == index);
+    let flat_edited = edited
+        .iter()
+        .enumerate()
+        .all(|(index, event)| event.site == index);
+    let old: Vec<u32> = pristine.iter().map(|event| event.frame).collect();
+    let new: Vec<u32> = edited.iter().map(|event| event.frame).collect();
+    let has_unsupported_structure =
+        parsed.branch_count() > 0 || contains_loop(&parsed.stmts) || !flat_sites || !flat_edited;
+    if has_unsupported_structure {
+        if pristine != edited {
+            report.skipped.push(format!(
+                "{label}: KineticModule::clear_speed_all placement changed inside a loop/branch or after a source-site mismatch — source syncing only edits flat point calls"
+            ));
+        }
+        return Ok((text.to_string(), report));
+    }
+
+    let n = old.len();
+    let m = new.len();
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if old[i] == new[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut matched_old = vec![false; n];
+    let mut matched_new = vec![false; m];
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if old[i] == new[j] {
+            matched_old[i] = true;
+            matched_new[j] = true;
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    if matched_old.iter().all(|matched| *matched) && matched_new.iter().all(|matched| *matched) {
+        return Ok((text.to_string(), report));
+    }
+
+    let removals: Vec<Replacement> = sites
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_old[*index])
+        .map(|(_, site)| remove_kinetic_clear_speed_all_line(text, site))
+        .collect();
+    let mut updated = apply(text, removals);
+    for (_, event) in edited
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_new[*index])
+    {
+        if insert_kinetic_clear_speed_all_line(&mut updated, event.frame) {
+            report.changed += 1;
+        }
+    }
+    report.changed += matched_old.iter().filter(|matched| !**matched).count();
+    Ok((updated, report))
+}
+
+/// Sync edited direct `KineticModule::clear_speed_all` points into the project's `game_` function.
+pub fn sync_kinetic_clear_speed_all(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::KineticClearSpeedAllEvent],
+    edited: &[crate::data::KineticClearSpeedAllEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_kinetic_clear_speed_all(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
 }
 
 /// Rewrite `SET_AIR` presence and frame placement in a flat `game_` function.
@@ -8349,6 +8573,71 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             .is_empty());
         assert!(kinetic_add_speed_sites(text).is_empty());
         let (after, report) = rewrite_kinetic_add_speed(text, "mario/x", &[], &[]).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn kinetic_clear_speed_all_source_sync_retimes_flat_standard_and_hdr_calls() {
+        let standard = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        KineticModule::clear_speed_all(agent.module_accessor);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(standard).to_kinetic_clear_speed_all_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 6;
+        let (after, report) =
+            rewrite_kinetic_clear_speed_all(standard, "mario/escape_air", &pristine, &edited)
+                .unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("frame(agent.lua_state_agent, 6.0);"));
+        assert!(after.contains("KineticModule::clear_speed_all(agent.module_accessor);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_kinetic_clear_speed_all_events(),
+            edited
+        );
+
+        let hdr = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 4.0);
+    if is_excute(agent) {
+        KineticModule::clear_speed_all(boma);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(hdr).to_kinetic_clear_speed_all_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 9;
+        let (after, report) =
+            rewrite_kinetic_clear_speed_all(hdr, "mario/escape_air_hdr", &pristine, &edited)
+                .unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(after.contains("let boma = agent.boma();"));
+        assert!(after.contains("KineticModule::clear_speed_all(boma);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_kinetic_clear_speed_all_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn malformed_kinetic_clear_speed_all_shapes_are_source_only() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::clear_speed_all(agent.module_accessor, 1);
+        KineticModule::clear_speed_all(other.module_accessor);
+    }
+}
+"#;
+        assert!(crate::acmd::parse_acmd_script(text)
+            .to_kinetic_clear_speed_all_events()
+            .is_empty());
+        assert!(kinetic_clear_speed_all_sites(text).is_empty());
+        let (after, report) = rewrite_kinetic_clear_speed_all(text, "mario/x", &[], &[]).unwrap();
         assert_eq!(after, text);
         assert!(report.skipped.is_empty(), "{report:?}");
     }

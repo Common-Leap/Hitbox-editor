@@ -1295,6 +1295,11 @@ pub enum ExcuteStmt {
     /// This is an argument-less point command. Structural placement is the editable payload;
     /// the source writer and live rule path keep it separate from `REVERSE_LR`.
     SetAir,
+    /// `KineticModule::clear_speed_all` — clear every kinetic speed at this point in the move.
+    ///
+    /// The measured direct lua-bind shape has no authored payload after the module accessor, so
+    /// structural presence and frame are the only editable values.
+    KineticClearSpeedAll,
     /// `KineticModule::change_kinetic` — change the fighter's current kinetic type.
     ///
     /// This direct lua-bind call is present in the measured `game_` source shape. The authored
@@ -1463,6 +1468,14 @@ impl ChangeKineticCall {
     pub const FUNC: &'static str = "KineticModule::change_kinetic";
 }
 
+/// The measured direct `KineticModule::clear_speed_all` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KineticClearSpeedAllCall;
+
+impl KineticClearSpeedAllCall {
+    pub const FUNC: &'static str = "KineticModule::clear_speed_all";
+}
+
 /// The four measured direct kinetic-energy toggles in the public ACMD corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KineticEnergyAction {
@@ -1598,6 +1611,14 @@ pub struct ClrSpeedEvent {
 /// A resolved `SET_AIR` point at the one-based game frame.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SetAirEvent {
+    pub frame: u32,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct `KineticModule::clear_speed_all` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KineticClearSpeedAllEvent {
     pub frame: u32,
     #[serde(default)]
     pub site: usize,
@@ -1994,6 +2015,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.set_airs
+    }
+
+    /// Flatten direct `KineticModule::clear_speed_all` calls into argument-less kinetic points.
+    pub fn to_kinetic_clear_speed_all_events(&self) -> Vec<KineticClearSpeedAllEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.kinetic_clear_speed_alls
     }
 
     /// Flatten direct kinetic-type changes into authored-token point events.
@@ -2660,6 +2689,84 @@ impl AcmdScript {
         true
     }
 
+    /// Remove a direct `KineticModule::clear_speed_all` source statement at its ordinal.
+    pub fn remove_kinetic_clear_speed_all(&mut self, site: usize) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        let mut inner_index = 0;
+                        while inner_index < inner.len() {
+                            if matches!(inner[inner_index], ExcuteStmt::KineticClearSpeedAll) {
+                                if *seen == site {
+                                    inner.remove(inner_index);
+                                    if inner.is_empty() {
+                                        stmts.remove(index);
+                                    }
+                                    return true;
+                                }
+                                *seen += 1;
+                            }
+                            inner_index += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner)
+                        if matches!(inner.as_ref(), ExcuteStmt::KineticClearSpeedAll) =>
+                    {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Insert an unconditional `KineticModule::clear_speed_all` call at a top-level frame.
+    pub fn insert_kinetic_clear_speed_all_at_frame(&mut self, frame: u32) -> bool {
+        let target = frame.max(1) as f32;
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(ExcuteStmt::KineticClearSpeedAll);
+                return true;
+            }
+            self.stmts.insert(
+                index + 1,
+                AcmdStmt::Excute(vec![ExcuteStmt::KineticClearSpeedAll]),
+            );
+            return true;
+        }
+
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target));
+        self.stmts.insert(
+            insert_at + 1,
+            AcmdStmt::Excute(vec![ExcuteStmt::KineticClearSpeedAll]),
+        );
+        true
+    }
+
     /// Remove the `REVERSE_LR` source statement at an ordinal from
     /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
     ///
@@ -2765,6 +2872,7 @@ struct WalkAccum {
     ft_start_adjust_motion_frames: Vec<FtStartAdjustMotionFrameEvent>,
     clr_speeds: Vec<ClrSpeedEvent>,
     set_airs: Vec<SetAirEvent>,
+    kinetic_clear_speed_alls: Vec<KineticClearSpeedAllEvent>,
     change_kinetics: Vec<ChangeKineticEvent>,
     kinetic_energies: Vec<KineticEnergyEvent>,
     kinetic_add_speeds: Vec<KineticAddSpeedEvent>,
@@ -2799,6 +2907,9 @@ struct WalkAccum {
     next_clr_speed_site: usize,
     /// Site for the next `SET_AIR`, independent of every other point event family.
     next_set_air_site: usize,
+    /// Site for the next direct `KineticModule::clear_speed_all`, independent of every other
+    /// point event family.
+    next_kinetic_clear_speed_all_site: usize,
     /// Site for the next direct `KineticModule::change_kinetic`, independent of every other point
     /// event family.
     next_change_kinetic_site: usize,
@@ -3075,6 +3186,27 @@ fn count_set_air_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// Direct `KineticModule::clear_speed_all` calls in a subtree, counted in source order for loop/site
+/// resolution.
+fn count_kinetic_clear_speed_all_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::KineticClearSpeedAll))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::KineticClearSpeedAll))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_kinetic_clear_speed_all_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Direct kinetic-type changes in a subtree, counted in source order for loop/site resolution.
 fn count_change_kinetic_stmts(stmts: &[AcmdStmt]) -> usize {
     stmts
@@ -3282,6 +3414,12 @@ impl WalkAccum {
     fn take_set_air_site(&mut self) -> usize {
         let site = self.next_set_air_site;
         self.next_set_air_site += 1;
+        site
+    }
+
+    fn take_kinetic_clear_speed_all_site(&mut self) -> usize {
+        let site = self.next_kinetic_clear_speed_all_site;
+        self.next_kinetic_clear_speed_all_site += 1;
         site
     }
 
@@ -3561,6 +3699,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::KineticClearSpeedAll => {
+            let site = hurt.take_kinetic_clear_speed_all_site();
+            hurt.kinetic_clear_speed_alls
+                .push(KineticClearSpeedAllEvent {
+                    frame: script_frame(frame),
+                    site,
+                });
+        }
         ExcuteStmt::ChangeKinetic(call) => {
             let site = hurt.take_change_kinetic_site();
             hurt.change_kinetics.push(ChangeKineticEvent {
@@ -3631,6 +3777,7 @@ fn eval_stmts(
                     hurt.next_ft_start_adjust_motion_frame_site;
                 let clr_speed_site_at_entry = hurt.next_clr_speed_site;
                 let set_air_site_at_entry = hurt.next_set_air_site;
+                let kinetic_clear_speed_all_site_at_entry = hurt.next_kinetic_clear_speed_all_site;
                 let change_kinetic_site_at_entry = hurt.next_change_kinetic_site;
                 let kinetic_energy_site_at_entry = hurt.next_kinetic_energy_site;
                 let kinetic_add_speed_site_at_entry = hurt.next_kinetic_add_speed_site;
@@ -3649,6 +3796,7 @@ fn eval_stmts(
                         ft_start_adjust_motion_frame_site_at_entry;
                     hurt.next_clr_speed_site = clr_speed_site_at_entry;
                     hurt.next_set_air_site = set_air_site_at_entry;
+                    hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry;
                     hurt.next_change_kinetic_site = change_kinetic_site_at_entry;
                     hurt.next_kinetic_energy_site = kinetic_energy_site_at_entry;
                     hurt.next_kinetic_add_speed_site = kinetic_add_speed_site_at_entry;
@@ -3671,6 +3819,8 @@ fn eval_stmts(
                         + count_ft_start_adjust_motion_frame_stmts(body);
                 hurt.next_clr_speed_site = clr_speed_site_at_entry + count_clr_speed_stmts(body);
                 hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
+                hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry
+                    + count_kinetic_clear_speed_all_stmts(body);
                 hurt.next_change_kinetic_site =
                     change_kinetic_site_at_entry + count_change_kinetic_stmts(body);
                 hurt.next_kinetic_energy_site =
@@ -3896,6 +4046,9 @@ pub struct AppState {
     pub clr_speed_pristine: Vec<ClrSpeedEvent>,
     /// `SET_AIR` point events as loaded, for sparse live kinetic rules and source syncing.
     pub set_air_pristine: Vec<SetAirEvent>,
+    /// Direct `KineticModule::clear_speed_all` point events as loaded, for sparse live rules and
+    /// source syncing.
+    pub kinetic_clear_speed_all_pristine: Vec<KineticClearSpeedAllEvent>,
     /// Direct kinetic-type point events as loaded, for sparse live rules and source syncing.
     pub change_kinetic_pristine: Vec<ChangeKineticEvent>,
     /// Direct kinetic-energy point events as loaded, for sparse live rules and source syncing.
@@ -3999,6 +4152,7 @@ impl Default for AppState {
             ft_start_adjust_motion_frame_pristine: Vec::new(),
             clr_speed_pristine: Vec::new(),
             set_air_pristine: Vec::new(),
+            kinetic_clear_speed_all_pristine: Vec::new(),
             change_kinetic_pristine: Vec::new(),
             kinetic_energy_pristine: Vec::new(),
             kinetic_add_speed_pristine: Vec::new(),
@@ -4037,6 +4191,7 @@ impl AppState {
             script.to_ft_start_adjust_motion_frame_events();
         self.clr_speed_pristine = script.to_clr_speed_events();
         self.set_air_pristine = script.to_set_air_events();
+        self.kinetic_clear_speed_all_pristine = script.to_kinetic_clear_speed_all_events();
         self.change_kinetic_pristine = script.to_change_kinetic_events();
         self.kinetic_energy_pristine = script.to_kinetic_energy_events();
         self.kinetic_add_speed_pristine = script.to_kinetic_add_speed_events();

@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**590 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**596 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2357,8 +2357,9 @@ behaviour remains unverified because no emulator or UI automation was run.
 Unmeasured `sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today; the exact
 direct `KineticModule::change_kinetic` call measured in the local `game_` corpus is covered by E1h below.
 `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, `SET_SPEED_EX`, direct `KineticModule::add_speed`,
-and the measured `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and
-`unable_energy` toggles now have value-editable slices
+the measured `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and
+`unable_energy` toggles, and the argument-less `KineticModule::clear_speed_all` point now have
+editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
@@ -2596,8 +2597,8 @@ reported rather than guessed.
 Offline validation passed: full desktop tests (585 unit tests, 1 ignored + 6 integration), strict
 Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and the
 Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
-behavior remains unverified. The E1 parent stays open for `clear_speed_all`, ground-friction
-controls, broader status-module calls, and the absent `sv_kinetic_energy` corpus family.
+behavior remains unverified. The E1 parent stays open for ground-friction controls, broader
+status-module calls, and the absent `sv_kinetic_energy` corpus family.
 
 #### [x] E1l — direct `KineticModule::enable_energy` and `unable_energy` points (completed 2026-08-08; live runtime unverified)
 
@@ -2613,13 +2614,35 @@ Skyline direct-pointer hooks, generated ACMD export, and value-only source write
 constants remain intact for export/source sync; live replacements require a numeric capture and
 preserve the enable/unable operation and measured receiver. Malformed arities, other receivers,
 empty IDs, structural operation changes, and source branches/loops remain raw or are reported
-rather than guessed. The E1 parent remains open for `clear_speed_all`, ground-friction controls,
-broader status-module calls, and the absent `sv_kinetic_energy` corpus family.
+rather than guessed. The E1 parent remains open for ground-friction controls, broader
+status-module calls, and the absent `sv_kinetic_energy` corpus family.
 
 Offline validation passed: full desktop tests (590 unit tests, 1 ignored + 6 integration), strict
 Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and the
 Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
-behavior remains unverified.
+behavior remains unverified. The E1 parent stays open for ground-friction controls, broader
+status-module calls, and the absent `sv_kinetic_energy` corpus family.
+
+#### [x] E1m — direct `KineticModule::clear_speed_all` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus has 6 exact `KineticModule::clear_speed_all` calls in
+the verbose `smashline` tree and the corresponding 6 exact calls in the HDR tree. The verbose
+receiver is `agent.module_accessor`; HDR uses the measured `boma` alias. The linked binding is
+the direct zero-argument `KineticModule::clear_speed_all(module_accessor) -> u64` primitive.
+
+The completed slice carries that argument-less point through the typed parser/IR, Movement panel
+and timeline, capture reconstruction, category-27 wire rules and the matching Skyline direct hook,
+generated ACMD export, and flat-source write-back. Standard and HDR receiver spellings are
+preserved. Structural edits use suppression/injection live rules; linked-source sync only edits a
+verified flat call layout and reports branches, loops, malformed receivers, or site mismatches.
+Unknown receivers, arguments, status-module calls, and the separate `sv_kinetic_energy::clear_speed`
+family remain preserved rather than guessed.
+
+Offline validation passed: the complete desktop suite (596 unit tests, 1 ignored + 6 integration),
+strict Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and
+the Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
+behavior remains unverified. The E1 parent remains open for ground-friction controls, broader
+status-module calls, and the absent `sv_kinetic_energy` corpus family.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

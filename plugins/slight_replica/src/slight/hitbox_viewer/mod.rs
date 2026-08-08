@@ -253,8 +253,14 @@ pub const CAT_KINETIC_ENABLE_ENERGY: u8 = 25;
 /// `KineticModule::unable_energy` — a direct kinetic-energy point. Must equal the editor's wire category.
 pub const CAT_KINETIC_UNABLE_ENERGY: u8 = 26;
 
+/// `KineticModule::clear_speed_all` — an argument-less direct kinetic point. Must equal the editor's wire category.
+pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = 27;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
+
+/// Targetless rule key for `KineticModule::clear_speed_all`. Must equal the editor's wire key.
+const KINETIC_KEY_CLEAR_SPEED_ALL: u64 = u64::MAX - 3;
 
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
@@ -1041,6 +1047,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_KINETIC_RESUME_ENERGY => "kinetic_resume_energy",
                     CAT_KINETIC_ENABLE_ENERGY => "kinetic_enable_energy",
                     CAT_KINETIC_UNABLE_ENERGY => "kinetic_unable_energy",
+                    CAT_KINETIC_CLEAR_SPEED_ALL => "kinetic_clear_speed_all",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1278,6 +1285,29 @@ unsafe fn hook_set_air(lua_state: u64) {
         }
     }
     original!()(lua_state)
+}
+
+/// Capture and sparsely suppress the measured argument-less direct kinetic clear point.
+#[skyline::hook(replace = smash::app::lua_bind::KineticModule::clear_speed_all)]
+unsafe fn hook_kinetic_clear_speed_all(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+) -> u64 {
+    record_for_boma(boma, "KineticModule::clear_speed_all", &[]);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        if let Some((suppress, _)) = action_for(
+            CAT_KINETIC_CLEAR_SPEED_ALL,
+            motion,
+            KINETIC_KEY_CLEAR_SPEED_ALL,
+            frame,
+        ) {
+            if suppress {
+                return 0;
+            }
+        }
+    }
+    original!()(boma)
 }
 
 /// Capture and sparsely override the verified direct kinetic-type change.
@@ -2710,6 +2740,15 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 crate::slight::diag::note("rejected SET_AIR injection with wrong command or args");
                 continue;
             }
+            if category == CAT_KINETIC_CLEAR_SPEED_ALL
+                && (!args.is_empty()
+                    || inj.command.as_deref() != Some("KineticModule::clear_speed_all"))
+            {
+                crate::slight::diag::note(
+                    "rejected kinetic clear_speed_all injection with wrong command or args",
+                );
+                continue;
+            }
             if category == CAT_CHANGE_KINETIC
                 && (args.len() != 1
                     || inj.command.as_deref() != Some("KineticModule::change_kinetic"))
@@ -2776,6 +2815,9 @@ pub unsafe fn inject_tick(lua_state: u64) {
                         smash::app::sv_animcmd::REVERSE_LR(agent.lua_state_agent)
                     }
                     CAT_SET_AIR => smash::app::sv_animcmd::SET_AIR(agent.lua_state_agent),
+                    CAT_KINETIC_CLEAR_SPEED_ALL => {
+                        smash::app::lua_bind::KineticModule::clear_speed_all(boma);
+                    }
                     CAT_CHANGE_KINETIC => {
                         let kinetic_type = match args.first() {
                             Some(LuaArg::Int(value)) => *value as i32,
@@ -2890,6 +2932,7 @@ pub fn install() {
         hook_ft_start_adjust_motion_frame,
         hook_clr_speed,
         hook_set_air,
+        hook_kinetic_clear_speed_all,
         hook_change_kinetic,
         hook_kinetic_suspend_energy,
         hook_kinetic_resume_energy,
