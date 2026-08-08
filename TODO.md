@@ -2740,12 +2740,12 @@ changes, add/remove, retiming, malformed calls, and zero live replacements remai
 or explicitly reported as unrepresentable. `set_frame_partial` remains separate because its frame
 and sync-boolean payloads are not interchangeable with this rate-only shape.
 
-Offline validation passed: 626 desktop tests, 1 existing ignored renderer benchmark, all 6
-deployment tests, strict Clippy, format/diff checks, the locked release build, and the Skyline
-plugin release build. No emulator, game, or UI automation was run, so live hook behavior remains
-explicitly unverified. The E1 parent remains open for broader status-module calls, the absent
-`sv_kinetic_energy` corpus family, and the separately measured `get_sum_speed_y`/`set_frame_partial`
-shapes.
+Offline validation passed: `bash build_check.sh`; 626 desktop tests, 1 existing ignored renderer
+benchmark, all 6 deployment tests, the six named corpus-oracle filters, strict Clippy, format/diff
+checks, the locked release build, and the Skyline plugin release build. No emulator, game, or UI
+automation was run, so live hook behavior remains explicitly unverified. The E1 parent remains
+open for broader status-module calls, the absent `sv_kinetic_energy` corpus family, and the
+separately measured `get_sum_speed_y`/`set_frame_partial` shapes.
 
 #### [!] E1r — `MotionModule::set_frame_partial` binding mismatch (evidence-blocked 2026-08-08)
 

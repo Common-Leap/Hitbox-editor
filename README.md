@@ -408,6 +408,9 @@ section of the editor:
 - `KineticModule::add_speed` edits the x/y components of the supported zero-z velocity vector.
 - `KineticModule::clear_speed_all` places, moves, or removes the measured argument-less speed-clear point.
 - `KineticModule::set_consider_ground_friction` edits the ground-friction toggle and authored reserve-attribute token.
+- `MotionModule::set_rate` edits the whole animation's playback rate.
+- `MotionModule::set_helper_calculation` edits the direct helper-calculation toggle.
+- `MotionModule::set_rate_partial` edits the playback rate of a named partial-animation part while preserving that part token.
 
 Value controls edit their point values while keeping their source frame. Placement
 controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.
@@ -428,9 +431,15 @@ The direct `KineticModule` controls preserve named source tokens for export and
 source sync; their live replacements require a numeric capture of the original
 energy or kinetic value. The supported `add_speed` shape keeps `z` at `0.0` and
 only exposes x/y for editing.
-Kinetic commands that are not shown remain preserved in the source and are not
-rewritten. Movement changes are not simulated in the desktop viewport; connect
-the Skyline plugin or export the project to apply them in game.
+`MotionModule::set_rate` and `MotionModule::set_rate_partial` accept zero in exported
+source, while live replacements require a finite positive captured rate. The partial
+part token is preserved for export and source sync; changing it or changing the call's
+structure is reported rather than guessed. `MotionModule::set_helper_calculation`
+source sync changes only an existing boolean argument. Partial-frame and status/getter
+kinetic calls that are not shown remain preserved in the source and are not rewritten
+until their complete source and runtime signatures are verified. Movement changes are
+not simulated in the desktop viewport; connect the Skyline plugin or export the project
+to apply them in game.
 
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
