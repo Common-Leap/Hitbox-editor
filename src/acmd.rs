@@ -351,6 +351,14 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_add_speed_no_limit_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_correct_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_reverse_lr_call(line) {
             stmts.push(stmt);
             continue;
@@ -1700,6 +1708,43 @@ fn parse_set_speed_ex_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Parse the buildable `ADD_SPEED_NO_LIMIT(agent, x, y)` shape.
+fn parse_add_speed_no_limit_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "macros::ADD_SPEED_NO_LIMIT(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, speed_x, speed_y] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" {
+        return None;
+    }
+    Some(ExcuteStmt::AddSpeedNoLimit(
+        crate::data::AddSpeedNoLimitCall {
+            speed_x: speed_x.trim().parse::<f32>().ok()?,
+            speed_y: speed_y.trim().parse::<f32>().ok()?,
+        },
+    ))
+}
+
+/// Parse the buildable `CORRECT(agent, kind)` shape, retaining the kind token verbatim.
+fn parse_correct_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "macros::CORRECT(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, kind] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" || kind.trim().is_empty() {
+        return None;
+    }
+    Some(ExcuteStmt::Correct(crate::data::CorrectCall {
+        kind: kind.trim().to_string(),
+    }))
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2192,6 +2237,14 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 num(call.speed_y),
                 call.kinetic_kind
             ),
+            crate::data::ExcuteStmt::AddSpeedNoLimit(call) => format!(
+                "{indent}macros::ADD_SPEED_NO_LIMIT(agent, {}, {});",
+                num(call.speed_x),
+                num(call.speed_y)
+            ),
+            crate::data::ExcuteStmt::Correct(call) => {
+                format!("{indent}macros::CORRECT(agent, {});", call.kind)
+            }
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -8333,6 +8386,35 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     }
 
     #[test]
+    fn add_speed_no_limit_and_correct_parse_export_as_typed_points() {
+        let source = r#"unsafe extern "C" fn game_attackairlw(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::ADD_SPEED_NO_LIMIT(agent, 0, -3.8);
+        macros::CORRECT(agent, *GROUND_CORRECT_KIND_GROUND);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let speed = script.to_add_speed_no_limit_events();
+        let correct = script.to_correct_events();
+        assert_eq!(speed.len(), 1);
+        assert_eq!(speed[0].frame, 4);
+        assert_eq!(speed[0].call.speed_x, 0.0);
+        assert_eq!(speed[0].call.speed_y, -3.8);
+        assert_eq!(correct.len(), 1);
+        assert_eq!(correct[0].frame, 4);
+        assert_eq!(correct[0].call.kind, "*GROUND_CORRECT_KIND_GROUND");
+
+        let emitted = preview_game_fn(&script, "attack_air_lw");
+        assert!(emitted.contains("macros::ADD_SPEED_NO_LIMIT(agent, 0.0, -3.8);"));
+        assert!(emitted.contains("macros::CORRECT(agent, *GROUND_CORRECT_KIND_GROUND);"));
+        let round_trip = parse_acmd_script(&emitted);
+        assert_eq!(round_trip.to_add_speed_no_limit_events(), speed);
+        assert_eq!(round_trip.to_correct_events(), correct);
+    }
+
+    #[test]
     fn malformed_set_speed_ex_dump_shapes_remain_raw() {
         let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
@@ -8348,5 +8430,26 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains(
             "macros::SET_SPEED_EX(agent, 0, 1, 0, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
         ));
+    }
+
+    #[test]
+    fn malformed_add_speed_no_limit_and_correct_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ADD_SPEED_NO_LIMIT(agent, 0);
+        macros::ADD_SPEED_NO_LIMIT(agent, 0, 1, 2);
+        macros::CORRECT(agent);
+        macros::CORRECT(agent, 1, 2);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_add_speed_no_limit_events().is_empty());
+        assert!(script.to_correct_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("macros::ADD_SPEED_NO_LIMIT(agent, 0);"));
+        assert!(emitted.contains("macros::ADD_SPEED_NO_LIMIT(agent, 0, 1, 2);"));
+        assert!(emitted.contains("macros::CORRECT(agent);"));
+        assert!(emitted.contains("macros::CORRECT(agent, 1, 2);"));
     }
 }

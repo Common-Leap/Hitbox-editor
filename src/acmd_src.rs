@@ -3242,6 +3242,172 @@ pub fn sync_speed_ex(
     })
 }
 
+/// The buildable `ADD_SPEED_NO_LIMIT` calls in source order.
+pub(crate) fn add_speed_no_limit_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "ADD_SPEED_NO_LIMIT" && site.args.len() == 3)
+        .collect()
+}
+
+/// Rewrite only the x/y values of existing `ADD_SPEED_NO_LIMIT` calls.
+pub fn rewrite_add_speed_no_limit(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::AddSpeedNoLimitEvent],
+    edited: &[crate::data::AddSpeedNoLimitEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = add_speed_no_limit_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `ADD_SPEED_NO_LIMIT` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `ADD_SPEED_NO_LIMIT` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `ADD_SPEED_NO_LIMIT` site {} was retimed from frame {} to {} — source syncing only retunes velocity values",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::AddSpeedNoLimitCall::FUNC || site.args.len() != 3 {
+            report.skipped.push(format!(
+                "{label}: `ADD_SPEED_NO_LIMIT` site {} no longer has its verified three-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        // Slot 0 is `agent`; x and y are the following `ToF32` arguments.
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.speed_x) {
+                edits.push(edit);
+            }
+        }
+        if let Some(span) = site.args.get(2) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.speed_y) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited `ADD_SPEED_NO_LIMIT` values into the project's `game_` function.
+pub fn sync_add_speed_no_limit(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::AddSpeedNoLimitEvent],
+    edited: &[crate::data::AddSpeedNoLimitEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_add_speed_no_limit(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
+/// The buildable `CORRECT` calls in source order.
+pub(crate) fn correct_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "CORRECT" && site.args.len() == 2)
+        .collect()
+}
+
+/// Rewrite the authored correction-kind token of existing `CORRECT` calls.
+pub fn rewrite_correct(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::CorrectEvent],
+    edited: &[crate::data::CorrectEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = correct_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `CORRECT` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `CORRECT` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `CORRECT` site {} was retimed from frame {} to {} — source syncing only retunes its authored kind token",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::CorrectCall::FUNC || site.args.len() != 2 {
+            report.skipped.push(format!(
+                "{label}: `CORRECT` site {} no longer has its verified two-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.kind.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited `CORRECT` kind tokens into the project's `game_` function.
+pub fn sync_correct(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::CorrectEvent],
+    edited: &[crate::data::CorrectEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_correct(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 // ── Facing-direction point write-back ───────────────────────────────────────
 
 /// The exact argument-less `REVERSE_LR` calls in a source function.
@@ -6533,6 +6699,46 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
     }
 
     #[test]
+    fn speed_addition_and_correction_write_back_change_only_their_values() {
+        let text = r#"unsafe extern "C" fn game_speed(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::ADD_SPEED_NO_LIMIT(agent, 0, -3.8);
+        macros::CORRECT(agent, *GROUND_CORRECT_KIND_GROUND);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text);
+        let speed_before = pristine.to_add_speed_no_limit_events();
+        let correct_before = pristine.to_correct_events();
+        let mut speed_after = speed_before.clone();
+        speed_after[0].call.speed_x = 1.25;
+        speed_after[0].call.speed_y = 2.0;
+        let mut correct_after = correct_before.clone();
+        correct_after[0].call.kind = "2".into();
+
+        let (after_speed, speed_report) =
+            rewrite_add_speed_no_limit(text, "mario/speed", &speed_before, &speed_after).unwrap();
+        assert_eq!(speed_report.changed, 2, "{speed_report:?}");
+        assert!(speed_report.skipped.is_empty(), "{speed_report:?}");
+        let (after, correct_report) =
+            rewrite_correct(&after_speed, "mario/speed", &correct_before, &correct_after).unwrap();
+        assert_eq!(correct_report.changed, 1, "{correct_report:?}");
+        assert!(correct_report.skipped.is_empty(), "{correct_report:?}");
+        assert!(after.contains("macros::ADD_SPEED_NO_LIMIT(agent, 1.25, 2);"));
+        assert!(after.contains("macros::CORRECT(agent, 2);"));
+        assert!(after.contains("frame(agent.lua_state_agent, 4.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_add_speed_no_limit_events(),
+            speed_after
+        );
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_correct_events(),
+            correct_after
+        );
+    }
+
+    #[test]
     fn malformed_set_speed_ex_shapes_block_positional_source_sync() {
         let text = r#"unsafe extern "C" fn game_speed(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
@@ -6550,5 +6756,23 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             "unchanged opaque calls need no warning"
         );
         assert_eq!(speed_ex_sites(text).len(), 0);
+    }
+
+    #[test]
+    fn malformed_speed_addition_and_correction_shapes_block_positional_sync() {
+        let text = r#"unsafe extern "C" fn game_speed(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ADD_SPEED_NO_LIMIT(agent, 0);
+        macros::ADD_SPEED_NO_LIMIT(agent, 0, 1, 2);
+        macros::CORRECT(agent);
+        macros::CORRECT(agent, 1, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text);
+        assert!(pristine.to_add_speed_no_limit_events().is_empty());
+        assert!(pristine.to_correct_events().is_empty());
+        assert_eq!(add_speed_no_limit_sites(text).len(), 0);
+        assert_eq!(correct_sites(text).len(), 0);
     }
 }

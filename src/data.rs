@@ -1267,6 +1267,10 @@ pub enum ExcuteStmt {
     ReverseLr,
     /// `SET_SPEED_EX` — set the x/y velocity of one kinetic-energy reserve.
     SetSpeedEx(SetSpeedExCall),
+    /// `ADD_SPEED_NO_LIMIT` — add x/y velocity without the kinetic module's normal limit.
+    AddSpeedNoLimit(AddSpeedNoLimitCall),
+    /// `CORRECT` — change the fighter's ground-correction mode at this point in the move.
+    Correct(CorrectCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1338,6 +1342,28 @@ impl SetSpeedExCall {
     pub const FUNC: &'static str = "SET_SPEED_EX";
 }
 
+/// A parsed `macros::ADD_SPEED_NO_LIMIT` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AddSpeedNoLimitCall {
+    pub speed_x: f32,
+    pub speed_y: f32,
+}
+
+impl AddSpeedNoLimitCall {
+    pub const FUNC: &'static str = "ADD_SPEED_NO_LIMIT";
+}
+
+/// A parsed `macros::CORRECT` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CorrectCall {
+    /// Ground-correction kind, retained as authored so named constants survive export.
+    pub kind: String,
+}
+
+impl CorrectCall {
+    pub const FUNC: &'static str = "CORRECT";
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1362,6 +1388,24 @@ pub struct ReverseLrEvent {
 pub struct SetSpeedExEvent {
     pub frame: u32,
     pub call: SetSpeedExCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `ADD_SPEED_NO_LIMIT` point event at the one-based game frame it fires on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AddSpeedNoLimitEvent {
+    pub frame: u32,
+    pub call: AddSpeedNoLimitCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `CORRECT` point event at the one-based game frame it fires on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CorrectEvent {
+    pub frame: u32,
+    pub call: CorrectCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -1674,6 +1718,23 @@ impl AcmdScript {
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.speed_exs
     }
+
+    /// Flatten `ADD_SPEED_NO_LIMIT` calls into editable point events at their one-based game
+    /// frames.
+    pub fn to_add_speed_no_limit_events(&self) -> Vec<AddSpeedNoLimitEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.add_speed_no_limits
+    }
+
+    /// Flatten `CORRECT` calls into editable point events at their one-based game frames.
+    pub fn to_correct_events(&self) -> Vec<CorrectEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.corrects
+    }
 }
 
 impl AcmdScript {
@@ -1871,6 +1932,88 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The `ADD_SPEED_NO_LIMIT` call an event site's ordinal refers to, in source order.
+    pub fn add_speed_no_limit_stmt_mut(&mut self, site: usize) -> Option<&mut AddSpeedNoLimitCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut AddSpeedNoLimitCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::AddSpeedNoLimit(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::AddSpeedNoLimit(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// The `CORRECT` call an event site's ordinal refers to, in source order.
+    pub fn correct_stmt_mut(&mut self, site: usize) -> Option<&mut CorrectCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut CorrectCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::Correct(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::Correct(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove the `REVERSE_LR` source statement at an ordinal from
     /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
     ///
@@ -1969,6 +2112,8 @@ struct WalkAccum {
     expressions: Vec<ExpressionEvent>,
     reverse_lrs: Vec<ReverseLrEvent>,
     speed_exs: Vec<SetSpeedExEvent>,
+    add_speed_no_limits: Vec<AddSpeedNoLimitEvent>,
+    corrects: Vec<CorrectEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -1985,6 +2130,10 @@ struct WalkAccum {
     next_reverse_lr_site: usize,
     /// Site for the next `SET_SPEED_EX`, independent of every other point-event family.
     next_speed_ex_site: usize,
+    /// Site for the next `ADD_SPEED_NO_LIMIT`, independent of every other point-event family.
+    next_add_speed_no_limit_site: usize,
+    /// Site for the next `CORRECT`, independent of every other point-event family.
+    next_correct_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -2118,6 +2267,44 @@ fn count_speed_ex_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// `ADD_SPEED_NO_LIMIT` calls in a subtree, counted in source order for loop/site resolution.
+fn count_add_speed_no_limit_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::AddSpeedNoLimit(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::AddSpeedNoLimit(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_add_speed_no_limit_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `CORRECT` calls in a subtree, counted in source order for loop/site resolution.
+fn count_correct_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::Correct(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(inner.as_ref(), ExcuteStmt::Correct(_))),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_correct_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -2221,6 +2408,18 @@ impl WalkAccum {
     fn take_speed_ex_site(&mut self) -> usize {
         let site = self.next_speed_ex_site;
         self.next_speed_ex_site += 1;
+        site
+    }
+
+    fn take_add_speed_no_limit_site(&mut self) -> usize {
+        let site = self.next_add_speed_no_limit_site;
+        self.next_add_speed_no_limit_site += 1;
+        site
+    }
+
+    fn take_correct_site(&mut self) -> usize {
+        let site = self.next_correct_site;
+        self.next_correct_site += 1;
         site
     }
 
@@ -2426,6 +2625,22 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::AddSpeedNoLimit(call) => {
+            let site = hurt.take_add_speed_no_limit_site();
+            hurt.add_speed_no_limits.push(AddSpeedNoLimitEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
+        ExcuteStmt::Correct(call) => {
+            let site = hurt.take_correct_site();
+            hurt.corrects.push(CorrectEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -2464,6 +2679,8 @@ fn eval_stmts(
                 let expression_site_at_entry = hurt.next_expression_site;
                 let reverse_lr_site_at_entry = hurt.next_reverse_lr_site;
                 let speed_ex_site_at_entry = hurt.next_speed_ex_site;
+                let add_speed_no_limit_site_at_entry = hurt.next_add_speed_no_limit_site;
+                let correct_site_at_entry = hurt.next_correct_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -2471,6 +2688,8 @@ fn eval_stmts(
                     hurt.next_expression_site = expression_site_at_entry;
                     hurt.next_reverse_lr_site = reverse_lr_site_at_entry;
                     hurt.next_speed_ex_site = speed_ex_site_at_entry;
+                    hurt.next_add_speed_no_limit_site = add_speed_no_limit_site_at_entry;
+                    hurt.next_correct_site = correct_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -2479,6 +2698,9 @@ fn eval_stmts(
                 hurt.next_expression_site = expression_site_at_entry + count_expression_stmts(body);
                 hurt.next_reverse_lr_site = reverse_lr_site_at_entry + count_reverse_lr_stmts(body);
                 hurt.next_speed_ex_site = speed_ex_site_at_entry + count_speed_ex_stmts(body);
+                hurt.next_add_speed_no_limit_site =
+                    add_speed_no_limit_site_at_entry + count_add_speed_no_limit_stmts(body);
+                hurt.next_correct_site = correct_site_at_entry + count_correct_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -2682,6 +2904,11 @@ pub struct AppState {
     pub reverse_lr_pristine: Vec<ReverseLrEvent>,
     /// `SET_SPEED_EX` point events as loaded, for sparse live velocity rules and source syncing.
     pub speed_ex_pristine: Vec<SetSpeedExEvent>,
+    /// `ADD_SPEED_NO_LIMIT` point events as loaded, for sparse live velocity rules and source
+    /// syncing.
+    pub add_speed_no_limit_pristine: Vec<AddSpeedNoLimitEvent>,
+    /// `CORRECT` point events as loaded, for sparse live correction rules and source syncing.
+    pub correct_pristine: Vec<CorrectEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -2772,6 +2999,8 @@ impl Default for AppState {
             attack_mods_pristine: Vec::new(),
             reverse_lr_pristine: Vec::new(),
             speed_ex_pristine: Vec::new(),
+            add_speed_no_limit_pristine: Vec::new(),
+            correct_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -2799,6 +3028,8 @@ impl AppState {
         self.attack_mods_pristine = script.to_attack_mods();
         self.reverse_lr_pristine = script.to_reverse_lr_events();
         self.speed_ex_pristine = script.to_speed_ex_events();
+        self.add_speed_no_limit_pristine = script.to_add_speed_no_limit_events();
+        self.correct_pristine = script.to_correct_events();
         self.script = script;
     }
 }
@@ -4583,5 +4814,51 @@ mod tests {
             script.to_speed_ex_events()[1].call.kinetic_kind,
             "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN"
         );
+    }
+
+    #[test]
+    fn speed_addition_and_correction_points_keep_independent_sites() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::AddSpeedNoLimit(AddSpeedNoLimitCall {
+                        speed_x: 0.0,
+                        speed_y: -2.5,
+                    }),
+                    ExcuteStmt::Correct(CorrectCall {
+                        kind: "*GROUND_CORRECT_KIND_GROUND".into(),
+                    }),
+                ]),
+                AcmdStmt::Wait(2.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::AddSpeedNoLimit(AddSpeedNoLimitCall {
+                        speed_x: 1.0,
+                        speed_y: 0.5,
+                    }),
+                    ExcuteStmt::Correct(CorrectCall { kind: "1".into() }),
+                ]),
+            ],
+        };
+        assert_eq!(
+            script
+                .to_add_speed_no_limit_events()
+                .iter()
+                .map(|event| (event.frame, event.site))
+                .collect::<Vec<_>>(),
+            vec![(3, 0), (5, 1)]
+        );
+        assert_eq!(
+            script
+                .to_correct_events()
+                .iter()
+                .map(|event| (event.frame, event.site))
+                .collect::<Vec<_>>(),
+            vec![(3, 0), (5, 1)]
+        );
+        script.add_speed_no_limit_stmt_mut(1).unwrap().speed_y = 1.25;
+        script.correct_stmt_mut(1).unwrap().kind = "2".into();
+        assert_eq!(script.to_add_speed_no_limit_events()[1].call.speed_y, 1.25);
+        assert_eq!(script.to_correct_events()[1].call.kind, "2");
     }
 }

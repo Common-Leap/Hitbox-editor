@@ -390,6 +390,21 @@ game keeps playing the original until the mod is built and installed. A move
 whose sounds you have not touched is left out of the export entirely, so the
 fighter's own `sound_` script keeps playing exactly as it did.
 
+**Movement** points appear in their own timeline lanes and in the Movement
+section of the editor:
+
+- `REVERSE_LR` places or removes a facing-direction change.
+- `SET_SPEED_EX` edits the x/y velocity written to the selected kinetic reserve.
+- `ADD_SPEED_NO_LIMIT` edits an x/y velocity addition.
+- `CORRECT` edits the ground-correction kind while preserving named source constants.
+
+These controls edit point values while keeping their source frame. Named
+`CORRECT` constants can be exported and written back to a linked source project;
+live correction changes require a numeric capture so Visionary can identify the
+call safely. Kinetic commands that are not shown remain preserved in the source
+and are not rewritten. Movement changes are not simulated in the desktop
+viewport; connect the Skyline plugin or export the project to apply them in game.
+
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:
 there is no graphic, joint, or position, so those fields are hidden and a colour

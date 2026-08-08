@@ -389,6 +389,12 @@ pub const CAT_REVERSE_LR: u8 = 11;
 /// Wire category for the verified three-argument `SET_SPEED_EX` velocity point.
 pub const CAT_SPEED_EX: u8 = 13;
 
+/// Wire category for the verified `ADD_SPEED_NO_LIMIT` x/y velocity point.
+pub const CAT_ADD_SPEED_NO_LIMIT: u8 = 14;
+
+/// Wire category for the verified `CORRECT` ground-correction point.
+pub const CAT_CORRECT: u8 = 15;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -524,11 +530,15 @@ pub struct HbOverridesWire {
     /// freezes the animation and nothing below the call would run again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_rate: Option<f32>,
-    /// Replacement `SET_SPEED_EX` x/y velocity components.
+    /// Replacement `SET_SPEED_EX` or `ADD_SPEED_NO_LIMIT` x/y velocity components.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_x: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_y: Option<f32>,
+    /// Replacement numeric `CORRECT` kind. Named source constants remain source-owned when a
+    /// live capture cannot prove their numeric value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correct_kind: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2556,6 +2566,29 @@ mod tests {
     }
 
     #[test]
+    fn the_speed_addition_and_correction_categories_match_the_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer");
+        let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        assert!(module.contains(&format!(
+            "pub const CAT_ADD_SPEED_NO_LIMIT: u8 = {CAT_ADD_SPEED_NO_LIMIT};"
+        )));
+        assert!(module.contains(&format!("pub const CAT_CORRECT: u8 = {CAT_CORRECT};")));
+        assert!(module.contains("replace = smash::app::sv_animcmd::ADD_SPEED_NO_LIMIT"));
+        assert!(module.contains("replace = smash::app::sv_animcmd::CORRECT"));
+        assert!(module.contains("hook_add_speed_no_limit"));
+        assert!(module.contains("hook_correct"));
+        assert!(module.contains("pub correct_kind: Option<i64>"));
+        for (category, other) in [
+            (CAT_ADD_SPEED_NO_LIMIT, CAT_SPEED_EX),
+            (CAT_CORRECT, CAT_SPEED_EX),
+            (CAT_ADD_SPEED_NO_LIMIT, CAT_CORRECT),
+        ] {
+            assert_ne!(category, other, "new point categories must not collide");
+        }
+    }
+
+    #[test]
     fn outbound_set_speed_ex_rules_match_plugin_wire_fields() {
         let link = GameLink::default();
         link.send_hitbox_rules(&[HitboxRuleWire {
@@ -2582,6 +2615,56 @@ mod tests {
         assert_eq!(rule["func"].as_str(), Some("SET_SPEED_EX"));
         assert_eq!(rule["overrides"]["speed_x"].as_f64(), Some(1.5));
         assert!((rule["overrides"]["speed_y"].as_f64().unwrap() + 3.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn outbound_speed_addition_and_correction_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_ADD_SPEED_NO_LIMIT,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: Some(4.0),
+                frame_end: Some(4.0),
+                overrides: Some(HbOverridesWire {
+                    speed_x: Some(1.5),
+                    speed_y: Some(-3.8),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("ADD_SPEED_NO_LIMIT".into()),
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_CORRECT,
+                hitbox_id: Some(1),
+                suppress: false,
+                frame_start: Some(4.0),
+                frame_end: Some(4.0),
+                overrides: Some(HbOverridesWire {
+                    correct_kind: Some(2),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("CORRECT".into()),
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0]["category"].as_u64(),
+            Some(CAT_ADD_SPEED_NO_LIMIT as u64)
+        );
+        assert_eq!(rules[0]["overrides"]["speed_x"].as_f64(), Some(1.5));
+        assert_eq!(rules[0]["func"].as_str(), Some("ADD_SPEED_NO_LIMIT"));
+        assert_eq!(rules[1]["category"].as_u64(), Some(CAT_CORRECT as u64));
+        assert_eq!(rules[1]["hitbox_id"].as_u64(), Some(1));
+        assert_eq!(rules[1]["overrides"]["correct_kind"].as_i64(), Some(2));
+        assert_eq!(rules[1]["func"].as_str(), Some("CORRECT"));
     }
 
     /// Suppression and zero-argument injection use the same wire lane. The command discriminator

@@ -65,6 +65,7 @@ fn timeline_thin_row() -> f32 {
     (TIMELINE_ROW_HEIGHT * 0.45).max(3.0)
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the timeline's explicit lane counts at this UI boundary.
 fn timeline_content_height(
     hitboxes: usize,
     effects: usize,
@@ -72,6 +73,8 @@ fn timeline_content_height(
     sounds: usize,
     reverse_lr: usize,
     speed_ex: usize,
+    add_speed_no_limit: usize,
+    correct: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
@@ -88,7 +91,9 @@ fn timeline_content_height(
         + band(hurtboxes)
         + band(sounds)
         + band(reverse_lr)
-        + band(speed_ex))
+        + band(speed_ex)
+        + band(add_speed_no_limit)
+        + band(correct))
     .max(24.0)
 }
 
@@ -255,6 +260,7 @@ fn live_capture_branch_warning(fighter: &str, move_name: &str, body: &str) -> Op
     })
 }
 
+#[allow(clippy::too_many_arguments)] // Keep every timeline source explicit at this UI boundary.
 fn timeline_frame_extent(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
@@ -262,6 +268,8 @@ fn timeline_frame_extent(
     expressions: &[crate::data::ExpressionEvent],
     reverse_lr: &[crate::data::ReverseLrEvent],
     speed_ex: &[crate::data::SetSpeedExEvent],
+    add_speed_no_limit: &[crate::data::AddSpeedNoLimitEvent],
+    correct: &[crate::data::CorrectEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -286,12 +294,16 @@ fn timeline_frame_extent(
     let expression_frames = expressions.iter().map(|expression| expression.frame);
     let reverse_lr_frames = reverse_lr.iter().map(|event| event.frame);
     let speed_ex_frames = speed_ex.iter().map(|event| event.frame);
+    let add_speed_no_limit_frames = add_speed_no_limit.iter().map(|event| event.frame);
+    let correct_frames = correct.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
         .chain(expression_frames)
         .chain(reverse_lr_frames)
         .chain(speed_ex_frames)
+        .chain(add_speed_no_limit_frames)
+        .chain(correct_frames)
         .max()
         .unwrap_or(0)
 }
@@ -973,6 +985,8 @@ type SourceMirror = (
     Vec<crate::data::ExpressionEvent>,
     Vec<crate::data::ReverseLrEvent>,
     Vec<crate::data::SetSpeedExEvent>,
+    Vec<crate::data::AddSpeedNoLimitEvent>,
+    Vec<crate::data::CorrectEvent>,
 );
 
 /// One ACMD function checked out of the linked project for editing.
@@ -2365,13 +2379,24 @@ impl VisionaryApp {
         // a couple of dozen structs carrying eight owned strings apiece.
         let buffer = self.acmd_src_buffer.as_mut().expect("checked above");
         let had_baseline = match &buffer.mirrored {
-            Some((hitboxes, effects, sounds, expressions, reverse_lr, speed_ex)) => {
+            Some((
+                hitboxes,
+                effects,
+                sounds,
+                expressions,
+                reverse_lr,
+                speed_ex,
+                add_speed_no_limit,
+                correct,
+            )) => {
                 if *hitboxes == self.state.hitboxes
                     && *effects == self.state.effects
                     && *sounds == self.state.sounds
                     && *expressions == self.state.expressions
                     && *reverse_lr == self.state.script.to_reverse_lr_events()
                     && *speed_ex == self.state.script.to_speed_ex_events()
+                    && *add_speed_no_limit == self.state.script.to_add_speed_no_limit_events()
+                    && *correct == self.state.script.to_correct_events()
                 {
                     return;
                 }
@@ -2386,6 +2411,8 @@ impl VisionaryApp {
             self.state.expressions.clone(),
             self.state.script.to_reverse_lr_events(),
             self.state.script.to_speed_ex_events(),
+            self.state.script.to_add_speed_no_limit_events(),
+            self.state.script.to_correct_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
@@ -2458,6 +2485,8 @@ impl VisionaryApp {
             &self.state.expressions,
             &self.state.script.to_reverse_lr_events(),
             &self.state.script.to_speed_ex_events(),
+            &self.state.script.to_add_speed_no_limit_events(),
+            &self.state.script.to_correct_events(),
         ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -2502,7 +2531,33 @@ impl VisionaryApp {
                                     report.changed += speed_report.changed;
                                     report.files.extend(speed_report.files);
                                     report.skipped.extend(speed_report.skipped);
-                                    Ok((updated, report))
+                                    match crate::acmd_src::rewrite_add_speed_no_limit(
+                                        &updated,
+                                        &label,
+                                        &self.state.add_speed_no_limit_pristine,
+                                        &self.state.script.to_add_speed_no_limit_events(),
+                                    ) {
+                                        Ok((updated, add_speed_report)) => {
+                                            report.changed += add_speed_report.changed;
+                                            report.files.extend(add_speed_report.files);
+                                            report.skipped.extend(add_speed_report.skipped);
+                                            match crate::acmd_src::rewrite_correct(
+                                                &updated,
+                                                &label,
+                                                &self.state.correct_pristine,
+                                                &self.state.script.to_correct_events(),
+                                            ) {
+                                                Ok((updated, correct_report)) => {
+                                                    report.changed += correct_report.changed;
+                                                    report.files.extend(correct_report.files);
+                                                    report.skipped.extend(correct_report.skipped);
+                                                    Ok((updated, report))
+                                                }
+                                                Err(error) => Err(error),
+                                            }
+                                        }
+                                        Err(error) => Err(error),
+                                    }
                                 }
                                 Err(error) => Err(error),
                             }
@@ -2708,6 +2763,36 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_add_speed_no_limit(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.add_speed_no_limit_pristine,
+                &self.state.script.to_add_speed_no_limit_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_correct(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.correct_pristine,
+                &self.state.script.to_correct_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
         // Sounds get a pass of their own, and unlike the three above it writes a *different
         // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
@@ -2801,6 +2886,8 @@ impl VisionaryApp {
             || state.script.to_attack_mods() != state.attack_mods_pristine
             || state.script.to_reverse_lr_events() != state.reverse_lr_pristine
             || state.script.to_speed_ex_events() != state.speed_ex_pristine
+            || state.script.to_add_speed_no_limit_events() != state.add_speed_no_limit_pristine
+            || state.script.to_correct_events() != state.correct_pristine
         {
             edited.push("game_");
         }
@@ -3087,6 +3174,8 @@ impl VisionaryApp {
                     }
                     self.push_reverse_lr_rules();
                     self.push_speed_ex_rules();
+                    self.push_add_speed_no_limit_rules();
+                    self.push_correct_rules();
 
                     self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
                         &self.state.hitboxes,
@@ -3095,6 +3184,8 @@ impl VisionaryApp {
                         &self.state.expressions,
                         &self.state.script.to_reverse_lr_events(),
                         &self.state.script.to_speed_ex_events(),
+                        &self.state.script.to_add_speed_no_limit_events(),
+                        &self.state.script.to_correct_events(),
                     ));
 
                     self.jump_to_earliest_active_frame();
@@ -3129,6 +3220,8 @@ impl VisionaryApp {
                 self.state.expressions = Vec::new();
                 self.state.expressions_pristine = Vec::new();
                 self.state.speed_ex_pristine = Vec::new();
+                self.state.add_speed_no_limit_pristine = Vec::new();
+                self.state.correct_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
         }
@@ -3995,8 +4088,12 @@ impl VisionaryApp {
             .get(&fighter.name)
             .map(|m| m.contains_key(&move_name))
             .unwrap_or(false);
-        let script_points_edited =
-            self.state.script.to_reverse_lr_events() != self.state.reverse_lr_pristine;
+        let script_points_edited = self.state.script.to_reverse_lr_events()
+            != self.state.reverse_lr_pristine
+            || self.state.script.to_speed_ex_events() != self.state.speed_ex_pristine
+            || self.state.script.to_add_speed_no_limit_events()
+                != self.state.add_speed_no_limit_pristine
+            || self.state.script.to_correct_events() != self.state.correct_pristine;
         if self.state.hitboxes == self.state.hitboxes_pristine
             && !script_points_edited
             && !already_logged
@@ -4517,6 +4614,8 @@ impl VisionaryApp {
                         &self.state.expressions,
                         &self.state.script.to_reverse_lr_events(),
                         &self.state.script.to_speed_ex_events(),
+                        &self.state.script.to_add_speed_no_limit_events(),
+                        &self.state.script.to_correct_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -4886,6 +4985,8 @@ impl VisionaryApp {
             self.draw_hurtbox_section(ui);
             self.draw_reverse_lr_section(ui);
             self.draw_speed_ex_section(ui);
+            self.draw_add_speed_no_limit_section(ui);
+            self.draw_correct_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
             self.draw_sound_section(ui);
@@ -5577,6 +5678,8 @@ impl VisionaryApp {
                     &self.state.expressions,
                     &self.state.script.to_reverse_lr_events(),
                     &self.state.script.to_speed_ex_events(),
+                    &self.state.script.to_add_speed_no_limit_events(),
+                    &self.state.script.to_correct_events(),
                 ));
                 self.state.status = if destination.is_some() {
                     "REVERSE_LR edit staged — export or sync it into the linked source project."
@@ -5651,6 +5754,120 @@ impl VisionaryApp {
                     "SET_SPEED_EX edit staged — export or sync it into the linked source project."
                         .into();
                 self.push_speed_ex_rules();
+            }
+        }
+    }
+
+    /// Editable x/y velocity additions from the measured `ADD_SPEED_NO_LIMIT` family.
+    fn draw_add_speed_no_limit_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_add_speed_no_limit_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(egui::Color32::from_rgb(90, 220, 180), "ADD_SPEED_NO_LIMIT");
+        })
+        .response
+        .on_hover_text(
+            "ADD_SPEED_NO_LIMIT adds x/y velocity at one point. The frame and source-site \
+             placement stay structural; x and y are editable here.",
+        );
+
+        let mut edit: Option<(usize, f32, f32)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut x = event.call.speed_x;
+            let mut y = event.call.speed_y;
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    if active {
+                        egui::Color32::from_rgb(90, 220, 180)
+                    } else {
+                        egui::Color32::from_gray(140)
+                    },
+                    if active { "◆" } else { "◇" },
+                );
+                ui.label(format!("f{}", event.frame));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut x).speed(0.1).prefix("x "))
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(&mut y).speed(0.1).prefix("y "))
+                    .changed();
+            });
+            if changed {
+                edit = Some((event.site, x, y));
+            }
+        }
+
+        if let Some((site, speed_x, speed_y)) = edit {
+            if let Some(call) = self.state.script.add_speed_no_limit_stmt_mut(site) {
+                call.speed_x = speed_x;
+                call.speed_y = speed_y;
+                self.state.status = "ADD_SPEED_NO_LIMIT edit staged — export or sync it into the linked source project.".into();
+                self.push_add_speed_no_limit_rules();
+            }
+        }
+    }
+
+    /// Editable correction-kind tokens from the measured `CORRECT` family.
+    fn draw_correct_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_correct_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(egui::Color32::from_rgb(255, 205, 120), "CORRECT");
+        })
+        .response
+        .on_hover_text(
+            "CORRECT changes the fighter's ground-correction mode at one point. The kind stays \
+             as source text so named constants remain portable; live replacement needs a numeric \
+             capture of the call.",
+        );
+
+        let mut edit: Option<(usize, String)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut kind = event.call.kind.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(255, 205, 120)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("f{}", event.frame));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut kind)
+                            .desired_width(260.0)
+                            .hint_text("*GROUND_CORRECT_KIND_…"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed && !kind.trim().is_empty() {
+                edit = Some((event.site, kind));
+            }
+        }
+
+        if let Some((site, kind)) = edit {
+            if let Some(call) = self.state.script.correct_stmt_mut(site) {
+                call.kind = kind;
+                self.state.status =
+                    "CORRECT edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_correct_rules();
             }
         }
     }
@@ -7334,6 +7551,9 @@ impl VisionaryApp {
             self.state.hitboxes_pristine = record.hitboxes_pristine;
         }
         let source_reverse = self.state.script.to_reverse_lr_events();
+        let source_speed_ex = self.state.script.to_speed_ex_events();
+        let source_add_speed_no_limit = self.state.script.to_add_speed_no_limit_events();
+        let source_correct = self.state.script.to_correct_events();
         let had_source_script = !self.state.script.stmts.is_empty();
         self.state.set_script(record.script);
         // A saved record is the edited script, not the live/source baseline. Preserve the
@@ -7341,6 +7561,9 @@ impl VisionaryApp {
         // no source baseline, so its saved script is its own baseline until a fresh capture.
         if had_source_script {
             self.state.reverse_lr_pristine = source_reverse;
+            self.state.speed_ex_pristine = source_speed_ex;
+            self.state.add_speed_no_limit_pristine = source_add_speed_no_limit;
+            self.state.correct_pristine = source_correct;
         }
         self.state.hitboxes = record.hitboxes;
         true
@@ -7875,6 +8098,9 @@ impl VisionaryApp {
         self.apply_effect_call_edits_to_current();
         self.push_hitbox_rules();
         self.push_reverse_lr_rules();
+        self.push_speed_ex_rules();
+        self.push_add_speed_no_limit_rules();
+        self.push_correct_rules();
         let pending_hitbox_live = self.push_all_saved_hitbox_rules();
         self.push_effect_rules();
         self.push_effect_aliases();
@@ -8488,6 +8714,8 @@ impl VisionaryApp {
         let n_expr = captured_expressions.to_expression_events().len();
         let n_reverse_lr = hurt.to_reverse_lr_events().len();
         let n_speed_ex = hurt.to_speed_ex_events().len();
+        let n_add_speed_no_limit = hurt.to_add_speed_no_limit_events().len();
+        let n_correct = hurt.to_correct_events().len();
 
         if let Some(message) = nothing_to_load(
             hitboxes.len(),
@@ -8497,6 +8725,8 @@ impl VisionaryApp {
             n_expr,
             n_reverse_lr,
             n_speed_ex,
+            n_add_speed_no_limit,
+            n_correct,
         ) {
             self.state.status = message;
             return;
@@ -8542,6 +8772,8 @@ impl VisionaryApp {
         }
         self.push_reverse_lr_rules();
         self.push_speed_ex_rules();
+        self.push_add_speed_no_limit_rules();
+        self.push_correct_rules();
         self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
@@ -8549,6 +8781,8 @@ impl VisionaryApp {
             &self.state.expressions,
             &self.state.script.to_reverse_lr_events(),
             &self.state.script.to_speed_ex_events(),
+            &self.state.script.to_add_speed_no_limit_events(),
+            &self.state.script.to_correct_events(),
         ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
@@ -8565,7 +8799,8 @@ impl VisionaryApp {
             }
         }
         // **Names every family, and this comment said so while naming three of six.** Hurtboxes,
-        // hitbox tuning and motion rate were all counted, adopted and then not mentioned, so a
+        // hitbox tuning, motion rate and movement points are all counted, adopted and then named,
+        // so a
         // capture that dropped them was indistinguishable from one that never had them — which
         // is exactly how it was reported: "the live capture failed to get hitbox tuning and
         // motion rate", with no way to tell which half was at fault.
@@ -8576,13 +8811,24 @@ impl VisionaryApp {
         let mut status = format!(
             "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) + {n_expr} \
              expression call(s) + {n_hurt} hurtbox state(s) + {n_mod} tuning call(s) + {n_rate} \
-             rate call(s) + {n_reverse_lr} facing reversal(s) from live game capture"
+             rate call(s) + {n_reverse_lr} facing reversal(s) + {n_speed_ex} reserve-speed point(s) \
+             + {n_add_speed_no_limit} speed-addition point(s) + {n_correct} correction point(s) \
+             from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
-        if script_kept && (n_hurt + n_mod + n_rate) > 0 {
+        if script_kept
+            && (n_hurt
+                + n_mod
+                + n_rate
+                + n_reverse_lr
+                + n_speed_ex
+                + n_add_speed_no_limit
+                + n_correct)
+                > 0
+        {
             status.push_str(
-                " — kept the loaded script, so its hurtboxes, tuning and rate are the script's, \
+                " — kept the loaded script, so its hurtboxes, tuning, rates and movement points are the script's, \
                  not the capture's",
             );
         }
@@ -9433,6 +9679,17 @@ impl VisionaryApp {
                                 .map(|value| value.to_string())
                                 .or_else(|| arg.as_f32().map(|value| value.to_string()))
                         })?,
+                    }))
+                }
+                "ADD_SPEED_NO_LIMIT" if line.args.len() == 2 => Some(ExcuteStmt::AddSpeedNoLimit(
+                    crate::data::AddSpeedNoLimitCall {
+                        speed_x: line.args.first()?.as_f32()?,
+                        speed_y: line.args.get(1)?.as_f32()?,
+                    },
+                )),
+                "CORRECT" if line.args.len() == 1 => {
+                    Some(ExcuteStmt::Correct(crate::data::CorrectCall {
+                        kind: line.args.first()?.to_source_arg()?,
                     }))
                 }
                 "REVERSE_LR" if line.args.is_empty() => Some(ExcuteStmt::ReverseLr),
@@ -10304,6 +10561,243 @@ impl VisionaryApp {
         }
     }
 
+    fn add_speed_no_limit_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::AddSpeedNoLimitEvent],
+        index: usize,
+        event: &crate::data::AddSpeedNoLimitEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::AddSpeedNoLimitCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 2)
+            .nth(occurrence)
+    }
+
+    fn add_speed_no_limit_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::AddSpeedNoLimitEvent],
+        shown: &[crate::data::AddSpeedNoLimitEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::add_speed_no_limit_capture_for(captures, pristine, index, was)
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            // This family has no argument that identifies one of two calls at the same frame.
+            // Do not let a frame-only rule retune the first one and silently leave the second.
+            if pristine
+                .iter()
+                .filter(|event| event.frame == was.frame)
+                .count()
+                != 1
+            {
+                unrepresentable += 1;
+                continue;
+            }
+            if donor.args.len() != 2 {
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_ADD_SPEED_NO_LIMIT,
+                hitbox_id: None,
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    speed_x: (was.call.speed_x != now.call.speed_x).then_some(now.call.speed_x),
+                    speed_y: (was.call.speed_y != now.call.speed_y).then_some(now.call.speed_y),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::AddSpeedNoLimitCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    fn push_add_speed_no_limit_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::add_speed_no_limit_rules_for(
+            motion,
+            &captures,
+            &self.state.add_speed_no_limit_pristine,
+            &self.state.script.to_add_speed_no_limit_events(),
+        );
+        let key = format!("{mv_key}#add_speed_no_limit");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "ADD_SPEED_NO_LIMIT edit staged, but {unrepresentable} point(s) need a live capture and an unambiguous frame"
+            );
+        }
+    }
+
+    fn correct_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::CorrectEvent],
+        index: usize,
+        event: &crate::data::CorrectEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::CorrectCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 1)
+            .nth(occurrence)
+    }
+
+    fn correct_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::CorrectEvent],
+        shown: &[crate::data::CorrectEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::correct_capture_for(captures, pristine, index, was) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(kind) = donor.args.first().and_then(|arg| arg.as_i64()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(replacement) = now.call.kind.trim().parse::<i64>().ok() else {
+                // Named constants are source-owned until a capture/label mapping can prove
+                // their numeric value. Export and source sync still handle them exactly.
+                unrepresentable += 1;
+                continue;
+            };
+            let same_frame: Vec<_> = pristine
+                .iter()
+                .filter(|event| event.frame == was.frame)
+                .collect();
+            if same_frame.len() != 1 {
+                // A numeric kind normally disambiguates, but identical kinds at one frame still
+                // cannot be separated by the primitive's captured payload.
+                let same_kind = same_frame
+                    .iter()
+                    .filter(|event| event.call.kind.trim().parse::<i64>().ok() == Some(kind))
+                    .count();
+                if same_kind != 1 {
+                    unrepresentable += 1;
+                    continue;
+                }
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_CORRECT,
+                hitbox_id: Some(kind as u64),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    correct_kind: Some(replacement),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::CorrectCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    fn push_correct_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::correct_rules_for(
+            motion,
+            &captures,
+            &self.state.correct_pristine,
+            &self.state.script.to_correct_events(),
+        );
+        let key = format!("{mv_key}#correct");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "CORRECT edit staged, but {unrepresentable} point(s) need a numeric live capture and numeric replacement kind"
+            );
+        }
+    }
+
     /// Send the post-hoc hitbox modifiers the editor has changed to the running game.
     ///
     /// Diffed by site against `attack_mods_pristine`, on the same terms as the hurtbox rules, and
@@ -10636,6 +11130,7 @@ impl VisionaryApp {
             motion_rate: None,
             speed_x: None,
             speed_y: None,
+            correct_kind: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -13925,6 +14420,8 @@ impl VisionaryApp {
             &self.state.expressions,
             &self.state.script.to_reverse_lr_events(),
             &self.state.script.to_speed_ex_events(),
+            &self.state.script.to_add_speed_no_limit_events(),
+            &self.state.script.to_correct_events(),
         ));
         if total == 0 {
             return;
@@ -13960,6 +14457,8 @@ impl VisionaryApp {
             .collect();
         let reverse_lr = self.state.script.to_reverse_lr_events();
         let speed_ex = self.state.script.to_speed_ex_events();
+        let add_speed_no_limit = self.state.script.to_add_speed_no_limit_events();
+        let correct = self.state.script.to_correct_events();
         let timeline_height = timeline_content_height(
             self.state.hitboxes.len(),
             n_fx,
@@ -13967,6 +14466,8 @@ impl VisionaryApp {
             self.state.sounds.len(),
             reverse_lr.len(),
             speed_ex.len(),
+            add_speed_no_limit.len(),
+            correct.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
@@ -14251,6 +14752,71 @@ impl VisionaryApp {
                             "SET_SPEED_EX ({:.2}, {:.2})",
                             event.call.speed_x, event.call.speed_y
                         ),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            // Unbounded velocity additions get a separate lane so their x/y payload is not
+            // confused with SET_SPEED_EX's reserve-specific velocity.
+            let add_speed_band_top = speed_band_top
+                + if speed_ex.is_empty() {
+                    0.0
+                } else {
+                    speed_ex.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in add_speed_no_limit.iter().enumerate() {
+                let y_top = add_speed_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(90, 220, 180);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!(
+                            "ADD_SPEED_NO_LIMIT ({:.2}, {:.2})",
+                            event.call.speed_x, event.call.speed_y
+                        ),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let correct_band_top = add_speed_band_top
+                + if add_speed_no_limit.is_empty() {
+                    0.0
+                } else {
+                    add_speed_no_limit.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in correct.iter().enumerate() {
+                let y_top = correct_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(255, 205, 120);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!("CORRECT {}", event.call.kind),
                         egui::FontId::monospace(8.0),
                         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
                     );
@@ -15908,6 +16474,8 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::Expression(_)
                 | ExcuteStmt::ReverseLr
                 | ExcuteStmt::SetSpeedEx(_)
+                | ExcuteStmt::AddSpeedNoLimit(_)
+                | ExcuteStmt::Correct(_)
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -16462,13 +17030,14 @@ fn clear_move_state(state: &mut crate::data::AppState) {
 
 /// The status message for a capture that carried nothing this editor can show, or `None` to load.
 ///
-/// A free function taking seven counts so a test can reach it. The decision it makes is one line
+/// A free function taking nine counts so a test can reach it. The decision it makes is one line
 /// and has been wrong once already: it used to ask only about hitboxes and effects, which was an
 /// accurate summary of what a capture produced when it was written and became a silent drop the
 /// moment hurtboxes (B4) and sounds (D1f) started arriving. A walk cycle has neither of the first
 /// two, so its footsteps were discarded with a message naming the two families it had not looked
 /// for. **Every family a capture can produce has to appear here, and the compiler cannot enforce
 /// that** — which is the whole reason this is testable rather than inline.
+#[allow(clippy::too_many_arguments)] // The capture guard names every supported family explicitly.
 fn nothing_to_load(
     hitboxes: usize,
     effects: usize,
@@ -16477,6 +17046,8 @@ fn nothing_to_load(
     expressions: usize,
     reverse_lr: usize,
     speed_ex: usize,
+    add_speed_no_limit: usize,
+    correct: usize,
 ) -> Option<String> {
     if hitboxes == 0
         && effects == 0
@@ -16485,10 +17056,12 @@ fn nothing_to_load(
         && expressions == 0
         && reverse_lr == 0
         && speed_ex == 0
+        && add_speed_no_limit == 0
+        && correct == 0
     {
         return Some(
-            "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal or speed \
-             lines \
+            "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
+             speed-addition or correction lines \
              for this move yet."
                 .into(),
         );
@@ -18433,13 +19006,13 @@ mod live_effect_capture_tests {
     /// rather than "I did not look for what you have".
     #[test]
     fn a_capture_with_only_sounds_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 0, 2, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 2, 0, 0, 0, 0, 0).is_none());
     }
 
     /// Likewise one carrying only hurtbox statements.
     #[test]
     fn a_capture_with_only_hurtboxes_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 4, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 4, 0, 0, 0, 0, 0, 0).is_none());
     }
 
     /// A direction-only capture is still meaningful: it has no collision payload, but its point
@@ -18447,7 +19020,7 @@ mod live_effect_capture_tests {
     /// guard.
     #[test]
     fn a_capture_with_only_facing_reversal_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 0, 0, 0, 1, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 1, 0, 0, 0).is_none());
     }
 
     /// A genuinely empty capture is refused, and says what it looked for.
@@ -18457,7 +19030,7 @@ mod live_effect_capture_tests {
     #[test]
     fn a_capture_with_nothing_in_it_is_refused_and_names_every_family() {
         let message =
-            nothing_to_load(0, 0, 0, 0, 0, 0, 0).expect("an empty capture must be refused");
+            nothing_to_load(0, 0, 0, 0, 0, 0, 0, 0, 0).expect("an empty capture must be refused");
         for family in [
             "hitbox",
             "effect",
@@ -18466,6 +19039,8 @@ mod live_effect_capture_tests {
             "expression",
             "facing-reversal",
             "speed",
+            "speed-addition",
+            "correction",
         ] {
             assert!(
                 message.contains(family),
@@ -18478,13 +19053,15 @@ mod live_effect_capture_tests {
     /// Each family on its own is enough.
     #[test]
     fn any_single_family_is_enough_to_load() {
-        assert!(nothing_to_load(1, 0, 0, 0, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 1, 0, 0, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 1, 0, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 1, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 0, 1, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 0, 0, 1, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 0, 0, 0, 1).is_none());
+        assert!(nothing_to_load(1, 0, 0, 0, 0, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 1, 0, 0, 0, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 1, 0, 0, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 1, 0, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 1, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 1, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 0, 1, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 0, 0, 1, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 0, 0, 0, 0, 1).is_none());
     }
 
     /// Switching moves drops every field that belonged to the previous one.
@@ -19194,6 +19771,41 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_speed_addition_and_correction_become_editable_game_statements() {
+        let motion = hash40::hash40("attack_air_lw").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "ADD_SPEED_NO_LIMIT".into(),
+                args: vec![A::Num(0.0), A::Num(-3.8)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "CORRECT".into(),
+                args: vec![A::Int(1)],
+                run: 1,
+            },
+        ];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        let additions = script.to_add_speed_no_limit_events();
+        let corrections = script.to_correct_events();
+        assert_eq!(additions.len(), 1);
+        assert_eq!(additions[0].frame, 4);
+        assert_eq!(additions[0].call.speed_y, -3.8);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].frame, 4);
+        assert_eq!(corrections[0].call.kind, "1");
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_air_lw");
+        assert!(exported.contains("macros::ADD_SPEED_NO_LIMIT(agent, 0.0, -3.8);"));
+        assert!(exported.contains("macros::CORRECT(agent, 1);"));
+    }
+
+    #[test]
     fn set_speed_ex_live_rules_key_numeric_kinetic_kind_and_reject_ambiguous_fallback() {
         let captures = vec![CaptureLine {
             kind: 6,
@@ -19229,6 +19841,72 @@ mod live_effect_capture_tests {
         ambiguous[1].site = 1;
         let (rules, unrepresentable) =
             VisionaryApp::speed_ex_rules_for(motion, &[], &pristine, &ambiguous);
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
+    fn speed_addition_and_correction_live_rules_keep_their_pristine_keys() {
+        let motion = hash40::hash40("attack_air_lw").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "ADD_SPEED_NO_LIMIT".into(),
+                args: vec![A::Num(0.0), A::Num(-3.8)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "CORRECT".into(),
+                args: vec![A::Int(1)],
+                run: 1,
+            },
+        ];
+        let script = crate::acmd::parse_acmd_script(
+            r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::ADD_SPEED_NO_LIMIT(agent, 0, -3.8);
+        macros::CORRECT(agent, 1);
+    }
+}
+"#,
+        );
+        let pristine_add = script.to_add_speed_no_limit_events();
+        let mut edited_add = pristine_add.clone();
+        edited_add[0].call.speed_x = 1.5;
+        let (rules, unrepresentable) = VisionaryApp::add_speed_no_limit_rules_for(
+            motion,
+            &captures,
+            &pristine_add,
+            &edited_add,
+        );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].category, crate::game_link::CAT_ADD_SPEED_NO_LIMIT);
+        assert_eq!(rules[0].hitbox_id, None);
+        assert_eq!(rules[0].func.as_deref(), Some("ADD_SPEED_NO_LIMIT"));
+        assert_eq!(rules[0].overrides.as_ref().unwrap().speed_x, Some(1.5));
+
+        let pristine_correct = script.to_correct_events();
+        let mut edited_correct = pristine_correct.clone();
+        edited_correct[0].call.kind = "2".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::correct_rules_for(motion, &captures, &pristine_correct, &edited_correct);
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].category, crate::game_link::CAT_CORRECT);
+        assert_eq!(rules[0].hitbox_id, Some(1));
+        assert_eq!(rules[0].func.as_deref(), Some("CORRECT"));
+        assert_eq!(rules[0].overrides.as_ref().unwrap().correct_kind, Some(2));
+
+        edited_correct[0].call.kind = "*GROUND_CORRECT_KIND_GROUND".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::correct_rules_for(motion, &captures, &pristine_correct, &edited_correct);
         assert!(rules.is_empty());
         assert_eq!(unrepresentable, 1);
     }
@@ -20745,14 +21423,17 @@ mod live_effect_capture_tests {
     /// than trusted to be like the two above it.
     #[test]
     fn each_thin_band_reserves_room_for_its_own_rows() {
-        let none = timeline_content_height(2, 0, 0, 0, 0, 0);
+        let none = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0);
         // Same shape for each — 4px of padding, then one thin row apiece.
         let band = 4.0 + 3.0 * timeline_thin_row();
         for (label, height) in [
-            ("effect", timeline_content_height(2, 3, 0, 0, 0, 0)),
-            ("hurtbox", timeline_content_height(2, 0, 3, 0, 0, 0)),
-            ("sound", timeline_content_height(2, 0, 0, 3, 0, 0)),
-            ("reverse_lr", timeline_content_height(2, 0, 0, 0, 3, 0)),
+            ("effect", timeline_content_height(2, 3, 0, 0, 0, 0, 0, 0)),
+            ("hurtbox", timeline_content_height(2, 0, 3, 0, 0, 0, 0, 0)),
+            ("sound", timeline_content_height(2, 0, 0, 3, 0, 0, 0, 0)),
+            (
+                "reverse_lr",
+                timeline_content_height(2, 0, 0, 0, 3, 0, 0, 0),
+            ),
         ] {
             assert!(
                 (height - none - band).abs() < 0.01,
@@ -20760,14 +21441,19 @@ mod live_effect_capture_tests {
             );
         }
         // And they stack rather than sharing space.
-        let all = timeline_content_height(2, 3, 3, 3, 3, 0);
+        let all = timeline_content_height(2, 3, 3, 3, 3, 0, 0, 0);
         assert!((all - none - 4.0 * band).abs() < 0.01, "{all} vs {none}");
+        let movement = timeline_content_height(2, 0, 0, 0, 0, 0, 1, 0);
+        let correction = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 1);
+        let single_band = 4.0 + timeline_thin_row();
+        assert!((movement - none - single_band).abs() < 0.01);
+        assert!((correction - none - single_band).abs() < 0.01);
     }
 
     #[test]
     fn dense_timeline_rows_scale_without_changing_frame_space() {
-        assert_eq!(timeline_content_height(0, 0, 0, 0, 0, 0), 24.0);
-        assert_eq!(timeline_content_height(40, 0, 0, 0, 0, 0), 504.0);
+        assert_eq!(timeline_content_height(0, 0, 0, 0, 0, 0, 0, 0), 24.0);
+        assert_eq!(timeline_content_height(40, 0, 0, 0, 0, 0, 0, 0), 504.0);
         assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
 
         let dense_capture: Vec<Hitbox> = (0..40)
@@ -20779,7 +21465,7 @@ mod live_effect_capture_tests {
             })
             .collect();
         assert_eq!(
-            timeline_frame_extent(&dense_capture, &[], &[], &[], &[], &[]),
+            timeline_frame_extent(&dense_capture, &[], &[], &[], &[], &[], &[], &[]),
             45
         );
 
@@ -20797,7 +21483,7 @@ mod live_effect_capture_tests {
                 ui.allocate_exact_size(
                     egui::vec2(
                         ui.available_width(),
-                        timeline_content_height(40, 0, 0, 0, 0, 0),
+                        timeline_content_height(40, 0, 0, 0, 0, 0, 0, 0),
                     ),
                     egui::Sense::hover(),
                 );
@@ -20831,14 +21517,17 @@ mod live_effect_capture_tests {
             active_end: 8,
             ..Default::default()
         }];
-        assert_eq!(timeline_frame_extent(&hitbox, &[], &[], &[], &[], &[]), 8);
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[sound(83)], &[], &[], &[]),
+            timeline_frame_extent(&hitbox, &[], &[], &[], &[], &[], &[], &[]),
+            8
+        );
+        assert_eq!(
+            timeline_frame_extent(&hitbox, &[], &[sound(83)], &[], &[], &[], &[], &[]),
             83
         );
         // And a sound inside the move does not shrink it.
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[sound(2)], &[], &[], &[]),
+            timeline_frame_extent(&hitbox, &[], &[sound(2)], &[], &[], &[], &[], &[]),
             8
         );
         let expression = [crate::data::ExpressionEvent {
@@ -20847,12 +21536,12 @@ mod live_effect_capture_tests {
             site: 0,
         }];
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[], &expression, &[], &[]),
+            timeline_frame_extent(&hitbox, &[], &[], &expression, &[], &[], &[], &[]),
             83
         );
         let reverse = [crate::data::ReverseLrEvent { frame: 91, site: 0 }];
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[], &[], &reverse, &[]),
+            timeline_frame_extent(&hitbox, &[], &[], &[], &reverse, &[], &[], &[]),
             91
         );
     }

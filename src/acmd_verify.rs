@@ -1128,6 +1128,23 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
         ExcuteStmt::Catch(call) => {
             check_hash_name(subject, "grab box joint", &call.bone_name, report);
         }
+        ExcuteStmt::AddSpeedNoLimit(call) => {
+            check_finite(
+                subject,
+                "ADD_SPEED_NO_LIMIT x velocity",
+                call.speed_x,
+                report,
+            );
+            check_finite(
+                subject,
+                "ADD_SPEED_NO_LIMIT y velocity",
+                call.speed_y,
+                report,
+            );
+        }
+        ExcuteStmt::Correct(call) if call.kind.trim().is_empty() => {
+            report.blocker(subject, "CORRECT has an empty correction kind");
+        }
         _ => {}
     }
 }
