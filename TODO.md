@@ -2758,6 +2758,27 @@ there is no measured wrapper or capture contract that identifies its value. The 
 remain raw until a version-matched source or runtime capture establishes that missing argument;
 no parser, export helper, write-back slot, or live hook should guess it.
 
+#### [x] E1s — direct `WorkModule::on_flag` / `off_flag` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 9,855 exact `on_flag` calls and 2,091 exact
+`off_flag` calls in each of the standard and HDR trees. All `off_flag` calls have the measured
+two-argument shape; 9,847 `on_flag` calls have that shape and eight textual three-argument
+artifacts remain raw. Standard calls use `agent.module_accessor`, while HDR calls use `boma`. The
+pinned direct bindings are `(BattleObjectModuleAccessor, i32) -> ()` for both operations.
+
+The five surfaces are covered for the exact direct shape: typed parser/IR and site walk, editable
+Movement panel and timeline lane, capture reconstruction, category-32 sparse live rules and
+matching Skyline hooks, generated ACMD export, and value-only source write-back. The panel and
+source writer retain numeric or dereferenced authored flag tokens; live replacement requires a
+numeric capture and a numeric replacement, and operation/frame changes, duplicate same-frame
+identities, malformed calls, and symbolic-only runtime values remain explicitly source/export-only.
+Other WorkModule status calls remain raw until their own source and runtime contracts are measured.
+
+The full locked desktop suite passes with 632 tests plus one existing ignored renderer benchmark;
+all six deployment tests, strict Clippy, format/diff checks, the locked release build, and the
+standalone Skyline release build also pass. No emulator, game, or UI automation was run, so live
+hook behavior remains explicitly unverified.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their

@@ -596,7 +596,9 @@ mod tests {
 
     #[test]
     fn kinetic_acmd_points_survive_project_round_trip() {
-        use crate::data::{AcmdScript, AcmdStmt, ClrSpeedCall, ExcuteStmt};
+        use crate::data::{
+            AcmdScript, AcmdStmt, ClrSpeedCall, ExcuteStmt, WorkFlagAction, WorkFlagCall,
+        };
 
         let script = AcmdScript {
             stmts: vec![
@@ -606,6 +608,10 @@ mod tests {
                         kinetic_kind: "*FIGHTER_KINETIC_ENERGY_ID_GRAVITY".into(),
                     }),
                     ExcuteStmt::SetAir,
+                    ExcuteStmt::WorkFlag(WorkFlagCall {
+                        action: WorkFlagAction::On,
+                        flag: "*FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD".into(),
+                    }),
                 ]),
             ],
         };
@@ -633,6 +639,7 @@ mod tests {
         let loaded = &reloaded.fighters["mario"].acmd["attack_air_n"].script;
         assert_eq!(loaded.to_clr_speed_events(), script.to_clr_speed_events());
         assert_eq!(loaded.to_set_air_events(), script.to_set_air_events());
+        assert_eq!(loaded.to_work_flag_events(), script.to_work_flag_events());
     }
 
     /// The plugin hardcodes this prefix (`acmd_hooks::EDIT_CLONE_PREFIX`) because it cannot

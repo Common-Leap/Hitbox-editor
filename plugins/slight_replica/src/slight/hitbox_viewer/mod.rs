@@ -269,6 +269,9 @@ pub const CAT_MOTION_MODULE_SET_HELPER_CALCULATION: u8 = 30;
 /// Direct `MotionModule::set_rate_partial` point. Must equal the editor's wire category.
 pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = 31;
 
+/// Direct `WorkModule::on_flag` / `off_flag` point. Must equal the editor's wire category.
+pub const CAT_WORK_FLAG: u8 = 32;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -949,6 +952,8 @@ pub struct HbOverrides {
     pub motion_module_helper_calculation: Option<bool>,
     /// Replacement direct `MotionModule::set_rate_partial` rate.
     pub motion_module_rate_partial: Option<f32>,
+    /// Replacement numeric flag for direct `WorkModule::on_flag` / `off_flag` calls.
+    pub work_flag: Option<i64>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     pub clr_speed_kinetic_kind: Option<i64>,
     /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
@@ -1080,6 +1085,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                         "motion_module_set_helper_calculation"
                     }
                     CAT_MOTION_MODULE_SET_RATE_PARTIAL => "motion_module_set_rate_partial",
+                    CAT_WORK_FLAG => "work_flag",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1112,6 +1118,27 @@ fn action_for(
     rules
         .iter()
         .find(|r| r.inject.is_none() && r.matches(category, motion, id, frame))
+        .map(|r| (r.suppress, r.overrides.clone()))
+}
+
+/// As [`action_for`], but with the exact direct-call name as a second discriminator. Shared
+/// `CAT_WORK_FLAG` rules must not let an `on_flag` edit reach an `off_flag` call with the same
+/// numeric flag and frame.
+fn action_for_func(
+    category: u8,
+    motion: u64,
+    id: u64,
+    frame: f32,
+    func: &str,
+) -> Option<(bool, Option<HbOverrides>)> {
+    let rules = RULES.lock();
+    rules
+        .iter()
+        .find(|r| {
+            r.inject.is_none()
+                && r.matches(category, motion, id, frame)
+                && r.func.as_deref().is_none_or(|candidate| candidate == func)
+        })
         .map(|r| (r.suppress, r.overrides.clone()))
 }
 
@@ -1554,6 +1581,53 @@ unsafe fn hook_kinetic_add_speed(
     }
     original!()(boma, speed)
 }
+
+/// Capture and sparsely override the verified direct WorkModule flag operations.
+///
+/// `on_flag` and `off_flag` share one wire category but keep their exact function name in the
+/// rule. The numeric flag is the runtime identity; the editor retains named source tokens for
+/// export and source sync.
+macro_rules! work_flag_hook {
+    ($hook_name:ident, $target:path, $func:literal) => {
+        #[skyline::hook(replace = $target)]
+        unsafe fn $hook_name(
+            boma: *mut smash::app::BattleObjectModuleAccessor,
+            flag: i32,
+        ) {
+            record_for_boma(boma, $func, &[LuaArg::Int(flag as i64)]);
+            if any_rules() && !boma.is_null() {
+                let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                let key = numeric_point_key($func, &[flag as f32]);
+                if let Some((suppress, overrides)) =
+                    action_for_func(CAT_WORK_FLAG, motion, key, frame, $func)
+                {
+                    if suppress {
+                        return;
+                    }
+                    if let Some(replacement) = overrides.and_then(|item| item.work_flag) {
+                        if replacement as i32 != flag {
+                            original!()(boma, replacement as i32);
+                            return;
+                        }
+                    }
+                }
+            }
+            original!()(boma, flag)
+        }
+    };
+}
+
+work_flag_hook!(
+    hook_work_module_on_flag,
+    smash::app::lua_bind::WorkModule::on_flag,
+    "WorkModule::on_flag"
+);
+work_flag_hook!(
+    hook_work_module_off_flag,
+    smash::app::lua_bind::WorkModule::off_flag,
+    "WorkModule::off_flag"
+);
 
 /// Capture and sparsely override the verified `SET_SPEED_EX` shape.
 ///
@@ -3069,7 +3143,9 @@ pub fn install() {
         hook_kinetic_resume_energy,
         hook_kinetic_enable_energy,
         hook_kinetic_unable_energy,
-        hook_kinetic_add_speed
+        hook_kinetic_add_speed,
+        hook_work_module_on_flag,
+        hook_work_module_off_flag
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

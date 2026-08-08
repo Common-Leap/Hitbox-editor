@@ -430,6 +430,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_work_flag_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_correct_call(line) {
             stmts.push(stmt);
             continue;
@@ -2239,6 +2243,45 @@ fn parse_kinetic_add_speed_call(line: &str) -> Option<ExcuteStmt> {
     ))
 }
 
+/// Parse the measured direct `WorkModule::on_flag` / `off_flag` shapes:
+/// `WorkModule::{on,off}_flag(agent.module_accessor, flag)` and the HDR `boma` form.
+/// Only a numeric or dereferenced identifier flag token is typed; other expressions and arities
+/// remain raw until their source/runtime identity is measured.
+fn parse_work_flag_call(line: &str) -> Option<ExcuteStmt> {
+    for (func, action) in [
+        ("WorkModule::on_flag", crate::data::WorkFlagAction::On),
+        ("WorkModule::off_flag", crate::data::WorkFlagAction::Off),
+    ] {
+        let needle = format!("{func}(");
+        let Some(start) = line.find(&needle).map(|index| index + needle.len()) else {
+            continue;
+        };
+        let end = line[start..].rfind(')')? + start;
+        let tokens = tokenize_args(&line[start..end]);
+        let [module_accessor, flag] = tokens.as_slice() else {
+            continue;
+        };
+        if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+            continue;
+        }
+        let flag = flag.trim();
+        let valid_flag = flag.parse::<i64>().is_ok()
+            || flag.strip_prefix('*').is_some_and(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            });
+        if valid_flag {
+            return Some(ExcuteStmt::WorkFlag(crate::data::WorkFlagCall {
+                action,
+                flag: flag.to_string(),
+            }));
+        }
+    }
+    None
+}
+
 fn parse_zero_z_vector(value: &str) -> Option<(f32, f32)> {
     let value = value.trim();
     let value = value.strip_prefix('&')?.trim_start();
@@ -2848,6 +2891,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 "{indent}KineticModule::add_speed(agent.module_accessor, &Vector3f{{x: {}, y: {}, z: 0.0}});",
                 num(call.speed_x),
                 num(call.speed_y)
+            ),
+            crate::data::ExcuteStmt::WorkFlag(call) => format!(
+                "{indent}{}(agent.module_accessor, {});",
+                call.func(),
+                call.flag
             ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
@@ -9451,6 +9499,60 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("z: 1.0"));
         assert!(emitted.contains("KineticModule::add_speed(other"));
         assert!(emitted.contains("Vector3f{x: 1.0, y: 2.0}"));
+    }
+
+    #[test]
+    fn work_module_flags_parse_standard_and_hdr_and_round_trip() {
+        let source = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        WorkModule::on_flag(agent.module_accessor, *FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD);
+        WorkModule::off_flag(agent.module_accessor, 17);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_work_flag_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 4);
+        assert_eq!(events[0].site, 0);
+        assert_eq!(events[0].call.action, crate::data::WorkFlagAction::On);
+        assert_eq!(
+            events[0].call.flag,
+            "*FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD"
+        );
+        assert_eq!(events[1].call.action, crate::data::WorkFlagAction::Off);
+        assert_eq!(events[1].call.flag, "17");
+
+        let emitted = preview_game_fn(&script, "attack_air_n");
+        assert!(emitted.contains(
+            "WorkModule::on_flag(agent.module_accessor, *FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD);"
+        ));
+        assert!(emitted.contains("WorkModule::off_flag(agent.module_accessor, 17);"));
+        assert_eq!(parse_acmd_script(&emitted).to_work_flag_events(), events);
+
+        let hdr = source.replace("agent.module_accessor", "boma");
+        assert_eq!(parse_acmd_script(&hdr).to_work_flag_events(), events);
+    }
+
+    #[test]
+    fn malformed_work_module_flag_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        WorkModule::on_flag(agent.module_accessor, *FLAG, 1);
+        WorkModule::off_flag(other, 2);
+        WorkModule::off_flag(agent.module_accessor, make_flag());
+        WorkModule::on_flag(agent.module_accessor, 3);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert_eq!(script.to_work_flag_events().len(), 1);
+        assert_eq!(script.to_work_flag_events()[0].call.flag, "3");
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("WorkModule::on_flag(agent.module_accessor, *FLAG, 1);"));
+        assert!(emitted.contains("WorkModule::off_flag(other, 2);"));
+        assert!(emitted.contains("WorkModule::off_flag(agent.module_accessor, make_flag());"));
     }
 
     #[test]

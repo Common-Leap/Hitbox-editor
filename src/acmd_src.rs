@@ -4628,6 +4628,133 @@ pub fn sync_kinetic_energy(
     })
 }
 
+fn valid_work_flag_token(value: &str) -> bool {
+    let value = value.trim();
+    value.parse::<i64>().is_ok()
+        || value.strip_prefix('*').is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+}
+
+/// The verified direct `WorkModule::on_flag` / `off_flag` calls in source order.
+pub(crate) fn work_flag_sites(text: &str) -> Vec<MacroSite> {
+    let mut sites = Vec::new();
+    for action in [
+        crate::data::WorkFlagAction::On,
+        crate::data::WorkFlagAction::Off,
+    ] {
+        sites.extend(scan_named_sites(text, action.func(), 0..text.len()));
+    }
+    sites.sort_by_key(|site| site.span.start);
+    sites
+        .into_iter()
+        .filter(|site| {
+            site.args.len() == 2
+                && site
+                    .arg(text, 0)
+                    .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+                && site.arg(text, 1).is_some_and(valid_work_flag_token)
+        })
+        .collect()
+}
+
+/// Rewrite only the authored flag token of existing direct WorkModule flag calls.
+pub fn rewrite_work_flags(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::WorkFlagEvent],
+    edited: &[crate::data::WorkFlagEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = work_flag_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable direct WorkModule flag call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: WorkModule flag site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: WorkModule flag site {} was retimed from frame {} to {} — source syncing only retunes its authored flag token",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        if before.call.action != now.call.action {
+            report.skipped.push(format!(
+                "{label}: WorkModule flag site {} changed between on_flag and off_flag — source syncing preserves the authored operation",
+                before.site
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != before.call.func()
+            || site.args.len() != 2
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !matches!(value.trim(), "agent.module_accessor" | "boma"))
+            || site
+                .arg(text, 1)
+                .is_none_or(|value| value.trim() != before.call.flag.trim())
+        {
+            report.skipped.push(format!(
+                "{label}: WorkModule flag site {} no longer has its verified receiver/operation/flag shape",
+                before.site
+            ));
+            continue;
+        }
+        if !valid_work_flag_token(&now.call.flag) {
+            report.skipped.push(format!(
+                "{label}: WorkModule flag site {} has an unsupported or empty flag token — source syncing leaves the authored token intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.flag.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited WorkModule flag tokens into the project's `game_` function.
+pub fn sync_work_flags(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::WorkFlagEvent],
+    edited: &[crate::data::WorkFlagEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_work_flags(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// Whether a direct `KineticModule::add_speed` receiver is one of the measured source forms.
 fn is_kinetic_add_speed_receiver(value: &str) -> bool {
     matches!(value.trim(), "agent.module_accessor" | "boma")
@@ -9243,6 +9370,57 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         let (after, report) = rewrite_kinetic_add_speed(text, "mario/x", &[], &[]).unwrap();
         assert_eq!(after, text);
         assert!(report.skipped.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn work_flag_source_sync_rewrites_only_authored_tokens_and_keeps_receivers() {
+        let text = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        WorkModule::on_flag(agent.module_accessor, *FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD);
+        WorkModule::off_flag(boma, 17);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_work_flag_events();
+        let mut edited = pristine.clone();
+        edited[0].call.flag = "23".into();
+        edited[1].call.flag = "*FIGHTER_STATUS_ATTACK_FLAG_ENABLE_COMBO".into();
+
+        let (after, report) =
+            rewrite_work_flags(text, "mario/attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("WorkModule::on_flag(agent.module_accessor, 23);"));
+        assert!(
+            after.contains("WorkModule::off_flag(boma, *FIGHTER_STATUS_ATTACK_FLAG_ENABLE_COMBO);")
+        );
+        assert!(after.contains("let boma = agent.boma();"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_work_flag_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn work_flag_source_sync_refuses_retiming_operation_changes_and_malformed_tokens() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        WorkModule::on_flag(agent.module_accessor, 7);
+        WorkModule::off_flag(agent.module_accessor, 8);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_work_flag_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 2;
+        edited[1].call.action = crate::data::WorkFlagAction::On;
+        edited[1].call.flag = "make_flag()".into();
+        let (after, report) = rewrite_work_flags(text, "mario/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert_eq!(report.changed, 0, "{report:?}");
+        assert_eq!(report.skipped.len(), 2, "{report:?}");
     }
 
     #[test]

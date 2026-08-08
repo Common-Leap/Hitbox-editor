@@ -495,6 +495,9 @@ pub const CAT_MOTION_MODULE_SET_HELPER_CALCULATION: u8 = 30;
 /// Wire category for direct `MotionModule::set_rate_partial` point overrides.
 pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = 31;
 
+/// Wire category for direct `WorkModule::on_flag` / `off_flag` point overrides.
+pub const CAT_WORK_FLAG: u8 = 32;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -657,6 +660,9 @@ pub struct HbOverridesWire {
     /// Replacement direct `MotionModule::set_rate_partial` rate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_module_rate_partial: Option<f32>,
+    /// Replacement numeric flag for direct `WorkModule::on_flag` / `off_flag` calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_flag: Option<i64>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_speed_kinetic_kind: Option<i64>,
@@ -2883,11 +2889,13 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = {CAT_MOTION_MODULE_SET_RATE_PARTIAL};"
         )));
+        assert!(module.contains(&format!("pub const CAT_WORK_FLAG: u8 = {CAT_WORK_FLAG};")));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
         assert!(module.contains("pub kinetic_ground_friction: Option<bool>"));
         assert!(module.contains("pub kinetic_ground_friction_energy: Option<i64>"));
+        assert!(module.contains("pub work_flag: Option<i64>"));
         assert!(module.contains("pub motion_module_rate: Option<f32>"));
         assert!(module.contains("pub motion_module_helper_calculation: Option<bool>"));
         assert!(module.contains("pub motion_module_rate_partial: Option<f32>"));
@@ -2906,6 +2914,10 @@ mod tests {
         assert!(module.contains("KineticModule::unable_energy,"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::clear_speed_all"));
         assert!(module.contains("hook_kinetic_clear_speed_all"));
+        assert!(module.contains("smash::app::lua_bind::WorkModule::on_flag,"));
+        assert!(module.contains("smash::app::lua_bind::WorkModule::off_flag,"));
+        assert!(module.contains("hook_work_module_on_flag"));
+        assert!(module.contains("hook_work_module_off_flag"));
         assert!(rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_rate"));
         assert!(rate_hooks.contains("hook_motion_module_set_rate"));
         assert!(rate_hooks
@@ -2947,6 +2959,7 @@ mod tests {
                 CAT_MOTION_MODULE_SET_RATE_PARTIAL,
                 CAT_MOTION_MODULE_SET_HELPER_CALCULATION,
             ),
+            (CAT_WORK_FLAG, CAT_MOTION_MODULE_SET_RATE_PARTIAL),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -3013,6 +3026,20 @@ mod tests {
                 inject: None,
                 func: Some("KineticModule::add_speed".into()),
             },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_WORK_FLAG,
+                hitbox_id: Some(numeric_point_key("WorkModule::on_flag", &[7.0])),
+                suppress: false,
+                frame_start: Some(13.5),
+                frame_end: Some(13.5),
+                overrides: Some(HbOverridesWire {
+                    work_flag: Some(9),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("WorkModule::on_flag".into()),
+            },
         ]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
@@ -3047,6 +3074,13 @@ mod tests {
         assert_eq!(rules[3]["func"].as_str(), Some("KineticModule::add_speed"));
         assert_eq!(rules[3]["overrides"]["speed_x"].as_f64(), Some(1.5));
         assert_eq!(rules[3]["overrides"]["speed_y"].as_f64(), Some(2.25));
+        assert_eq!(rules[4]["category"].as_u64(), Some(CAT_WORK_FLAG as u64));
+        assert_eq!(
+            rules[4]["hitbox_id"].as_u64(),
+            Some(numeric_point_key("WorkModule::on_flag", &[7.0]))
+        );
+        assert_eq!(rules[4]["func"].as_str(), Some("WorkModule::on_flag"));
+        assert_eq!(rules[4]["overrides"]["work_flag"].as_i64(), Some(9));
     }
 
     #[test]

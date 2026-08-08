@@ -411,6 +411,7 @@ section of the editor:
 - `MotionModule::set_rate` edits the whole animation's playback rate.
 - `MotionModule::set_helper_calculation` edits the direct helper-calculation toggle.
 - `MotionModule::set_rate_partial` edits the playback rate of a named partial-animation part while preserving that part token.
+- `WorkModule::on_flag` and `WorkModule::off_flag` edit the authored flag token for the supported direct calls.
 
 Value controls edit their point values while keeping their source frame. Placement
 controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.
@@ -437,9 +438,12 @@ part token is preserved for export and source sync; changing it or changing the 
 structure is reported rather than guessed. `MotionModule::set_helper_calculation`
 source sync changes only an existing boolean argument. Partial-frame and status/getter
 kinetic calls that are not shown remain preserved in the source and are not rewritten
-until their complete source and runtime signatures are verified. Movement changes are
-not simulated in the desktop viewport; connect the Skyline plugin or export the project
-to apply them in game.
+until their complete source and runtime signatures are verified. Direct `WorkModule` flag
+controls preserve numeric and dereferenced source tokens in export and source sync; live
+replacement requires a numeric capture of the original flag and a numeric replacement.
+Malformed calls, symbolic-only live values, duplicate same-frame identities, and structural
+changes remain source/export-only. Movement changes are not simulated in the desktop viewport;
+connect the Skyline plugin or export the project to apply them in game.
 
 `FLASH`, `COL_NORMAL` and the `BURN_COLOR` family tint the fighter's model or the screen
 flash. They sit in the effect list beside the spawns, but they are not spawns:

@@ -1231,6 +1231,9 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
                 "KineticModule::change_kinetic has an empty kinetic type",
             );
         }
+        ExcuteStmt::WorkFlag(call) if call.flag.trim().is_empty() => {
+            report.blocker(subject, "WorkModule flag call has an empty flag token");
+        }
         _ => {}
     }
 }
