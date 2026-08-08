@@ -465,6 +465,12 @@ pub const CAT_CHANGE_KINETIC: u8 = 21;
 /// Wire category for the direct `KineticModule::add_speed` x/y vector point.
 pub const CAT_KINETIC_ADD_SPEED: u8 = 22;
 
+/// Wire category for direct `KineticModule::suspend_energy` points.
+pub const CAT_KINETIC_SUSPEND_ENERGY: u8 = 23;
+
+/// Wire category for direct `KineticModule::resume_energy` points.
+pub const CAT_KINETIC_RESUME_ENERGY: u8 = 24;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -623,6 +629,9 @@ pub struct HbOverridesWire {
     /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_kinetic_type: Option<i64>,
+    /// Replacement numeric energy ID for direct suspend/resume kinetic calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinetic_energy_id: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2805,13 +2814,24 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_KINETIC_ADD_SPEED: u8 = {CAT_KINETIC_ADD_SPEED};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_SUSPEND_ENERGY: u8 = {CAT_KINETIC_SUSPEND_ENERGY};"
+        )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_RESUME_ENERGY: u8 = {CAT_KINETIC_RESUME_ENERGY};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
+        assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
         assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::change_kinetic"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::add_speed"));
         assert!(module.contains("hook_kinetic_add_speed"));
+        assert!(module.contains("hook_kinetic_suspend_energy"));
+        assert!(module.contains("KineticModule::suspend_energy,"));
+        assert!(module.contains("hook_kinetic_resume_energy"));
+        assert!(module.contains("KineticModule::resume_energy,"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
@@ -2822,6 +2842,9 @@ mod tests {
             (CAT_KINETIC_ADD_SPEED, CAT_CHANGE_KINETIC),
             (CAT_KINETIC_ADD_SPEED, CAT_SET_AIR),
             (CAT_KINETIC_ADD_SPEED, CAT_SPEED),
+            (CAT_KINETIC_SUSPEND_ENERGY, CAT_KINETIC_ADD_SPEED),
+            (CAT_KINETIC_RESUME_ENERGY, CAT_KINETIC_SUSPEND_ENERGY),
+            (CAT_KINETIC_RESUME_ENERGY, CAT_CHANGE_KINETIC),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -2921,6 +2944,60 @@ mod tests {
         assert_eq!(rules[3]["func"].as_str(), Some("KineticModule::add_speed"));
         assert_eq!(rules[3]["overrides"]["speed_x"].as_f64(), Some(1.5));
         assert_eq!(rules[3]["overrides"]["speed_y"].as_f64(), Some(2.25));
+    }
+
+    #[test]
+    fn outbound_kinetic_energy_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_SUSPEND_ENERGY,
+                hitbox_id: Some(numeric_point_key("KineticModule::suspend_energy", &[2.0])),
+                suppress: false,
+                frame_start: Some(4.5),
+                frame_end: Some(4.5),
+                overrides: Some(HbOverridesWire {
+                    kinetic_energy_id: Some(3),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("KineticModule::suspend_energy".into()),
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_RESUME_ENERGY,
+                hitbox_id: Some(numeric_point_key("KineticModule::resume_energy", &[2.0])),
+                suppress: true,
+                frame_start: Some(9.5),
+                frame_end: Some(9.5),
+                overrides: None,
+                inject: None,
+                func: Some("KineticModule::resume_energy".into()),
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0]["category"].as_u64(),
+            Some(CAT_KINETIC_SUSPEND_ENERGY as u64)
+        );
+        assert_eq!(
+            rules[0]["func"].as_str(),
+            Some("KineticModule::suspend_energy")
+        );
+        assert_eq!(rules[0]["overrides"]["kinetic_energy_id"].as_i64(), Some(3));
+        assert_eq!(
+            rules[1]["category"].as_u64(),
+            Some(CAT_KINETIC_RESUME_ENERGY as u64)
+        );
+        assert_eq!(
+            rules[1]["func"].as_str(),
+            Some("KineticModule::resume_energy")
+        );
+        assert_eq!(rules[1]["suppress"].as_bool(), Some(true));
     }
 
     #[test]

@@ -81,6 +81,7 @@ fn timeline_content_height_with_change_kinetic(
     clr_speed: usize,
     set_air: usize,
     change_kinetic: usize,
+    kinetic_energy: usize,
     kinetic_add_speed: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
@@ -107,6 +108,7 @@ fn timeline_content_height_with_change_kinetic(
         + band(clr_speed)
         + band(set_air)
         + band(change_kinetic)
+        + band(kinetic_energy)
         + band(kinetic_add_speed))
     .max(24.0)
 }
@@ -143,6 +145,7 @@ fn timeline_content_height(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        0,
         0,
         0,
     )
@@ -327,6 +330,7 @@ fn timeline_frame_extent_with_change_kinetic(
     clr_speed: &[crate::data::ClrSpeedEvent],
     set_air: &[crate::data::SetAirEvent],
     change_kinetic: &[crate::data::ChangeKineticEvent],
+    kinetic_energy: &[crate::data::KineticEnergyEvent],
     kinetic_add_speed: &[crate::data::KineticAddSpeedEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
@@ -361,6 +365,7 @@ fn timeline_frame_extent_with_change_kinetic(
     let clr_speed_frames = clr_speed.iter().map(|event| event.frame);
     let set_air_frames = set_air.iter().map(|event| event.frame);
     let change_kinetic_frames = change_kinetic.iter().map(|event| event.frame);
+    let kinetic_energy_frames = kinetic_energy.iter().map(|event| event.frame);
     let kinetic_add_speed_frames = kinetic_add_speed.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
@@ -376,6 +381,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .chain(clr_speed_frames)
         .chain(set_air_frames)
         .chain(change_kinetic_frames)
+        .chain(kinetic_energy_frames)
         .chain(kinetic_add_speed_frames)
         .max()
         .unwrap_or(0)
@@ -413,6 +419,7 @@ fn timeline_frame_extent(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        &[],
         &[],
         &[],
     )
@@ -1132,6 +1139,7 @@ type SourceMirror = (
     Vec<crate::data::ClrSpeedEvent>,
     Vec<crate::data::SetAirEvent>,
     Vec<crate::data::ChangeKineticEvent>,
+    Vec<crate::data::KineticEnergyEvent>,
     Vec<crate::data::KineticAddSpeedEvent>,
 );
 
@@ -2544,6 +2552,7 @@ impl VisionaryApp {
                 clr_speed,
                 set_air,
                 change_kinetic,
+                kinetic_energy,
                 kinetic_add_speed,
             )) => {
                 if *hitboxes == self.state.hitboxes
@@ -2561,6 +2570,7 @@ impl VisionaryApp {
                     && *clr_speed == self.state.script.to_clr_speed_events()
                     && *set_air == self.state.script.to_set_air_events()
                     && *change_kinetic == self.state.script.to_change_kinetic_events()
+                    && *kinetic_energy == self.state.script.to_kinetic_energy_events()
                     && *kinetic_add_speed == self.state.script.to_kinetic_add_speed_events()
                 {
                     return;
@@ -2584,6 +2594,7 @@ impl VisionaryApp {
             self.state.script.to_clr_speed_events(),
             self.state.script.to_set_air_events(),
             self.state.script.to_change_kinetic_events(),
+            self.state.script.to_kinetic_energy_events(),
             self.state.script.to_kinetic_add_speed_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
@@ -2668,6 +2679,7 @@ impl VisionaryApp {
                     &self.state.script.to_clr_speed_events(),
                     &self.state.script.to_set_air_events(),
                     &self.state.script.to_change_kinetic_events(),
+                    &self.state.script.to_kinetic_energy_events(),
                     &self.state.script.to_kinetic_add_speed_events(),
                 ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
@@ -2869,6 +2881,29 @@ impl VisionaryApp {
                     }
                     Err(error) => Err(error),
                 },
+                Err(error) => Err(error),
+            }
+        } else {
+            outcome
+        };
+        let outcome = if buffer.is_game_script() {
+            match outcome {
+                Ok((updated, mut report)) => {
+                    match crate::acmd_src::rewrite_kinetic_energy(
+                        &updated,
+                        &label,
+                        &self.state.kinetic_energy_pristine,
+                        &self.state.script.to_kinetic_energy_events(),
+                    ) {
+                        Ok((updated, kinetic_energy_report)) => {
+                            report.changed += kinetic_energy_report.changed;
+                            report.files.extend(kinetic_energy_report.files);
+                            report.skipped.extend(kinetic_energy_report.skipped);
+                            Ok((updated, report))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(error) => Err(error),
             }
         } else {
@@ -3167,6 +3202,21 @@ impl VisionaryApp {
                 Err(e) => notes.push(e.to_string()),
             }
             refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_kinetic_energy(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.kinetic_energy_pristine,
+                &self.state.script.to_kinetic_energy_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
             match crate::acmd_src::sync_kinetic_add_speed(
                 &index,
                 &fighter,
@@ -3283,6 +3333,7 @@ impl VisionaryApp {
             || state.script.to_clr_speed_events() != state.clr_speed_pristine
             || state.script.to_set_air_events() != state.set_air_pristine
             || state.script.to_change_kinetic_events() != state.change_kinetic_pristine
+            || state.script.to_kinetic_energy_events() != state.kinetic_energy_pristine
             || state.script.to_kinetic_add_speed_events() != state.kinetic_add_speed_pristine
         {
             edited.push("game_");
@@ -3578,6 +3629,7 @@ impl VisionaryApp {
                     self.push_clr_speed_rules();
                     self.push_set_air_rules();
                     self.push_change_kinetic_rules();
+                    self.push_kinetic_energy_rules();
                     self.push_kinetic_add_speed_rules();
 
                     self.state.total_frames =
@@ -3598,6 +3650,7 @@ impl VisionaryApp {
                                 &self.state.script.to_clr_speed_events(),
                                 &self.state.script.to_set_air_events(),
                                 &self.state.script.to_change_kinetic_events(),
+                                &self.state.script.to_kinetic_energy_events(),
                                 &self.state.script.to_kinetic_add_speed_events(),
                             ));
 
@@ -3641,6 +3694,7 @@ impl VisionaryApp {
                 self.state.clr_speed_pristine = Vec::new();
                 self.state.set_air_pristine = Vec::new();
                 self.state.change_kinetic_pristine = Vec::new();
+                self.state.kinetic_energy_pristine = Vec::new();
                 self.state.kinetic_add_speed_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
@@ -5051,6 +5105,7 @@ impl VisionaryApp {
                         &self.state.script.to_clr_speed_events(),
                         &self.state.script.to_set_air_events(),
                         &self.state.script.to_change_kinetic_events(),
+                        &self.state.script.to_kinetic_energy_events(),
                         &self.state.script.to_kinetic_add_speed_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
@@ -5428,6 +5483,7 @@ impl VisionaryApp {
             self.draw_ft_start_adjust_motion_frame_section(ui);
             self.draw_clr_speed_section(ui);
             self.draw_change_kinetic_section(ui);
+            self.draw_kinetic_energy_section(ui);
             self.draw_kinetic_add_speed_section(ui);
             self.draw_set_air_section(ui);
             self.draw_attack_mod_section(ui);
@@ -6132,6 +6188,7 @@ impl VisionaryApp {
                             &self.state.script.to_clr_speed_events(),
                             &self.state.script.to_set_air_events(),
                             &self.state.script.to_change_kinetic_events(),
+                            &self.state.script.to_kinetic_energy_events(),
                             &self.state.script.to_kinetic_add_speed_events(),
                         ));
                 self.state.status = if destination.is_some() {
@@ -6619,7 +6676,75 @@ impl VisionaryApp {
                     "change_kinetic edit staged — export or sync it into the linked source project."
                         .into();
                 self.push_change_kinetic_rules();
+                self.push_kinetic_energy_rules();
                 self.push_kinetic_add_speed_rules();
+            }
+        }
+    }
+
+    /// Editable authored energy-ID tokens from the measured direct suspend/resume calls.
+    /// Numeric live replacements require a matching capture; the operation and receiver remain
+    /// structural so source write-back never guesses a different primitive.
+    fn draw_kinetic_energy_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_kinetic_energy_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(
+                egui::Color32::from_rgb(205, 160, 255),
+                "KineticModule energy",
+            );
+        })
+        .response
+        .on_hover_text(
+            "Suspends or resumes one measured kinetic energy. The authored energy ID stays as source text; numeric live overrides require a matching capture.",
+        );
+
+        let mut edit: Option<(usize, String)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut kinetic_energy_id = event.call.kinetic_energy_id.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(205, 160, 255)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!(
+                        "f{} {}",
+                        event.frame,
+                        event.call.func().trim_start_matches("KineticModule::")
+                    ));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut kinetic_energy_id)
+                            .desired_width(280.0)
+                            .hint_text("*FIGHTER_KINETIC_ENERGY_ID_…"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed {
+                edit = Some((event.site, kinetic_energy_id));
+            }
+        }
+
+        if let Some((site, kinetic_energy_id)) = edit {
+            if let Some(call) = self.state.script.kinetic_energy_stmt_mut(site) {
+                if !kinetic_energy_id.trim().is_empty() {
+                    call.kinetic_energy_id = kinetic_energy_id;
+                    self.state.status =
+                        "KineticModule energy edit staged — export or sync it into the linked source project."
+                            .into();
+                    self.push_kinetic_energy_rules();
+                }
             }
         }
     }
@@ -6773,6 +6898,7 @@ impl VisionaryApp {
                             &self.state.script.to_clr_speed_events(),
                             &self.state.script.to_set_air_events(),
                             &self.state.script.to_change_kinetic_events(),
+                            &self.state.script.to_kinetic_energy_events(),
                             &self.state.script.to_kinetic_add_speed_events(),
                         ));
                 self.state.status = if destination.is_some() {
@@ -8606,6 +8732,7 @@ impl VisionaryApp {
         let source_clr_speed = self.state.script.to_clr_speed_events();
         let source_set_air = self.state.script.to_set_air_events();
         let source_change_kinetic = self.state.script.to_change_kinetic_events();
+        let source_kinetic_energy = self.state.script.to_kinetic_energy_events();
         let source_kinetic_add_speed = self.state.script.to_kinetic_add_speed_events();
         let had_source_script = !self.state.script.stmts.is_empty();
         self.state.set_script(record.script);
@@ -8623,6 +8750,7 @@ impl VisionaryApp {
             self.state.clr_speed_pristine = source_clr_speed;
             self.state.set_air_pristine = source_set_air;
             self.state.change_kinetic_pristine = source_change_kinetic;
+            self.state.kinetic_energy_pristine = source_kinetic_energy;
             self.state.kinetic_add_speed_pristine = source_kinetic_add_speed;
         }
         self.state.hitboxes = record.hitboxes;
@@ -9167,6 +9295,7 @@ impl VisionaryApp {
         self.push_clr_speed_rules();
         self.push_set_air_rules();
         self.push_change_kinetic_rules();
+        self.push_kinetic_energy_rules();
         self.push_kinetic_add_speed_rules();
         let pending_hitbox_live = self.push_all_saved_hitbox_rules();
         self.push_effect_rules();
@@ -9791,6 +9920,7 @@ impl VisionaryApp {
         let n_clr_speed = hurt.to_clr_speed_events().len();
         let n_set_air = hurt.to_set_air_events().len();
         let n_change_kinetic = hurt.to_change_kinetic_events().len();
+        let n_kinetic_energy = hurt.to_kinetic_energy_events().len();
         let n_kinetic_add_speed = hurt.to_kinetic_add_speed_events().len();
 
         if let Some(message) = nothing_to_load_with_kinetics(
@@ -9809,6 +9939,7 @@ impl VisionaryApp {
             n_clr_speed,
             n_set_air,
             n_change_kinetic,
+            n_kinetic_energy,
             n_kinetic_add_speed,
         ) {
             self.state.status = message;
@@ -9863,6 +9994,7 @@ impl VisionaryApp {
         self.push_clr_speed_rules();
         self.push_set_air_rules();
         self.push_change_kinetic_rules();
+        self.push_kinetic_energy_rules();
         self.push_kinetic_add_speed_rules();
         self.state.total_frames =
             self.state
@@ -9882,6 +10014,7 @@ impl VisionaryApp {
                     &self.state.script.to_clr_speed_events(),
                     &self.state.script.to_set_air_events(),
                     &self.state.script.to_change_kinetic_events(),
+                    &self.state.script.to_kinetic_energy_events(),
                     &self.state.script.to_kinetic_add_speed_events(),
                 ));
         self.jump_to_earliest_active_frame();
@@ -9917,8 +10050,8 @@ impl VisionaryApp {
              + {n_ft_catch_stop} catch-stop point(s) \
              + {n_ft_start_adjust_motion_frame} motion-frame adjustment point(s) \
              + {n_clr_speed} CLR_SPEED point(s) + {n_set_air} SET_AIR point(s) \
-             + {n_change_kinetic} change_kinetic point(s) + {n_kinetic_add_speed} direct \
-             kinetic-vector point(s) from live game capture"
+             + {n_change_kinetic} change_kinetic point(s) + {n_kinetic_energy} kinetic-energy \
+             point(s) + {n_kinetic_add_speed} direct kinetic-vector point(s) from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
@@ -9936,6 +10069,7 @@ impl VisionaryApp {
                 + n_clr_speed
                 + n_set_air
                 + n_change_kinetic
+                + n_kinetic_energy
                 + n_kinetic_add_speed)
                 > 0
         {
@@ -10902,6 +11036,19 @@ impl VisionaryApp {
                 "KineticModule::change_kinetic" if line.args.len() == 1 => {
                     Some(ExcuteStmt::ChangeKinetic(crate::data::ChangeKineticCall {
                         kinetic_type: line.args.first()?.to_source_arg()?,
+                    }))
+                }
+                "KineticModule::suspend_energy" | "KineticModule::resume_energy"
+                    if line.args.len() == 1 =>
+                {
+                    let action = if line.func == "KineticModule::suspend_energy" {
+                        crate::data::KineticEnergyAction::Suspend
+                    } else {
+                        crate::data::KineticEnergyAction::Resume
+                    };
+                    Some(ExcuteStmt::KineticEnergy(crate::data::KineticEnergyCall {
+                        action,
+                        kinetic_energy_id: line.args.first()?.to_source_arg()?,
                     }))
                 }
                 "KineticModule::add_speed" if line.args.len() == 3 => {
@@ -12657,6 +12804,142 @@ impl VisionaryApp {
         }
     }
 
+    fn kinetic_energy_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::KineticEnergyEvent],
+        index: usize,
+        event: &crate::data::KineticEnergyEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame && other.call.action == event.call.action)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == event.call.func()
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 1)
+            .nth(occurrence)
+    }
+
+    fn kinetic_energy_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::KineticEnergyEvent],
+        shown: &[crate::data::KineticEnergyEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame || was.call.action != now.call.action {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::kinetic_energy_capture_for(captures, pristine, index, was)
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(value) = donor.args.first().and_then(|arg| arg.as_f32()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(replacement) = now.call.kinetic_energy_id.trim().parse::<i64>().ok() else {
+                // Named source constants remain source/export-owned until a capture or known
+                // label table can prove their runtime integer.
+                unrepresentable += 1;
+                continue;
+            };
+            let duplicate_key = pristine
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index
+                        && other.frame == was.frame
+                        && other.call.action == was.call.action
+                        && other.call.kinetic_energy_id.trim().parse::<i64>().ok()
+                            == Some(value as i64)
+                })
+                .count();
+            if duplicate_key != 0 {
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            let category = match was.call.action {
+                crate::data::KineticEnergyAction::Suspend => {
+                    crate::game_link::CAT_KINETIC_SUSPEND_ENERGY
+                }
+                crate::data::KineticEnergyAction::Resume => {
+                    crate::game_link::CAT_KINETIC_RESUME_ENERGY
+                }
+            };
+            rules.push(HitboxRuleWire {
+                motion,
+                category,
+                hitbox_id: Some(crate::game_link::numeric_point_key(
+                    was.call.func(),
+                    &[value],
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    kinetic_energy_id: Some(replacement),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(was.call.func().into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    /// Send numeric replacements for direct kinetic-energy suspend/resume calls. Named source
+    /// constants remain source/export-owned when capture cannot prove their runtime ID.
+    fn push_kinetic_energy_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::kinetic_energy_rules_for(
+            motion,
+            &captures,
+            &self.state.kinetic_energy_pristine,
+            &self.state.script.to_kinetic_energy_events(),
+        );
+        let key = format!("{mv_key}#kinetic_energy");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "KineticModule energy edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique frame/key"
+            );
+        }
+    }
+
     fn kinetic_add_speed_capture_for<'a>(
         captures: &'a [crate::game_link::CaptureLine],
         pristine: &[crate::data::KineticAddSpeedEvent],
@@ -13234,6 +13517,7 @@ impl VisionaryApp {
             ft_start_adjust_motion_frame_value: None,
             clr_speed_kinetic_kind: None,
             change_kinetic_type: None,
+            kinetic_energy_id: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -16790,6 +17074,7 @@ impl VisionaryApp {
                 &self.state.script.to_clr_speed_events(),
                 &self.state.script.to_set_air_events(),
                 &self.state.script.to_change_kinetic_events(),
+                &self.state.script.to_kinetic_energy_events(),
                 &self.state.script.to_kinetic_add_speed_events(),
             ));
         if total == 0 {
@@ -16835,6 +17120,7 @@ impl VisionaryApp {
         let clr_speed = self.state.script.to_clr_speed_events();
         let set_air = self.state.script.to_set_air_events();
         let change_kinetic = self.state.script.to_change_kinetic_events();
+        let kinetic_energy = self.state.script.to_kinetic_energy_events();
         let kinetic_add_speed = self.state.script.to_kinetic_add_speed_events();
         let timeline_height = timeline_content_height_with_change_kinetic(
             self.state.hitboxes.len(),
@@ -16851,6 +17137,7 @@ impl VisionaryApp {
             clr_speed.len(),
             set_air.len(),
             change_kinetic.len(),
+            kinetic_energy.len(),
             kinetic_add_speed.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
@@ -17398,11 +17685,41 @@ impl VisionaryApp {
                 }
             }
 
-            let kinetic_add_speed_band_top = change_kinetic_band_top
+            let kinetic_energy_band_top = change_kinetic_band_top
                 + if change_kinetic.is_empty() {
                     0.0
                 } else {
                     change_kinetic.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in kinetic_energy.iter().enumerate() {
+                let y_top = kinetic_energy_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(205, 160, 255);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{} {}", event.call.func(), event.call.kinetic_energy_id),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let kinetic_add_speed_band_top = kinetic_energy_band_top
+                + if kinetic_energy.is_empty() {
+                    0.0
+                } else {
+                    kinetic_energy.len() as f32 * effect_height + 2.0
                 };
             for (row, event) in kinetic_add_speed.iter().enumerate() {
                 let y_top = kinetic_add_speed_band_top + row as f32 * effect_height;
@@ -19099,6 +19416,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::ClrSpeed(_)
                 | ExcuteStmt::SetAir
                 | ExcuteStmt::ChangeKinetic(_)
+                | ExcuteStmt::KineticEnergy(_)
                 | ExcuteStmt::KineticAddSpeed(_)
                 | ExcuteStmt::Raw(_) => true,
             })
@@ -19678,6 +19996,7 @@ fn nothing_to_load_with_kinetics(
     clr_speed: usize,
     set_air: usize,
     change_kinetic: usize,
+    kinetic_energy: usize,
     kinetic_add_speed: usize,
 ) -> Option<String> {
     if hitboxes == 0
@@ -19695,12 +20014,13 @@ fn nothing_to_load_with_kinetics(
         && clr_speed == 0
         && set_air == 0
         && change_kinetic == 0
+        && kinetic_energy == 0
         && kinetic_add_speed == 0
     {
         return Some(
             "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
              direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
-             CLR_SPEED, SET_AIR, change_kinetic or kinetic-vector lines for this move yet."
+             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy or kinetic-vector lines for this move yet."
                 .into(),
         );
     }
@@ -19739,6 +20059,7 @@ fn nothing_to_load(
         correct,
         ft_catch_stop,
         ft_start_adjust_motion_frame,
+        0,
         0,
         0,
         0,
@@ -22837,6 +23158,92 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_kinetic_energy_becomes_editable_suspend_and_resume_calls() {
+        let motion = hash40::hash40("attack_air_lw").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 0.0,
+                func: "KineticModule::suspend_energy".into(),
+                args: vec![crate::game_link::LuaArgWire::Int(2)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 8.0,
+                func: "KineticModule::resume_energy".into(),
+                args: vec![crate::game_link::LuaArgWire::Int(2)],
+                run: 1,
+            },
+        ];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        let events = script.to_kinetic_energy_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 1);
+        assert_eq!(
+            events[0].call.action,
+            crate::data::KineticEnergyAction::Suspend
+        );
+        assert_eq!(events[1].frame, 9);
+        assert_eq!(
+            events[1].call.action,
+            crate::data::KineticEnergyAction::Resume
+        );
+        assert_eq!(events[0].call.kinetic_energy_id, "2");
+        let exported = crate::acmd::export_acmd_source(&script, "bayonetta", "attack_air_lw");
+        assert!(exported.contains("KineticModule::suspend_energy(agent.module_accessor, 2);"));
+        assert!(exported.contains("KineticModule::resume_energy(agent.module_accessor, 2);"));
+    }
+
+    #[test]
+    fn kinetic_energy_live_rules_key_the_operation_and_numeric_energy_id() {
+        let motion = hash40::hash40("attack_air_lw").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 0.0,
+            func: "KineticModule::suspend_energy".into(),
+            args: vec![crate::game_link::LuaArgWire::Int(2)],
+            run: 1,
+        }];
+        let baseline = vec![crate::data::KineticEnergyEvent {
+            frame: 1,
+            call: crate::data::KineticEnergyCall {
+                action: crate::data::KineticEnergyAction::Suspend,
+                kinetic_energy_id: "2".into(),
+            },
+            site: 0,
+        }];
+        let mut edited = baseline.clone();
+        edited[0].call.kinetic_energy_id = "3".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::kinetic_energy_rules_for(motion, &captures, &baseline, &edited);
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].category,
+            crate::game_link::CAT_KINETIC_SUSPEND_ENERGY
+        );
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                "KineticModule::suspend_energy",
+                &[2.0]
+            ))
+        );
+        assert_eq!(
+            rules[0].overrides.as_ref().unwrap().kinetic_energy_id,
+            Some(3)
+        );
+        assert_eq!(
+            rules[0].func.as_deref(),
+            Some("KineticModule::suspend_energy")
+        );
+    }
+
+    #[test]
     fn captured_kinetic_add_speed_becomes_an_editable_zero_z_vector() {
         let motion = hash40::hash40("escape_air").0;
         let captures = vec![CaptureLine {
@@ -24648,7 +25055,7 @@ mod live_effect_capture_tests {
             );
         }
         let direct_kinetic = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0,
         );
         assert!((direct_kinetic - none - band).abs() < 0.01);
         // And they stack rather than sharing space.
@@ -24966,6 +25373,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &change_kinetic,
+                &[],
                 &[],
             ),
             127

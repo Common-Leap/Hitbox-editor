@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**578 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**585 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2356,8 +2356,8 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 Unmeasured `sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today; the exact
 direct `KineticModule::change_kinetic` call measured in the local `game_` corpus is covered by E1h below.
-`SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, `SET_SPEED_EX`, and direct `KineticModule::add_speed`
-now have measured, value-editable slices
+`SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, `SET_SPEED_EX`, direct `KineticModule::add_speed`,
+and the measured `KineticModule::suspend_energy` / `resume_energy` toggles now have value-editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
@@ -2575,6 +2575,29 @@ Clippy, format/diff checks, the debug build-check wrapper, the locked release bu
 Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
 behavior remains unverified. The E1 parent stays open for broader status-module and
 `sv_kinetic_energy` families.
+
+#### [x] E1k — direct `KineticModule::suspend_energy` and `resume_energy` points (completed 2026-08-08; live runtime unverified)
+
+The public dumped-script corpus contains 27 exact `KineticModule::suspend_energy` calls and 27
+exact `KineticModule::resume_energy` calls in both the verbose and HDR trees. The verbose receiver
+is `agent.module_accessor`; HDR uses the measured `boma` alias. Every call has exactly one authored
+energy-ID token after the receiver, and the linked bindings prove both forms as
+`(module_accessor, kinetic_energy_id: c_int) -> u64`.
+
+The completed slice carries both operations through typed parser/IR events, a Movement panel and
+timeline lane, live capture reconstruction, separate category-23/24 wire rules and matching
+Skyline direct-pointer hooks, generated ACMD export, and value-only source write-back. Named
+energy constants remain intact for export/source sync; live replacements require a numeric capture
+and preserve the suspend/resume operation and measured receiver. Malformed arities, other
+receivers, empty IDs, structural operation changes, and source branches/loops remain raw or are
+reported rather than guessed.
+
+Offline validation passed: full desktop tests (585 unit tests, 1 ignored + 6 integration), strict
+Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and the
+Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
+behavior remains unverified. The E1 parent stays open for `enable_energy`,
+`unable_energy`, `clear_speed_all`, ground-friction controls, broader status-module calls, and
+the absent `sv_kinetic_energy` corpus family.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

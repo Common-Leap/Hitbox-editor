@@ -1185,6 +1185,12 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
                 report,
             );
         }
+        ExcuteStmt::KineticEnergy(call) if call.kinetic_energy_id.trim().is_empty() => {
+            report.blocker(
+                subject,
+                "KineticModule suspend/resume energy call has an empty energy ID",
+            );
+        }
         ExcuteStmt::Correct(call) if call.kind.trim().is_empty() => {
             report.blocker(subject, "CORRECT has an empty correction kind");
         }

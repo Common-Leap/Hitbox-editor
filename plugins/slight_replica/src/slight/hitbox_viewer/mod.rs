@@ -241,6 +241,12 @@ pub const CAT_CHANGE_KINETIC: u8 = 21;
 /// `KineticModule::add_speed` — a direct x/y vector point. Must equal the editor's wire category.
 pub const CAT_KINETIC_ADD_SPEED: u8 = 22;
 
+/// `KineticModule::suspend_energy` — a direct kinetic-energy point. Must equal the editor's wire category.
+pub const CAT_KINETIC_SUSPEND_ENERGY: u8 = 23;
+
+/// `KineticModule::resume_energy` — a direct kinetic-energy point. Must equal the editor's wire category.
+pub const CAT_KINETIC_RESUME_ENERGY: u8 = 24;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -915,6 +921,8 @@ pub struct HbOverrides {
     pub clr_speed_kinetic_kind: Option<i64>,
     /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
     pub change_kinetic_type: Option<i64>,
+    /// Replacement numeric energy ID for direct suspend/resume kinetic calls.
+    pub kinetic_energy_id: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -1023,6 +1031,8 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_SET_AIR => "set_air",
                     CAT_CHANGE_KINETIC => "change_kinetic",
                     CAT_KINETIC_ADD_SPEED => "kinetic_add_speed",
+                    CAT_KINETIC_SUSPEND_ENERGY => "kinetic_suspend_energy",
+                    CAT_KINETIC_RESUME_ENERGY => "kinetic_resume_energy",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1297,6 +1307,56 @@ unsafe fn hook_change_kinetic(
     }
     original!()(boma, kinetic_type)
 }
+
+/// Capture and sparsely override the measured direct kinetic-energy toggles. The source keeps the
+/// authored energy-ID token, while the live hook keys the resolved numeric ID and only sends a
+/// numeric replacement when capture proves it.
+macro_rules! kinetic_energy_hook {
+    ($hook_name:ident, $target:path, $category:expr, $func:literal) => {
+        #[skyline::hook(replace = $target)]
+        unsafe fn $hook_name(
+            boma: *mut smash::app::BattleObjectModuleAccessor,
+            kinetic_energy_id: i32,
+        ) -> u64 {
+            record_for_boma(
+                boma,
+                $func,
+                &[LuaArg::Int(kinetic_energy_id as i64)],
+            );
+            if any_rules() && !boma.is_null() {
+                let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                let key = numeric_point_key($func, &[kinetic_energy_id as f32]);
+                if let Some((suppress, overrides)) =
+                    action_for($category, motion, key, frame)
+                {
+                    if suppress {
+                        return 0;
+                    }
+                    if let Some(replacement) =
+                        overrides.and_then(|item| item.kinetic_energy_id)
+                    {
+                        return original!()(boma, replacement as i32);
+                    }
+                }
+            }
+            original!()(boma, kinetic_energy_id)
+        }
+    };
+}
+
+kinetic_energy_hook!(
+    hook_kinetic_suspend_energy,
+    smash::app::lua_bind::KineticModule::suspend_energy,
+    CAT_KINETIC_SUSPEND_ENERGY,
+    "KineticModule::suspend_energy"
+);
+kinetic_energy_hook!(
+    hook_kinetic_resume_energy,
+    smash::app::lua_bind::KineticModule::resume_energy,
+    CAT_KINETIC_RESUME_ENERGY,
+    "KineticModule::resume_energy"
+);
 
 /// Capture and sparsely override the verified direct kinetic-vector addition.
 ///
@@ -2811,6 +2871,8 @@ pub fn install() {
         hook_clr_speed,
         hook_set_air,
         hook_change_kinetic,
+        hook_kinetic_suspend_energy,
+        hook_kinetic_resume_energy,
         hook_kinetic_add_speed
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a

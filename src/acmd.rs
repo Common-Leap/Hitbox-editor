@@ -402,6 +402,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_kinetic_energy_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_kinetic_add_speed_call(line) {
             stmts.push(stmt);
             continue;
@@ -2017,6 +2021,43 @@ fn parse_change_kinetic_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Parse the measured direct kinetic-energy shapes:
+/// `KineticModule::suspend_energy(agent.module_accessor, *ENERGY_ID)` and its resume member.
+/// HDR uses `boma` for the receiver. Other receivers, arities, and empty authored IDs remain
+/// `Raw` because this input boundary does not prove their meaning.
+fn parse_kinetic_energy_call(line: &str) -> Option<ExcuteStmt> {
+    for (func, action) in [
+        (
+            "KineticModule::suspend_energy",
+            crate::data::KineticEnergyAction::Suspend,
+        ),
+        (
+            "KineticModule::resume_energy",
+            crate::data::KineticEnergyAction::Resume,
+        ),
+    ] {
+        let needle = format!("{func}(");
+        let Some(start) = line.find(&needle).map(|index| index + needle.len()) else {
+            continue;
+        };
+        let end = line[start..].rfind(')')? + start;
+        let tokens = tokenize_args(&line[start..end]);
+        let [module_accessor, kinetic_energy_id] = tokens.as_slice() else {
+            continue;
+        };
+        if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma")
+            || kinetic_energy_id.trim().is_empty()
+        {
+            continue;
+        }
+        return Some(ExcuteStmt::KineticEnergy(crate::data::KineticEnergyCall {
+            action,
+            kinetic_energy_id: kinetic_energy_id.trim().to_string(),
+        }));
+    }
+    None
+}
+
 /// Parse the measured direct lua-bind vector shape:
 /// `KineticModule::add_speed(agent.module_accessor, &Vector3f{x: ..., y: ..., z: 0.0})`.
 /// HDR uses `boma` for the receiver. The source corpus has a numeric zero z component; a
@@ -2614,6 +2655,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::ChangeKinetic(call) => format!(
                 "{indent}KineticModule::change_kinetic(agent.module_accessor, {});",
                 call.kinetic_type
+            ),
+            crate::data::ExcuteStmt::KineticEnergy(call) => format!(
+                "{indent}{}(agent.module_accessor, {});",
+                call.func(),
+                call.kinetic_energy_id
             ),
             crate::data::ExcuteStmt::KineticAddSpeed(call) => format!(
                 "{indent}KineticModule::add_speed(agent.module_accessor, &Vector3f{{x: {}, y: {}, z: 0.0}});",
@@ -9222,6 +9268,65 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("z: 1.0"));
         assert!(emitted.contains("KineticModule::add_speed(other"));
         assert!(emitted.contains("Vector3f{x: 1.0, y: 2.0}"));
+    }
+
+    #[test]
+    fn kinetic_energy_parses_standard_and_hdr_suspend_resume_calls_and_round_trips() {
+        let source = r#"unsafe extern "C" fn game_attackairlw(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        KineticModule::suspend_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+        KineticModule::resume_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_energy_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 1);
+        assert_eq!(
+            events[0].call.action,
+            crate::data::KineticEnergyAction::Suspend
+        );
+        assert_eq!(
+            events[0].call.kinetic_energy_id,
+            "*FIGHTER_KINETIC_ENERGY_ID_CONTROL"
+        );
+        assert_eq!(
+            events[1].call.action,
+            crate::data::KineticEnergyAction::Resume
+        );
+        let emitted = preview_game_fn(&script, "attack_air_lw");
+        assert!(emitted.contains(
+            "KineticModule::suspend_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);"
+        ));
+        assert!(emitted.contains(
+            "KineticModule::resume_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_kinetic_energy_events(),
+            events
+        );
+
+        let hdr = source.replace("agent.module_accessor", "boma");
+        assert_eq!(parse_acmd_script(&hdr).to_kinetic_energy_events(), events);
+    }
+
+    #[test]
+    fn malformed_kinetic_energy_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::suspend_energy(agent.module_accessor);
+        KineticModule::resume_energy(other, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+        KineticModule::resume_energy(agent.module_accessor, );
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_kinetic_energy_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("KineticModule::suspend_energy(agent.module_accessor)"));
+        assert!(emitted.contains("KineticModule::resume_energy(other"));
     }
 
     #[test]

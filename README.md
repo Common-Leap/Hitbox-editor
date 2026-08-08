@@ -402,6 +402,9 @@ section of the editor:
 - `FT_START_ADJUST_MOTION_FRAME_arg1` edits the numeric motion-frame adjustment.
 - `CLR_SPEED` edits the authored kinetic-reserve ID token.
 - `SET_AIR` places, moves, or removes the point that switches the fighter to air kinetics.
+- `KineticModule::change_kinetic` edits the authored kinetic-type token.
+- `KineticModule::suspend_energy` and `KineticModule::resume_energy` edit the authored energy-ID token.
+- `KineticModule::add_speed` edits the x/y components of the supported zero-z velocity vector.
 
 Value controls edit their point values while keeping their source frame. Placement
 controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.
@@ -413,6 +416,10 @@ its live replacement is available only when a numeric capture identifies the
 kinetic reserve. `SET_AIR` presence and placement are structural edits: the
 generated export applies them freely, while linked-source sync edits only a
 verified flat call layout and reports branches, loops, or ambiguous sites.
+The direct `KineticModule` controls preserve named source tokens for export and
+source sync; their live replacements require a numeric capture of the original
+energy or kinetic value. The supported `add_speed` shape keeps `z` at `0.0` and
+only exposes x/y for editing.
 Kinetic commands that are not shown remain preserved in the source and are not
 rewritten. Movement changes are not simulated in the desktop viewport; connect
 the Skyline plugin or export the project to apply them in game.

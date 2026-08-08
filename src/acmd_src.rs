@@ -4143,6 +4143,129 @@ pub fn sync_change_kinetic(
     })
 }
 
+/// Whether a direct `KineticModule::{suspend,resume}_energy` receiver is one of the measured
+/// source forms.
+fn is_kinetic_energy_receiver(value: &str) -> bool {
+    matches!(value.trim(), "agent.module_accessor" | "boma")
+}
+
+/// The verified direct kinetic-energy toggle calls in source order.
+pub(crate) fn kinetic_energy_sites(text: &str) -> Vec<MacroSite> {
+    let mut sites = Vec::new();
+    for action in [
+        crate::data::KineticEnergyAction::Suspend,
+        crate::data::KineticEnergyAction::Resume,
+    ] {
+        sites.extend(scan_named_sites(text, action.func(), 0..text.len()));
+    }
+    sites.sort_by_key(|site| site.span.start);
+    sites
+        .into_iter()
+        .filter(|site| {
+            site.args.len() == 2
+                && site.arg(text, 0).is_some_and(is_kinetic_energy_receiver)
+                && site
+                    .arg(text, 1)
+                    .is_some_and(|value| !value.trim().is_empty())
+        })
+        .collect()
+}
+
+/// Rewrite only the authored energy-ID token of existing direct suspend/resume calls. The source
+/// receiver and operation remain structural; HDR's `boma` spelling is retained.
+pub fn rewrite_kinetic_energy(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::KineticEnergyEvent],
+    edited: &[crate::data::KineticEnergyEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = kinetic_energy_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable direct kinetic-energy call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: direct kinetic-energy site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: direct kinetic-energy site {} was retimed from frame {} to {} — source syncing only retunes its authored ID token",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        if before.call.action != now.call.action {
+            report.skipped.push(format!(
+                "{label}: direct kinetic-energy site {} changed between suspend and resume — source syncing preserves the authored operation",
+                before.site
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != before.call.func()
+            || site.args.len() != 2
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !is_kinetic_energy_receiver(value))
+            || site
+                .arg(text, 1)
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            report.skipped.push(format!(
+                "{label}: direct kinetic-energy site {} no longer has its verified receiver/operation/ID shape",
+                before.site
+            ));
+            continue;
+        }
+        if now.call.kinetic_energy_id.trim().is_empty() {
+            report.skipped.push(format!(
+                "{label}: direct kinetic-energy site {} has an empty energy ID — source syncing leaves the authored token intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.kinetic_energy_id.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited direct kinetic-energy IDs into the project's `game_` function.
+pub fn sync_kinetic_energy(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::KineticEnergyEvent],
+    edited: &[crate::data::KineticEnergyEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_kinetic_energy(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// Whether a direct `KineticModule::add_speed` receiver is one of the measured source forms.
 fn is_kinetic_add_speed_receiver(value: &str) -> bool {
     matches!(value.trim(), "agent.module_accessor" | "boma")
@@ -8225,6 +8348,48 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             .is_empty());
         assert!(kinetic_add_speed_sites(text).is_empty());
         let (after, report) = rewrite_kinetic_add_speed(text, "mario/x", &[], &[]).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn kinetic_energy_source_sync_rewrites_ids_and_keeps_operation_and_receiver() {
+        let text = r#"unsafe extern "C" fn game_attackairlw(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 1.0);
+    if is_excute(agent) {
+        KineticModule::suspend_energy(boma, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+        KineticModule::resume_energy(boma, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_kinetic_energy_events();
+        let mut edited = pristine.clone();
+        edited[0].call.kinetic_energy_id = "*FIGHTER_KINETIC_ENERGY_ID_GRAVITY".into();
+        let (after, report) =
+            rewrite_kinetic_energy(text, "mario/attack_air_lw", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after
+            .contains("KineticModule::suspend_energy(boma, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);"));
+        assert!(after
+            .contains("KineticModule::resume_energy(boma, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);"));
+        assert!(after.contains("let boma = agent.boma();"));
+    }
+
+    #[test]
+    fn malformed_kinetic_energy_source_shapes_are_source_only() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::suspend_energy(agent.module_accessor);
+    }
+}
+"#;
+        assert!(crate::acmd::parse_acmd_script(text)
+            .to_kinetic_energy_events()
+            .is_empty());
+        assert!(kinetic_energy_sites(text).is_empty());
+        let (after, report) = rewrite_kinetic_energy(text, "mario/x", &[], &[]).unwrap();
         assert_eq!(after, text);
         assert!(report.skipped.is_empty(), "{report:?}");
     }

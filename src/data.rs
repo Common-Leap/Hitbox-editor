@@ -1301,6 +1301,11 @@ pub enum ExcuteStmt {
     /// kinetic type stays as source text because the live capture only proves its resolved
     /// integer value.
     ChangeKinetic(ChangeKineticCall),
+    /// `KineticModule::suspend_energy` / `resume_energy` — toggle one named kinetic energy.
+    ///
+    /// The measured source shape has a receiver and one authored energy-ID token. The token is
+    /// retained for source/export, while the live hook can only prove its resolved integer.
+    KineticEnergy(KineticEnergyCall),
     /// `KineticModule::add_speed` — add a measured x/y velocity vector directly to the fighter.
     ///
     /// The public source corpus uses a `Vector3f` with a numeric zero `z` component. The editor
@@ -1458,6 +1463,36 @@ impl ChangeKineticCall {
     pub const FUNC: &'static str = "KineticModule::change_kinetic";
 }
 
+/// The two measured direct kinetic-energy toggles in the public ACMD corpus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum KineticEnergyAction {
+    Suspend,
+    Resume,
+}
+
+impl KineticEnergyAction {
+    pub const fn func(self) -> &'static str {
+        match self {
+            Self::Suspend => "KineticModule::suspend_energy",
+            Self::Resume => "KineticModule::resume_energy",
+        }
+    }
+}
+
+/// A parsed `KineticModule::{suspend,resume}_energy(receiver, kinetic_energy_id)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KineticEnergyCall {
+    pub action: KineticEnergyAction,
+    /// Authored energy-ID token, usually a dereferenced lua constant.
+    pub kinetic_energy_id: String,
+}
+
+impl KineticEnergyCall {
+    pub fn func(&self) -> &'static str {
+        self.action.func()
+    }
+}
+
 /// A parsed `KineticModule::add_speed(agent.module_accessor, &Vector3f{x, y, z: 0.0})` call.
 ///
 /// HDR source uses `boma` for the receiver. The zero z component is part of the measured input
@@ -1568,6 +1603,15 @@ pub struct SetAirEvent {
 pub struct ChangeKineticEvent {
     pub frame: u32,
     pub call: ChangeKineticCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct kinetic-energy toggle at its one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KineticEnergyEvent {
+    pub frame: u32,
+    pub call: KineticEnergyCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -1961,6 +2005,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.kinetic_add_speeds
+    }
+
+    /// Flatten direct kinetic-energy suspend/resume calls into editable point events.
+    pub fn to_kinetic_energy_events(&self) -> Vec<KineticEnergyEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.kinetic_energies
     }
 }
 
@@ -2490,6 +2542,47 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The direct kinetic-energy call an event site's ordinal refers to.
+    pub fn kinetic_energy_stmt_mut(&mut self, site: usize) -> Option<&mut KineticEnergyCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut KineticEnergyCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::KineticEnergy(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::KineticEnergy(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove a `SET_AIR` source statement at its source ordinal.
     pub fn remove_set_air(&mut self, site: usize) -> bool {
         fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
@@ -2668,6 +2761,7 @@ struct WalkAccum {
     clr_speeds: Vec<ClrSpeedEvent>,
     set_airs: Vec<SetAirEvent>,
     change_kinetics: Vec<ChangeKineticEvent>,
+    kinetic_energies: Vec<KineticEnergyEvent>,
     kinetic_add_speeds: Vec<KineticAddSpeedEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
@@ -2703,6 +2797,9 @@ struct WalkAccum {
     /// Site for the next direct `KineticModule::change_kinetic`, independent of every other point
     /// event family.
     next_change_kinetic_site: usize,
+    /// Site for the next direct kinetic-energy toggle, independent of every other point event
+    /// family.
+    next_kinetic_energy_site: usize,
     /// Site for the next direct `KineticModule::add_speed`, independent of every other point
     /// event family.
     next_kinetic_add_speed_site: usize,
@@ -3014,6 +3111,27 @@ fn count_kinetic_add_speed_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// Direct kinetic-energy toggles in a subtree, counted in source order for loop/site
+/// resolution.
+fn count_kinetic_energy_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::KineticEnergy(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::KineticEnergy(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_kinetic_energy_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -3171,6 +3289,12 @@ impl WalkAccum {
     fn take_kinetic_add_speed_site(&mut self) -> usize {
         let site = self.next_kinetic_add_speed_site;
         self.next_kinetic_add_speed_site += 1;
+        site
+    }
+
+    fn take_kinetic_energy_site(&mut self) -> usize {
+        let site = self.next_kinetic_energy_site;
+        self.next_kinetic_energy_site += 1;
         site
     }
 
@@ -3448,6 +3572,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::KineticEnergy(call) => {
+            let site = hurt.take_kinetic_energy_site();
+            hurt.kinetic_energies.push(KineticEnergyEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -3495,6 +3627,7 @@ fn eval_stmts(
                 let clr_speed_site_at_entry = hurt.next_clr_speed_site;
                 let set_air_site_at_entry = hurt.next_set_air_site;
                 let change_kinetic_site_at_entry = hurt.next_change_kinetic_site;
+                let kinetic_energy_site_at_entry = hurt.next_kinetic_energy_site;
                 let kinetic_add_speed_site_at_entry = hurt.next_kinetic_add_speed_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
@@ -3512,6 +3645,7 @@ fn eval_stmts(
                     hurt.next_clr_speed_site = clr_speed_site_at_entry;
                     hurt.next_set_air_site = set_air_site_at_entry;
                     hurt.next_change_kinetic_site = change_kinetic_site_at_entry;
+                    hurt.next_kinetic_energy_site = kinetic_energy_site_at_entry;
                     hurt.next_kinetic_add_speed_site = kinetic_add_speed_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
@@ -3534,6 +3668,8 @@ fn eval_stmts(
                 hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
                 hurt.next_change_kinetic_site =
                     change_kinetic_site_at_entry + count_change_kinetic_stmts(body);
+                hurt.next_kinetic_energy_site =
+                    kinetic_energy_site_at_entry + count_kinetic_energy_stmts(body);
                 hurt.next_kinetic_add_speed_site =
                     kinetic_add_speed_site_at_entry + count_kinetic_add_speed_stmts(body);
             }
@@ -3757,6 +3893,8 @@ pub struct AppState {
     pub set_air_pristine: Vec<SetAirEvent>,
     /// Direct kinetic-type point events as loaded, for sparse live rules and source syncing.
     pub change_kinetic_pristine: Vec<ChangeKineticEvent>,
+    /// Direct kinetic-energy point events as loaded, for sparse live rules and source syncing.
+    pub kinetic_energy_pristine: Vec<KineticEnergyEvent>,
     /// Direct kinetic-vector point events as loaded, for sparse live rules and source syncing.
     pub kinetic_add_speed_pristine: Vec<KineticAddSpeedEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
@@ -3857,6 +3995,7 @@ impl Default for AppState {
             clr_speed_pristine: Vec::new(),
             set_air_pristine: Vec::new(),
             change_kinetic_pristine: Vec::new(),
+            kinetic_energy_pristine: Vec::new(),
             kinetic_add_speed_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
@@ -3894,6 +4033,7 @@ impl AppState {
         self.clr_speed_pristine = script.to_clr_speed_events();
         self.set_air_pristine = script.to_set_air_events();
         self.change_kinetic_pristine = script.to_change_kinetic_events();
+        self.kinetic_energy_pristine = script.to_kinetic_energy_events();
         self.kinetic_add_speed_pristine = script.to_kinetic_add_speed_events();
         self.script = script;
     }
