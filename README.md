@@ -403,7 +403,8 @@ section of the editor:
 - `CLR_SPEED` edits the authored kinetic-reserve ID token.
 - `SET_AIR` places, moves, or removes the point that switches the fighter to air kinetics.
 - `KineticModule::change_kinetic` edits the authored kinetic-type token.
-- `KineticModule::suspend_energy` and `KineticModule::resume_energy` edit the authored energy-ID token.
+- `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and `unable_energy` edit
+  the authored energy-ID token.
 - `KineticModule::add_speed` edits the x/y components of the supported zero-z velocity vector.
 
 Value controls edit their point values while keeping their source frame. Placement

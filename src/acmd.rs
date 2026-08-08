@@ -2022,7 +2022,7 @@ fn parse_change_kinetic_call(line: &str) -> Option<ExcuteStmt> {
 }
 
 /// Parse the measured direct kinetic-energy shapes:
-/// `KineticModule::suspend_energy(agent.module_accessor, *ENERGY_ID)` and its resume member.
+/// `KineticModule::{suspend,resume,enable,unable}_energy(agent.module_accessor, *ENERGY_ID)`.
 /// HDR uses `boma` for the receiver. Other receivers, arities, and empty authored IDs remain
 /// `Raw` because this input boundary does not prove their meaning.
 fn parse_kinetic_energy_call(line: &str) -> Option<ExcuteStmt> {
@@ -2034,6 +2034,14 @@ fn parse_kinetic_energy_call(line: &str) -> Option<ExcuteStmt> {
         (
             "KineticModule::resume_energy",
             crate::data::KineticEnergyAction::Resume,
+        ),
+        (
+            "KineticModule::enable_energy",
+            crate::data::KineticEnergyAction::Enable,
+        ),
+        (
+            "KineticModule::unable_energy",
+            crate::data::KineticEnergyAction::Unable,
         ),
     ] {
         let needle = format!("{func}(");
@@ -9327,6 +9335,39 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let emitted = preview_game_fn(&script, "x");
         assert!(emitted.contains("KineticModule::suspend_energy(agent.module_accessor)"));
         assert!(emitted.contains("KineticModule::resume_energy(other"));
+    }
+
+    #[test]
+    fn kinetic_energy_enable_and_unable_round_trip_with_measured_ids() {
+        let source = r#"unsafe extern "C" fn game_specialhi(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::enable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);
+        KineticModule::unable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_energy_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].call.action,
+            crate::data::KineticEnergyAction::Enable
+        );
+        assert_eq!(
+            events[1].call.action,
+            crate::data::KineticEnergyAction::Unable
+        );
+        let emitted = preview_game_fn(&script, "special_hi");
+        assert!(emitted.contains(
+            "KineticModule::enable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);"
+        ));
+        assert!(emitted.contains(
+            "KineticModule::unable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_kinetic_energy_events(),
+            events
+        );
     }
 
     #[test]

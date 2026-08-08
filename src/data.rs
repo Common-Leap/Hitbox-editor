@@ -1301,7 +1301,7 @@ pub enum ExcuteStmt {
     /// kinetic type stays as source text because the live capture only proves its resolved
     /// integer value.
     ChangeKinetic(ChangeKineticCall),
-    /// `KineticModule::suspend_energy` / `resume_energy` — toggle one named kinetic energy.
+    /// `KineticModule::{suspend,resume,enable,unable}_energy` — toggle one named kinetic energy.
     ///
     /// The measured source shape has a receiver and one authored energy-ID token. The token is
     /// retained for source/export, while the live hook can only prove its resolved integer.
@@ -1463,11 +1463,13 @@ impl ChangeKineticCall {
     pub const FUNC: &'static str = "KineticModule::change_kinetic";
 }
 
-/// The two measured direct kinetic-energy toggles in the public ACMD corpus.
+/// The four measured direct kinetic-energy toggles in the public ACMD corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KineticEnergyAction {
     Suspend,
     Resume,
+    Enable,
+    Unable,
 }
 
 impl KineticEnergyAction {
@@ -1475,11 +1477,14 @@ impl KineticEnergyAction {
         match self {
             Self::Suspend => "KineticModule::suspend_energy",
             Self::Resume => "KineticModule::resume_energy",
+            Self::Enable => "KineticModule::enable_energy",
+            Self::Unable => "KineticModule::unable_energy",
         }
     }
 }
 
-/// A parsed `KineticModule::{suspend,resume}_energy(receiver, kinetic_energy_id)` call.
+/// A parsed direct `KineticModule::{suspend,resume,enable,unable}_energy(
+/// receiver, kinetic_energy_id)` call.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KineticEnergyCall {
     pub action: KineticEnergyAction,

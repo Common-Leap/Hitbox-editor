@@ -4143,8 +4143,7 @@ pub fn sync_change_kinetic(
     })
 }
 
-/// Whether a direct `KineticModule::{suspend,resume}_energy` receiver is one of the measured
-/// source forms.
+/// Whether a direct kinetic-energy receiver is one of the measured source forms.
 fn is_kinetic_energy_receiver(value: &str) -> bool {
     matches!(value.trim(), "agent.module_accessor" | "boma")
 }
@@ -4155,6 +4154,8 @@ pub(crate) fn kinetic_energy_sites(text: &str) -> Vec<MacroSite> {
     for action in [
         crate::data::KineticEnergyAction::Suspend,
         crate::data::KineticEnergyAction::Resume,
+        crate::data::KineticEnergyAction::Enable,
+        crate::data::KineticEnergyAction::Unable,
     ] {
         sites.extend(scan_named_sites(text, action.func(), 0..text.len()));
     }
@@ -4171,7 +4172,7 @@ pub(crate) fn kinetic_energy_sites(text: &str) -> Vec<MacroSite> {
         .collect()
 }
 
-/// Rewrite only the authored energy-ID token of existing direct suspend/resume calls. The source
+/// Rewrite only the authored energy-ID token of existing direct kinetic-energy calls. The source
 /// receiver and operation remain structural; HDR's `boma` spelling is retained.
 pub fn rewrite_kinetic_energy(
     text: &str,
@@ -8392,6 +8393,30 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         let (after, report) = rewrite_kinetic_energy(text, "mario/x", &[], &[]).unwrap();
         assert_eq!(after, text);
         assert!(report.skipped.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn kinetic_energy_source_sync_accepts_enable_and_unable_operations() {
+        let text = r#"unsafe extern "C" fn game_specialhi(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::enable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);
+        KineticModule::unable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_CONTROL);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_kinetic_energy_events();
+        let mut edited = pristine.clone();
+        edited[1].call.kinetic_energy_id = "*FIGHTER_KINETIC_ENERGY_ID_GRAVITY".into();
+        let (after, report) =
+            rewrite_kinetic_energy(text, "mario/special_hi", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(
+            "KineticModule::enable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);"
+        ));
+        assert!(after.contains(
+            "KineticModule::unable_energy(agent.module_accessor, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);"
+        ));
     }
 
     #[test]

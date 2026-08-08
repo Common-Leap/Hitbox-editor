@@ -471,6 +471,12 @@ pub const CAT_KINETIC_SUSPEND_ENERGY: u8 = 23;
 /// Wire category for direct `KineticModule::resume_energy` points.
 pub const CAT_KINETIC_RESUME_ENERGY: u8 = 24;
 
+/// Wire category for direct `KineticModule::enable_energy` points.
+pub const CAT_KINETIC_ENABLE_ENERGY: u8 = 25;
+
+/// Wire category for direct `KineticModule::unable_energy` points.
+pub const CAT_KINETIC_UNABLE_ENERGY: u8 = 26;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -2820,6 +2826,12 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_KINETIC_RESUME_ENERGY: u8 = {CAT_KINETIC_RESUME_ENERGY};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_ENABLE_ENERGY: u8 = {CAT_KINETIC_ENABLE_ENERGY};"
+        )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_UNABLE_ENERGY: u8 = {CAT_KINETIC_UNABLE_ENERGY};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
@@ -2832,6 +2844,10 @@ mod tests {
         assert!(module.contains("KineticModule::suspend_energy,"));
         assert!(module.contains("hook_kinetic_resume_energy"));
         assert!(module.contains("KineticModule::resume_energy,"));
+        assert!(module.contains("hook_kinetic_enable_energy"));
+        assert!(module.contains("KineticModule::enable_energy,"));
+        assert!(module.contains("hook_kinetic_unable_energy"));
+        assert!(module.contains("KineticModule::unable_energy,"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
@@ -2845,6 +2861,8 @@ mod tests {
             (CAT_KINETIC_SUSPEND_ENERGY, CAT_KINETIC_ADD_SPEED),
             (CAT_KINETIC_RESUME_ENERGY, CAT_KINETIC_SUSPEND_ENERGY),
             (CAT_KINETIC_RESUME_ENERGY, CAT_CHANGE_KINETIC),
+            (CAT_KINETIC_ENABLE_ENERGY, CAT_KINETIC_RESUME_ENERGY),
+            (CAT_KINETIC_UNABLE_ENERGY, CAT_KINETIC_ENABLE_ENERGY),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -2996,6 +3014,60 @@ mod tests {
         assert_eq!(
             rules[1]["func"].as_str(),
             Some("KineticModule::resume_energy")
+        );
+        assert_eq!(rules[1]["suppress"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn outbound_enable_unable_energy_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_ENABLE_ENERGY,
+                hitbox_id: Some(numeric_point_key("KineticModule::enable_energy", &[3.0])),
+                suppress: false,
+                frame_start: Some(4.5),
+                frame_end: Some(4.5),
+                overrides: Some(HbOverridesWire {
+                    kinetic_energy_id: Some(4),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("KineticModule::enable_energy".into()),
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_UNABLE_ENERGY,
+                hitbox_id: Some(numeric_point_key("KineticModule::unable_energy", &[5.0])),
+                suppress: true,
+                frame_start: Some(9.5),
+                frame_end: Some(9.5),
+                overrides: None,
+                inject: None,
+                func: Some("KineticModule::unable_energy".into()),
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0]["category"].as_u64(),
+            Some(CAT_KINETIC_ENABLE_ENERGY as u64)
+        );
+        assert_eq!(
+            rules[0]["func"].as_str(),
+            Some("KineticModule::enable_energy")
+        );
+        assert_eq!(rules[0]["overrides"]["kinetic_energy_id"].as_i64(), Some(4));
+        assert_eq!(
+            rules[1]["category"].as_u64(),
+            Some(CAT_KINETIC_UNABLE_ENERGY as u64)
+        );
+        assert_eq!(
+            rules[1]["func"].as_str(),
+            Some("KineticModule::unable_energy")
         );
         assert_eq!(rules[1]["suppress"].as_bool(), Some(true));
     }

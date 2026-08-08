@@ -247,6 +247,12 @@ pub const CAT_KINETIC_SUSPEND_ENERGY: u8 = 23;
 /// `KineticModule::resume_energy` — a direct kinetic-energy point. Must equal the editor's wire category.
 pub const CAT_KINETIC_RESUME_ENERGY: u8 = 24;
 
+/// `KineticModule::enable_energy` — a direct kinetic-energy point. Must equal the editor's wire category.
+pub const CAT_KINETIC_ENABLE_ENERGY: u8 = 25;
+
+/// `KineticModule::unable_energy` — a direct kinetic-energy point. Must equal the editor's wire category.
+pub const CAT_KINETIC_UNABLE_ENERGY: u8 = 26;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -1033,6 +1039,8 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_KINETIC_ADD_SPEED => "kinetic_add_speed",
                     CAT_KINETIC_SUSPEND_ENERGY => "kinetic_suspend_energy",
                     CAT_KINETIC_RESUME_ENERGY => "kinetic_resume_energy",
+                    CAT_KINETIC_ENABLE_ENERGY => "kinetic_enable_energy",
+                    CAT_KINETIC_UNABLE_ENERGY => "kinetic_unable_energy",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1356,6 +1364,18 @@ kinetic_energy_hook!(
     smash::app::lua_bind::KineticModule::resume_energy,
     CAT_KINETIC_RESUME_ENERGY,
     "KineticModule::resume_energy"
+);
+kinetic_energy_hook!(
+    hook_kinetic_enable_energy,
+    smash::app::lua_bind::KineticModule::enable_energy,
+    CAT_KINETIC_ENABLE_ENERGY,
+    "KineticModule::enable_energy"
+);
+kinetic_energy_hook!(
+    hook_kinetic_unable_energy,
+    smash::app::lua_bind::KineticModule::unable_energy,
+    CAT_KINETIC_UNABLE_ENERGY,
+    "KineticModule::unable_energy"
 );
 
 /// Capture and sparsely override the verified direct kinetic-vector addition.
@@ -2873,6 +2893,8 @@ pub fn install() {
         hook_change_kinetic,
         hook_kinetic_suspend_energy,
         hook_kinetic_resume_energy,
+        hook_kinetic_enable_energy,
+        hook_kinetic_unable_energy,
         hook_kinetic_add_speed
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a

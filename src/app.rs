@@ -6682,7 +6682,7 @@ impl VisionaryApp {
         }
     }
 
-    /// Editable authored energy-ID tokens from the measured direct suspend/resume calls.
+    /// Editable authored energy-ID tokens from the measured direct kinetic-energy calls.
     /// Numeric live replacements require a matching capture; the operation and receiver remain
     /// structural so source write-back never guesses a different primitive.
     fn draw_kinetic_energy_section(&mut self, ui: &mut Ui) {
@@ -6701,7 +6701,7 @@ impl VisionaryApp {
         })
         .response
         .on_hover_text(
-            "Suspends or resumes one measured kinetic energy. The authored energy ID stays as source text; numeric live overrides require a matching capture.",
+            "Suspends, resumes, enables, or unables one measured kinetic energy. The authored energy ID stays as source text; numeric live overrides require a matching capture.",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -11038,13 +11038,20 @@ impl VisionaryApp {
                         kinetic_type: line.args.first()?.to_source_arg()?,
                     }))
                 }
-                "KineticModule::suspend_energy" | "KineticModule::resume_energy"
+                "KineticModule::suspend_energy"
+                | "KineticModule::resume_energy"
+                | "KineticModule::enable_energy"
+                | "KineticModule::unable_energy"
                     if line.args.len() == 1 =>
                 {
-                    let action = if line.func == "KineticModule::suspend_energy" {
-                        crate::data::KineticEnergyAction::Suspend
-                    } else {
-                        crate::data::KineticEnergyAction::Resume
+                    let action = match line.func.as_str() {
+                        "KineticModule::suspend_energy" => {
+                            crate::data::KineticEnergyAction::Suspend
+                        }
+                        "KineticModule::resume_energy" => crate::data::KineticEnergyAction::Resume,
+                        "KineticModule::enable_energy" => crate::data::KineticEnergyAction::Enable,
+                        "KineticModule::unable_energy" => crate::data::KineticEnergyAction::Unable,
+                        _ => return None,
                     };
                     Some(ExcuteStmt::KineticEnergy(crate::data::KineticEnergyCall {
                         action,
@@ -12881,6 +12888,12 @@ impl VisionaryApp {
                 }
                 crate::data::KineticEnergyAction::Resume => {
                     crate::game_link::CAT_KINETIC_RESUME_ENERGY
+                }
+                crate::data::KineticEnergyAction::Enable => {
+                    crate::game_link::CAT_KINETIC_ENABLE_ENERGY
+                }
+                crate::data::KineticEnergyAction::Unable => {
+                    crate::game_link::CAT_KINETIC_UNABLE_ENERGY
                 }
             };
             rules.push(HitboxRuleWire {
@@ -23198,6 +23211,47 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_kinetic_energy_becomes_editable_enable_and_unable_calls() {
+        let motion = hash40::hash40("special_hi").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 2.0,
+                func: "KineticModule::enable_energy".into(),
+                args: vec![crate::game_link::LuaArgWire::Int(4)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 6.0,
+                func: "KineticModule::unable_energy".into(),
+                args: vec![crate::game_link::LuaArgWire::Int(5)],
+                run: 1,
+            },
+        ];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        let events = script.to_kinetic_energy_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 3);
+        assert_eq!(
+            events[0].call.action,
+            crate::data::KineticEnergyAction::Enable
+        );
+        assert_eq!(events[0].call.kinetic_energy_id, "4");
+        assert_eq!(events[1].frame, 7);
+        assert_eq!(
+            events[1].call.action,
+            crate::data::KineticEnergyAction::Unable
+        );
+        assert_eq!(events[1].call.kinetic_energy_id, "5");
+        let exported = crate::acmd::export_acmd_source(&script, "bayonetta", "special_hi");
+        assert!(exported.contains("KineticModule::enable_energy(agent.module_accessor, 4);"));
+        assert!(exported.contains("KineticModule::unable_energy(agent.module_accessor, 5);"));
+    }
+
+    #[test]
     fn kinetic_energy_live_rules_key_the_operation_and_numeric_energy_id() {
         let motion = hash40::hash40("attack_air_lw").0;
         let captures = vec![CaptureLine {
@@ -23240,6 +23294,92 @@ mod live_effect_capture_tests {
         assert_eq!(
             rules[0].func.as_deref(),
             Some("KineticModule::suspend_energy")
+        );
+    }
+
+    #[test]
+    fn kinetic_energy_enable_and_unable_live_rules_keep_distinct_categories() {
+        let motion = hash40::hash40("special_hi").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 2.0,
+                func: "KineticModule::enable_energy".into(),
+                args: vec![crate::game_link::LuaArgWire::Int(4)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 6.0,
+                func: "KineticModule::unable_energy".into(),
+                args: vec![crate::game_link::LuaArgWire::Int(5)],
+                run: 1,
+            },
+        ];
+        let baseline = vec![
+            crate::data::KineticEnergyEvent {
+                frame: 3,
+                call: crate::data::KineticEnergyCall {
+                    action: crate::data::KineticEnergyAction::Enable,
+                    kinetic_energy_id: "4".into(),
+                },
+                site: 0,
+            },
+            crate::data::KineticEnergyEvent {
+                frame: 7,
+                call: crate::data::KineticEnergyCall {
+                    action: crate::data::KineticEnergyAction::Unable,
+                    kinetic_energy_id: "5".into(),
+                },
+                site: 1,
+            },
+        ];
+        let mut edited = baseline.clone();
+        edited[0].call.kinetic_energy_id = "6".into();
+        edited[1].call.kinetic_energy_id = "7".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::kinetic_energy_rules_for(motion, &captures, &baseline, &edited);
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            rules[0].category,
+            crate::game_link::CAT_KINETIC_ENABLE_ENERGY
+        );
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                "KineticModule::enable_energy",
+                &[4.0]
+            ))
+        );
+        assert_eq!(
+            rules[0].overrides.as_ref().unwrap().kinetic_energy_id,
+            Some(6)
+        );
+        assert_eq!(
+            rules[0].func.as_deref(),
+            Some("KineticModule::enable_energy")
+        );
+        assert_eq!(
+            rules[1].category,
+            crate::game_link::CAT_KINETIC_UNABLE_ENERGY
+        );
+        assert_eq!(
+            rules[1].hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                "KineticModule::unable_energy",
+                &[5.0]
+            ))
+        );
+        assert_eq!(
+            rules[1].overrides.as_ref().unwrap().kinetic_energy_id,
+            Some(7)
+        );
+        assert_eq!(
+            rules[1].func.as_deref(),
+            Some("KineticModule::unable_energy")
         );
     }
 
