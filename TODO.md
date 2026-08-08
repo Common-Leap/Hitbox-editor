@@ -1017,8 +1017,10 @@ the resolved integer only and live retiming/swap overrides stay explicitly unsup
 portable symbolic-to-runtime mapping is verified. The valid three-value
 `LAST_PARTICLE_SET_COLOR` shape is typed below, but the local `SetInkColor` call still uses the
 dump's zero-argument spelling after three preceding `WorkModule::get_float` stack inputs; that
-malformed form remains explicitly carried. `LAST_EFFECT_SET_SCALE_W` still has only a malformed
-one-argument external hit, so C7 remains open for evidence and runtime-boundary work.
+malformed form remains explicitly carried and the export verifier reports its wrapper mismatch.
+`LAST_EFFECT_SET_SCALE_W` still has only a malformed one-argument external hit, so C7 remains
+open for evidence and runtime-boundary work; that shape is now reported as an export blocker too,
+without inventing the three scale values.
 
 #### [x] C7a — `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` (completed 2026-08-08; live runtime unverified)
 
