@@ -89,6 +89,7 @@ fn timeline_content_height_with_change_kinetic(
     motion_module_set_helper_calculation: usize,
     motion_module_set_rate_partial: usize,
     work_flag: usize,
+    work_transition_term: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
@@ -121,7 +122,8 @@ fn timeline_content_height_with_change_kinetic(
         + band(motion_module_set_rate)
         + band(motion_module_set_helper_calculation)
         + band(motion_module_set_rate_partial)
-        + band(work_flag))
+        + band(work_flag)
+        + band(work_transition_term))
     .max(24.0)
 }
 
@@ -157,6 +159,7 @@ fn timeline_content_height(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        0,
         0,
         0,
         0,
@@ -356,6 +359,7 @@ fn timeline_frame_extent_with_change_kinetic(
     motion_module_set_helper_calculation: &[crate::data::MotionModuleSetHelperCalculationEvent],
     motion_module_set_rate_partial: &[crate::data::MotionModuleSetRatePartialEvent],
     work_flags: &[crate::data::WorkFlagEvent],
+    work_transition_terms: &[crate::data::WorkTransitionTermEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -403,6 +407,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .iter()
         .map(|event| event.frame);
     let work_flag_frames = work_flags.iter().map(|event| event.frame);
+    let work_transition_term_frames = work_transition_terms.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
@@ -425,6 +430,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .chain(motion_module_set_helper_calculation_frames)
         .chain(motion_module_set_rate_partial_frames)
         .chain(work_flag_frames)
+        .chain(work_transition_term_frames)
         .max()
         .unwrap_or(0)
 }
@@ -461,6 +467,7 @@ fn timeline_frame_extent(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        &[],
         &[],
         &[],
         &[],
@@ -1195,6 +1202,7 @@ type SourceMirror = (
     Vec<crate::data::MotionModuleSetHelperCalculationEvent>,
     Vec<crate::data::MotionModuleSetRatePartialEvent>,
     Vec<crate::data::WorkFlagEvent>,
+    Vec<crate::data::WorkTransitionTermEvent>,
 );
 
 /// One ACMD function checked out of the linked project for editing.
@@ -2614,6 +2622,7 @@ impl VisionaryApp {
                 motion_module_set_helper_calculation,
                 motion_module_set_rate_partial,
                 work_flags,
+                work_transition_terms,
             )) => {
                 if *hitboxes == self.state.hitboxes
                     && *effects == self.state.effects
@@ -2649,6 +2658,7 @@ impl VisionaryApp {
                     && *motion_module_set_rate_partial
                         == self.state.script.to_motion_module_set_rate_partial_events()
                     && *work_flags == self.state.script.to_work_flag_events()
+                    && *work_transition_terms == self.state.script.to_work_transition_term_events()
                 {
                     return;
                 }
@@ -2683,6 +2693,7 @@ impl VisionaryApp {
                 .to_motion_module_set_helper_calculation_events(),
             self.state.script.to_motion_module_set_rate_partial_events(),
             self.state.script.to_work_flag_events(),
+            self.state.script.to_work_transition_term_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
@@ -2780,6 +2791,7 @@ impl VisionaryApp {
                         .to_motion_module_set_helper_calculation_events(),
                     &self.state.script.to_motion_module_set_rate_partial_events(),
                     &self.state.script.to_work_flag_events(),
+                    &self.state.script.to_work_transition_term_events(),
                 ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -3119,6 +3131,29 @@ impl VisionaryApp {
                             report.changed += work_flag_report.changed;
                             report.files.extend(work_flag_report.files);
                             report.skipped.extend(work_flag_report.skipped);
+                            Ok((updated, report))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            outcome
+        };
+        let outcome = if buffer.is_game_script() {
+            match outcome {
+                Ok((updated, mut report)) => {
+                    match crate::acmd_src::rewrite_work_transition_terms(
+                        &updated,
+                        &label,
+                        &self.state.work_transition_term_pristine,
+                        &self.state.script.to_work_transition_term_events(),
+                    ) {
+                        Ok((updated, transition_term_report)) => {
+                            report.changed += transition_term_report.changed;
+                            report.files.extend(transition_term_report.files);
+                            report.skipped.extend(transition_term_report.skipped);
                             Ok((updated, report))
                         }
                         Err(error) => Err(error),
@@ -3515,6 +3550,21 @@ impl VisionaryApp {
                 Err(e) => notes.push(e.to_string()),
             }
             refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_work_transition_terms(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.work_transition_term_pristine,
+                &self.state.script.to_work_transition_term_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
             match crate::acmd_src::sync_kinetic_clear_speed_all(
                 &index,
                 &fighter,
@@ -3660,6 +3710,7 @@ impl VisionaryApp {
             || state.script.to_kinetic_energy_events() != state.kinetic_energy_pristine
             || state.script.to_kinetic_add_speed_events() != state.kinetic_add_speed_pristine
             || state.script.to_work_flag_events() != state.work_flag_pristine
+            || state.script.to_work_transition_term_events() != state.work_transition_term_pristine
             || state.script.to_kinetic_clear_speed_all_events()
                 != state.kinetic_clear_speed_all_pristine
             || state
@@ -3966,6 +4017,7 @@ impl VisionaryApp {
                     self.push_kinetic_energy_rules();
                     self.push_kinetic_add_speed_rules();
                     self.push_work_flag_rules();
+                    self.push_work_transition_term_rules();
                     self.push_kinetic_clear_speed_all_rules();
                     self.push_kinetic_set_consider_ground_friction_rules();
 
@@ -4001,6 +4053,7 @@ impl VisionaryApp {
                                     .to_motion_module_set_helper_calculation_events(),
                                 &self.state.script.to_motion_module_set_rate_partial_events(),
                                 &self.state.script.to_work_flag_events(),
+                                &self.state.script.to_work_transition_term_events(),
                             ));
 
                     self.jump_to_earliest_active_frame();
@@ -4048,6 +4101,7 @@ impl VisionaryApp {
                 self.state.kinetic_energy_pristine = Vec::new();
                 self.state.kinetic_add_speed_pristine = Vec::new();
                 self.state.work_flag_pristine = Vec::new();
+                self.state.work_transition_term_pristine = Vec::new();
                 self.state.kinetic_clear_speed_all_pristine = Vec::new();
                 self.state.kinetic_set_consider_ground_friction_pristine = Vec::new();
                 self.state.loaded_body = String::new();
@@ -4941,6 +4995,8 @@ impl VisionaryApp {
             || self.state.script.to_kinetic_add_speed_events()
                 != self.state.kinetic_add_speed_pristine
             || self.state.script.to_work_flag_events() != self.state.work_flag_pristine
+            || self.state.script.to_work_transition_term_events()
+                != self.state.work_transition_term_pristine
             || self.state.script.to_kinetic_clear_speed_all_events()
                 != self.state.kinetic_clear_speed_all_pristine
             || self
@@ -5490,6 +5546,7 @@ impl VisionaryApp {
                             .to_motion_module_set_helper_calculation_events(),
                         &self.state.script.to_motion_module_set_rate_partial_events(),
                         &self.state.script.to_work_flag_events(),
+                        &self.state.script.to_work_transition_term_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -5875,6 +5932,7 @@ impl VisionaryApp {
             self.draw_kinetic_set_consider_ground_friction_section(ui);
             self.draw_set_air_section(ui);
             self.draw_work_flag_section(ui);
+            self.draw_work_transition_term_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
             self.draw_sound_section(ui);
@@ -6591,6 +6649,7 @@ impl VisionaryApp {
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
+                            &self.state.script.to_work_transition_term_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "REVERSE_LR edit staged — export or sync it into the linked source project."
@@ -7507,6 +7566,7 @@ impl VisionaryApp {
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
+                            &self.state.script.to_work_transition_term_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "KineticModule::clear_speed_all edit staged — export or sync it into the linked source project."
@@ -7690,6 +7750,7 @@ impl VisionaryApp {
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
+                            &self.state.script.to_work_transition_term_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "set_consider_ground_friction edit staged — export or sync it into the linked source project."
@@ -7764,6 +7825,71 @@ impl VisionaryApp {
                     "WorkModule flag edit staged — export or sync it into the linked source project."
                         .into();
                 self.push_work_flag_rules();
+            }
+        }
+    }
+
+    /// Editable authored transition-term tokens from the measured direct WorkModule family.
+    ///
+    /// The source token stays visible because named transition constants are not decoded into a
+    /// portable label table. Numeric live replacement is available only when a capture proves
+    /// the term value; changing the operation or frame remains an export/source concern.
+    fn draw_work_transition_term_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_work_transition_term_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement / Status");
+            ui.colored_label(
+                egui::Color32::from_rgb(205, 170, 235),
+                "transition term",
+            );
+        })
+        .response
+        .on_hover_text(
+            "Enables or unables one status transition term. The measured direct WorkModule operation and authored term token are preserved; numeric live replacement requires a matching capture.",
+        );
+
+        let mut edit: Option<(usize, String)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut transition_term = event.call.transition_term.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(205, 170, 235)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!(
+                        "f{} {}",
+                        event.frame,
+                        event.call.func().trim_start_matches("WorkModule::")
+                    ));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut transition_term)
+                            .desired_width(300.0)
+                            .hint_text("*FIGHTER_STATUS_TRANSITION_TERM_ID_…"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed && !transition_term.trim().is_empty() {
+                edit = Some((event.site, transition_term));
+            }
+        }
+
+        if let Some((site, transition_term)) = edit {
+            if let Some(call) = self.state.script.work_transition_term_stmt_mut(site) {
+                call.transition_term = transition_term;
+                self.state.status = "WorkModule transition-term edit staged — export or sync it into the linked source project.".into();
+                self.push_work_transition_term_rules();
             }
         }
     }
@@ -7868,6 +7994,7 @@ impl VisionaryApp {
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
+                            &self.state.script.to_work_transition_term_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "SET_AIR edit staged — export or sync it into the linked source project."
@@ -9710,6 +9837,7 @@ impl VisionaryApp {
         let source_kinetic_energy = self.state.script.to_kinetic_energy_events();
         let source_kinetic_add_speed = self.state.script.to_kinetic_add_speed_events();
         let source_work_flags = self.state.script.to_work_flag_events();
+        let source_work_transition_terms = self.state.script.to_work_transition_term_events();
         let source_kinetic_clear_speed_all = self.state.script.to_kinetic_clear_speed_all_events();
         let source_kinetic_set_consider_ground_friction = self
             .state
@@ -9739,6 +9867,7 @@ impl VisionaryApp {
             self.state.kinetic_energy_pristine = source_kinetic_energy;
             self.state.kinetic_add_speed_pristine = source_kinetic_add_speed;
             self.state.work_flag_pristine = source_work_flags;
+            self.state.work_transition_term_pristine = source_work_transition_terms;
             self.state.kinetic_clear_speed_all_pristine = source_kinetic_clear_speed_all;
             self.state.kinetic_set_consider_ground_friction_pristine =
                 source_kinetic_set_consider_ground_friction;
@@ -10291,6 +10420,7 @@ impl VisionaryApp {
         self.push_kinetic_energy_rules();
         self.push_kinetic_add_speed_rules();
         self.push_work_flag_rules();
+        self.push_work_transition_term_rules();
         self.push_kinetic_clear_speed_all_rules();
         self.push_kinetic_set_consider_ground_friction_rules();
         let pending_hitbox_live = self.push_all_saved_hitbox_rules();
@@ -10919,6 +11049,7 @@ impl VisionaryApp {
         let n_kinetic_energy = hurt.to_kinetic_energy_events().len();
         let n_kinetic_add_speed = hurt.to_kinetic_add_speed_events().len();
         let n_work_flag = hurt.to_work_flag_events().len();
+        let n_work_transition_term = hurt.to_work_transition_term_events().len();
         let n_kinetic_clear_speed_all = hurt.to_kinetic_clear_speed_all_events().len();
         let n_kinetic_set_consider_ground_friction =
             hurt.to_kinetic_set_consider_ground_friction_events().len();
@@ -10947,6 +11078,7 @@ impl VisionaryApp {
             n_kinetic_energy,
             n_kinetic_add_speed,
             n_work_flag,
+            n_work_transition_term,
             n_kinetic_clear_speed_all,
             n_kinetic_set_consider_ground_friction,
             n_motion_module_set_rate,
@@ -11011,6 +11143,7 @@ impl VisionaryApp {
         self.push_kinetic_energy_rules();
         self.push_kinetic_add_speed_rules();
         self.push_work_flag_rules();
+        self.push_work_transition_term_rules();
         self.push_kinetic_clear_speed_all_rules();
         self.push_kinetic_set_consider_ground_friction_rules();
         self.state.total_frames =
@@ -11045,6 +11178,7 @@ impl VisionaryApp {
                         .to_motion_module_set_helper_calculation_events(),
                     &self.state.script.to_motion_module_set_rate_partial_events(),
                     &self.state.script.to_work_flag_events(),
+                    &self.state.script.to_work_transition_term_events(),
                 ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
@@ -12155,6 +12289,20 @@ impl VisionaryApp {
                         },
                         flag: line.args.first()?.to_source_arg()?,
                     }))
+                }
+                "WorkModule::enable_transition_term" | "WorkModule::unable_transition_term"
+                    if line.args.len() == 1 =>
+                {
+                    Some(ExcuteStmt::WorkTransitionTerm(
+                        crate::data::WorkTransitionTermCall {
+                            action: if line.func == "WorkModule::enable_transition_term" {
+                                crate::data::WorkTransitionTermAction::Enable
+                            } else {
+                                crate::data::WorkTransitionTermAction::Unable
+                            },
+                            transition_term: line.args.first()?.to_source_arg()?,
+                        },
+                    ))
                 }
                 "SET_AIR" if line.args.is_empty() => Some(ExcuteStmt::SetAir),
                 "REVERSE_LR" if line.args.is_empty() => Some(ExcuteStmt::ReverseLr),
@@ -14728,6 +14876,144 @@ impl VisionaryApp {
         }
     }
 
+    fn work_transition_term_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::WorkTransitionTermEvent],
+        index: usize,
+        event: &crate::data::WorkTransitionTermEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame && other.call.action == event.call.action)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == event.call.func()
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 1)
+            .nth(occurrence)
+    }
+
+    fn work_transition_term_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::WorkTransitionTermEvent],
+        shown: &[crate::data::WorkTransitionTermEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame || was.call.action != now.call.action {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) =
+                Self::work_transition_term_capture_for(captures, pristine, index, was)
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(value) = donor.args.first().and_then(|arg| arg.as_i64()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(replacement) = now.call.transition_term.trim().parse::<i64>().ok() else {
+                // Named source constants remain source/export-owned until a capture or known
+                // label table proves their runtime integer.
+                unrepresentable += 1;
+                continue;
+            };
+            let duplicate_key = pristine
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index
+                        && other.frame == was.frame
+                        && other.call.action == was.call.action
+                })
+                .filter_map(|(other_index, other)| {
+                    let donor = Self::work_transition_term_capture_for(
+                        captures,
+                        pristine,
+                        other_index,
+                        other,
+                    )?;
+                    donor.args.first()?.as_i64()
+                })
+                .filter(|captured| *captured == value)
+                .count();
+            if duplicate_key != 0 {
+                // The direct hook's identity is operation + numeric transition term + frame.
+                // Same-frame duplicates with the same identity cannot be separated by sparse
+                // rules.
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_WORK_TRANSITION_TERM,
+                hitbox_id: Some(crate::game_link::numeric_point_key(
+                    was.call.func(),
+                    &[value as f32],
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    work_transition_term: Some(replacement),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(was.call.func().into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    fn push_work_transition_term_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::work_transition_term_rules_for(
+            motion,
+            &captures,
+            &self.state.work_transition_term_pristine,
+            &self.state.script.to_work_transition_term_events(),
+        );
+        let key = format!("{mv_key}#work_transition_term");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "WorkModule transition-term edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique same-frame operation/term key"
+            );
+        }
+    }
+
     fn set_air_rules_for(
         motion: u64,
         pristine: &[crate::data::SetAirEvent],
@@ -15518,6 +15804,7 @@ impl VisionaryApp {
             kinetic_ground_friction: None,
             kinetic_ground_friction_energy: None,
             work_flag: None,
+            work_transition_term: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -19088,6 +19375,7 @@ impl VisionaryApp {
                     .to_motion_module_set_helper_calculation_events(),
                 &self.state.script.to_motion_module_set_rate_partial_events(),
                 &self.state.script.to_work_flag_events(),
+                &self.state.script.to_work_transition_term_events(),
             ));
         if total == 0 {
             return;
@@ -19147,6 +19435,7 @@ impl VisionaryApp {
         let motion_module_set_rate_partial =
             self.state.script.to_motion_module_set_rate_partial_events();
         let work_flags = self.state.script.to_work_flag_events();
+        let work_transition_terms = self.state.script.to_work_transition_term_events();
         let timeline_height = timeline_content_height_with_change_kinetic(
             self.state.hitboxes.len(),
             n_fx,
@@ -19170,6 +19459,7 @@ impl VisionaryApp {
             motion_module_set_helper_calculation.len(),
             motion_module_set_rate_partial.len(),
             work_flags.len(),
+            work_transition_terms.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
@@ -19966,6 +20256,36 @@ impl VisionaryApp {
                         egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
                         egui::Align2::LEFT_CENTER,
                         format!("{} {}", event.call.func(), event.call.flag),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let work_transition_term_band_top = work_flag_band_top
+                + if work_flags.is_empty() {
+                    0.0
+                } else {
+                    work_flags.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in work_transition_terms.iter().enumerate() {
+                let y_top = work_transition_term_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(205, 170, 235);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{} {}", event.call.func(), event.call.transition_term),
                         egui::FontId::monospace(8.0),
                         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
                     );
@@ -21646,6 +21966,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::KineticEnergy(_)
                 | ExcuteStmt::KineticAddSpeed(_)
                 | ExcuteStmt::WorkFlag(_)
+                | ExcuteStmt::WorkTransitionTerm(_)
                 | ExcuteStmt::KineticClearSpeedAll
                 | ExcuteStmt::KineticSetConsiderGroundFriction(_)
                 | ExcuteStmt::Raw(_) => true,
@@ -22229,6 +22550,7 @@ fn nothing_to_load_with_kinetics(
     kinetic_energy: usize,
     kinetic_add_speed: usize,
     work_flag: usize,
+    work_transition_term: usize,
     kinetic_clear_speed_all: usize,
     kinetic_set_consider_ground_friction: usize,
     motion_module_set_rate: usize,
@@ -22253,6 +22575,7 @@ fn nothing_to_load_with_kinetics(
         && kinetic_energy == 0
         && kinetic_add_speed == 0
         && work_flag == 0
+        && work_transition_term == 0
         && kinetic_clear_speed_all == 0
         && kinetic_set_consider_ground_friction == 0
         && motion_module_set_rate == 0
@@ -22262,7 +22585,7 @@ fn nothing_to_load_with_kinetics(
         return Some(
             "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
              direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
-             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, WorkModule flag, clear-speed-all, ground-friction, MotionModule::set_rate, MotionModule::set_helper_calculation or MotionModule::set_rate_partial lines for this move yet."
+             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, WorkModule flag, WorkModule transition-term, clear-speed-all, ground-friction, MotionModule::set_rate, MotionModule::set_helper_calculation or MotionModule::set_rate_partial lines for this move yet."
                 .into(),
         );
     }
@@ -22301,6 +22624,7 @@ fn nothing_to_load(
         correct,
         ft_catch_stop,
         ft_start_adjust_motion_frame,
+        0,
         0,
         0,
         0,
@@ -26069,6 +26393,107 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_work_module_transition_terms_become_editable_game_statements() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 0.0,
+                func: "WorkModule::enable_transition_term".into(),
+                args: vec![A::Int(7)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "WorkModule::unable_transition_term".into(),
+                args: vec![A::Int(8)],
+                run: 1,
+            },
+        ];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        assert_eq!(
+            script.to_work_transition_term_events(),
+            vec![
+                crate::data::WorkTransitionTermEvent {
+                    frame: 1,
+                    call: crate::data::WorkTransitionTermCall {
+                        action: crate::data::WorkTransitionTermAction::Enable,
+                        transition_term: "7".into(),
+                    },
+                    site: 0,
+                },
+                crate::data::WorkTransitionTermEvent {
+                    frame: 4,
+                    call: crate::data::WorkTransitionTermCall {
+                        action: crate::data::WorkTransitionTermAction::Unable,
+                        transition_term: "8".into(),
+                    },
+                    site: 1,
+                },
+            ]
+        );
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_air_n");
+        assert!(exported.contains("WorkModule::enable_transition_term(agent.module_accessor, 7);"));
+        assert!(exported.contains("WorkModule::unable_transition_term(agent.module_accessor, 8);"));
+    }
+
+    #[test]
+    fn work_module_transition_term_live_rules_key_the_pristine_numeric_term_and_operation() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 0.0,
+            func: "WorkModule::enable_transition_term".into(),
+            args: vec![A::Int(7)],
+            run: 1,
+        }];
+        let baseline = crate::acmd::parse_acmd_script(
+            r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        WorkModule::enable_transition_term(agent.module_accessor, 7);
+    }
+}
+"#,
+        )
+        .to_work_transition_term_events();
+        let mut edited = baseline.clone();
+        edited[0].call.transition_term = "9".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::work_transition_term_rules_for(motion, &captures, &baseline, &edited);
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one WorkModule transition-term rule, got {rules:?}");
+        };
+        assert_eq!(rule.category, crate::game_link::CAT_WORK_TRANSITION_TERM);
+        assert_eq!(
+            rule.hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                "WorkModule::enable_transition_term",
+                &[7.0]
+            ))
+        );
+        assert_eq!(
+            rule.func.as_deref(),
+            Some("WorkModule::enable_transition_term")
+        );
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().work_transition_term,
+            Some(9)
+        );
+
+        edited[0].call.transition_term = "*FIGHTER_STATUS_TRANSITION_TERM_ID_DASH_TO_RUN".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::work_transition_term_rules_for(motion, &captures, &baseline, &edited);
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
     fn set_air_live_rules_suppress_removed_and_inject_added_points() {
         let motion = hash40::hash40("attack_air_n").0;
         let pristine = vec![
@@ -28021,25 +28446,29 @@ mod live_effect_capture_tests {
             );
         }
         let direct_kinetic = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         );
         assert!((direct_kinetic - none - band).abs() < 0.01);
         let motion_module_set_rate = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0,
         );
         assert!((motion_module_set_rate - none - band).abs() < 0.01);
         let motion_module_set_helper_calculation = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
         );
         assert!((motion_module_set_helper_calculation - none - band).abs() < 0.01);
         let motion_module_set_rate_partial = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0,
         );
         assert!((motion_module_set_rate_partial - none - band).abs() < 0.01);
         let work_flag = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
         );
         assert!((work_flag - none - (4.0 + timeline_thin_row())).abs() < 0.01);
+        let work_transition_term = timeline_content_height_with_change_kinetic(
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        );
+        assert!((work_transition_term - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         // And they stack rather than sharing space.
         let all = timeline_content_height(2, 3, 3, 3, 3, 0, 0, 0, 0, 3, 3, 3, 3);
         assert!((all - none - 8.0 * band).abs() < 0.01, "{all} vs {none}");
@@ -28363,6 +28792,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &[],
+                &[],
             ),
             127
         );
@@ -28392,6 +28822,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &motion_module_set_rate,
+                &[],
                 &[],
                 &[],
                 &[],
@@ -28428,6 +28859,7 @@ mod live_effect_capture_tests {
                 &motion_module_set_helper_calculation,
                 &[],
                 &[],
+                &[],
             ),
             137
         );
@@ -28462,6 +28894,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &motion_module_set_rate_partial,
+                &[],
                 &[],
             ),
             149

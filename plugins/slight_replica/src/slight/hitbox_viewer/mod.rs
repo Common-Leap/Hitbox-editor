@@ -272,6 +272,10 @@ pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = 31;
 /// Direct `WorkModule::on_flag` / `off_flag` point. Must equal the editor's wire category.
 pub const CAT_WORK_FLAG: u8 = 32;
 
+/// Direct `WorkModule::enable_transition_term` / `unable_transition_term` point. Must equal the
+/// editor's wire category.
+pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -954,6 +958,8 @@ pub struct HbOverrides {
     pub motion_module_rate_partial: Option<f32>,
     /// Replacement numeric flag for direct `WorkModule::on_flag` / `off_flag` calls.
     pub work_flag: Option<i64>,
+    /// Replacement numeric transition term for direct WorkModule transition-term calls.
+    pub work_transition_term: Option<i64>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     pub clr_speed_kinetic_kind: Option<i64>,
     /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
@@ -1086,6 +1092,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     }
                     CAT_MOTION_MODULE_SET_RATE_PARTIAL => "motion_module_set_rate_partial",
                     CAT_WORK_FLAG => "work_flag",
+                    CAT_WORK_TRANSITION_TERM => "work_transition_term",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1627,6 +1634,58 @@ work_flag_hook!(
     hook_work_module_off_flag,
     smash::app::lua_bind::WorkModule::off_flag,
     "WorkModule::off_flag"
+);
+
+/// Capture and sparsely override the verified direct WorkModule transition-term operations.
+///
+/// The operation name remains the rule discriminator; the numeric transition term is the
+/// runtime identity while the editor retains the authored source token for export and sync.
+macro_rules! work_transition_term_hook {
+    ($hook_name:ident, $target:path, $func:literal) => {
+        #[skyline::hook(replace = $target)]
+        unsafe fn $hook_name(
+            boma: *mut smash::app::BattleObjectModuleAccessor,
+            transition_term: i32,
+        ) {
+            record_for_boma(boma, $func, &[LuaArg::Int(transition_term as i64)]);
+            if any_rules() && !boma.is_null() {
+                let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                let key = numeric_point_key($func, &[transition_term as f32]);
+                if let Some((suppress, overrides)) = action_for_func(
+                    CAT_WORK_TRANSITION_TERM,
+                    motion,
+                    key,
+                    frame,
+                    $func,
+                ) {
+                    if suppress {
+                        return;
+                    }
+                    if let Some(replacement) =
+                        overrides.and_then(|item| item.work_transition_term)
+                    {
+                        if replacement as i32 != transition_term {
+                            original!()(boma, replacement as i32);
+                            return;
+                        }
+                    }
+                }
+            }
+            original!()(boma, transition_term)
+        }
+    };
+}
+
+work_transition_term_hook!(
+    hook_work_module_enable_transition_term,
+    smash::app::lua_bind::WorkModule::enable_transition_term,
+    "WorkModule::enable_transition_term"
+);
+work_transition_term_hook!(
+    hook_work_module_unable_transition_term,
+    smash::app::lua_bind::WorkModule::unable_transition_term,
+    "WorkModule::unable_transition_term"
 );
 
 /// Capture and sparsely override the verified `SET_SPEED_EX` shape.
@@ -3145,7 +3204,9 @@ pub fn install() {
         hook_kinetic_unable_energy,
         hook_kinetic_add_speed,
         hook_work_module_on_flag,
-        hook_work_module_off_flag
+        hook_work_module_off_flag,
+        hook_work_module_enable_transition_term,
+        hook_work_module_unable_transition_term
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

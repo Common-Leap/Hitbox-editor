@@ -2360,8 +2360,9 @@ Unmeasured `sv_kinetic_energy` and status-module kinetic calls remain preserved 
 direct `KineticModule::change_kinetic` call measured in the local `game_` corpus is covered by E1h below.
 `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, `SET_SPEED_EX`, direct `KineticModule::add_speed`,
 the measured `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and
-`unable_energy` toggles, the argument-less `KineticModule::clear_speed_all` point, and the
-direct `KineticModule::set_consider_ground_friction` point now have editable slices
+`unable_energy` toggles, the argument-less `KineticModule::clear_speed_all` point, the direct
+`KineticModule::set_consider_ground_friction` point, and the direct WorkModule transition-term
+toggles now have editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
@@ -2778,6 +2779,24 @@ The full locked desktop suite passes with 632 tests plus one existing ignored re
 all six deployment tests, strict Clippy, format/diff checks, the locked release build, and the
 standalone Skyline release build also pass. No emulator, game, or UI automation was run, so live
 hook behavior remains explicitly unverified.
+
+#### [x] E1t — direct `WorkModule::enable_transition_term` / `unable_transition_term` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains direct transition-term calls in both its standard
+`agent.module_accessor` form and HDR `boma` form. The pinned `skyline-smash` binding verifies the
+two-argument direct operations `(BattleObjectModuleAccessor, i32) -> ()`; the measured family is
+limited to one numeric or dereferenced transition-term token after the receiver. Calls with a
+different receiver, arity, or expression remain raw rather than being guessed into the typed lane.
+
+The five surfaces are covered for that exact shape: typed parser/IR and source-site walk, editable
+Movement / Status panel and timeline lane, capture reconstruction, category-33 sparse live rules and
+matching Skyline hooks, generated ACMD export, project persistence, and value-only source write-back.
+The editor preserves the authored term token, while a live replacement requires a numeric capture
+of the original term and a numeric replacement. Operation changes, retiming, receiver or structure
+changes, duplicate same-frame identities, malformed calls, and symbolic-only live replacements
+remain explicitly source/export-only. No emulator, game, or UI automation was run, so live hook
+behavior remains explicitly unverified. Other WorkModule status calls, including getter-driven
+conditional logic, remain open under E1.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

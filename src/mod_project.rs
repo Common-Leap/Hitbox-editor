@@ -598,6 +598,7 @@ mod tests {
     fn kinetic_acmd_points_survive_project_round_trip() {
         use crate::data::{
             AcmdScript, AcmdStmt, ClrSpeedCall, ExcuteStmt, WorkFlagAction, WorkFlagCall,
+            WorkTransitionTermAction, WorkTransitionTermCall,
         };
 
         let script = AcmdScript {
@@ -611,6 +612,10 @@ mod tests {
                     ExcuteStmt::WorkFlag(WorkFlagCall {
                         action: WorkFlagAction::On,
                         flag: "*FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD".into(),
+                    }),
+                    ExcuteStmt::WorkTransitionTerm(WorkTransitionTermCall {
+                        action: WorkTransitionTermAction::Enable,
+                        transition_term: "*FIGHTER_STATUS_TRANSITION_TERM_ID_DASH_TO_RUN".into(),
                     }),
                 ]),
             ],
@@ -640,6 +645,10 @@ mod tests {
         assert_eq!(loaded.to_clr_speed_events(), script.to_clr_speed_events());
         assert_eq!(loaded.to_set_air_events(), script.to_set_air_events());
         assert_eq!(loaded.to_work_flag_events(), script.to_work_flag_events());
+        assert_eq!(
+            loaded.to_work_transition_term_events(),
+            script.to_work_transition_term_events()
+        );
     }
 
     /// The plugin hardcodes this prefix (`acmd_hooks::EDIT_CLONE_PREFIX`) because it cannot

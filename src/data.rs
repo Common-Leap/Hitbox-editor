@@ -1344,6 +1344,10 @@ pub enum ExcuteStmt {
     /// remains source-owned text because named work constants are not decoded into a portable
     /// label table; the live hook keys the sparse rule by its resolved numeric flag.
     WorkFlag(WorkFlagCall),
+    /// `WorkModule::enable_transition_term` / `unable_transition_term` — toggle one status
+    /// transition term. Only the measured direct receiver and one-token shape is typed; the
+    /// authored transition token remains source-owned for export and source sync.
+    WorkTransitionTerm(WorkTransitionTermCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1628,6 +1632,36 @@ impl WorkFlagCall {
     }
 }
 
+/// Which direct WorkModule transition-term operation a source call performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WorkTransitionTermAction {
+    Enable,
+    Unable,
+}
+
+impl WorkTransitionTermAction {
+    pub const fn func(self) -> &'static str {
+        match self {
+            Self::Enable => "WorkModule::enable_transition_term",
+            Self::Unable => "WorkModule::unable_transition_term",
+        }
+    }
+}
+
+/// A parsed direct `WorkModule::{enable,unable}_transition_term(receiver, transition_term)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkTransitionTermCall {
+    pub action: WorkTransitionTermAction,
+    /// Authored transition-term token, usually a dereferenced lua constant.
+    pub transition_term: String,
+}
+
+impl WorkTransitionTermCall {
+    pub fn func(&self) -> &'static str {
+        self.action.func()
+    }
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1794,6 +1828,15 @@ pub struct KineticAddSpeedEvent {
 pub struct WorkFlagEvent {
     pub frame: u32,
     pub call: WorkFlagCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct WorkModule transition-term point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkTransitionTermEvent {
+    pub frame: u32,
+    pub call: WorkTransitionTermCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -2238,6 +2281,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.work_flags
+    }
+
+    /// Flatten direct WorkModule transition-term calls into authored-token point events.
+    pub fn to_work_transition_term_events(&self) -> Vec<WorkTransitionTermEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.work_transition_terms
     }
 }
 
@@ -3026,6 +3077,50 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The direct WorkModule transition-term call an event site's ordinal refers to.
+    pub fn work_transition_term_stmt_mut(
+        &mut self,
+        site: usize,
+    ) -> Option<&mut WorkTransitionTermCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut WorkTransitionTermCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::WorkTransitionTerm(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::WorkTransitionTerm(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove a `SET_AIR` source statement at its source ordinal.
     pub fn remove_set_air(&mut self, site: usize) -> bool {
         fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
@@ -3380,6 +3475,7 @@ struct WalkAccum {
     kinetic_energies: Vec<KineticEnergyEvent>,
     kinetic_add_speeds: Vec<KineticAddSpeedEvent>,
     work_flags: Vec<WorkFlagEvent>,
+    work_transition_terms: Vec<WorkTransitionTermEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -3438,6 +3534,9 @@ struct WalkAccum {
     /// Site for the next direct WorkModule flag call, independent of every other point event
     /// family.
     next_work_flag_site: usize,
+    /// Site for the next direct WorkModule transition-term call, independent of every other
+    /// point event family.
+    next_work_transition_term_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -3893,6 +3992,27 @@ fn count_work_flag_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// Direct WorkModule transition-term calls in a subtree, counted in source order for loop/site
+/// resolution.
+fn count_work_transition_term_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::WorkTransitionTerm(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::WorkTransitionTerm(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_work_transition_term_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -4092,6 +4212,12 @@ impl WalkAccum {
     fn take_work_flag_site(&mut self) -> usize {
         let site = self.next_work_flag_site;
         self.next_work_flag_site += 1;
+        site
+    }
+
+    fn take_work_transition_term_site(&mut self) -> usize {
+        let site = self.next_work_transition_term_site;
+        self.next_work_transition_term_site += 1;
         site
     }
 
@@ -4430,6 +4556,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::WorkTransitionTerm(call) => {
+            let site = hurt.take_work_transition_term_site();
+            hurt.work_transition_terms.push(WorkTransitionTermEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -4488,6 +4622,7 @@ fn eval_stmts(
                 let kinetic_energy_site_at_entry = hurt.next_kinetic_energy_site;
                 let kinetic_add_speed_site_at_entry = hurt.next_kinetic_add_speed_site;
                 let work_flag_site_at_entry = hurt.next_work_flag_site;
+                let work_transition_term_site_at_entry = hurt.next_work_transition_term_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -4515,6 +4650,7 @@ fn eval_stmts(
                     hurt.next_kinetic_energy_site = kinetic_energy_site_at_entry;
                     hurt.next_kinetic_add_speed_site = kinetic_add_speed_site_at_entry;
                     hurt.next_work_flag_site = work_flag_site_at_entry;
+                    hurt.next_work_transition_term_site = work_transition_term_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -4554,6 +4690,8 @@ fn eval_stmts(
                 hurt.next_kinetic_add_speed_site =
                     kinetic_add_speed_site_at_entry + count_kinetic_add_speed_stmts(body);
                 hurt.next_work_flag_site = work_flag_site_at_entry + count_work_flag_stmts(body);
+                hurt.next_work_transition_term_site =
+                    work_transition_term_site_at_entry + count_work_transition_term_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -4796,6 +4934,9 @@ pub struct AppState {
     pub kinetic_add_speed_pristine: Vec<KineticAddSpeedEvent>,
     /// Direct WorkModule flag point events as loaded, for sparse live rules and source syncing.
     pub work_flag_pristine: Vec<WorkFlagEvent>,
+    /// Direct WorkModule transition-term point events as loaded, for sparse live rules and source
+    /// syncing.
+    pub work_transition_term_pristine: Vec<WorkTransitionTermEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -4902,6 +5043,7 @@ impl Default for AppState {
             kinetic_energy_pristine: Vec::new(),
             kinetic_add_speed_pristine: Vec::new(),
             work_flag_pristine: Vec::new(),
+            work_transition_term_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -4949,6 +5091,7 @@ impl AppState {
         self.kinetic_energy_pristine = script.to_kinetic_energy_events();
         self.kinetic_add_speed_pristine = script.to_kinetic_add_speed_events();
         self.work_flag_pristine = script.to_work_flag_events();
+        self.work_transition_term_pristine = script.to_work_transition_term_events();
         self.script = script;
     }
 }

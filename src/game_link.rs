@@ -498,6 +498,10 @@ pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = 31;
 /// Wire category for direct `WorkModule::on_flag` / `off_flag` point overrides.
 pub const CAT_WORK_FLAG: u8 = 32;
 
+/// Wire category for direct `WorkModule::enable_transition_term` /
+/// `unable_transition_term` point overrides.
+pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -663,6 +667,9 @@ pub struct HbOverridesWire {
     /// Replacement numeric flag for direct `WorkModule::on_flag` / `off_flag` calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_flag: Option<i64>,
+    /// Replacement numeric transition term for direct WorkModule transition-term calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_transition_term: Option<i64>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_speed_kinetic_kind: Option<i64>,
@@ -2890,12 +2897,16 @@ mod tests {
             "pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = {CAT_MOTION_MODULE_SET_RATE_PARTIAL};"
         )));
         assert!(module.contains(&format!("pub const CAT_WORK_FLAG: u8 = {CAT_WORK_FLAG};")));
+        assert!(module.contains(&format!(
+            "pub const CAT_WORK_TRANSITION_TERM: u8 = {CAT_WORK_TRANSITION_TERM};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
         assert!(module.contains("pub kinetic_ground_friction: Option<bool>"));
         assert!(module.contains("pub kinetic_ground_friction_energy: Option<i64>"));
         assert!(module.contains("pub work_flag: Option<i64>"));
+        assert!(module.contains("pub work_transition_term: Option<i64>"));
         assert!(module.contains("pub motion_module_rate: Option<f32>"));
         assert!(module.contains("pub motion_module_helper_calculation: Option<bool>"));
         assert!(module.contains("pub motion_module_rate_partial: Option<f32>"));
@@ -2918,6 +2929,10 @@ mod tests {
         assert!(module.contains("smash::app::lua_bind::WorkModule::off_flag,"));
         assert!(module.contains("hook_work_module_on_flag"));
         assert!(module.contains("hook_work_module_off_flag"));
+        assert!(module.contains("smash::app::lua_bind::WorkModule::enable_transition_term,"));
+        assert!(module.contains("smash::app::lua_bind::WorkModule::unable_transition_term,"));
+        assert!(module.contains("hook_work_module_enable_transition_term"));
+        assert!(module.contains("hook_work_module_unable_transition_term"));
         assert!(rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_rate"));
         assert!(rate_hooks.contains("hook_motion_module_set_rate"));
         assert!(rate_hooks
@@ -2960,6 +2975,7 @@ mod tests {
                 CAT_MOTION_MODULE_SET_HELPER_CALCULATION,
             ),
             (CAT_WORK_FLAG, CAT_MOTION_MODULE_SET_RATE_PARTIAL),
+            (CAT_WORK_TRANSITION_TERM, CAT_WORK_FLAG),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -3081,6 +3097,40 @@ mod tests {
         );
         assert_eq!(rules[4]["func"].as_str(), Some("WorkModule::on_flag"));
         assert_eq!(rules[4]["overrides"]["work_flag"].as_i64(), Some(9));
+    }
+
+    #[test]
+    fn outbound_work_transition_term_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let key = numeric_point_key("WorkModule::enable_transition_term", &[7.0]);
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_WORK_TRANSITION_TERM,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(13.5),
+            frame_end: Some(13.5),
+            overrides: Some(HbOverridesWire {
+                work_transition_term: Some(9),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("WorkModule::enable_transition_term".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(
+            rule["category"].as_u64(),
+            Some(CAT_WORK_TRANSITION_TERM as u64)
+        );
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(
+            rule["func"].as_str(),
+            Some("WorkModule::enable_transition_term")
+        );
+        assert_eq!(rule["overrides"]["work_transition_term"].as_i64(), Some(9));
     }
 
     #[test]

@@ -1234,6 +1234,12 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
         ExcuteStmt::WorkFlag(call) if call.flag.trim().is_empty() => {
             report.blocker(subject, "WorkModule flag call has an empty flag token");
         }
+        ExcuteStmt::WorkTransitionTerm(call) if call.transition_term.trim().is_empty() => {
+            report.blocker(
+                subject,
+                "WorkModule transition-term call has an empty transition term token",
+            );
+        }
         _ => {}
     }
 }
