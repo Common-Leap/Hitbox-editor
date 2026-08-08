@@ -389,6 +389,9 @@ pub const CAT_REVERSE_LR: u8 = 11;
 /// Wire category for the verified three-argument `SET_SPEED_EX` velocity point.
 pub const CAT_SPEED_EX: u8 = 13;
 
+/// Wire category for the verified `(x, y)` `SET_SPEED` velocity point.
+pub const CAT_SPEED: u8 = 16;
+
 /// Wire category for the verified `ADD_SPEED_NO_LIMIT` x/y velocity point.
 pub const CAT_ADD_SPEED_NO_LIMIT: u8 = 14;
 
@@ -2505,7 +2508,7 @@ mod tests {
                 "missing {func} hook"
             );
         }
-        for other in [0, CAT_SOUND, CAT_MOTION_RATE, CAT_SPEED_EX] {
+        for other in [0, CAT_SOUND, CAT_MOTION_RATE, CAT_SPEED_EX, CAT_SPEED] {
             assert_ne!(
                 CAT_EXPRESSION, other,
                 "CAT_EXPRESSION collides with another family"
@@ -2535,6 +2538,7 @@ mod tests {
             CAT_MOTION_RATE,
             CAT_EXPRESSION,
             CAT_SPEED_EX,
+            CAT_SPEED,
         ] {
             assert_ne!(
                 CAT_REVERSE_LR, other,
@@ -2579,10 +2583,16 @@ mod tests {
         assert!(module.contains("hook_add_speed_no_limit"));
         assert!(module.contains("hook_correct"));
         assert!(module.contains("pub correct_kind: Option<i64>"));
+        assert!(module.contains(&format!("pub const CAT_SPEED: u8 = {CAT_SPEED};")));
+        assert!(module.contains("replace = smash::app::sv_animcmd::SET_SPEED"));
+        assert!(module.contains("hook_set_speed"));
         for (category, other) in [
             (CAT_ADD_SPEED_NO_LIMIT, CAT_SPEED_EX),
             (CAT_CORRECT, CAT_SPEED_EX),
+            (CAT_SPEED, CAT_SPEED_EX),
             (CAT_ADD_SPEED_NO_LIMIT, CAT_CORRECT),
+            (CAT_SPEED, CAT_ADD_SPEED_NO_LIMIT),
+            (CAT_SPEED, CAT_CORRECT),
         ] {
             assert_ne!(category, other, "new point categories must not collide");
         }
@@ -2613,6 +2623,35 @@ mod tests {
         assert_eq!(rule["category"].as_u64(), Some(CAT_SPEED_EX as u64));
         assert_eq!(rule["hitbox_id"].as_u64(), Some(7));
         assert_eq!(rule["func"].as_str(), Some("SET_SPEED_EX"));
+        assert_eq!(rule["overrides"]["speed_x"].as_f64(), Some(1.5));
+        assert!((rule["overrides"]["speed_y"].as_f64().unwrap() + 3.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn outbound_set_speed_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_SPEED,
+            hitbox_id: None,
+            suppress: false,
+            frame_start: Some(4.5),
+            frame_end: Some(4.5),
+            overrides: Some(HbOverridesWire {
+                speed_x: Some(1.5),
+                speed_y: Some(-3.8),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("SET_SPEED".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_SPEED as u64));
+        assert_eq!(rule["hitbox_id"], serde_json::Value::Null);
+        assert_eq!(rule["func"].as_str(), Some("SET_SPEED"));
         assert_eq!(rule["overrides"]["speed_x"].as_f64(), Some(1.5));
         assert!((rule["overrides"]["speed_y"].as_f64().unwrap() + 3.8).abs() < 1e-6);
     }

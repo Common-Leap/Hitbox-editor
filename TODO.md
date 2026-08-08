@@ -2312,23 +2312,24 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 ### [ ] E1 — Movement and kinetics (the measured `REVERSE_LR` slice is complete)
 
-`sv_kinetic_energy`, `SET_SPEED`, and status-module kinetic calls remain preserved verbatim today.
-`ADD_SPEED_NO_LIMIT`, `CORRECT`, and `SET_SPEED_EX` now have measured, value-editable slices
+`sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today.
+`SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, and `SET_SPEED_EX` now have measured, value-editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
 
 **Measured 2026-08-08, and this is the Rule 5 correction:** the local cache has no calls for
-`sv_kinetic_energy`, `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, or `CORRECT`; the single `KineticModule`
+`sv_kinetic_energy`, `ADD_SPEED_NO_LIMIT`, or `CORRECT`; the single `KineticModule`
 hit in the whole cache is `KineticModule::change_kinetic` in Kirby `EscapeAir`, a raw status-module
 call rather than an ACMD macro. A read-only public dumped-script corpus has 144 textual
 `SET_SPEED_EX` calls: 122 match the vendored three-argument wrapper shape, while 22 are malformed
 dump artifacts (17 short and 5 with one extra argument). The same corpus has 3 exact
 `ADD_SPEED_NO_LIMIT(agent, x, y)` calls and 31 exact `CORRECT(agent, kind)` calls, both covered
-by vendored `smash-script` wrappers. `SET_SPEED` has primitive bindings but no safe Rust macro
-wrapper in the vendored crate, so it remains raw rather than being emitted against an invented
-API. Kinetics outside these verified ACMD shapes remain outside this editor's current input
-boundary.
+by vendored `smash-script` wrappers. The same corpus has **2 exact textual
+`macros::SET_SPEED(agent, x, y)` calls**. `SET_SPEED` has a linked primitive but no safe Rust macro
+wrapper in the vendored crate, so the generated source uses a local Lua-stack helper over that
+primitive while editable source keeps the original macro spelling. Kinetics outside these
+verified ACMD shapes remain outside this editor's current input boundary.
 
 `REVERSE_LR` is the local-cache exception that started this slice: **7 real calls**, all
 `macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,
@@ -2341,11 +2342,10 @@ the speed macros.
   `FIGHTER_DOLLY_STATUS_SPECIAL_HI_WORK_FLAG_REVERSE_LR` in `WorkModule::on_flag` — a flag name
   that ends in the macro name. Word-boundary the pattern and read the call site; see the
   `ACMD family prefix and const collisions` note.
-- **Scope decision.** `REVERSE_LR`, the verified three-argument `SET_SPEED_EX` shape, and the
-  exact `ADD_SPEED_NO_LIMIT`/`CORRECT` wrapper shapes are handled as their own slices below. The
-  remaining zero-count speed/kinetic names, `SET_SPEED` without a safe Rust wrapper, malformed
-  `SET_SPEED_EX` shapes, and status-module sources remain parked, so the full E1 entry remains
-  open.
+- **Scope decision.** `REVERSE_LR`, the verified `SET_SPEED` and three-argument `SET_SPEED_EX`
+  shapes, and the exact `ADD_SPEED_NO_LIMIT`/`CORRECT` wrapper shapes are handled as their own
+  slices below. The remaining zero-count speed/kinetic names, malformed `SET_SPEED_EX` shapes,
+  and status-module sources remain parked, so the full E1 entry remains open.
 - **Trap:** these change where the fighter *is*, so previewing them means moving the model,
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
@@ -2393,11 +2393,27 @@ ambiguity because the primitive has no identifying argument. `CORRECT` preserves
 tokens through parse/export/write-back; live replacement is limited to numeric captured keys and
 numeric replacement kinds, with named cases reported as unrepresentable rather than guessed.
 
-Malformed arities remain raw, and `SET_SPEED` remains outside this slice because the vendored
-Rust macro layer has no safe wrapper for it. Offline regression coverage includes parse/IR,
-malformed preservation, panel/timeline/capture conversion, live-rule keying, wire/plugin parity,
-export read-back, source write-back, and the release plugin build. No emulator, game, or UI
-automation was run, so live in-game behavior remains unverified.
+Malformed arities remain raw. Offline regression coverage includes parse/IR, malformed preservation,
+panel/timeline/capture conversion, live-rule keying, wire/plugin parity, export read-back, source
+write-back, and the release plugin build. No emulator, game, or UI automation was run, so live
+in-game behavior remains unverified.
+
+#### [x] E1d — verified direct `SET_SPEED` velocity points (completed 2026-08-08; live runtime unverified)
+
+The exact three-argument source shape — `SET_SPEED(agent, speed_x, speed_y)` — now has a typed
+statement/event walk, one-based timeline points, an editable Movement panel, capture
+reconstruction, portable project persistence, category-16 live rules with a matching Skyline
+hook, generated ACMD export, and value-only write-back of the two velocity arguments. Because the
+vendored Rust macro layer exposes no safe `SET_SPEED` wrapper, generated source calls a local
+helper that prepares the Lua stack and invokes the linked primitive; editable source retains the
+original `macros::SET_SPEED` spelling.
+
+The two measured external calls and all exact local shapes round-trip; malformed arities remain
+raw. Live replacement is frame-only and refuses same-frame pairs because the command has no
+identifying argument. Offline regression coverage includes parse/IR, malformed preservation,
+panel/timeline/capture conversion, live-rule keying, wire/plugin parity, export read-back, source
+write-back, and the release plugin build. No emulator, game, or UI automation was run, so live
+in-game behavior remains unverified.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

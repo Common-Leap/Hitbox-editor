@@ -311,6 +311,7 @@ pub fn verify_sound_move(subject: &str, script: &AcmdScript, emitted: &str, repo
 pub fn verify_move(subject: &str, script: &AcmdScript, emitted: &str, report: &mut Report) {
     check_hitbox_fidelity(subject, script, emitted, report);
     check_hurtbox_fidelity(subject, script, emitted, report);
+    check_speed_fidelity(subject, script, emitted, report);
     check_script_values(subject, script, report);
     check_script_shape(subject, script, report);
 }
@@ -614,6 +615,20 @@ fn check_hurtbox_fidelity(subject: &str, script: &AcmdScript, emitted: &str, rep
             }
         }
     }
+}
+
+fn check_speed_fidelity(subject: &str, script: &AcmdScript, emitted: &str, report: &mut Report) {
+    let specified = script.to_speed_events();
+    let exported = crate::acmd::parse_acmd_script(emitted).to_speed_events();
+    if specified == exported {
+        return;
+    }
+    report.blocker(
+        subject,
+        format!(
+            "the generated SET_SPEED points do not reproduce the specified values: exported {exported:?}, specified {specified:?}"
+        ),
+    );
 }
 
 fn hitbox_differences(want: &Hitbox, got: &Hitbox) -> Vec<String> {
@@ -1141,6 +1156,10 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
                 call.speed_y,
                 report,
             );
+        }
+        ExcuteStmt::SetSpeed(call) => {
+            check_finite(subject, "SET_SPEED x velocity", call.speed_x, report);
+            check_finite(subject, "SET_SPEED y velocity", call.speed_y, report);
         }
         ExcuteStmt::Correct(call) if call.kind.trim().is_empty() => {
             report.blocker(subject, "CORRECT has an empty correction kind");

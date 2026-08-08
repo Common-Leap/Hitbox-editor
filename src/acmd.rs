@@ -234,6 +234,16 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
             }
         }
 
+        // The direct `SET_SPEED` export uses this local helper because the vendored
+        // `smash-script` crate has no safe wrapper for the linked primitive. It is an emitter
+        // implementation detail, not a source statement; skipping the whole nested function
+        // keeps parse -> export -> parse -> export from duplicating the helper definition.
+        if line.contains("fn visionary_set_speed(") && line.ends_with('{') {
+            let (body_end, _) = find_block_end(lines, pos);
+            pos = body_end + 1;
+            continue;
+        }
+
         // Any other line that opens a block — a runtime branch, its `else`, a `for` whose
         // count could not be read. The body is walked, so a `frame()` or a hitbox inside a
         // branch is still seen; the brace is kept, so the function still closes.
@@ -348,6 +358,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             continue;
         }
         if let Some(stmt) = parse_set_speed_ex_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_set_speed_call(line) {
             stmts.push(stmt);
             continue;
         }
@@ -1708,6 +1722,31 @@ fn parse_set_speed_ex_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Parse the measured `SET_SPEED(agent, x, y)` source shape, or the exact helper call emitted
+/// when a generated project uses the linked primitive directly.
+fn parse_set_speed_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = if line.contains("macros::SET_SPEED(") {
+        "macros::SET_SPEED("
+    } else if line.contains("visionary_set_speed(") {
+        "visionary_set_speed("
+    } else {
+        return None;
+    };
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, speed_x, speed_y] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" {
+        return None;
+    }
+    Some(ExcuteStmt::SetSpeed(crate::data::SetSpeedCall {
+        speed_x: speed_x.trim().parse::<f32>().ok()?,
+        speed_y: speed_y.trim().parse::<f32>().ok()?,
+    }))
+}
+
 /// Parse the buildable `ADD_SPEED_NO_LIMIT(agent, x, y)` shape.
 fn parse_add_speed_no_limit_call(line: &str) -> Option<ExcuteStmt> {
     let needle = "macros::ADD_SPEED_NO_LIMIT(";
@@ -2237,6 +2276,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 num(call.speed_y),
                 call.kinetic_kind
             ),
+            crate::data::ExcuteStmt::SetSpeed(call) => format!(
+                "{indent}visionary_set_speed(agent, {}, {});",
+                num(call.speed_x),
+                num(call.speed_y)
+            ),
             crate::data::ExcuteStmt::AddSpeedNoLimit(call) => format!(
                 "{indent}macros::ADD_SPEED_NO_LIMIT(agent, {}, {});",
                 num(call.speed_x),
@@ -2295,6 +2339,40 @@ fn emit_stmts(stmts: &[crate::data::AcmdStmt], indent: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+fn contains_set_speed(stmts: &[crate::data::AcmdStmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        crate::data::AcmdStmt::Excute(inner) => inner
+            .iter()
+            .any(|stmt| matches!(stmt, crate::data::ExcuteStmt::SetSpeed(_))),
+        crate::data::AcmdStmt::Bare(inner) => {
+            matches!(inner.as_ref(), crate::data::ExcuteStmt::SetSpeed(_))
+        }
+        crate::data::AcmdStmt::Loop { body, .. } | crate::data::AcmdStmt::RawBlock { body, .. } => {
+            contains_set_speed(body)
+        }
+        _ => false,
+    })
+}
+
+/// `smash-script` has no Rust wrapper for `sv_animcmd::SET_SPEED`. Generated projects therefore
+/// use the linked primitive with the same Lua-stack setup as the crate's other wrappers. The
+/// helper is nested in a generated function so the preview and shipped source have identical
+/// text, while the parser can still recognise its call as the typed SET_SPEED family.
+fn emit_set_speed_helper(indent: &str) -> Vec<String> {
+    vec![
+        format!("{indent}#[inline]"),
+        format!("{indent}#[allow(dead_code)]"),
+        format!(
+            "{indent}unsafe fn visionary_set_speed(agent: &mut L2CAgentBase, speed_x: f32, speed_y: f32) {{"
+        ),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}    lua_args!(agent, speed_x, speed_y);"),
+        format!("{indent}    smash::app::sv_animcmd::SET_SPEED(agent.lua_state_agent);"),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}}}"),
+    ]
 }
 
 /// The ACMD script name for a move: `attack_air_n` + `game` → `game_attackairn`.
@@ -2359,6 +2437,12 @@ fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, S
     out.push_str(&format!(
         "unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n"
     ));
+    if contains_set_speed(&script.stmts) {
+        for line in emit_set_speed_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     for line in &body {
         out.push_str(line);
         out.push('\n');
@@ -2376,6 +2460,12 @@ fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, S
 fn emit_sound_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, String) {
     let fn_name = script_function_name("sound", move_name);
     let mut out = format!("unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n");
+    if contains_set_speed(&script.stmts) {
+        for line in emit_set_speed_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     for line in emit_stmts(&script.stmts, "    ") {
         out.push_str(&line);
         out.push('\n');
@@ -8383,6 +8473,60 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "macros::SET_SPEED_EX(agent, 0.0, -3.8, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
         ));
         assert_eq!(parse_acmd_script(&emitted).to_speed_ex_events(), events);
+    }
+
+    #[test]
+    fn set_speed_parses_as_a_typed_point_and_generated_helper_round_trips() {
+        let source = r#"unsafe extern "C" fn game_attackairlw(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::SET_SPEED(agent, 0, -3.8);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_speed_events();
+        assert_eq!(
+            events,
+            vec![crate::data::SetSpeedEvent {
+                frame: 4,
+                call: crate::data::SetSpeedCall {
+                    speed_x: 0.0,
+                    speed_y: -3.8,
+                },
+                site: 0,
+            }]
+        );
+
+        let emitted = preview_game_fn(&script, "attack_air_lw");
+        assert!(emitted.contains("visionary_set_speed(agent, 0.0, -3.8);"));
+        assert!(emitted.contains("sv_animcmd::SET_SPEED(agent.lua_state_agent);"));
+        assert_eq!(parse_acmd_script(&emitted).to_speed_events(), events);
+
+        let reparsed = parse_acmd_script(&emitted);
+        let reemitted = preview_game_fn(&reparsed, "attack_air_lw");
+        assert_eq!(
+            reemitted.matches("unsafe fn visionary_set_speed(").count(),
+            1,
+            "the generated helper is an emitter detail and must not duplicate on re-export"
+        );
+        assert_eq!(parse_acmd_script(&reemitted).to_speed_events(), events);
+    }
+
+    #[test]
+    fn malformed_set_speed_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SET_SPEED(agent, 0);
+        macros::SET_SPEED(agent, 0, 1, 2);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_speed_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("macros::SET_SPEED(agent, 0);"));
+        assert!(emitted.contains("macros::SET_SPEED(agent, 0, 1, 2);"));
     }
 
     #[test]

@@ -214,6 +214,9 @@ pub const CAT_REVERSE_LR: u8 = 11;
 /// `SET_SPEED_EX` — a verified three-argument velocity point.
 pub const CAT_SPEED_EX: u8 = 13;
 
+/// `SET_SPEED` — a verified direct x/y velocity point.
+pub const CAT_SPEED: u8 = 16;
+
 /// `ADD_SPEED_NO_LIMIT` — a verified x/y velocity-addition point.
 pub const CAT_ADD_SPEED_NO_LIMIT: u8 = 14;
 
@@ -981,6 +984,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_EXPRESSION => "expression",
                     CAT_REVERSE_LR => "reverse_lr",
                     CAT_SPEED_EX => "speed_ex",
+                    CAT_SPEED => "speed",
                     CAT_ADD_SPEED_NO_LIMIT => "add_speed_no_limit",
                     CAT_CORRECT => "correct",
                     _ => "unknown",
@@ -1158,11 +1162,50 @@ unsafe fn hook_set_speed_ex(lua_state: u64) {
                     let mut values = args.clone();
                     let set_speed = |slot: usize, value: Option<f32>, values: &mut Vec<LuaArg>| {
                         let Some(value) = value else { return };
-                        let Some(current) = values.get(slot).cloned() else { return };
-                        values[slot] = match current {
-                            LuaArg::Int(_) => LuaArg::Int(value as i64),
-                            _ => LuaArg::Num(value),
-                        };
+                        if values.get(slot).is_some() {
+                            // Velocity arguments are not integer keys. Keep fractional edits as
+                            // Lua numbers even if a decompiled call happened to arrive as an
+                            // integer value.
+                            values[slot] = LuaArg::Num(value);
+                        }
+                    };
+                    set_speed(0, overrides.speed_x, &mut values);
+                    set_speed(1, overrides.speed_y, &mut values);
+                    if values != args {
+                        rewrite_args(lua_state, &values);
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
+/// Capture and sparsely override the verified direct `SET_SPEED` shape.
+#[skyline::hook(replace = smash::app::sv_animcmd::SET_SPEED)]
+unsafe fn hook_set_speed(lua_state: u64) {
+    let args = read_args_exact(lua_state, 2);
+    record(lua_state, "SET_SPEED", &args);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            if let Some((suppress, overrides)) = action_for(CAT_SPEED, motion, 0, frame) {
+                if suppress {
+                    return;
+                }
+                if let Some(overrides) = overrides {
+                    let mut values = args.clone();
+                    let set_speed = |slot: usize, value: Option<f32>, values: &mut Vec<LuaArg>| {
+                        let Some(value) = value else { return };
+                        if values.get(slot).is_some() {
+                            // SET_SPEED's two arguments are velocities, not integer keys. Keep
+                            // fractional edits as Lua numbers even if a decompiled call happened
+                            // to arrive as an integer value.
+                            values[slot] = LuaArg::Num(value);
+                        }
                     };
                     set_speed(0, overrides.speed_x, &mut values);
                     set_speed(1, overrides.speed_y, &mut values);
@@ -2369,6 +2412,7 @@ pub fn install() {
         hook_ft_attack_abs_camera_quake,
         hook_reverse_lr,
         hook_set_speed_ex,
+        hook_set_speed,
         hook_add_speed_no_limit,
         hook_correct
     );

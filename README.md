@@ -394,6 +394,7 @@ fighter's own `sound_` script keeps playing exactly as it did.
 section of the editor:
 
 - `REVERSE_LR` places or removes a facing-direction change.
+- `SET_SPEED` edits the direct x/y velocity written at a point.
 - `SET_SPEED_EX` edits the x/y velocity written to the selected kinetic reserve.
 - `ADD_SPEED_NO_LIMIT` edits an x/y velocity addition.
 - `CORRECT` edits the ground-correction kind while preserving named source constants.

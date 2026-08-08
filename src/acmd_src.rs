@@ -3242,6 +3242,91 @@ pub fn sync_speed_ex(
     })
 }
 
+/// The buildable `SET_SPEED` calls in source order.
+pub(crate) fn speed_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "SET_SPEED" && site.args.len() == 3)
+        .collect()
+}
+
+/// Rewrite only the x/y values of existing `SET_SPEED` calls.
+pub fn rewrite_speed(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::SetSpeedEvent],
+    edited: &[crate::data::SetSpeedEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = speed_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `SET_SPEED` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `SET_SPEED` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `SET_SPEED` site {} was retimed from frame {} to {} — source syncing only retunes velocity values",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::SetSpeedCall::FUNC || site.args.len() != 3 {
+            report.skipped.push(format!(
+                "{label}: `SET_SPEED` site {} no longer has its verified three-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.speed_x) {
+                edits.push(edit);
+            }
+        }
+        if let Some(span) = site.args.get(2) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.speed_y) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited `SET_SPEED` values into the project's `game_` function.
+pub fn sync_speed(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::SetSpeedEvent],
+    edited: &[crate::data::SetSpeedEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_speed(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// The buildable `ADD_SPEED_NO_LIMIT` calls in source order.
 pub(crate) fn add_speed_no_limit_sites(text: &str) -> Vec<MacroSite> {
     scan_macro_sites(text, 0..text.len())
@@ -6696,6 +6781,47 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             crate::acmd::parse_acmd_script(&after).to_speed_ex_events(),
             edited
         );
+    }
+
+    #[test]
+    fn set_speed_write_back_changes_only_direct_velocity_arguments() {
+        let text = r#"unsafe extern "C" fn game_speed(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::SET_SPEED(agent, 0, -3.8);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_speed_events();
+        let mut edited = pristine.clone();
+        edited[0].call.speed_x = 1.25;
+        edited[0].call.speed_y = 2.0;
+        let (after, report) = rewrite_speed(text, "mario/speed", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("macros::SET_SPEED(agent, 1.25, 2);"));
+        assert!(after.contains("frame(agent.lua_state_agent, 4.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_speed_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn malformed_set_speed_shapes_block_positional_source_sync() {
+        let text = r#"unsafe extern "C" fn game_speed(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::SET_SPEED(agent, 0);
+        macros::SET_SPEED(agent, 0, 1, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_speed_events();
+        assert!(pristine.is_empty());
+        let (after, report) = rewrite_speed(text, "mario/speed", &pristine, &pristine).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.is_empty());
+        assert_eq!(speed_sites(text).len(), 0);
     }
 
     #[test]
