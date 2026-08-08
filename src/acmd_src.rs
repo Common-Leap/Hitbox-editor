@@ -3934,6 +3934,317 @@ pub fn sync_ft_start_adjust_motion_frame(
     })
 }
 
+// ── Kinetic point write-back ────────────────────────────────────────────────
+
+/// The buildable `CLR_SPEED` calls and generated helper calls in source order.
+pub(crate) fn clr_speed_sites(text: &str) -> Vec<MacroSite> {
+    let mut sites = scan_macro_sites(text, 0..text.len());
+    sites.extend(scan_named_sites(text, "visionary_clr_speed", 0..text.len()));
+    sites.sort_by_key(|site| site.span.start);
+    sites
+        .into_iter()
+        .filter(|site| {
+            matches!(site.name.as_str(), "CLR_SPEED" | "visionary_clr_speed")
+                && site.args.len() == 2
+        })
+        .collect()
+}
+
+/// Rewrite the authored kinetic-ID token of existing `CLR_SPEED` calls.
+pub fn rewrite_clr_speed(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::ClrSpeedEvent],
+    edited: &[crate::data::ClrSpeedEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = clr_speed_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `CLR_SPEED` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `CLR_SPEED` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `CLR_SPEED` site {} was retimed from frame {} to {} — source syncing only retunes its authored kinetic token",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if !matches!(
+            site.name.as_str(),
+            crate::data::ClrSpeedCall::FUNC | "visionary_clr_speed"
+        ) || site.args.len() != 2
+        {
+            report.skipped.push(format!(
+                "{label}: `CLR_SPEED` site {} no longer has its verified two-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        if now.call.kinetic_kind.trim().is_empty() {
+            report.skipped.push(format!(
+                "{label}: `CLR_SPEED` site {} has an empty kinetic kind — source syncing leaves the authored token intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.kinetic_kind.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited `CLR_SPEED` kinetic tokens into the project's `game_` function.
+pub fn sync_clr_speed(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::ClrSpeedEvent],
+    edited: &[crate::data::ClrSpeedEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_clr_speed(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
+/// The buildable argument-less `SET_AIR` calls and generated helper calls in source order.
+pub(crate) fn set_air_sites(text: &str) -> Vec<MacroSite> {
+    let mut sites = scan_macro_sites(text, 0..text.len());
+    sites.extend(scan_named_sites(text, "visionary_set_air", 0..text.len()));
+    sites.sort_by_key(|site| site.span.start);
+    sites
+        .into_iter()
+        .filter(|site| {
+            matches!(site.name.as_str(), "SET_AIR" | "visionary_set_air") && site.args.len() == 1
+        })
+        .collect()
+}
+
+fn remove_set_air_line(text: &str, site: &MacroSite) -> Replacement {
+    let ranges = source_line_ranges(text);
+    let Some(line) = ranges
+        .iter()
+        .find(|range| range.start <= site.span.start && site.span.start < range.end)
+    else {
+        return Replacement {
+            span: site.span.clone(),
+            value: String::new(),
+        };
+    };
+    let trimmed = text[line.clone()].trim();
+    if trimmed == "macros::SET_AIR(agent);" || trimmed == "visionary_set_air(agent);" {
+        Replacement {
+            span: line.clone(),
+            value: String::new(),
+        }
+    } else {
+        let mut end = site.span.end;
+        if text[end..].starts_with(';') {
+            end += 1;
+        }
+        Replacement {
+            span: site.span.start..end,
+            value: String::new(),
+        }
+    }
+}
+
+fn insert_set_air_line(text: &mut String, frame: u32) -> bool {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let ranges = source_line_ranges(text);
+    let frame_index = ranges.iter().position(|range| {
+        frame_literal(&text[range.clone()])
+            .is_some_and(|value| value.round().max(1.0) as u32 == frame)
+    });
+
+    if let Some(frame_index) = frame_index {
+        let frame_range = ranges[frame_index].clone();
+        for range in ranges.iter().skip(frame_index + 1) {
+            if frame_literal(&text[range.clone()]).is_some() {
+                break;
+            }
+            let line = &text[range.clone()];
+            if line.contains("if macros::is_excute") && line.contains('{') {
+                let open = range.start + line.find('{').unwrap();
+                if let Some(close) = matching_brace(text, open) {
+                    let body_indent = ranges
+                        .iter()
+                        .skip(frame_index + 1)
+                        .find(|body| {
+                            body.start > open && body.start < close && {
+                                let body_text = &text[body.start..body.end];
+                                !body_text.trim().is_empty() && !body_text.trim().starts_with('}')
+                            }
+                        })
+                        .map(|body| line_indent(text, body).to_string())
+                        .unwrap_or_else(|| format!("{}    ", line_indent(text, range)));
+                    text.insert_str(
+                        close,
+                        &format!("{body_indent}macros::SET_AIR(agent);{newline}"),
+                    );
+                    return true;
+                }
+            }
+        }
+
+        let indent = line_indent(text, &frame_range);
+        let block = format!(
+            "{indent}if macros::is_excute(agent) {{{newline}{indent}    macros::SET_AIR(agent);{newline}{indent}}}{newline}"
+        );
+        text.insert_str(frame_range.end, &block);
+        return true;
+    }
+
+    let insert_at = ranges
+        .iter()
+        .find(|range| {
+            frame_literal(&text[range.start..range.end]).is_some_and(|value| value > frame as f32)
+        })
+        .map(|range| range.start)
+        .or_else(|| text.rfind('}'))
+        .unwrap_or(text.len());
+    let indent = ranges
+        .iter()
+        .find(|range| frame_literal(&text[range.start..range.end]).is_some())
+        .map(|range| line_indent(text, range).to_string())
+        .unwrap_or_else(|| "    ".into());
+    let block = format!(
+        "{indent}frame(agent.lua_state_agent, {frame}.0);{newline}{indent}if macros::is_excute(agent) {{{newline}{indent}    macros::SET_AIR(agent);{newline}{indent}}}{newline}"
+    );
+    text.insert_str(insert_at, &block);
+    true
+}
+
+/// Rewrite `SET_AIR` presence and frame placement in a flat `game_` function.
+pub fn rewrite_set_air(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::SetAirEvent],
+    edited: &[crate::data::SetAirEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = set_air_sites(text);
+    let parsed = crate::acmd::parse_acmd_script(text);
+    fn contains_loop(stmts: &[crate::data::AcmdStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            crate::data::AcmdStmt::Loop { .. } => true,
+            crate::data::AcmdStmt::RawBlock { body, .. } => contains_loop(body),
+            _ => false,
+        })
+    }
+    let mut report = SyncReport::default();
+    let flat_sites = pristine.len() == sites.len()
+        && pristine
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.site == index);
+    let flat_edited = edited
+        .iter()
+        .enumerate()
+        .all(|(index, event)| event.site == index);
+    let old: Vec<u32> = pristine.iter().map(|event| event.frame).collect();
+    let new: Vec<u32> = edited.iter().map(|event| event.frame).collect();
+    let has_unsupported_structure =
+        parsed.branch_count() > 0 || contains_loop(&parsed.stmts) || !flat_sites || !flat_edited;
+    if has_unsupported_structure {
+        if pristine != edited {
+            report.skipped.push(format!(
+                "{label}: SET_AIR placement changed inside a loop/branch or after a source-site mismatch — source syncing only edits flat point calls"
+            ));
+        }
+        return Ok((text.to_string(), report));
+    }
+
+    let n = old.len();
+    let m = new.len();
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if old[i] == new[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut matched_old = vec![false; n];
+    let mut matched_new = vec![false; m];
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if old[i] == new[j] {
+            matched_old[i] = true;
+            matched_new[j] = true;
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    if matched_old.iter().all(|matched| *matched) && matched_new.iter().all(|matched| *matched) {
+        return Ok((text.to_string(), report));
+    }
+
+    let removals: Vec<Replacement> = sites
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_old[*index])
+        .map(|(_, site)| remove_set_air_line(text, site))
+        .collect();
+    let mut updated = apply(text, removals);
+    for (_, event) in edited
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_new[*index])
+    {
+        if insert_set_air_line(&mut updated, event.frame) {
+            report.changed += 1;
+        }
+    }
+    report.changed += matched_old.iter().filter(|matched| !**matched).count();
+    Ok((updated, report))
+}
+
+/// Sync edited `SET_AIR` points into the project's `game_` function.
+pub fn sync_set_air(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::SetAirEvent],
+    edited: &[crate::data::SetAirEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_set_air(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 // ── Facing-direction point write-back ───────────────────────────────────────
 
 /// The exact argument-less `REVERSE_LR` calls in a source function.
@@ -7514,6 +7825,77 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             rewrite_ft_start_adjust_motion_frame(text, "trail/special_n", &[], &[]).unwrap();
         assert_eq!(after, text);
         assert!(report.skipped.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn clr_speed_source_sync_rewrites_only_the_authored_kinetic_token() {
+        let text = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::CLR_SPEED(agent, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_clr_speed_events();
+        let mut edited = pristine.clone();
+        edited[0].call.kinetic_kind = "*FIGHTER_KINETIC_ENERGY_ID_MOTION".into();
+        let (after, report) =
+            rewrite_clr_speed(text, "mario/attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("macros::CLR_SPEED(agent, *FIGHTER_KINETIC_ENERGY_ID_MOTION);"));
+        assert!(after.contains("frame(agent.lua_state_agent, 4.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_clr_speed_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn set_air_source_sync_handles_flat_remove_retime_and_insert() {
+        let text = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::SET_AIR(agent);
+    }
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        macros::SET_AIR(agent);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_set_air_events();
+        let edited = vec![crate::data::SetAirEvent { frame: 6, site: 0 }];
+        let (after, report) =
+            rewrite_set_air(text, "mario/attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 3, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        let round_trip = crate::acmd::parse_acmd_script(&after).to_set_air_events();
+        assert_eq!(round_trip, edited, "{after}");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 6.0);"),
+            "{after}"
+        );
+    }
+
+    #[test]
+    fn set_air_source_sync_refuses_branch_restructuring() {
+        let text = r#"unsafe extern "C" fn game_specialn(agent: &mut L2CAgentBase) {
+    if WorkModule::is_flag(agent.module_accessor, 1) {
+        if macros::is_excute(agent) {
+            macros::SET_AIR(agent);
+        }
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_set_air_events();
+        let edited = Vec::new();
+        let (after, report) = rewrite_set_air(text, "mario/special_n", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert!(report
+            .skipped
+            .iter()
+            .any(|note| note.contains("loop/branch")));
     }
 
     #[test]

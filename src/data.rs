@@ -1284,6 +1284,17 @@ pub enum ExcuteStmt {
     /// The linked wrapper exposes the payload as an `f32`; the editor keeps that numeric shape
     /// without assigning a more specific game meaning to it.
     FtStartAdjustMotionFrame(FtStartAdjustMotionFrameCall),
+    /// `CLR_SPEED` — clear one named kinetic-energy reserve.
+    ///
+    /// The checked-in macro layer has no safe `CLR_SPEED` wrapper, so the authored kinetic ID is
+    /// retained as source text and generated exports use a local helper over the linked
+    /// `sv_kinetic_energy::clear_speed` primitive.
+    ClrSpeed(ClrSpeedCall),
+    /// `SET_AIR` — switch the fighter's kinetic state to air at this point.
+    ///
+    /// This is an argument-less point command. Structural placement is the editable payload;
+    /// the source writer and live rule path keep it separate from `REVERSE_LR`.
+    SetAir,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1413,6 +1424,17 @@ impl FtStartAdjustMotionFrameCall {
     pub const FUNC: &'static str = "FT_START_ADJUST_MOTION_FRAME_arg1";
 }
 
+/// A parsed `macros::CLR_SPEED(agent, kinetic_id)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClrSpeedCall {
+    /// Authored kinetic-energy ID token, usually a dereferenced lua constant.
+    pub kinetic_kind: String,
+}
+
+impl ClrSpeedCall {
+    pub const FUNC: &'static str = "CLR_SPEED";
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1482,6 +1504,23 @@ pub struct FtCatchStopEvent {
 pub struct FtStartAdjustMotionFrameEvent {
     pub frame: u32,
     pub call: FtStartAdjustMotionFrameCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `CLR_SPEED` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClrSpeedEvent {
+    pub frame: u32,
+    pub call: ClrSpeedCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `SET_AIR` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SetAirEvent {
+    pub frame: u32,
     #[serde(default)]
     pub site: usize,
 }
@@ -1834,6 +1873,22 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.ft_start_adjust_motion_frames
+    }
+
+    /// Flatten `CLR_SPEED` calls into source-token kinetic point events.
+    pub fn to_clr_speed_events(&self) -> Vec<ClrSpeedEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.clr_speeds
+    }
+
+    /// Flatten `SET_AIR` calls into argument-less kinetic point events.
+    pub fn to_set_air_events(&self) -> Vec<SetAirEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.set_airs
     }
 }
 
@@ -2240,6 +2295,119 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The `CLR_SPEED` call an event site's ordinal refers to.
+    pub fn clr_speed_stmt_mut(&mut self, site: usize) -> Option<&mut ClrSpeedCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut ClrSpeedCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::ClrSpeed(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::ClrSpeed(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Remove a `SET_AIR` source statement at its source ordinal.
+    pub fn remove_set_air(&mut self, site: usize) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        let mut inner_index = 0;
+                        while inner_index < inner.len() {
+                            if matches!(inner[inner_index], ExcuteStmt::SetAir) {
+                                if *seen == site {
+                                    inner.remove(inner_index);
+                                    if inner.is_empty() {
+                                        stmts.remove(index);
+                                    }
+                                    return true;
+                                }
+                                *seen += 1;
+                            }
+                            inner_index += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if matches!(inner.as_ref(), ExcuteStmt::SetAir) => {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Insert an unconditional `SET_AIR` call at a top-level frame.
+    pub fn insert_set_air_at_frame(&mut self, frame: u32) -> bool {
+        let target = frame.max(1) as f32;
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(ExcuteStmt::SetAir);
+                return true;
+            }
+            self.stmts
+                .insert(index + 1, AcmdStmt::Excute(vec![ExcuteStmt::SetAir]));
+            return true;
+        }
+
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target));
+        self.stmts
+            .insert(insert_at + 1, AcmdStmt::Excute(vec![ExcuteStmt::SetAir]));
+        true
+    }
+
     /// Remove the `REVERSE_LR` source statement at an ordinal from
     /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
     ///
@@ -2343,6 +2511,8 @@ struct WalkAccum {
     corrects: Vec<CorrectEvent>,
     ft_catch_stops: Vec<FtCatchStopEvent>,
     ft_start_adjust_motion_frames: Vec<FtStartAdjustMotionFrameEvent>,
+    clr_speeds: Vec<ClrSpeedEvent>,
+    set_airs: Vec<SetAirEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -2370,6 +2540,10 @@ struct WalkAccum {
     /// Site for the next `FT_START_ADJUST_MOTION_FRAME_arg1`, independent of every other point
     /// event family.
     next_ft_start_adjust_motion_frame_site: usize,
+    /// Site for the next `CLR_SPEED`, independent of every other point event family.
+    next_clr_speed_site: usize,
+    /// Site for the next `SET_AIR`, independent of every other point event family.
+    next_set_air_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -2601,6 +2775,42 @@ fn count_ft_start_adjust_motion_frame_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// `CLR_SPEED` calls in a subtree, counted in source order for loop/site resolution.
+fn count_clr_speed_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::ClrSpeed(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(inner.as_ref(), ExcuteStmt::ClrSpeed(_))),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_clr_speed_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `SET_AIR` calls in a subtree, counted in source order for loop/site resolution.
+fn count_set_air_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::SetAir))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(inner.as_ref(), ExcuteStmt::SetAir)),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_set_air_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -2734,6 +2944,18 @@ impl WalkAccum {
     fn take_ft_start_adjust_motion_frame_site(&mut self) -> usize {
         let site = self.next_ft_start_adjust_motion_frame_site;
         self.next_ft_start_adjust_motion_frame_site += 1;
+        site
+    }
+
+    fn take_clr_speed_site(&mut self) -> usize {
+        let site = self.next_clr_speed_site;
+        self.next_clr_speed_site += 1;
+        site
+    }
+
+    fn take_set_air_site(&mut self) -> usize {
+        let site = self.next_set_air_site;
+        self.next_set_air_site += 1;
         site
     }
 
@@ -2980,6 +3202,21 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                     site,
                 });
         }
+        ExcuteStmt::ClrSpeed(call) => {
+            let site = hurt.take_clr_speed_site();
+            hurt.clr_speeds.push(ClrSpeedEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
+        ExcuteStmt::SetAir => {
+            let site = hurt.take_set_air_site();
+            hurt.set_airs.push(SetAirEvent {
+                frame: script_frame(frame),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -3024,6 +3261,8 @@ fn eval_stmts(
                 let ft_catch_stop_site_at_entry = hurt.next_ft_catch_stop_site;
                 let ft_start_adjust_motion_frame_site_at_entry =
                     hurt.next_ft_start_adjust_motion_frame_site;
+                let clr_speed_site_at_entry = hurt.next_clr_speed_site;
+                let set_air_site_at_entry = hurt.next_set_air_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -3037,6 +3276,8 @@ fn eval_stmts(
                     hurt.next_ft_catch_stop_site = ft_catch_stop_site_at_entry;
                     hurt.next_ft_start_adjust_motion_frame_site =
                         ft_start_adjust_motion_frame_site_at_entry;
+                    hurt.next_clr_speed_site = clr_speed_site_at_entry;
+                    hurt.next_set_air_site = set_air_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -3054,6 +3295,8 @@ fn eval_stmts(
                 hurt.next_ft_start_adjust_motion_frame_site =
                     ft_start_adjust_motion_frame_site_at_entry
                         + count_ft_start_adjust_motion_frame_stmts(body);
+                hurt.next_clr_speed_site = clr_speed_site_at_entry + count_clr_speed_stmts(body);
+                hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -3269,6 +3512,10 @@ pub struct AppState {
     /// `FT_START_ADJUST_MOTION_FRAME_arg1` point events as loaded, for sparse live value rules
     /// and source syncing.
     pub ft_start_adjust_motion_frame_pristine: Vec<FtStartAdjustMotionFrameEvent>,
+    /// `CLR_SPEED` point events as loaded, for sparse live kinetic rules and source syncing.
+    pub clr_speed_pristine: Vec<ClrSpeedEvent>,
+    /// `SET_AIR` point events as loaded, for sparse live kinetic rules and source syncing.
+    pub set_air_pristine: Vec<SetAirEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -3364,6 +3611,8 @@ impl Default for AppState {
             correct_pristine: Vec::new(),
             ft_catch_stop_pristine: Vec::new(),
             ft_start_adjust_motion_frame_pristine: Vec::new(),
+            clr_speed_pristine: Vec::new(),
+            set_air_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -3397,6 +3646,8 @@ impl AppState {
         self.ft_catch_stop_pristine = script.to_ft_catch_stop_events();
         self.ft_start_adjust_motion_frame_pristine =
             script.to_ft_start_adjust_motion_frame_events();
+        self.clr_speed_pristine = script.to_clr_speed_events();
+        self.set_air_pristine = script.to_set_air_events();
         self.script = script;
     }
 }

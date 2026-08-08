@@ -78,6 +78,8 @@ fn timeline_content_height(
     correct: usize,
     ft_catch_stop: usize,
     ft_start_adjust_motion_frame: usize,
+    clr_speed: usize,
+    set_air: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
@@ -99,7 +101,9 @@ fn timeline_content_height(
         + band(add_speed_no_limit)
         + band(correct)
         + band(ft_catch_stop)
-        + band(ft_start_adjust_motion_frame))
+        + band(ft_start_adjust_motion_frame)
+        + band(clr_speed)
+        + band(set_air))
     .max(24.0)
 }
 
@@ -279,6 +283,8 @@ fn timeline_frame_extent(
     correct: &[crate::data::CorrectEvent],
     ft_catch_stop: &[crate::data::FtCatchStopEvent],
     ft_start_adjust_motion_frame: &[crate::data::FtStartAdjustMotionFrameEvent],
+    clr_speed: &[crate::data::ClrSpeedEvent],
+    set_air: &[crate::data::SetAirEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -309,6 +315,8 @@ fn timeline_frame_extent(
     let ft_catch_stop_frames = ft_catch_stop.iter().map(|event| event.frame);
     let ft_start_adjust_motion_frame_frames =
         ft_start_adjust_motion_frame.iter().map(|event| event.frame);
+    let clr_speed_frames = clr_speed.iter().map(|event| event.frame);
+    let set_air_frames = set_air.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
@@ -320,6 +328,8 @@ fn timeline_frame_extent(
         .chain(correct_frames)
         .chain(ft_catch_stop_frames)
         .chain(ft_start_adjust_motion_frame_frames)
+        .chain(clr_speed_frames)
+        .chain(set_air_frames)
         .max()
         .unwrap_or(0)
 }
@@ -1035,6 +1045,8 @@ type SourceMirror = (
     Vec<crate::data::CorrectEvent>,
     Vec<crate::data::FtCatchStopEvent>,
     Vec<crate::data::FtStartAdjustMotionFrameEvent>,
+    Vec<crate::data::ClrSpeedEvent>,
+    Vec<crate::data::SetAirEvent>,
 );
 
 /// One ACMD function checked out of the linked project for editing.
@@ -2443,6 +2455,8 @@ impl VisionaryApp {
                 correct,
                 ft_catch_stop,
                 ft_start_adjust_motion_frame,
+                clr_speed,
+                set_air,
             )) => {
                 if *hitboxes == self.state.hitboxes
                     && *effects == self.state.effects
@@ -2456,6 +2470,8 @@ impl VisionaryApp {
                     && *ft_catch_stop == self.state.script.to_ft_catch_stop_events()
                     && *ft_start_adjust_motion_frame
                         == self.state.script.to_ft_start_adjust_motion_frame_events()
+                    && *clr_speed == self.state.script.to_clr_speed_events()
+                    && *set_air == self.state.script.to_set_air_events()
                 {
                     return;
                 }
@@ -2475,6 +2491,8 @@ impl VisionaryApp {
             self.state.script.to_correct_events(),
             self.state.script.to_ft_catch_stop_events(),
             self.state.script.to_ft_start_adjust_motion_frame_events(),
+            self.state.script.to_clr_speed_events(),
+            self.state.script.to_set_air_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
@@ -2552,6 +2570,8 @@ impl VisionaryApp {
             &self.state.script.to_correct_events(),
             &self.state.script.to_ft_catch_stop_events(),
             &self.state.script.to_ft_start_adjust_motion_frame_events(),
+            &self.state.script.to_clr_speed_events(),
+            &self.state.script.to_set_air_events(),
         ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -2688,7 +2708,35 @@ impl VisionaryApp {
                                         report.changed += ft_start_report.changed;
                                         report.files.extend(ft_start_report.files);
                                         report.skipped.extend(ft_start_report.skipped);
-                                        Ok((updated, report))
+                                        match crate::acmd_src::rewrite_clr_speed(
+                                            &updated,
+                                            &label,
+                                            &self.state.clr_speed_pristine,
+                                            &self.state.script.to_clr_speed_events(),
+                                        ) {
+                                            Ok((updated, clr_speed_report)) => {
+                                                report.changed += clr_speed_report.changed;
+                                                report.files.extend(clr_speed_report.files);
+                                                report.skipped.extend(clr_speed_report.skipped);
+                                                match crate::acmd_src::rewrite_set_air(
+                                                    &updated,
+                                                    &label,
+                                                    &self.state.set_air_pristine,
+                                                    &self.state.script.to_set_air_events(),
+                                                ) {
+                                                    Ok((updated, set_air_report)) => {
+                                                        report.changed += set_air_report.changed;
+                                                        report.files.extend(set_air_report.files);
+                                                        report
+                                                            .skipped
+                                                            .extend(set_air_report.skipped);
+                                                        Ok((updated, report))
+                                                    }
+                                                    Err(error) => Err(error),
+                                                }
+                                            }
+                                            Err(error) => Err(error),
+                                        }
                                     }
                                     Err(error) => Err(error),
                                 }
@@ -2950,6 +2998,36 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_clr_speed(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.clr_speed_pristine,
+                &self.state.script.to_clr_speed_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_set_air(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.set_air_pristine,
+                &self.state.script.to_set_air_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
         // Sounds get a pass of their own, and unlike the three above it writes a *different
         // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
@@ -3049,6 +3127,8 @@ impl VisionaryApp {
             || state.script.to_ft_catch_stop_events() != state.ft_catch_stop_pristine
             || state.script.to_ft_start_adjust_motion_frame_events()
                 != state.ft_start_adjust_motion_frame_pristine
+            || state.script.to_clr_speed_events() != state.clr_speed_pristine
+            || state.script.to_set_air_events() != state.set_air_pristine
         {
             edited.push("game_");
         }
@@ -3340,6 +3420,8 @@ impl VisionaryApp {
                     self.push_correct_rules();
                     self.push_ft_catch_stop_rules();
                     self.push_ft_start_adjust_motion_frame_rules();
+                    self.push_clr_speed_rules();
+                    self.push_set_air_rules();
 
                     self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
                         &self.state.hitboxes,
@@ -3353,6 +3435,8 @@ impl VisionaryApp {
                         &self.state.script.to_correct_events(),
                         &self.state.script.to_ft_catch_stop_events(),
                         &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                        &self.state.script.to_clr_speed_events(),
+                        &self.state.script.to_set_air_events(),
                     ));
 
                     self.jump_to_earliest_active_frame();
@@ -3392,6 +3476,8 @@ impl VisionaryApp {
                 self.state.correct_pristine = Vec::new();
                 self.state.ft_catch_stop_pristine = Vec::new();
                 self.state.ft_start_adjust_motion_frame_pristine = Vec::new();
+                self.state.clr_speed_pristine = Vec::new();
+                self.state.set_air_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
         }
@@ -4267,7 +4353,9 @@ impl VisionaryApp {
             || self.state.script.to_correct_events() != self.state.correct_pristine
             || self.state.script.to_ft_catch_stop_events() != self.state.ft_catch_stop_pristine
             || self.state.script.to_ft_start_adjust_motion_frame_events()
-                != self.state.ft_start_adjust_motion_frame_pristine;
+                != self.state.ft_start_adjust_motion_frame_pristine
+            || self.state.script.to_clr_speed_events() != self.state.clr_speed_pristine
+            || self.state.script.to_set_air_events() != self.state.set_air_pristine;
         if self.state.hitboxes == self.state.hitboxes_pristine
             && !script_points_edited
             && !already_logged
@@ -4793,6 +4881,8 @@ impl VisionaryApp {
                         &self.state.script.to_correct_events(),
                         &self.state.script.to_ft_catch_stop_events(),
                         &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                        &self.state.script.to_clr_speed_events(),
+                        &self.state.script.to_set_air_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -5167,6 +5257,8 @@ impl VisionaryApp {
             self.draw_correct_section(ui);
             self.draw_ft_catch_stop_section(ui);
             self.draw_ft_start_adjust_motion_frame_section(ui);
+            self.draw_clr_speed_section(ui);
+            self.draw_set_air_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
             self.draw_sound_section(ui);
@@ -5863,6 +5955,8 @@ impl VisionaryApp {
                     &self.state.script.to_correct_events(),
                     &self.state.script.to_ft_catch_stop_events(),
                     &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                    &self.state.script.to_clr_speed_events(),
+                    &self.state.script.to_set_air_events(),
                 ));
                 self.state.status = if destination.is_some() {
                     "REVERSE_LR edit staged — export or sync it into the linked source project."
@@ -6229,6 +6323,162 @@ impl VisionaryApp {
                 call.value = value;
                 self.state.status = "FT_START_ADJUST_MOTION_FRAME_arg1 edit staged — export or sync it into the linked source project.".into();
                 self.push_ft_start_adjust_motion_frame_rules();
+            }
+        }
+    }
+
+    /// Editable authored kinetic-ID tokens from the measured `CLR_SPEED` family.
+    ///
+    /// The token remains source-owned text because named `FIGHTER_KINETIC_ENERGY_ID_*` constants
+    /// are not decoded into a portable label table. A numeric live capture can still carry a
+    /// replacement through the plugin; structural placement stays in export/source sync.
+    fn draw_clr_speed_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_clr_speed_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(egui::Color32::from_rgb(245, 125, 175), "CLR_SPEED");
+        })
+        .response
+        .on_hover_text(
+            "CLR_SPEED clears one named kinetic-energy reserve. The authored kinetic ID stays as source text; frame and structural placement are written through export/source sync.",
+        );
+
+        let mut edit: Option<(usize, String)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut kind = event.call.kinetic_kind.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(245, 125, 175)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("f{}", event.frame));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut kind)
+                            .desired_width(280.0)
+                            .hint_text("*FIGHTER_KINETIC_ENERGY_ID_…"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed && !kind.trim().is_empty() {
+                edit = Some((event.site, kind));
+            }
+        }
+
+        if let Some((site, kinetic_kind)) = edit {
+            if let Some(call) = self.state.script.clr_speed_stmt_mut(site) {
+                call.kinetic_kind = kinetic_kind;
+                self.state.status =
+                    "CLR_SPEED edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_clr_speed_rules();
+            }
+        }
+    }
+
+    /// Structural `SET_AIR` point editing, with the same flat source/live contract as
+    /// `REVERSE_LR`. The desktop viewport does not simulate the kinetic-state transition.
+    fn draw_set_air_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_set_air_events();
+        if events.is_empty() && self.state.script.stmts.is_empty() && self.state.hitboxes.is_empty()
+        {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(egui::Color32::from_rgb(170, 200, 255), "SET_AIR");
+        })
+        .response
+        .on_hover_text(
+            "SET_AIR switches the fighter's kinetic state to air at one point. This editor changes its presence and frame; the desktop viewport does not simulate the state transition.",
+        );
+
+        let mut action: Option<(usize, Option<u32>)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    if active {
+                        egui::Color32::from_rgb(170, 200, 255)
+                    } else {
+                        egui::Color32::from_gray(140)
+                    },
+                    if active { "◆" } else { "◇" },
+                );
+                ui.label(format!("f{}", event.frame));
+                if ui
+                    .small_button("Move here")
+                    .on_hover_text("Move this SET_AIR point to the current playhead frame.")
+                    .clicked()
+                    && event.frame != self.state.current_frame
+                {
+                    action = Some((event.site, Some(self.state.current_frame)));
+                }
+                if ui
+                    .small_button("Remove")
+                    .on_hover_text("Remove this SET_AIR call from the exported script.")
+                    .clicked()
+                {
+                    action = Some((event.site, None));
+                }
+            });
+        }
+
+        if ui
+            .small_button(format!("＋ Add at frame {}", self.state.current_frame))
+            .on_hover_text("Insert an unconditional SET_AIR call at the current game frame.")
+            .clicked()
+        {
+            action = Some((usize::MAX, Some(self.state.current_frame)));
+        }
+
+        if let Some((site, destination)) = action {
+            let changed = if site == usize::MAX {
+                self.state
+                    .script
+                    .insert_set_air_at_frame(destination.unwrap_or(FIRST_GAME_FRAME))
+            } else if let Some(frame) = destination {
+                self.state.script.remove_set_air(site)
+                    && self.state.script.insert_set_air_at_frame(frame)
+            } else {
+                self.state.script.remove_set_air(site)
+            };
+            if changed {
+                self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
+                    &self.state.hitboxes,
+                    &self.state.effects,
+                    &self.state.sounds,
+                    &self.state.expressions,
+                    &self.state.script.to_reverse_lr_events(),
+                    &self.state.script.to_speed_ex_events(),
+                    &self.state.script.to_speed_events(),
+                    &self.state.script.to_add_speed_no_limit_events(),
+                    &self.state.script.to_correct_events(),
+                    &self.state.script.to_ft_catch_stop_events(),
+                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                    &self.state.script.to_clr_speed_events(),
+                    &self.state.script.to_set_air_events(),
+                ));
+                self.state.status = if destination.is_some() {
+                    "SET_AIR edit staged — export or sync it into the linked source project."
+                } else {
+                    "SET_AIR removed — export or sync to apply the structural edit."
+                }
+                .into();
+                self.push_set_air_rules();
             }
         }
     }
@@ -8050,6 +8300,8 @@ impl VisionaryApp {
         let source_ft_catch_stop = self.state.script.to_ft_catch_stop_events();
         let source_ft_start_adjust_motion_frame =
             self.state.script.to_ft_start_adjust_motion_frame_events();
+        let source_clr_speed = self.state.script.to_clr_speed_events();
+        let source_set_air = self.state.script.to_set_air_events();
         let had_source_script = !self.state.script.stmts.is_empty();
         self.state.set_script(record.script);
         // A saved record is the edited script, not the live/source baseline. Preserve the
@@ -8063,6 +8315,8 @@ impl VisionaryApp {
             self.state.correct_pristine = source_correct;
             self.state.ft_catch_stop_pristine = source_ft_catch_stop;
             self.state.ft_start_adjust_motion_frame_pristine = source_ft_start_adjust_motion_frame;
+            self.state.clr_speed_pristine = source_clr_speed;
+            self.state.set_air_pristine = source_set_air;
         }
         self.state.hitboxes = record.hitboxes;
         true
@@ -8603,6 +8857,8 @@ impl VisionaryApp {
         self.push_correct_rules();
         self.push_ft_catch_stop_rules();
         self.push_ft_start_adjust_motion_frame_rules();
+        self.push_clr_speed_rules();
+        self.push_set_air_rules();
         let pending_hitbox_live = self.push_all_saved_hitbox_rules();
         self.push_effect_rules();
         self.push_effect_aliases();
@@ -9223,8 +9479,10 @@ impl VisionaryApp {
         let n_correct = hurt.to_correct_events().len();
         let n_ft_catch_stop = hurt.to_ft_catch_stop_events().len();
         let n_ft_start_adjust_motion_frame = hurt.to_ft_start_adjust_motion_frame_events().len();
+        let n_clr_speed = hurt.to_clr_speed_events().len();
+        let n_set_air = hurt.to_set_air_events().len();
 
-        if let Some(message) = nothing_to_load(
+        if let Some(message) = nothing_to_load_with_kinetics(
             hitboxes.len(),
             effects.len(),
             hurt.stmts.len(),
@@ -9237,6 +9495,8 @@ impl VisionaryApp {
             n_correct,
             n_ft_catch_stop,
             n_ft_start_adjust_motion_frame,
+            n_clr_speed,
+            n_set_air,
         ) {
             self.state.status = message;
             return;
@@ -9287,6 +9547,8 @@ impl VisionaryApp {
         self.push_correct_rules();
         self.push_ft_catch_stop_rules();
         self.push_ft_start_adjust_motion_frame_rules();
+        self.push_clr_speed_rules();
+        self.push_set_air_rules();
         self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
@@ -9299,6 +9561,8 @@ impl VisionaryApp {
             &self.state.script.to_correct_events(),
             &self.state.script.to_ft_catch_stop_events(),
             &self.state.script.to_ft_start_adjust_motion_frame_events(),
+            &self.state.script.to_clr_speed_events(),
+            &self.state.script.to_set_air_events(),
         ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
@@ -9332,6 +9596,7 @@ impl VisionaryApp {
              + {n_add_speed_no_limit} speed-addition point(s) + {n_correct} correction point(s) \
              + {n_ft_catch_stop} catch-stop point(s) \
              + {n_ft_start_adjust_motion_frame} motion-frame adjustment point(s) \
+             + {n_clr_speed} CLR_SPEED point(s) + {n_set_air} SET_AIR point(s) \
              from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
@@ -9346,7 +9611,9 @@ impl VisionaryApp {
                 + n_add_speed_no_limit
                 + n_correct
                 + n_ft_catch_stop
-                + n_ft_start_adjust_motion_frame)
+                + n_ft_start_adjust_motion_frame
+                + n_clr_speed
+                + n_set_air)
                 > 0
         {
             status.push_str(
@@ -10304,6 +10571,12 @@ impl VisionaryApp {
                         },
                     ))
                 }
+                "CLR_SPEED" if line.args.len() == 1 => {
+                    Some(ExcuteStmt::ClrSpeed(crate::data::ClrSpeedCall {
+                        kinetic_kind: line.args.first()?.to_source_arg()?,
+                    }))
+                }
+                "SET_AIR" if line.args.is_empty() => Some(ExcuteStmt::SetAir),
                 "REVERSE_LR" if line.args.is_empty() => Some(ExcuteStmt::ReverseLr),
                 _ => None,
             }
@@ -11797,6 +12070,235 @@ impl VisionaryApp {
         }
     }
 
+    fn clr_speed_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::ClrSpeedEvent],
+        index: usize,
+        event: &crate::data::ClrSpeedEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::ClrSpeedCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 1)
+            .nth(occurrence)
+    }
+
+    fn clr_speed_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::ClrSpeedEvent],
+        shown: &[crate::data::ClrSpeedEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::clr_speed_capture_for(captures, pristine, index, was) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(value) = donor.args.first().and_then(|arg| arg.as_f32()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(replacement) = now.call.kinetic_kind.trim().parse::<i64>().ok() else {
+                // Named source constants are preserved for export/source sync until a numeric
+                // live capture can prove the replacement value.
+                unrepresentable += 1;
+                continue;
+            };
+            let duplicate_key = pristine
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index
+                        && other.frame == was.frame
+                        && other.call.kinetic_kind.trim().parse::<i64>().ok() == Some(value as i64)
+                })
+                .count();
+            if duplicate_key != 0 {
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_CLR_SPEED,
+                hitbox_id: Some(crate::game_link::numeric_point_key(
+                    crate::data::ClrSpeedCall::FUNC,
+                    &[value],
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    clr_speed_kinetic_kind: Some(replacement),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::ClrSpeedCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    /// Send numeric `CLR_SPEED` replacements to the plugin. Named replacements remain an
+    /// explicit source/export-only edit because the capture is the only proof of their runtime ID.
+    fn push_clr_speed_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::clr_speed_rules_for(
+            motion,
+            &captures,
+            &self.state.clr_speed_pristine,
+            &self.state.script.to_clr_speed_events(),
+        );
+        let key = format!("{mv_key}#clr_speed");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "CLR_SPEED edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique frame/key"
+            );
+        }
+    }
+
+    fn set_air_rules_for(
+        motion: u64,
+        pristine: &[crate::data::SetAirEvent],
+        shown: &[crate::data::SetAirEvent],
+    ) -> Vec<crate::game_link::HitboxRuleWire> {
+        let n = pristine.len();
+        let m = shown.len();
+        let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if pristine[i].frame == shown[j].frame {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let mut matched_old = vec![false; n];
+        let mut matched_new = vec![false; m];
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < n && j < m {
+            if pristine[i].frame == shown[j].frame {
+                matched_old[i] = true;
+                matched_new[j] = true;
+                i += 1;
+                j += 1;
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        let mut rules = Vec::new();
+        for event in pristine
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| (!matched_old[index]).then_some(event))
+        {
+            let (frame_start, frame_end) = Self::rule_frame_window(event.frame);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_SET_AIR,
+                hitbox_id: Some(crate::game_link::KINETIC_KEY_SET_AIR),
+                suppress: true,
+                frame_start,
+                frame_end,
+                overrides: None,
+                inject: None,
+                func: Some("SET_AIR".into()),
+            });
+        }
+        for event in shown
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| (!matched_new[index]).then_some(event))
+        {
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_SET_AIR,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(crate::game_link::InjectRuleWire {
+                    frame: Self::script_to_motion_frame(event.frame),
+                    args: Vec::new(),
+                    command: Some("SET_AIR".into()),
+                }),
+                func: Some("SET_AIR".into()),
+            });
+        }
+        rules
+    }
+
+    /// Send structural `SET_AIR` suppression/injection rules to the plugin.
+    fn push_set_air_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let rules = Self::set_air_rules_for(
+            motion,
+            &self.state.set_air_pristine,
+            &self.state.script.to_set_air_events(),
+        );
+        let key = format!("{mv_key}#set_air");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+    }
+
     /// Send the post-hoc hitbox modifiers the editor has changed to the running game.
     ///
     /// Diffed by site against `attack_mods_pristine`, on the same terms as the hurtbox rules, and
@@ -12133,6 +12635,7 @@ impl VisionaryApp {
             ft_catch_stop_arg1: None,
             ft_catch_stop_arg2: None,
             ft_start_adjust_motion_frame_value: None,
+            clr_speed_kinetic_kind: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -15683,6 +16186,8 @@ impl VisionaryApp {
             &self.state.script.to_correct_events(),
             &self.state.script.to_ft_catch_stop_events(),
             &self.state.script.to_ft_start_adjust_motion_frame_events(),
+            &self.state.script.to_clr_speed_events(),
+            &self.state.script.to_set_air_events(),
         ));
         if total == 0 {
             return;
@@ -15724,6 +16229,8 @@ impl VisionaryApp {
         let ft_catch_stop = self.state.script.to_ft_catch_stop_events();
         let ft_start_adjust_motion_frame =
             self.state.script.to_ft_start_adjust_motion_frame_events();
+        let clr_speed = self.state.script.to_clr_speed_events();
+        let set_air = self.state.script.to_set_air_events();
         let timeline_height = timeline_content_height(
             self.state.hitboxes.len(),
             n_fx,
@@ -15736,6 +16243,8 @@ impl VisionaryApp {
             correct.len(),
             ft_catch_stop.len(),
             ft_start_adjust_motion_frame.len(),
+            clr_speed.len(),
+            set_air.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
@@ -16186,6 +16695,66 @@ impl VisionaryApp {
                             "FT_START_ADJUST_MOTION_FRAME_arg1 ({:.2})",
                             event.call.value
                         ),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let clr_speed_band_top = ft_start_adjust_motion_frame_band_top
+                + if ft_start_adjust_motion_frame.is_empty() {
+                    0.0
+                } else {
+                    ft_start_adjust_motion_frame.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in clr_speed.iter().enumerate() {
+                let y_top = clr_speed_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(245, 125, 175);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!("CLR_SPEED {}", event.call.kinetic_kind),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let set_air_band_top = clr_speed_band_top
+                + if clr_speed.is_empty() {
+                    0.0
+                } else {
+                    clr_speed.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in set_air.iter().enumerate() {
+                let y_top = set_air_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(170, 200, 255);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        "SET_AIR",
                         egui::FontId::monospace(8.0),
                         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
                     );
@@ -17857,6 +18426,8 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::Correct(_)
                 | ExcuteStmt::FtCatchStop(_)
                 | ExcuteStmt::FtStartAdjustMotionFrame(_)
+                | ExcuteStmt::ClrSpeed(_)
+                | ExcuteStmt::SetAir
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -18419,6 +18990,52 @@ fn clear_move_state(state: &mut crate::data::AppState) {
 /// for. **Every family a capture can produce has to appear here, and the compiler cannot enforce
 /// that** — which is the whole reason this is testable rather than inline.
 #[allow(clippy::too_many_arguments)] // The capture guard names every supported family explicitly.
+fn nothing_to_load_with_kinetics(
+    hitboxes: usize,
+    effects: usize,
+    hurt_stmts: usize,
+    sounds: usize,
+    expressions: usize,
+    reverse_lr: usize,
+    speed_ex: usize,
+    speed: usize,
+    add_speed_no_limit: usize,
+    correct: usize,
+    ft_catch_stop: usize,
+    ft_start_adjust_motion_frame: usize,
+    clr_speed: usize,
+    set_air: usize,
+) -> Option<String> {
+    if hitboxes == 0
+        && effects == 0
+        && hurt_stmts == 0
+        && sounds == 0
+        && expressions == 0
+        && reverse_lr == 0
+        && speed_ex == 0
+        && speed == 0
+        && add_speed_no_limit == 0
+        && correct == 0
+        && ft_catch_stop == 0
+        && ft_start_adjust_motion_frame == 0
+        && clr_speed == 0
+        && set_air == 0
+    {
+        return Some(
+            "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
+             direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
+             CLR_SPEED or SET_AIR lines for this move yet."
+                .into(),
+        );
+    }
+    None
+}
+
+/// Compatibility wrapper for callers that only have the original capture-family counts.
+/// Kinetic point families are zero in that older view; live capture loading uses the full
+/// `nothing_to_load_with_kinetics` predicate above.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn nothing_to_load(
     hitboxes: usize,
     effects: usize,
@@ -18433,27 +19050,22 @@ fn nothing_to_load(
     ft_catch_stop: usize,
     ft_start_adjust_motion_frame: usize,
 ) -> Option<String> {
-    if hitboxes == 0
-        && effects == 0
-        && hurt_stmts == 0
-        && sounds == 0
-        && expressions == 0
-        && reverse_lr == 0
-        && speed_ex == 0
-        && speed == 0
-        && add_speed_no_limit == 0
-        && correct == 0
-        && ft_catch_stop == 0
-        && ft_start_adjust_motion_frame == 0
-    {
-        return Some(
-            "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
-             direct-speed, speed-addition, correction, catch-stop or motion-frame adjustment lines \
-             for this move yet."
-                .into(),
-        );
-    }
-    None
+    nothing_to_load_with_kinetics(
+        hitboxes,
+        effects,
+        hurt_stmts,
+        sounds,
+        expressions,
+        reverse_lr,
+        speed_ex,
+        speed,
+        add_speed_no_limit,
+        correct,
+        ft_catch_stop,
+        ft_start_adjust_motion_frame,
+        0,
+        0,
+    )
 }
 
 /// One editable sound name: a text field for typing, and a Browse list for finding.
@@ -21385,6 +21997,116 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_clr_speed_and_set_air_become_editable_game_statements() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "CLR_SPEED".into(),
+                args: vec![A::Int(7)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "SET_AIR".into(),
+                args: vec![],
+                run: 1,
+            },
+        ];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        assert_eq!(
+            script.to_clr_speed_events(),
+            vec![crate::data::ClrSpeedEvent {
+                frame: 4,
+                call: crate::data::ClrSpeedCall {
+                    kinetic_kind: "7".into(),
+                },
+                site: 0,
+            }]
+        );
+        assert_eq!(
+            script.to_set_air_events(),
+            vec![crate::data::SetAirEvent { frame: 4, site: 0 }]
+        );
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_air_n");
+        assert!(
+            exported.contains("visionary_clr_speed(agent, 7);"),
+            "{exported}"
+        );
+        assert!(exported.contains("visionary_set_air(agent);"), "{exported}");
+    }
+
+    #[test]
+    fn clr_speed_live_rules_key_the_pristine_numeric_kinetic_value() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 3.0,
+            func: "CLR_SPEED".into(),
+            args: vec![A::Int(7)],
+            run: 1,
+        }];
+        let pristine = crate::acmd::parse_acmd_script(
+            r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::CLR_SPEED(agent, 7);
+    }
+}
+"#,
+        )
+        .to_clr_speed_events();
+        let mut edited = pristine.clone();
+        edited[0].call.kinetic_kind = "9".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::clr_speed_rules_for(motion, &captures, &pristine, &edited);
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].category, crate::game_link::CAT_CLR_SPEED);
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::numeric_point_key("CLR_SPEED", &[7.0]))
+        );
+        assert_eq!(
+            rules[0].overrides.as_ref().unwrap().clr_speed_kinetic_kind,
+            Some(9)
+        );
+        let mut named = pristine.clone();
+        named[0].call.kinetic_kind = "*FIGHTER_KINETIC_ENERGY_ID_MOTION".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::clr_speed_rules_for(motion, &captures, &pristine, &named);
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
+    fn set_air_live_rules_suppress_removed_and_inject_added_points() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let pristine = vec![
+            crate::data::SetAirEvent { frame: 4, site: 0 },
+            crate::data::SetAirEvent { frame: 8, site: 1 },
+        ];
+        let shown = vec![crate::data::SetAirEvent { frame: 6, site: 0 }];
+        let rules = VisionaryApp::set_air_rules_for(motion, &pristine, &shown);
+        assert_eq!(rules.len(), 3);
+        assert!(rules[0].suppress);
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::KINETIC_KEY_SET_AIR)
+        );
+        assert!(rules[1].suppress);
+        let inject = rules[2].inject.as_ref().expect("retimed point injection");
+        assert_eq!(inject.command.as_deref(), Some("SET_AIR"));
+        assert!(inject.args.is_empty());
+        assert_eq!(inject.frame, 5.0);
+    }
+
+    #[test]
     fn set_speed_ex_live_rules_key_numeric_kinetic_kind_and_reject_ambiguous_fallback() {
         let captures = vec![CaptureLine {
             kind: 6,
@@ -23063,33 +23785,41 @@ mod live_effect_capture_tests {
     /// than trusted to be like the two above it.
     #[test]
     fn each_thin_band_reserves_room_for_its_own_rows() {
-        let none = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        let none = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         // Same shape for each — 4px of padding, then one thin row apiece.
         let band = 4.0 + 3.0 * timeline_thin_row();
         for (label, height) in [
             (
                 "effect",
-                timeline_content_height(2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                timeline_content_height(2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             ),
             (
                 "hurtbox",
-                timeline_content_height(2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0),
+                timeline_content_height(2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             ),
             (
                 "sound",
-                timeline_content_height(2, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0),
+                timeline_content_height(2, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             ),
             (
                 "reverse_lr",
-                timeline_content_height(2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0),
+                timeline_content_height(2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0),
             ),
             (
                 "ft_catch_stop",
-                timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0),
+                timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0),
             ),
             (
                 "ft_start_adjust_motion_frame",
-                timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3),
+                timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0),
+            ),
+            (
+                "clr_speed",
+                timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0),
+            ),
+            (
+                "set_air",
+                timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3),
             ),
         ] {
             assert!(
@@ -23098,11 +23828,11 @@ mod live_effect_capture_tests {
             );
         }
         // And they stack rather than sharing space.
-        let all = timeline_content_height(2, 3, 3, 3, 3, 0, 0, 0, 0, 3, 3);
-        assert!((all - none - 6.0 * band).abs() < 0.01, "{all} vs {none}");
-        let movement = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0);
-        let correction = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0);
-        let plain_speed = timeline_content_height(2, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
+        let all = timeline_content_height(2, 3, 3, 3, 3, 0, 0, 0, 0, 3, 3, 3, 3);
+        assert!((all - none - 8.0 * band).abs() < 0.01, "{all} vs {none}");
+        let movement = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0);
+        let correction = timeline_content_height(2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
+        let plain_speed = timeline_content_height(2, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0);
         let single_band = 4.0 + timeline_thin_row();
         assert!((movement - none - single_band).abs() < 0.01);
         assert!((correction - none - single_band).abs() < 0.01);
@@ -23112,11 +23842,11 @@ mod live_effect_capture_tests {
     #[test]
     fn dense_timeline_rows_scale_without_changing_frame_space() {
         assert_eq!(
-            timeline_content_height(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            timeline_content_height(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             24.0
         );
         assert_eq!(
-            timeline_content_height(40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            timeline_content_height(40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             504.0
         );
         assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
@@ -23132,6 +23862,8 @@ mod live_effect_capture_tests {
         assert_eq!(
             timeline_frame_extent(
                 &dense_capture,
+                &[],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -23160,7 +23892,7 @@ mod live_effect_capture_tests {
                 ui.allocate_exact_size(
                     egui::vec2(
                         ui.available_width(),
-                        timeline_content_height(40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                        timeline_content_height(40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
                     ),
                     egui::Sense::hover(),
                 );
@@ -23195,7 +23927,21 @@ mod live_effect_capture_tests {
             ..Default::default()
         }];
         assert_eq!(
-            timeline_frame_extent(&hitbox, &[], &[], &[], &[], &[], &[], &[], &[], &[], &[],),
+            timeline_frame_extent(
+                &hitbox,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
             8
         );
         assert_eq!(
@@ -23203,6 +23949,8 @@ mod live_effect_capture_tests {
                 &hitbox,
                 &[],
                 &[sound(83)],
+                &[],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -23220,6 +23968,8 @@ mod live_effect_capture_tests {
                 &hitbox,
                 &[],
                 &[sound(2)],
+                &[],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -23249,6 +23999,8 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &[],
+                &[],
+                &[],
             ),
             83
         );
@@ -23260,6 +24012,8 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &reverse,
+                &[],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -23290,6 +24044,8 @@ mod live_effect_capture_tests {
                 &[],
                 &ft_catch_stop,
                 &[],
+                &[],
+                &[],
             ),
             97
         );
@@ -23311,8 +24067,57 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &ft_start_adjust_motion_frame,
+                &[],
+                &[],
             ),
             103
+        );
+        let clr_speed = [crate::data::ClrSpeedEvent {
+            frame: 109,
+            call: crate::data::ClrSpeedCall {
+                kinetic_kind: "7".into(),
+            },
+            site: 0,
+        }];
+        assert_eq!(
+            timeline_frame_extent(
+                &hitbox,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &clr_speed,
+                &[],
+            ),
+            109
+        );
+        let set_air = [crate::data::SetAirEvent {
+            frame: 113,
+            site: 0,
+        }];
+        assert_eq!(
+            timeline_frame_extent(
+                &hitbox,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &set_air,
+            ),
+            113
         );
     }
 

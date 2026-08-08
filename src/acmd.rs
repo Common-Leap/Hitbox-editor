@@ -247,7 +247,11 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // `smash-script` crate has no safe wrapper for the linked primitive. It is an emitter
         // implementation detail, not a source statement; skipping the whole nested function
         // keeps parse -> export -> parse -> export from duplicating the helper definition.
-        if line.contains("fn visionary_set_speed(") && line.ends_with('{') {
+        if (line.contains("fn visionary_set_speed(")
+            || line.contains("fn visionary_clr_speed(")
+            || line.contains("fn visionary_set_air("))
+            && line.ends_with('{')
+        {
             let (body_end, _) = find_block_end(lines, pos);
             pos = body_end + 1;
             continue;
@@ -383,6 +387,14 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             continue;
         }
         if let Some(stmt) = parse_ft_start_adjust_motion_frame_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_clr_speed_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_set_air_call(line) {
             stmts.push(stmt);
             continue;
         }
@@ -1933,6 +1945,46 @@ fn parse_ft_start_adjust_motion_frame_call(line: &str) -> Option<ExcuteStmt> {
     ))
 }
 
+/// Parse the exact measured `CLR_SPEED(agent, kinetic_id)` shape or its generated helper call.
+/// The vendored crate exposes only the generic kinetic primitive macro, so generated source uses
+/// the helper while editable source retains the corpus's `macros::CLR_SPEED` spelling.
+fn parse_clr_speed_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = if line.contains("macros::CLR_SPEED(") {
+        "macros::CLR_SPEED("
+    } else if line.contains("visionary_clr_speed(") {
+        "visionary_clr_speed("
+    } else {
+        return None;
+    };
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, kinetic_kind] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" || kinetic_kind.trim().is_empty() {
+        return None;
+    }
+    Some(ExcuteStmt::ClrSpeed(crate::data::ClrSpeedCall {
+        kinetic_kind: kinetic_kind.trim().to_string(),
+    }))
+}
+
+/// Parse the exact measured argument-less `SET_AIR(agent)` shape or its generated helper call.
+fn parse_set_air_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = if line.contains("macros::SET_AIR(") {
+        "macros::SET_AIR("
+    } else if line.contains("visionary_set_air(") {
+        "visionary_set_air("
+    } else {
+        return None;
+    };
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    (tokens.as_slice() == ["agent"]).then_some(ExcuteStmt::SetAir)
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2447,6 +2499,12 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 "{indent}macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, {});",
                 num(call.value)
             ),
+            crate::data::ExcuteStmt::ClrSpeed(call) => {
+                format!("{indent}visionary_clr_speed(agent, {});", call.kinetic_kind)
+            }
+            crate::data::ExcuteStmt::SetAir => {
+                format!("{indent}visionary_set_air(agent);")
+            }
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -2514,6 +2572,36 @@ fn contains_set_speed(stmts: &[crate::data::AcmdStmt]) -> bool {
     })
 }
 
+fn contains_clr_speed(stmts: &[crate::data::AcmdStmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        crate::data::AcmdStmt::Excute(inner) => inner
+            .iter()
+            .any(|stmt| matches!(stmt, crate::data::ExcuteStmt::ClrSpeed(_))),
+        crate::data::AcmdStmt::Bare(inner) => {
+            matches!(inner.as_ref(), crate::data::ExcuteStmt::ClrSpeed(_))
+        }
+        crate::data::AcmdStmt::Loop { body, .. } | crate::data::AcmdStmt::RawBlock { body, .. } => {
+            contains_clr_speed(body)
+        }
+        _ => false,
+    })
+}
+
+fn contains_set_air(stmts: &[crate::data::AcmdStmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        crate::data::AcmdStmt::Excute(inner) => inner
+            .iter()
+            .any(|stmt| matches!(stmt, crate::data::ExcuteStmt::SetAir)),
+        crate::data::AcmdStmt::Bare(inner) => {
+            matches!(inner.as_ref(), crate::data::ExcuteStmt::SetAir)
+        }
+        crate::data::AcmdStmt::Loop { body, .. } | crate::data::AcmdStmt::RawBlock { body, .. } => {
+            contains_set_air(body)
+        }
+        _ => false,
+    })
+}
+
 /// `smash-script` has no Rust wrapper for `sv_animcmd::SET_SPEED`. Generated projects therefore
 /// use the linked primitive with the same Lua-stack setup as the crate's other wrappers. The
 /// helper is nested in a generated function so the preview and shipped source have identical
@@ -2528,6 +2616,37 @@ fn emit_set_speed_helper(indent: &str) -> Vec<String> {
         format!("{indent}    agent.clear_lua_stack();"),
         format!("{indent}    lua_args!(agent, speed_x, speed_y);"),
         format!("{indent}    smash::app::sv_animcmd::SET_SPEED(agent.lua_state_agent);"),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}}}"),
+    ]
+}
+
+/// `smash-script` has no safe `CLR_SPEED` wrapper. Generated projects use the linked kinetic
+/// primitive with the same Lua-stack setup as the generic wrapper macro.
+fn emit_clr_speed_helper(indent: &str) -> Vec<String> {
+    vec![
+        format!("{indent}#[inline]"),
+        format!("{indent}#[allow(dead_code)]"),
+        format!(
+            "{indent}unsafe fn visionary_clr_speed(agent: &mut L2CAgentBase, kinetic_kind: i32) {{"
+        ),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}    lua_args!(agent, kinetic_kind);"),
+        format!("{indent}    smash::app::sv_kinetic_energy::clear_speed(agent.lua_state_agent);"),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}}}"),
+    ]
+}
+
+/// `smash-script` has no safe `SET_AIR` wrapper. Generated projects call the linked animcmd
+/// primitive directly after preparing an empty Lua stack.
+fn emit_set_air_helper(indent: &str) -> Vec<String> {
+    vec![
+        format!("{indent}#[inline]"),
+        format!("{indent}#[allow(dead_code)]"),
+        format!("{indent}unsafe fn visionary_set_air(agent: &mut L2CAgentBase) {{"),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}    smash::app::sv_animcmd::SET_AIR(agent.lua_state_agent);"),
         format!("{indent}    agent.clear_lua_stack();"),
         format!("{indent}}}"),
     ]
@@ -2601,6 +2720,18 @@ fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, S
             out.push('\n');
         }
     }
+    if contains_clr_speed(&script.stmts) {
+        for line in emit_clr_speed_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    if contains_set_air(&script.stmts) {
+        for line in emit_set_air_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     for line in &body {
         out.push_str(line);
         out.push('\n');
@@ -2620,6 +2751,18 @@ fn emit_sound_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (Str
     let mut out = format!("unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n");
     if contains_set_speed(&script.stmts) {
         for line in emit_set_speed_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    if contains_clr_speed(&script.stmts) {
+        for line in emit_clr_speed_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    if contains_set_air(&script.stmts) {
+        for line in emit_set_air_helper("    ") {
             out.push_str(&line);
             out.push('\n');
         }
@@ -8872,6 +9015,63 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             parse_acmd_script(&emitted).to_ft_start_adjust_motion_frame_events(),
             events
         );
+    }
+
+    #[test]
+    fn clr_speed_and_set_air_parse_export_as_typed_points() {
+        let source = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::CLR_SPEED(agent, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);
+        macros::SET_AIR(agent);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let clr = script.to_clr_speed_events();
+        let air = script.to_set_air_events();
+        assert_eq!(clr.len(), 1);
+        assert_eq!(clr[0].frame, 4);
+        assert_eq!(
+            clr[0].call.kinetic_kind,
+            "*FIGHTER_KINETIC_ENERGY_ID_GRAVITY"
+        );
+        assert_eq!(air, vec![crate::data::SetAirEvent { frame: 4, site: 0 }]);
+
+        let emitted = preview_game_fn(&script, "attack_air_n");
+        assert!(emitted.contains("visionary_clr_speed(agent, *FIGHTER_KINETIC_ENERGY_ID_GRAVITY);"));
+        assert!(emitted.contains("visionary_set_air(agent);"));
+        assert!(emitted.contains("sv_kinetic_energy::clear_speed"));
+        assert!(emitted.contains("sv_animcmd::SET_AIR"));
+        assert_eq!(parse_acmd_script(&emitted).to_clr_speed_events(), clr);
+        assert_eq!(parse_acmd_script(&emitted).to_set_air_events(), air);
+        let reemitted = preview_game_fn(&parse_acmd_script(&emitted), "attack_air_n");
+        assert_eq!(
+            reemitted.matches("unsafe fn visionary_clr_speed(").count(),
+            1
+        );
+        assert_eq!(reemitted.matches("unsafe fn visionary_set_air(").count(), 1);
+    }
+
+    #[test]
+    fn malformed_clr_speed_and_set_air_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::CLR_SPEED(agent);
+        macros::CLR_SPEED(agent, 0, 1);
+        macros::SET_AIR(agent, 0);
+        macros::SET_AIR(other);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_clr_speed_events().is_empty());
+        assert!(script.to_set_air_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("macros::CLR_SPEED(agent);"));
+        assert!(emitted.contains("macros::CLR_SPEED(agent, 0, 1);"));
+        assert!(emitted.contains("macros::SET_AIR(agent, 0);"));
+        assert!(emitted.contains("macros::SET_AIR(other);"));
     }
 
     #[test]

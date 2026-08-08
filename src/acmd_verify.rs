@@ -1186,6 +1186,9 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
                 report,
             );
         }
+        ExcuteStmt::ClrSpeed(call) if call.kinetic_kind.trim().is_empty() => {
+            report.blocker(subject, "CLR_SPEED has an empty kinetic kind");
+        }
         _ => {}
     }
 }

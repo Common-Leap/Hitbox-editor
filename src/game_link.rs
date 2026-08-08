@@ -357,6 +357,12 @@ pub const HURT_KEY_COL_PRI: u64 = u64::MAX;
 /// arrived at from the other direction. **Must equal the plugin's value.**
 pub const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
 
+/// Rule key for the targetless `SET_AIR` kinetic point.
+///
+/// Kept separate from the hurtbox sentinels so a structural kinetic rule cannot match a
+/// `WHOLE_HIT` or `COL_PRI` call in an older/current plugin. **Must equal the plugin's value.**
+pub const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
+
 /// Wire category for `ATTACK_ABS`. **Must equal the plugin's `CAT_ABS`.**
 ///
 /// Deliberately *not* [`crate::data::CAT_ABS`], which is `3`. These are two different numbering
@@ -446,6 +452,12 @@ pub const CAT_FT_CATCH_STOP: u8 = 17;
 
 /// Wire category for the measured one-argument motion-frame adjustment point.
 pub const CAT_FT_START_ADJUST_MOTION_FRAME: u8 = 18;
+
+/// Wire category for the measured `CLR_SPEED` kinetic point.
+pub const CAT_CLR_SPEED: u8 = 19;
+
+/// Wire category for the measured argument-less `SET_AIR` kinetic point.
+pub const CAT_SET_AIR: u8 = 20;
 
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
@@ -599,6 +611,9 @@ pub struct HbOverridesWire {
     /// Replacement `FT_START_ADJUST_MOTION_FRAME_arg1` numeric value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ft_start_adjust_motion_frame_value: Option<f32>,
+    /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clr_speed_kinetic_kind: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2766,6 +2781,71 @@ mod tests {
             rule["overrides"]["ft_start_adjust_motion_frame_value"].as_f64(),
             Some(1.25)
         );
+    }
+
+    #[test]
+    fn kinetic_point_categories_and_overrides_match_plugin_wire_fields() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer");
+        let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        assert!(module.contains(&format!("pub const CAT_CLR_SPEED: u8 = {CAT_CLR_SPEED};")));
+        assert!(module.contains(&format!("pub const CAT_SET_AIR: u8 = {CAT_SET_AIR};")));
+        assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
+        assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
+        assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
+        for (category, other) in [
+            (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
+            (CAT_SET_AIR, CAT_CLR_SPEED),
+            (CAT_SET_AIR, CAT_SPEED),
+            (CAT_SET_AIR, CAT_REVERSE_LR),
+        ] {
+            assert_ne!(category, other, "kinetic category collision");
+        }
+        assert!(module.contains("const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;"));
+
+        let link = GameLink::default();
+        let clr_key = numeric_point_key("CLR_SPEED", &[7.0]);
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_CLR_SPEED,
+                hitbox_id: Some(clr_key),
+                suppress: false,
+                frame_start: Some(3.5),
+                frame_end: Some(4.5),
+                overrides: Some(HbOverridesWire {
+                    clr_speed_kinetic_kind: Some(9),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("CLR_SPEED".into()),
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_SET_AIR,
+                hitbox_id: Some(KINETIC_KEY_SET_AIR),
+                suppress: true,
+                frame_start: Some(7.5),
+                frame_end: Some(8.5),
+                overrides: None,
+                inject: None,
+                func: Some("SET_AIR".into()),
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(rules[0]["category"].as_u64(), Some(CAT_CLR_SPEED as u64));
+        assert_eq!(rules[0]["hitbox_id"].as_u64(), Some(clr_key));
+        assert_eq!(rules[0]["func"].as_str(), Some("CLR_SPEED"));
+        assert_eq!(
+            rules[0]["overrides"]["clr_speed_kinetic_kind"].as_i64(),
+            Some(9)
+        );
+        assert_eq!(rules[1]["category"].as_u64(), Some(CAT_SET_AIR as u64));
+        assert_eq!(rules[1]["hitbox_id"].as_u64(), Some(KINETIC_KEY_SET_AIR));
+        assert_eq!(rules[1]["func"].as_str(), Some("SET_AIR"));
     }
 
     #[test]

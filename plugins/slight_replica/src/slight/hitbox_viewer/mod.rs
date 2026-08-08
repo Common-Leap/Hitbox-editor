@@ -229,6 +229,15 @@ pub const CAT_FT_CATCH_STOP: u8 = 17;
 /// `FT_START_ADJUST_MOTION_FRAME_arg1` — a verified one-argument numeric point.
 pub const CAT_FT_START_ADJUST_MOTION_FRAME: u8 = 18;
 
+/// `CLR_SPEED` — clear one named kinetic-energy reserve. Must equal the editor's wire category.
+pub const CAT_CLR_SPEED: u8 = 19;
+
+/// `SET_AIR` — an argument-less kinetic-state point. Must equal the editor's wire category.
+pub const CAT_SET_AIR: u8 = 20;
+
+/// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
+const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -896,6 +905,8 @@ pub struct HbOverrides {
     pub ft_catch_stop_arg2: Option<f32>,
     /// Replacement `FT_START_ADJUST_MOTION_FRAME_arg1` numeric value.
     pub ft_start_adjust_motion_frame_value: Option<f32>,
+    /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
+    pub clr_speed_kinetic_kind: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -1000,6 +1011,8 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_CORRECT => "correct",
                     CAT_FT_CATCH_STOP => "ft_catch_stop",
                     CAT_FT_START_ADJUST_MOTION_FRAME => "ft_start_adjust_motion_frame",
+                    CAT_CLR_SPEED => "clr_speed",
+                    CAT_SET_AIR => "set_air",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1156,6 +1169,72 @@ unsafe fn hook_reverse_lr(lua_state: u64) {
             let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
             let frame = smash::app::lua_bind::MotionModule::frame(boma);
             if let Some((suppress, _)) = action_for(CAT_REVERSE_LR, motion, 0, frame) {
+                if suppress {
+                    return;
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
+/// Capture and sparsely override the measured `CLR_SPEED(agent, kinetic_id)` point.
+///
+/// The runtime hook sees the resolved numeric kinetic ID; the editor keeps the authored source
+/// token separately and only sends a numeric replacement when the live capture can prove it.
+#[skyline::hook(replace = smash::app::sv_kinetic_energy::clear_speed)]
+unsafe fn hook_clr_speed(lua_state: u64) {
+    let args = read_args_exact(lua_state, 1);
+    record(lua_state, "CLR_SPEED", &args);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            let Some(kind) = args.first().and_then(|arg| match arg {
+                LuaArg::Int(value) => Some(*value as f32),
+                LuaArg::Num(value) => Some(*value),
+                _ => None,
+            }) else {
+                original!()(lua_state);
+                return;
+            };
+            let key = numeric_point_key("CLR_SPEED", &[kind]);
+            if let Some((suppress, overrides)) = action_for(CAT_CLR_SPEED, motion, key, frame) {
+                if suppress {
+                    return;
+                }
+                if let Some(replacement) =
+                    overrides.and_then(|item| item.clr_speed_kinetic_kind)
+                {
+                    let mut values = args.clone();
+                    if let Some(slot) = values.first_mut() {
+                        *slot = LuaArg::Int(replacement);
+                        if values != args {
+                            rewrite_args(lua_state, &values);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
+/// Capture and sparsely suppress the measured argument-less `SET_AIR` point.
+#[skyline::hook(replace = smash::app::sv_animcmd::SET_AIR)]
+unsafe fn hook_set_air(lua_state: u64) {
+    record(lua_state, "SET_AIR", &[]);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            if let Some((suppress, _)) =
+                action_for(CAT_SET_AIR, motion, KINETIC_KEY_SET_AIR, frame)
+            {
                 if suppress {
                     return;
                 }
@@ -2431,6 +2510,18 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 );
                 continue;
             }
+            if category == CAT_CLR_SPEED {
+                crate::slight::diag::note(
+                    "rejected CLR_SPEED injection: this slice supports numeric value overrides only",
+                );
+                continue;
+            }
+            if category == CAT_SET_AIR
+                && (!args.is_empty() || inj.command.as_deref() != Some("SET_AIR"))
+            {
+                crate::slight::diag::note("rejected SET_AIR injection with wrong command or args");
+                continue;
+            }
             if category == CAT_GRAB && args.len() == 9 {
                 args.push(LuaArg::Int(
                     *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
@@ -2478,6 +2569,7 @@ pub unsafe fn inject_tick(lua_state: u64) {
                     CAT_REVERSE_LR => {
                         smash::app::sv_animcmd::REVERSE_LR(agent.lua_state_agent)
                     }
+                    CAT_SET_AIR => smash::app::sv_animcmd::SET_AIR(agent.lua_state_agent),
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
                     CAT_ATTACK_FP => {
@@ -2555,7 +2647,9 @@ pub fn install() {
         hook_add_speed_no_limit,
         hook_correct,
         hook_ft_catch_stop,
-        hook_ft_start_adjust_motion_frame
+        hook_ft_start_adjust_motion_frame,
+        hook_clr_speed,
+        hook_set_air
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

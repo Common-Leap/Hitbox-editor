@@ -2489,6 +2489,28 @@ operations. The source parser also preserves the measured corpus's top-level cal
 malformed or revised shapes remain raw. Live game behavior is unverified because no emulator,
 game, or UI automation was run.
 
+#### [x] E1g — measured `CLR_SPEED` and `SET_AIR` kinetic point events (completed 2026-08-08; live runtime unverified)
+
+The read-only external corpus has four exact `macros::CLR_SPEED(agent, kinetic_id)` calls and six
+exact `macros::SET_AIR(agent)` calls. The local cache has neither family. The linked bindings expose
+the matching `sv_kinetic_energy::clear_speed` and `sv_animcmd::SET_AIR` primitives, so these calls
+can be carried as source-token/argument-less point events without guessing status-module kinetic
+semantics.
+
+The completed slice carries exact calls through typed parser/IR events, editor panels and timeline
+lanes, capture reconstruction, portable project/edit-log persistence, category-19/20 live rules,
+matching Skyline hooks, generated ACMD export, and source write-back. `CLR_SPEED` preserves the
+authored kinetic-ID token and supports numeric live-keyed value replacement; `SET_AIR` supports
+flat structural remove, add, and retime operations through the source writer. The source writer
+refuses branches, loops, and site mismatches rather than guessing placement, while malformed
+shapes remain raw. The 190 external `KineticModule::change_kinetic` calls remain raw
+status-module statements and are not part of this ACMD macro slice.
+
+Offline validation passed: focused and full desktop tests (563 tests, 1 ignored), strict Clippy,
+format/diff checks, the debug build-check wrapper, the locked release build, and the Skyline
+plugin release build. No emulator, game, or UI automation was run, so live in-game behavior
+remains unverified.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
