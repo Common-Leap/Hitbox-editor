@@ -1260,6 +1260,18 @@ pub fn rewrite_effect_calls(
         modifier_edits(
             text,
             label,
+            "camera offset",
+            "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
+            macro_site,
+            was.camera_offset.map(|v| vec![v]),
+            target.camera_offset.map(|v| vec![v]),
+            sites.and_then(|s| s.camera_offset.as_ref()),
+            &mut edits,
+            &mut report,
+        );
+        modifier_edits(
+            text,
+            label,
             "tint",
             "LAST_EFFECT_SET_COLOR",
             macro_site,
@@ -1339,10 +1351,10 @@ fn sync_script(
 /// Write one `LAST_EFFECT_SET_*` modifier back, or say why it could not be.
 ///
 /// Each of these lives on its own line, so turning one on or off is a call added or removed —
-/// structural, and reported. Only retuning an existing one is a value edit. The three differ
-/// solely in how many arguments they carry, which is why they share this: a rate is a
-/// one-component modifier and a tint a three-component one, and every rule around them is the
-/// same. `noun` names the property in the user's terms and `command` names the line to look for.
+/// structural, and reported. Only retuning an existing one is a value edit. The four differ
+/// only in which property they carry — rate, camera offset, opacity, or three-component tint —
+/// and every rule around them is the same. `noun` names the property in the user's terms and
+/// `command` names the line to look for.
 #[allow(clippy::too_many_arguments)]
 fn modifier_edits(
     text: &str,
@@ -1390,12 +1402,13 @@ fn modifier_edits(
 
 /// The `LAST_EFFECT_SET_*` lines a spawn can carry, in the spelling `scan_macro_sites` reports.
 ///
-/// Only these three break nothing when they sit between a spawn and a later modifier of its
+/// Only these four break nothing when they sit between a spawn and a later modifier of its
 /// own; every other macro ends the run. Adding a member of the family to
 /// [`crate::data::EffectCall`] means adding it here too, or its line will end the run and the
 /// modifier after it will be reported as unfindable.
 const MODIFIER_COMMANDS: &[&str] = &[
     "LAST_EFFECT_SET_RATE",
+    "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
     "LAST_EFFECT_SET_COLOR",
     "LAST_EFFECT_SET_ALPHA",
 ];
@@ -1404,6 +1417,7 @@ const MODIFIER_COMMANDS: &[&str] = &[
 #[derive(Default)]
 struct ModifierSites {
     rate: Option<MacroSite>,
+    camera_offset: Option<MacroSite>,
     tint: Option<MacroSite>,
     alpha: Option<MacroSite>,
 }
@@ -1412,7 +1426,7 @@ struct ModifierSites {
 ///
 /// These macros name no effect, so the only thing tying one to a spawn is that it comes
 /// directly after it — the same rule `eval_effect_stmts` uses to fill `EffectCall::rate`,
-/// `tint`, and `alpha`, and the two must agree or a value would be read off one call and
+/// `camera_offset`, `tint`, and `alpha`, and the two must agree or a value would be read off one call and
 /// written into another. Anything else between them, including a macro this scanner does not
 /// recognise, breaks the pairing rather than reaching further back for a spawn to claim.
 ///
@@ -1459,6 +1473,7 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
         // A second line of the same kind overwrites the first, because in game the later call
         // wins and that is the value the parser will have read.
         let slot = match site.name.as_str() {
+            "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT" => &mut entry.camera_offset,
             "LAST_EFFECT_SET_COLOR" => &mut entry.tint,
             "LAST_EFFECT_SET_ALPHA" => &mut entry.alpha,
             _ => &mut entry.rate,
@@ -1499,13 +1514,14 @@ fn is_trail_macro(name: &str) -> bool {
 /// of a loop body agrees, since they all come off one line of source.
 ///
 /// The `LAST_EFFECT_SET_*` modifiers count: each is written back from its own line, but that
-/// line is inside the loop body too, so a per-iteration rate, tint, or opacity is no more
+/// line is inside the loop body too, so a per-iteration rate, camera offset, tint, or opacity is no more
 /// expressible than a per-iteration position.
 fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
     a.offset == b.offset
         && a.rotation == b.rotation
         && a.scale == b.scale
         && a.rate == b.rate
+        && a.camera_offset == b.camera_offset
         && a.tint == b.tint
         && a.alpha == b.alpha
         && a.color == b.color
@@ -4804,6 +4820,41 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(
             report.skipped.iter().any(|s| s.contains("gained a rate")),
             "{report:?}"
+        );
+    }
+
+    const CAMERA_OFFSETS: &str = r#"unsafe extern "C" fn effect_camera(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_hit"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, -5);
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_hit_2"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.4);
+    }
+}
+"#;
+
+    #[test]
+    fn a_camera_flat_offset_edit_rewrites_only_its_own_modifier_line() {
+        let pristine = crate::acmd::parse_effect_script(CAMERA_OFFSETS).to_effect_calls();
+        assert_eq!(
+            pristine.iter().map(|c| c.camera_offset).collect::<Vec<_>>(),
+            vec![Some(-5.0), Some(0.4)]
+        );
+        let mut edited = pristine.clone();
+        edited[1].camera_offset = Some(0.75);
+
+        let (after, report) = rewrite_effect_calls(CAMERA_OFFSETS, "t", &pristine, &edited)
+            .expect("camera-flat offset source rewrite");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, -5);"),
+            "the first spawn's modifier must be untouched:\n{after}"
+        );
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.75);"),
+            "the second spawn's modifier must be retuned:\n{after}"
         );
     }
 

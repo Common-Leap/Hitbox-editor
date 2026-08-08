@@ -111,6 +111,11 @@ pub struct SpawnRuleWire {
     /// rate line if there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate: Option<f32>,
+    /// Per-spawn camera-flat offset — the live counterpart of the spawn's
+    /// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` line. It is a separate modifier because it is
+    /// not part of the spawn's three-dimensional position arguments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_offset: Option<f32>,
     /// Per-spawn tint and opacity — the live counterparts of `LAST_EFFECT_SET_COLOR` and
     /// `LAST_EFFECT_SET_ALPHA`, applied and rewritten exactly the way `rate` is.
     ///
@@ -2302,6 +2307,58 @@ mod tests {
         assert!(
             rule["hitbox_id"].is_null(),
             "a rate rule must not carry an id: {rule}"
+        );
+    }
+
+    #[test]
+    fn outbound_camera_flat_offset_rules_match_plugin_field_names() {
+        let link = GameLink::default();
+        link.send_spawn_rules(&[SpawnRuleWire {
+            eff_hash: 0x99,
+            suppress: false,
+            motion: Some(0x1234),
+            frame_start: Some(5.0),
+            frame_end: Some(5.0),
+            pos: None,
+            rot: None,
+            scale: None,
+            rate: None,
+            camera_offset: Some(0.4),
+            tint: None,
+            alpha: None,
+            color: None,
+            transition: None,
+            inject: None,
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let offset = v["spawn_rules"][0]["camera_offset"]
+            .as_f64()
+            .map(|value| value as f32);
+        assert_eq!(
+            offset.map(|value| (value - 0.4).abs() < f32::EPSILON),
+            Some(true),
+            "the camera-flat value must use the plugin's field name"
+        );
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/effect_viewer");
+        let rules = std::fs::read_to_string(root.join("spawn_rules.rs"))
+            .expect("read the plugin's spawn rules");
+        assert!(
+            rules.contains("pub camera_offset: Option<f32>,")
+                && rules.contains("pub fn camera_offset_for"),
+            "the plugin no longer exposes the camera-flat rule field and lookup"
+        );
+        let hooks = std::fs::read_to_string(root.join("acmd_hooks.rs"))
+            .expect("read the plugin's ACMD hooks");
+        assert!(
+            hooks.contains(
+                "replace = smash::app::sv_animcmd::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT"
+            ) && hooks.contains("hook_last_effect_set_offset_to_camera_flat")
+                && hooks.contains("apply_pending_camera_offset"),
+            "the plugin no longer rewrites the camera-flat modifier hook"
         );
     }
 

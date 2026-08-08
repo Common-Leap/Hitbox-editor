@@ -45,6 +45,11 @@ pub struct SpawnRule {
     pub rot: Option<[f32; 3]>,
     #[serde(default)]
     pub scale: Option<f32>,
+    /// Per-spawn camera-flat offset — the live form of the spawn's
+    /// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` line. The macro applies it to the last spawned
+    /// effect, so it is carried as a pending modifier rather than folded into `pos`.
+    #[serde(default)]
+    pub camera_offset: Option<f32>,
     /// Per-spawn playback rate — the live form of the spawn's `LAST_EFFECT_SET_RATE`.
     ///
     /// Not part of the argument rewrite: the rate is not an argument of any spawn macro. It is
@@ -162,6 +167,17 @@ pub fn rate_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<f32> {
         .iter()
         .find(|r| !r.suppress && r.rate.is_some() && r.matches(eff_hash, motion, motion_frame))
         .and_then(|r| r.rate)
+}
+
+/// Per-spawn camera-flat offset for the FIRST non-suppress rule matching this spawn.
+pub fn camera_offset_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<f32> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| {
+            !r.suppress && r.camera_offset.is_some() && r.matches(eff_hash, motion, motion_frame)
+        })
+        .and_then(|r| r.camera_offset)
 }
 
 /// Per-spawn tint and opacity for the FIRST non-suppress rule matching this spawn.

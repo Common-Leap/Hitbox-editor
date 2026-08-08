@@ -3136,6 +3136,9 @@ pub enum EffectMacro {
     EffectOffKind { effect_name: String },
     /// LAST_EFFECT_SET_RATE — modifies the rate of the last spawned effect.
     LastEffectSetRate { rate: f32 },
+    /// LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT — offsets the last spawned effect along the
+    /// camera-flat axis. The wrapper takes one numeric value after `agent`.
+    LastEffectSetOffsetToCameraFlat { offset: f32 },
     /// LAST_EFFECT_SET_COLOR — retints the last spawned effect.
     ///
     /// Three arguments in every one of the corpus's 65 calls, and no alpha among them: opacity
@@ -3374,6 +3377,12 @@ pub struct EffectCall {
     /// rate along instead of leaving the line behind to land on someone else's effect.
     #[serde(default)]
     pub rate: Option<f32>,
+    /// Camera-flat offset from a `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` line following this
+    /// spawn. It is kept separate from [`offset`](Self::offset): the latter is the spawn's
+    /// three-dimensional bone-relative position, while this macro adjusts the rendered effect
+    /// after it has been created.
+    #[serde(default)]
+    pub camera_offset: Option<f32>,
     /// Tint from a `LAST_EFFECT_SET_COLOR` line following this spawn, as red, green, blue.
     ///
     /// Bound to the spawn for the same reason [`rate`](Self::rate) is, and with the same
@@ -3691,6 +3700,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
+                                camera_offset: None,
                                 tint: None,
                                 alpha: None,
                                 color: None,
@@ -3734,6 +3744,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: bone_name2.clone(),
                                 rate: None,
+                                camera_offset: None,
                                 tint: None,
                                 alpha: None,
                                 color: None,
@@ -3805,6 +3816,15 @@ fn eval_effect_stmts(
                                 ),
                             }
                         }
+                        EffectMacro::LastEffectSetOffsetToCameraFlat { offset } => match anchor {
+                            Some(index) => calls[index].camera_offset = Some(*offset),
+                            None => walk.residue(
+                                &format!(
+                                    "macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, {offset});"
+                                ),
+                                calls,
+                            ),
+                        },
                         EffectMacro::LastEffectSetColor { rgb } => match anchor {
                             Some(index) => calls[index].tint = Some(*rgb),
                             // The 64 costume tints land here, and carrying them verbatim is the
@@ -3847,6 +3867,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
+                                camera_offset: None,
                                 tint: None,
                                 alpha: None,
                                 color: Some(color.clone()),

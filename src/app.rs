@@ -5886,6 +5886,7 @@ impl VisionaryApp {
                     trail_off: None,
                     trail_bone2: None,
                     rate: None,
+                    camera_offset: None,
                     tint: None,
                     alpha: None,
                     color: Some(crate::data::ColorCall {
@@ -5936,6 +5937,7 @@ impl VisionaryApp {
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
                     rate: None,
+                    camera_offset: None,
                     tint: None,
                     alpha: None,
                     // This button adds a spawn. Colour commands are added by their own button
@@ -6479,6 +6481,49 @@ impl VisionaryApp {
                                 });
                                 match pristine.as_ref().map(|p| p.rate) {
                                     Some(Some(rate)) => orig(ui, format!("orig {rate:.2}")),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+
+                                // Camera-flat offset — the `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT`
+                                // line that follows this spawn. It is not part of the spawn's
+                                // three-dimensional bone-relative offset, so it gets its own
+                                // optional row and live rule.
+                                ui.label("Camera offset");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.camera_offset.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Offset THIS EFFECT along the camera-flat axis. Off writes no LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT line.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.camera_offset = on.then_some(0.0);
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(offset) = ec.camera_offset.as_mut() {
+                                        if ui
+                                            .add(egui::DragValue::new(offset).speed(0.02))
+                                            .changed()
+                                        {
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.camera_offset) {
+                                    Some(Some(offset)) => orig(ui, format!("orig {offset:.3}")),
                                     Some(None) => orig(ui, "orig none".to_string()),
                                     None => {
                                         ui.label("");
@@ -8892,10 +8937,11 @@ impl VisionaryApp {
             raw_line: None,
             trail_off: None,
             trail_bone2: None,
-            // A spawn call carries none of the three modifiers of its own — each arrives as its
+            // A spawn call carries none of the four modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
             rate: None,
+            camera_offset: None,
             tint: None,
             alpha: None,
             // `effect_capture_layout` above only matches spawn families, so nothing that
@@ -8960,6 +9006,7 @@ impl VisionaryApp {
             trail_off: None,
             trail_bone2: None,
             rate: None,
+            camera_offset: None,
             tint: None,
             alpha: None,
             color: Some(crate::data::ColorCall { transition, rgba }),
@@ -9419,10 +9466,11 @@ impl VisionaryApp {
         ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
 
         let mut effects: Vec<crate::data::EffectCall> = Vec::new();
-        // The spawn a `LAST_EFFECT_SET_RATE` line binds to, mirroring the rule the parser
+        // The spawn a `LAST_EFFECT_SET_*` line binds to, mirroring the rule the parser
         // applies to a script. Cleared by every line that pushes no spawn — including a spawn
-        // that was captured but dropped as a `null` sentinel or failed to parse — so a rate
-        // can never quietly land on some earlier effect that merely happens to be last.
+        // that was captured but dropped as a `null` sentinel or failed to parse — so a
+        // modifier can never quietly land on some earlier effect that merely happens to be
+        // last.
         let mut anchor: Option<usize> = None;
         for (_, line) in ordered {
             if effect_capture_layout(&line.func).is_some() {
@@ -9450,13 +9498,21 @@ impl VisionaryApp {
             // spawned last, so each binds to the capture line above it exactly as the parser
             // binds it to the macro above it in a script. The sort is stable and the lines share
             // a frame, so the spawn is still the previous entry here. `anchor` survives all
-            // three, because a second modifier line targets the same spawn and the later one
-            // wins — and a tint followed by a rate is two lines about one spawn.
+            // four, because a second modifier line targets the same spawn and the later one
+            // wins — and a tint followed by a rate or camera offset is still one spawn's data.
             if line.func == "LAST_EFFECT_SET_RATE" {
                 if let (Some(rate), Some(index)) =
                     (line.args.first().and_then(|arg| arg.as_f32()), anchor)
                 {
                     effects[index].rate = Some(rate);
+                }
+                continue;
+            }
+            if line.func == "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT" {
+                if let (Some(offset), Some(index)) =
+                    (line.args.first().and_then(|arg| arg.as_f32()), anchor)
+                {
+                    effects[index].camera_offset = Some(offset);
                 }
                 continue;
             }
@@ -13074,6 +13130,7 @@ impl VisionaryApp {
                                 rot: None,
                                 scale: None,
                                 rate: None,
+                                camera_offset: None,
                                 tint: None,
                                 alpha: None,
                                 color: None,
@@ -13090,6 +13147,7 @@ impl VisionaryApp {
                                 rot: None,
                                 scale: None,
                                 rate: None,
+                                camera_offset: None,
                                 tint: None,
                                 alpha: None,
                                 color: None,
@@ -13245,6 +13303,7 @@ impl VisionaryApp {
                     rot: None,
                     scale: None,
                     rate: None,
+                    camera_offset: None,
                     tint: None,
                     alpha: None,
                     color: None,
@@ -13268,6 +13327,7 @@ impl VisionaryApp {
                     rot: None,
                     scale: None,
                     rate: None,
+                    camera_offset: None,
                     tint: None,
                     alpha: None,
                     color: None,
@@ -13302,6 +13362,7 @@ impl VisionaryApp {
                         rot: None,
                         scale: None,
                         rate: None,
+                        camera_offset: None,
                         tint: None,
                         alpha: None,
                         color: None,
@@ -13325,6 +13386,7 @@ impl VisionaryApp {
                         // Tint and opacity are separate lines for the same reason and are sent
                         // on the same unconditional terms.
                         rate: ec.rate,
+                        camera_offset: ec.camera_offset,
                         tint: ec.tint,
                         alpha: ec.alpha,
                         color: None,
@@ -13340,7 +13402,7 @@ impl VisionaryApp {
             let moved = pristine
                 .map(|p| p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale)
                 .unwrap_or(true);
-            // The three `LAST_EFFECT_SET_*` modifiers ride along on the same rule, and each is
+            // The four `LAST_EFFECT_SET_*` modifiers ride along on the same rule, and each is
             // sent on its own terms: a spawn whose rate changed but which has not been moved
             // still needs a rule, and one that moved but kept its rate must not claim to set
             // one. Sending a modifier unconditionally would override the script's own line
@@ -13356,7 +13418,10 @@ impl VisionaryApp {
             let refaded = pristine
                 .map(|p| p.alpha != ec.alpha)
                 .unwrap_or(ec.alpha.is_some());
-            if moved || retuned || retinted || refaded {
+            let camera_offset_changed = pristine
+                .map(|p| p.camera_offset != ec.camera_offset)
+                .unwrap_or(ec.camera_offset.is_some());
+            if moved || retuned || retinted || refaded || camera_offset_changed {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
@@ -13367,6 +13432,7 @@ impl VisionaryApp {
                     rot: moved.then_some(ec.rotation),
                     scale: moved.then_some(ec.scale),
                     rate: retuned.then_some(ec.rate).flatten(),
+                    camera_offset: camera_offset_changed.then_some(ec.camera_offset).flatten(),
                     tint: retinted.then_some(ec.tint).flatten(),
                     alpha: refaded.then_some(ec.alpha).flatten(),
                     color: None,
@@ -13479,6 +13545,7 @@ impl VisionaryApp {
             rot: None,
             scale: None,
             rate: None,
+            camera_offset: None,
             tint: None,
             alpha: None,
             color: None,
@@ -18817,6 +18884,7 @@ mod live_effect_capture_tests {
         }
         assert!(effect_capture_layout("EFFECT_OFF_KIND").is_none());
         assert!(effect_capture_layout("LAST_EFFECT_SET_RATE").is_none());
+        assert!(effect_capture_layout("LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT").is_none());
         assert_eq!(fighter_kind_id("kirby"), Some(6));
         assert_eq!(fighter_kind_id("mario"), Some(0));
     }
@@ -18885,6 +18953,39 @@ mod live_effect_capture_tests {
             calls[1].rate,
             Some(1.5),
             "the orphaned 0.25 must not have overwritten this"
+        );
+    }
+
+    #[test]
+    fn a_captured_camera_flat_offset_binds_to_the_spawn_above_it() {
+        let smoke = hash40::hash40("sys_atk_smoke").0;
+        let line = hash40::hash40("sys_attack_line").0;
+        let offset = |frame: f32, value: f32| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT".into(),
+            args: vec![A::Num(value)],
+            run: 1,
+        };
+        let captures = vec![
+            spawn("EFFECT", 5.0, smoke),
+            offset(5.0, -5.0),
+            spawn("EFFECT_FOLLOW_ALPHA", 5.0, line),
+            offset(5.0, 0.4),
+        ];
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([
+            (smoke, "sys_atk_smoke".into()),
+            (line, "sys_attack_line".into()),
+        ]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.camera_offset)
+                .collect::<Vec<_>>(),
+            vec![Some(-5.0), Some(0.4)]
         );
     }
 

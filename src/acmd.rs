@@ -660,6 +660,20 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // The camera-flat offset has one numeric argument after `agent`, just like the rate.
+        // Keep malformed or non-numeric calls raw rather than inventing a default that would
+        // move an effect the source never moved.
+        if line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(") {
+            if let Some(t) = try_extract("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(") {
+                if t.len() > 1 {
+                    if let Ok(offset) = t[1].trim().parse::<f32>() {
+                        macros.push(EffectMacro::LastEffectSetOffsetToCameraFlat { offset });
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Tint and opacity for the last spawned effect. Both arities are uniform across the
         // whole corpus — 65 `(agent, r, g, b)` and 4 `(agent, a)` — so a call of the wrong
         // length is not a variant to interpret but a line this parser does not understand, and
@@ -831,16 +845,17 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::AFTER_IMAGE_OFF(")
             || crate::acmd_src::raw_trail_line(line).is_some()
             || line.contains("macros::LAST_EFFECT_SET_RATE(")
+            || line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(")
             || line.contains("macros::LAST_EFFECT_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_ALPHA(")
-            // These four are deliberately still opaque C7 lines. They belong to the effect
-            // timeline when written bare, though, so route them through the same residue path
+            // These three remaining members are deliberately still opaque C7 lines. They belong
+            // to the effect timeline when written bare, though, so route them through the same
+            // residue path
             // as an unknown line inside `is_excute` instead of dropping the whole statement.
             // Their argument meaning and live/export contracts remain unmodelled below.
             || line.contains("macros::LAST_PARTICLE_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
             || line.contains("macros::LAST_EFFECT_SET_SCALE_W(")
-            || line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(")
             // C4's detach/area controls are also intentionally opaque. Their names and wrapper
             // arities are known, but the local corpus has no calls to establish how they should
             // bind to a follow effect or an editable area lifetime. Preserve bare forms through
@@ -2493,7 +2508,8 @@ fn emit_spawn_stop(call: &crate::data::EffectCall, indent: &str) -> String {
 /// Generate a smashline `effect_*` ACMD function that replays the (edited) effect-call
 /// list: calls grouped by spawn frame, disabled calls omitted. `tweaks` (keyed by effect
 /// hash) adds LAST_EFFECT_SET_COLOR / LAST_EFFECT_SET_RATE lines after matching spawns so
-/// live color/speed multipliers ship with the mod.
+/// live color/speed multipliers ship with the mod. Authored per-spawn modifiers, including
+/// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT`, are emitted from their `EffectCall` fields.
 /// `residue` is the second half of
 /// [`EffectScript::to_effect_calls_and_residue`](crate::data::EffectScript::to_effect_calls_and_residue):
 /// wrapped lines that belong to a frame rather than to any one call, because their frame block
@@ -2637,6 +2653,11 @@ fn emit_effect_move_fn(
 
             for call in run_calls.iter().copied() {
                 out.push_str(&emit_spawn_call(call, &body));
+                if let Some(offset) = call.camera_offset {
+                    out.push_str(&format!(
+                        "{body}macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, {offset});\n"
+                    ));
+                }
                 let tweak = tweaks.get(&tweak_hash(&call.effect_name));
                 // One tint line, never two, on exactly the terms the rate below uses: a live colour
                 // multiplier is a deliberate replacement of this kind's tint, so it wins over the
@@ -4959,6 +4980,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 trail_off: None,
                 trail_bone2: None,
                 rate: None,
+                camera_offset: None,
                 tint: None,
                 alpha: None,
                 color: None,
@@ -4983,6 +5005,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 trail_off: None,
                 trail_bone2: None,
                 rate: None,
+                camera_offset: None,
                 tint: None,
                 alpha: None,
                 color: None,
@@ -5364,6 +5387,48 @@ unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
             round_tripped.iter().map(|c| c.rate).collect::<Vec<_>>(),
             vec![Some(2.0), Some(1.5)],
             "reading the export back must find the same rates on the same spawns"
+        );
+    }
+
+    /// The measured camera-flat modifier has the same last-spawn binding as rate, but its own
+    /// scalar field. Two adjacent calls keep their offsets separate and the generated source
+    /// puts each line directly below the spawn it modifies.
+    #[test]
+    fn camera_flat_offset_binds_to_its_spawn_and_survives_an_export() {
+        let src = r#"
+unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_hit"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, -5);
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_hit_2"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.4);
+    }
+}
+"#;
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(
+            calls.iter().map(|c| c.camera_offset).collect::<Vec<_>>(),
+            vec![Some(-5.0), Some(0.4)]
+        );
+
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "test", &Default::default(), &Default::default());
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, -5);"),
+            "the first camera-flat offset must be exported:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.4);"),
+            "the second camera-flat offset must be exported:\n{emitted}"
+        );
+        let round_tripped = parse_effect_script(&emitted).to_effect_calls();
+        assert_eq!(
+            round_tripped
+                .iter()
+                .map(|c| c.camera_offset)
+                .collect::<Vec<_>>(),
+            vec![Some(-5.0), Some(0.4)]
         );
     }
 
@@ -6914,6 +6979,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             trail_off: None,
             trail_bone2: None,
             rate: None,
+            camera_offset: None,
             tint: None,
             alpha: None,
             color: None,

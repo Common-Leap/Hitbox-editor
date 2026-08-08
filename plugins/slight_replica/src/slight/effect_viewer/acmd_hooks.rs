@@ -807,6 +807,7 @@ impl PendingValue {
 }
 
 static PENDING_RATE: PendingValue = PendingValue::new();
+static PENDING_CAMERA_OFFSET: PendingValue = PendingValue::new();
 static PENDING_ALPHA: PendingValue = PendingValue::new();
 // Three slots rather than one, so a partially-stored tint can never be read: each component is
 // set and read on its own, and `pending_tint` only reports a colour when all three are present.
@@ -819,6 +820,14 @@ fn set_pending_rate(rate: Option<f32>) {
 
 fn pending_rate() -> Option<f32> {
     PENDING_RATE.get()
+}
+
+fn set_pending_camera_offset(offset: Option<f32>) {
+    PENDING_CAMERA_OFFSET.set(offset);
+}
+
+fn pending_camera_offset() -> Option<f32> {
+    PENDING_CAMERA_OFFSET.get()
 }
 
 fn set_pending_tint(tint: Option<[f32; 3]>, alpha: Option<f32>) {
@@ -857,6 +866,24 @@ unsafe fn apply_pending_modifiers(
     if let Some(alpha) = PENDING_ALPHA.get() {
         smash::app::lua_bind::EffectModule::set_alpha(boma, h_after, alpha);
     }
+}
+
+/// Apply the camera-flat modifier to a spawn even when the live rule is editing a source that
+/// has no `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` line (or when a retime injection replays only
+/// the captured spawn call). The same hooked sv_animcmd primitive is used, with a synthetic
+/// one-argument lua stack; capture is suppressed because this is editor plumbing, not authored
+/// ACMD.
+unsafe fn apply_pending_camera_offset(lua_state: u64) {
+    let Some(offset) = pending_camera_offset() else {
+        return;
+    };
+    let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    let mut value = L2CValue::new_num(offset);
+    agent.push_lua_stack(&mut value);
+    hook_last_effect_set_offset_to_camera_flat(lua_state);
+    agent.clear_lua_stack();
 }
 
 /// Overwrite the arguments of a `LAST_EFFECT_SET_*` call with the editor's own values.
@@ -925,6 +952,25 @@ unsafe fn hook_last_effect_set_alpha(lua_state: u64) {
     original!()(lua_state);
 }
 
+/// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` — recorded and overridden on the same terms as the
+/// other per-spawn modifier lines. The original applies the value to the last effect handle, so
+/// rewriting its one numeric argument is enough; no guessed EffectModule setter is needed here.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT)]
+unsafe fn hook_last_effect_set_offset_to_camera_flat(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(
+        lua_state,
+        "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
+        &typed,
+    );
+
+    if let Some(offset) = pending_camera_offset() {
+        override_modifier_args(lua_state, &[offset]);
+    }
+
+    original!()(lua_state);
+}
+
 /// After original ran (effect spawned): track via the spawn path — result_h = 0 makes
 /// track_spawn resolve the real handle via EffectModule::get_last_handle.
 unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_before: u32) {
@@ -942,6 +988,7 @@ unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_befor
     // gets the editor's values. When there IS such a line, it runs after this and would win —
     // which is why each `hook_last_effect_set_*` rewrites its arguments as well.
     apply_pending_modifiers(boma, h_before, h_after);
+    apply_pending_camera_offset(lua_state);
     super::track_spawn(
         boma,
         0,
@@ -995,6 +1042,7 @@ macro_rules! effect_hook {
                 // line follows it, which is the exact misattribution the `LAST_EFFECT_SET_*`
                 // family invites.
                 set_pending_rate(None);
+                set_pending_camera_offset(None);
                 set_pending_tint(None, None);
                 // Eff-editor spawn rules: suppression + PER-SPAWN transform, both scoped to
                 // (motion, frame window) so editing one spawn doesn't affect the others.
@@ -1054,6 +1102,13 @@ macro_rules! effect_hook {
                         motion,
                         frame,
                     ));
+                    set_pending_camera_offset(
+                        crate::slight::effect_viewer::spawn_rules::camera_offset_for(
+                            args.eff_hash,
+                            motion,
+                            frame,
+                        ),
+                    );
                     let (tint, alpha) = crate::slight::effect_viewer::spawn_rules::tint_for(
                         args.eff_hash,
                         motion,
@@ -1711,6 +1766,7 @@ pub fn install() {
         hook_down_eff,
         hook_effect_off_kind,
         hook_last_effect_set_rate,
+        hook_last_effect_set_offset_to_camera_flat,
         hook_last_effect_set_color,
         hook_last_effect_set_alpha,
         hook_flash,

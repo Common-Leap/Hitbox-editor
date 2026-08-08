@@ -989,39 +989,51 @@ repeat this exactly.
 
 ### [ ] C7 — The last four `LAST_EFFECT_SET_*` members
 
-What C1 left. Corpus counts and wrapper status, all verified against the full `macros.rs`
-declaration list:
+What C1 left. Local cache counts and wrapper status, verified against the full `macros.rs`
+declaration list. A separate public dumped-script corpus was checked read-only for shape and
+coverage; its files are not part of this repository:
 
-| macro | args | corpus | `macros.rs` wrapper |
-|---|---|---|---|
-| `LAST_PARTICLE_SET_COLOR` | 3 (`ToF32`) | 1 | yes |
-| `LAST_EFFECT_SET_WORK_INT` | — | 1 | **NO** |
-| `LAST_EFFECT_SET_SCALE_W` | 3 (`ToF32`) | 0 | yes |
-| `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` | 1 (`ToF32`) | 0 | yes |
+| macro | args | local cache | external oracle | `macros.rs` wrapper |
+|---|---|---|---|---|
+| `LAST_PARTICLE_SET_COLOR` | 3 (`ToF32`) | 1 | 685 / 254 files | yes |
+| `LAST_EFFECT_SET_WORK_INT` | — | 1 | 105 / 70 files | **NO** |
+| `LAST_EFFECT_SET_SCALE_W` | 3 (`ToF32`) | 0 | 1 / 1 file* | yes |
+| `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` | 1 (`ToF32`) | 0 | 204 / 121 files | yes |
 
-**Boundary added 2026-08-08, without claiming C7 complete.** Opaque C7 lines inside an
+The external `LAST_EFFECT_SET_SCALE_W` hit has one argument rather than the three-argument
+wrapper shape, so it is not safe evidence for a typed editor field. The offset member is the one
+slice taken from that oracle so far.
+
+**Boundary added 2026-08-08, without claiming C7 complete.** Remaining opaque C7 lines inside an
 `is_excute` block were already carried by C6; bare forms now take that same frame-residue path
 instead of becoming statement-level losses. The real `TornadoStart` line survives the generated
 effect text and source write-back, while the verifier refuses the export because
 `LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper. The real `SetInkColor` particle line is
 also carried, but its three preceding `WorkModule::get_float` stack inputs remain unmodelled and
 the dump's zero-argument `LAST_PARTICLE_SET_COLOR(agent)` spelling is explicitly unbuildable.
-There is still no typed panel field, live wire/plugin hook, or safe semantic export for this
-family, so this entry remains open.
+The offset member below is now typed; the other three still have no complete five-surface
+contract, so this parent entry remains open.
 
-**This is a low-value entry and should probably stay open forever.** Two of the four appear
-nowhere in the corpus, and the other two appear once each. C1's result is the argument against
-doing it: modelling a whole family recovered five real calls. Take it only if a user asks for
-one of these by name.
+#### [x] C7a — `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` (completed 2026-08-08; live runtime unverified)
 
-- `LAST_PARTICLE_SET_COLOR` targets the last *particle*, not the last effect. It is not a fourth
-  member of C1's family and must not share its anchor — check what the game binds it to before
-  modelling it at all.
-- **`LAST_EFFECT_SET_WORK_INT` is the `AREA_WIND_2ND` situation again**: `sv_animcmd` has it, the
-  archive uses it once, and `macros.rs` does not declare it. If it is modelled it must be
-  parse-only, with a verifier blocker on export — the same shape as `WIND_MACRO_COMMANDS` /
-  `has_macro_wrapper` in [data.rs](src/data.rs).
-- Whatever is added, return its unbound lines from `to_effect_calls_reporting_losses`. See C1.
+The one-argument wrapper shape and 204 external calls were enough to take this member through
+all five surfaces: `EffectCall::camera_offset` in the parser/IR, an optional Camera offset row in
+the effect panel, per-spawn JSON and Skyline hook/capture handling, generated ACMD export, and
+value-only source write-back for an existing modifier line. Adjacent modifiers remain bound to
+their own spawn, and old projects deserialize with no authored value through `serde(default)`.
+
+Offline regression coverage includes source parse/export read-back, source write-back, live
+capture reconstruction, wire-field parity, and a standalone plugin release build. No emulator,
+game, or UI automation was run, so live in-game behavior remains unverified.
+
+The remaining three members stay separately bounded:
+
+- `LAST_PARTICLE_SET_COLOR` targets the last *particle*, not the last effect, and its observed
+  stack form still does not supply a buildable three-value source call.
+- `LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper and remains parse/carry-only with an
+  export blocker.
+- `LAST_EFFECT_SET_SCALE_W` has only the malformed one-argument external hit, not the measured
+  three-argument wrapper shape.
 
 ### [x] C2 — Sword trails (done 2026-08-05)
 
