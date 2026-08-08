@@ -1279,6 +1279,11 @@ pub enum ExcuteStmt {
     /// not guessed here. Keeping the pair typed still gives the editor, capture path, live rule
     /// key, and source writer one exact call shape to share.
     FtCatchStop(FtCatchStopCall),
+    /// `FT_START_ADJUST_MOTION_FRAME_arg1` — a measured numeric motion-frame adjustment point.
+    ///
+    /// The linked wrapper exposes the payload as an `f32`; the editor keeps that numeric shape
+    /// without assigning a more specific game meaning to it.
+    FtStartAdjustMotionFrame(FtStartAdjustMotionFrameCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1398,6 +1403,16 @@ impl FtCatchStopCall {
     pub const FUNC: &'static str = "FT_CATCH_STOP";
 }
 
+/// A parsed `macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, value)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FtStartAdjustMotionFrameCall {
+    pub value: f32,
+}
+
+impl FtStartAdjustMotionFrameCall {
+    pub const FUNC: &'static str = "FT_START_ADJUST_MOTION_FRAME_arg1";
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1458,6 +1473,15 @@ pub struct CorrectEvent {
 pub struct FtCatchStopEvent {
     pub frame: u32,
     pub call: FtCatchStopCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `FT_START_ADJUST_MOTION_FRAME_arg1` point event at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FtStartAdjustMotionFrameEvent {
+    pub frame: u32,
+    pub call: FtStartAdjustMotionFrameCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -1802,6 +1826,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.ft_catch_stops
+    }
+
+    /// Flatten `FT_START_ADJUST_MOTION_FRAME_arg1` calls into editable numeric point events.
+    pub fn to_ft_start_adjust_motion_frame_events(&self) -> Vec<FtStartAdjustMotionFrameEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.ft_start_adjust_motion_frames
     }
 }
 
@@ -2164,6 +2196,50 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The `FT_START_ADJUST_MOTION_FRAME_arg1` call an event site's ordinal refers to.
+    pub fn ft_start_adjust_motion_frame_stmt_mut(
+        &mut self,
+        site: usize,
+    ) -> Option<&mut FtStartAdjustMotionFrameCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut FtStartAdjustMotionFrameCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::FtStartAdjustMotionFrame(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::FtStartAdjustMotionFrame(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove the `REVERSE_LR` source statement at an ordinal from
     /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
     ///
@@ -2266,6 +2342,7 @@ struct WalkAccum {
     add_speed_no_limits: Vec<AddSpeedNoLimitEvent>,
     corrects: Vec<CorrectEvent>,
     ft_catch_stops: Vec<FtCatchStopEvent>,
+    ft_start_adjust_motion_frames: Vec<FtStartAdjustMotionFrameEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -2290,6 +2367,9 @@ struct WalkAccum {
     next_correct_site: usize,
     /// Site for the next `FT_CATCH_STOP`, independent of every other point-event family.
     next_ft_catch_stop_site: usize,
+    /// Site for the next `FT_START_ADJUST_MOTION_FRAME_arg1`, independent of every other point
+    /// event family.
+    next_ft_start_adjust_motion_frame_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -2499,6 +2579,28 @@ fn count_ft_catch_stop_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// `FT_START_ADJUST_MOTION_FRAME_arg1` calls in a subtree, counted in source order for loop/site
+/// resolution.
+fn count_ft_start_adjust_motion_frame_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::FtStartAdjustMotionFrame(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(
+                inner.as_ref(),
+                ExcuteStmt::FtStartAdjustMotionFrame(_)
+            )),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_ft_start_adjust_motion_frame_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -2626,6 +2728,12 @@ impl WalkAccum {
     fn take_ft_catch_stop_site(&mut self) -> usize {
         let site = self.next_ft_catch_stop_site;
         self.next_ft_catch_stop_site += 1;
+        site
+    }
+
+    fn take_ft_start_adjust_motion_frame_site(&mut self) -> usize {
+        let site = self.next_ft_start_adjust_motion_frame_site;
+        self.next_ft_start_adjust_motion_frame_site += 1;
         site
     }
 
@@ -2863,6 +2971,15 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::FtStartAdjustMotionFrame(call) => {
+            let site = hurt.take_ft_start_adjust_motion_frame_site();
+            hurt.ft_start_adjust_motion_frames
+                .push(FtStartAdjustMotionFrameEvent {
+                    frame: script_frame(frame),
+                    call: call.clone(),
+                    site,
+                });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -2905,6 +3022,8 @@ fn eval_stmts(
                 let add_speed_no_limit_site_at_entry = hurt.next_add_speed_no_limit_site;
                 let correct_site_at_entry = hurt.next_correct_site;
                 let ft_catch_stop_site_at_entry = hurt.next_ft_catch_stop_site;
+                let ft_start_adjust_motion_frame_site_at_entry =
+                    hurt.next_ft_start_adjust_motion_frame_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -2916,6 +3035,8 @@ fn eval_stmts(
                     hurt.next_add_speed_no_limit_site = add_speed_no_limit_site_at_entry;
                     hurt.next_correct_site = correct_site_at_entry;
                     hurt.next_ft_catch_stop_site = ft_catch_stop_site_at_entry;
+                    hurt.next_ft_start_adjust_motion_frame_site =
+                        ft_start_adjust_motion_frame_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -2930,6 +3051,9 @@ fn eval_stmts(
                 hurt.next_correct_site = correct_site_at_entry + count_correct_stmts(body);
                 hurt.next_ft_catch_stop_site =
                     ft_catch_stop_site_at_entry + count_ft_catch_stop_stmts(body);
+                hurt.next_ft_start_adjust_motion_frame_site =
+                    ft_start_adjust_motion_frame_site_at_entry
+                        + count_ft_start_adjust_motion_frame_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -3142,6 +3266,9 @@ pub struct AppState {
     pub correct_pristine: Vec<CorrectEvent>,
     /// `FT_CATCH_STOP` point events as loaded, for sparse live argument rules and source syncing.
     pub ft_catch_stop_pristine: Vec<FtCatchStopEvent>,
+    /// `FT_START_ADJUST_MOTION_FRAME_arg1` point events as loaded, for sparse live value rules
+    /// and source syncing.
+    pub ft_start_adjust_motion_frame_pristine: Vec<FtStartAdjustMotionFrameEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -3236,6 +3363,7 @@ impl Default for AppState {
             add_speed_no_limit_pristine: Vec::new(),
             correct_pristine: Vec::new(),
             ft_catch_stop_pristine: Vec::new(),
+            ft_start_adjust_motion_frame_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -3267,6 +3395,8 @@ impl AppState {
         self.add_speed_no_limit_pristine = script.to_add_speed_no_limit_events();
         self.correct_pristine = script.to_correct_events();
         self.ft_catch_stop_pristine = script.to_ft_catch_stop_events();
+        self.ft_start_adjust_motion_frame_pristine =
+            script.to_ft_start_adjust_motion_frame_events();
         self.script = script;
     }
 }

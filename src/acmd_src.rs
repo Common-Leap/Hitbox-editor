@@ -3849,6 +3849,91 @@ pub fn sync_ft_catch_stop(
     })
 }
 
+/// The buildable `FT_START_ADJUST_MOTION_FRAME_arg1` calls in source order.
+pub(crate) fn ft_start_adjust_motion_frame_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "FT_START_ADJUST_MOTION_FRAME_arg1" && site.args.len() == 2)
+        .collect()
+}
+
+/// Rewrite only the numeric payload of existing motion-frame adjustment calls.
+pub fn rewrite_ft_start_adjust_motion_frame(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::FtStartAdjustMotionFrameEvent],
+    edited: &[crate::data::FtStartAdjustMotionFrameEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = ft_start_adjust_motion_frame_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `FT_START_ADJUST_MOTION_FRAME_arg1` call(s), while the editor has {} pristine and {} edited point(s) — malformed or revised calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `FT_START_ADJUST_MOTION_FRAME_arg1` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `FT_START_ADJUST_MOTION_FRAME_arg1` site {} was retimed from frame {} to {} — source syncing only retunes its numeric value",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::FtStartAdjustMotionFrameCall::FUNC || site.args.len() != 2 {
+            report.skipped.push(format!(
+                "{label}: `FT_START_ADJUST_MOTION_FRAME_arg1` site {} no longer has its verified two-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.value) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited motion-frame adjustment values into the project's `game_` function.
+pub fn sync_ft_start_adjust_motion_frame(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::FtStartAdjustMotionFrameEvent],
+    edited: &[crate::data::FtStartAdjustMotionFrameEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_ft_start_adjust_motion_frame(
+            body,
+            &format!("{fighter}/{move_name}"),
+            pristine,
+            edited,
+        )
+    })
+}
+
 // ── Facing-direction point write-back ───────────────────────────────────────
 
 /// The exact argument-less `REVERSE_LR` calls in a source function.
@@ -7384,6 +7469,51 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             report.skipped.is_empty(),
             "unchanged opaque calls need no warning"
         );
+    }
+
+    #[test]
+    fn ft_start_adjust_motion_frame_write_back_changes_only_numeric_value() {
+        let text = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 17.0);
+    macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 0.85);
+}
+"#;
+        let pristine =
+            crate::acmd::parse_acmd_script(text).to_ft_start_adjust_motion_frame_events();
+        let mut edited = pristine.clone();
+        edited[0].call.value = 1.25;
+
+        let (after, report) = rewrite_ft_start_adjust_motion_frame(
+            text,
+            "bayonetta/attack_air_n",
+            &pristine,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 1.25);"));
+        assert!(after.contains("frame(agent.lua_state_agent, 17.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_ft_start_adjust_motion_frame_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn revised_ft_start_adjust_motion_frame_shapes_block_positional_source_sync() {
+        let text = r#"unsafe extern "C" fn game_specialn(agent: &mut L2CAgentBase) {
+    FT_START_ADJUST_MOTION_FRAME_REVISED_arg1(1.0);
+}
+"#;
+        let pristine =
+            crate::acmd::parse_acmd_script(text).to_ft_start_adjust_motion_frame_events();
+        assert!(pristine.is_empty());
+        assert!(ft_start_adjust_motion_frame_sites(text).is_empty());
+        let (after, report) =
+            rewrite_ft_start_adjust_motion_frame(text, "trail/special_n", &[], &[]).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.is_empty(), "{report:?}");
     }
 
     #[test]

@@ -1178,6 +1178,14 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
             check_finite(subject, "FT_CATCH_STOP argument 1", call.arg1, report);
             check_finite(subject, "FT_CATCH_STOP argument 2", call.arg2, report);
         }
+        ExcuteStmt::FtStartAdjustMotionFrame(call) => {
+            check_finite(
+                subject,
+                "FT_START_ADJUST_MOTION_FRAME_arg1 value",
+                call.value,
+                report,
+            );
+        }
         _ => {}
     }
 }

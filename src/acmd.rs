@@ -225,6 +225,15 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
             continue;
         }
 
+        // The measured motion-frame adjustment primitive is also emitted bare by captured
+        // scripts. Preserve that source shape; wrapping it in `is_excute` would change the
+        // capture's structure and make source write-back move the call into a different block.
+        if let Some(stmt) = parse_ft_start_adjust_motion_frame_call(line) {
+            stmts.push(AcmdStmt::Bare(Box::new(stmt)));
+            pos += 1;
+            continue;
+        }
+
         // wait(lua_state, N)
         if line.contains("wait(") {
             if let Some(w) = parse_wait_call(line) {
@@ -370,6 +379,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             continue;
         }
         if let Some(stmt) = parse_ft_catch_stop_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_ft_start_adjust_motion_frame_call(line) {
             stmts.push(stmt);
             continue;
         }
@@ -1898,6 +1911,28 @@ fn parse_ft_catch_stop_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Parse the measured `FT_START_ADJUST_MOTION_FRAME_arg1(agent, value)` shape.
+///
+/// The linked wrapper accepts one `f32`, so the exact arity and agent token are required. Related
+/// revised or unqualified dump artifacts stay `Raw` rather than being emitted as a guessed call.
+fn parse_ft_start_adjust_motion_frame_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "macros::FT_START_ADJUST_MOTION_FRAME_arg1(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, value] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" {
+        return None;
+    }
+    Some(ExcuteStmt::FtStartAdjustMotionFrame(
+        crate::data::FtStartAdjustMotionFrameCall {
+            value: value.trim().parse::<f32>().ok()?,
+        },
+    ))
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2407,6 +2442,10 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 "{indent}macros::FT_CATCH_STOP(agent, {}, {});",
                 num(call.arg1),
                 num(call.arg2)
+            ),
+            crate::data::ExcuteStmt::FtStartAdjustMotionFrame(call) => format!(
+                "{indent}macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, {});",
+                num(call.value)
             ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
@@ -8808,6 +8847,47 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("macros::FT_CATCH_STOP(agent, 6);"));
         assert!(emitted.contains("macros::FT_CATCH_STOP(agent, 6, 1, 2);"));
         assert!(emitted.contains("macros::FT_CATCH_STOP(other, 6, 1);"));
+    }
+
+    #[test]
+    fn ft_start_adjust_motion_frame_parse_export_as_typed_point() {
+        let source = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 17.0);
+    macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 0.85);
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_ft_start_adjust_motion_frame_events();
+        assert_eq!(
+            events,
+            vec![crate::data::FtStartAdjustMotionFrameEvent {
+                frame: 17,
+                call: crate::data::FtStartAdjustMotionFrameCall { value: 0.85 },
+                site: 0,
+            }]
+        );
+        let emitted = preview_game_fn(&script, "attack_air_n");
+        assert!(emitted.contains("macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 0.85);"));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_ft_start_adjust_motion_frame_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_ft_start_adjust_motion_frame_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent);
+    macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 1, 2);
+    FT_START_ADJUST_MOTION_FRAME_REVISED_arg1(1.0);
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_ft_start_adjust_motion_frame_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent);"));
+        assert!(emitted.contains("macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 1, 2);"));
+        assert!(emitted.contains("FT_START_ADJUST_MOTION_FRAME_REVISED_arg1(1.0);"));
     }
 
     #[test]

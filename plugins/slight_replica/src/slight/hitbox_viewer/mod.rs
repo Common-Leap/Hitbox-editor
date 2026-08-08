@@ -226,6 +226,9 @@ pub const CAT_CORRECT: u8 = 15;
 /// `FT_CATCH_STOP` — a verified two-argument numeric point.
 pub const CAT_FT_CATCH_STOP: u8 = 17;
 
+/// `FT_START_ADJUST_MOTION_FRAME_arg1` — a verified one-argument numeric point.
+pub const CAT_FT_START_ADJUST_MOTION_FRAME: u8 = 18;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -891,6 +894,8 @@ pub struct HbOverrides {
     /// Replacement `FT_CATCH_STOP` numeric `ToF32` arguments.
     pub ft_catch_stop_arg1: Option<f32>,
     pub ft_catch_stop_arg2: Option<f32>,
+    /// Replacement `FT_START_ADJUST_MOTION_FRAME_arg1` numeric value.
+    pub ft_start_adjust_motion_frame_value: Option<f32>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -994,6 +999,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_ADD_SPEED_NO_LIMIT => "add_speed_no_limit",
                     CAT_CORRECT => "correct",
                     CAT_FT_CATCH_STOP => "ft_catch_stop",
+                    CAT_FT_START_ADJUST_MOTION_FRAME => "ft_start_adjust_motion_frame",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1359,6 +1365,52 @@ unsafe fn hook_ft_catch_stop(lua_state: u64) {
                         if let Some(value) = overrides.ft_catch_stop_arg2 {
                             values[1] = LuaArg::Num(value);
                         }
+                        if values != args {
+                            rewrite_args(lua_state, &values);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
+/// Capture and sparsely override the verified one-argument motion-frame adjustment shape.
+///
+/// The numeric payload is the live rule key. This keeps the editor from assigning an unverified
+/// semantic name to the value while still allowing a source-backed point to be retuned.
+#[skyline::hook(replace = smash::app::sv_animcmd::FT_START_ADJUST_MOTION_FRAME_arg1)]
+unsafe fn hook_ft_start_adjust_motion_frame(lua_state: u64) {
+    let args = read_args_exact(lua_state, 1);
+    record(lua_state, "FT_START_ADJUST_MOTION_FRAME_arg1", &args);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            let Some(value) = args.first().and_then(|arg| match arg {
+                LuaArg::Int(value) => Some(*value as f32),
+                LuaArg::Num(value) => Some(*value),
+                _ => None,
+            }) else {
+                original!()(lua_state);
+                return;
+            };
+            let key = numeric_point_key("FT_START_ADJUST_MOTION_FRAME_arg1", &[value]);
+            if let Some((suppress, overrides)) =
+                action_for(CAT_FT_START_ADJUST_MOTION_FRAME, motion, key, frame)
+            {
+                if suppress {
+                    return;
+                }
+                if let Some(value) =
+                    overrides.and_then(|item| item.ft_start_adjust_motion_frame_value)
+                {
+                    let mut values = args.clone();
+                    if let Some(slot) = values.first_mut() {
+                        *slot = LuaArg::Num(value);
                         if values != args {
                             rewrite_args(lua_state, &values);
                         }
@@ -2373,6 +2425,12 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 );
                 continue;
             }
+            if category == CAT_FT_START_ADJUST_MOTION_FRAME {
+                crate::slight::diag::note(
+                    "rejected FT_START_ADJUST_MOTION_FRAME_arg1 injection: this slice supports value overrides only",
+                );
+                continue;
+            }
             if category == CAT_GRAB && args.len() == 9 {
                 args.push(LuaArg::Int(
                     *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
@@ -2496,7 +2554,8 @@ pub fn install() {
         hook_set_speed,
         hook_add_speed_no_limit,
         hook_correct,
-        hook_ft_catch_stop
+        hook_ft_catch_stop,
+        hook_ft_start_adjust_motion_frame
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

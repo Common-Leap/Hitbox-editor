@@ -444,6 +444,9 @@ pub const CAT_CORRECT: u8 = 15;
 /// Wire category for the measured two-argument `FT_CATCH_STOP` point.
 pub const CAT_FT_CATCH_STOP: u8 = 17;
 
+/// Wire category for the measured one-argument motion-frame adjustment point.
+pub const CAT_FT_START_ADJUST_MOTION_FRAME: u8 = 18;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -593,6 +596,9 @@ pub struct HbOverridesWire {
     pub ft_catch_stop_arg1: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ft_catch_stop_arg2: Option<f32>,
+    /// Replacement `FT_START_ADJUST_MOTION_FRAME_arg1` numeric value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ft_start_adjust_motion_frame_value: Option<f32>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2696,6 +2702,14 @@ mod tests {
         assert!(module.contains("hook_ft_catch_stop"));
         assert!(module.contains("pub ft_catch_stop_arg1: Option<f32>"));
         assert!(module.contains("pub ft_catch_stop_arg2: Option<f32>"));
+        assert!(module.contains(&format!(
+            "pub const CAT_FT_START_ADJUST_MOTION_FRAME: u8 = {CAT_FT_START_ADJUST_MOTION_FRAME};"
+        )));
+        assert!(
+            module.contains("replace = smash::app::sv_animcmd::FT_START_ADJUST_MOTION_FRAME_arg1")
+        );
+        assert!(module.contains("hook_ft_start_adjust_motion_frame"));
+        assert!(module.contains("pub ft_start_adjust_motion_frame_value: Option<f32>"));
         for (category, other) in [
             (CAT_ADD_SPEED_NO_LIMIT, CAT_SPEED_EX),
             (CAT_CORRECT, CAT_SPEED_EX),
@@ -2707,9 +2721,51 @@ mod tests {
             (CAT_FT_CATCH_STOP, CAT_SPEED),
             (CAT_FT_CATCH_STOP, CAT_ADD_SPEED_NO_LIMIT),
             (CAT_FT_CATCH_STOP, CAT_CORRECT),
+            (CAT_FT_START_ADJUST_MOTION_FRAME, CAT_FT_CATCH_STOP),
+            (CAT_FT_START_ADJUST_MOTION_FRAME, CAT_SPEED_EX),
+            (CAT_FT_START_ADJUST_MOTION_FRAME, CAT_SPEED),
+            (CAT_FT_START_ADJUST_MOTION_FRAME, CAT_ADD_SPEED_NO_LIMIT),
+            (CAT_FT_START_ADJUST_MOTION_FRAME, CAT_CORRECT),
         ] {
             assert_ne!(category, other, "new point categories must not collide");
         }
+    }
+
+    #[test]
+    fn outbound_ft_start_adjust_motion_frame_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let key = numeric_point_key("FT_START_ADJUST_MOTION_FRAME_arg1", &[0.85]);
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_FT_START_ADJUST_MOTION_FRAME,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(17.0),
+            frame_end: Some(17.0),
+            overrides: Some(HbOverridesWire {
+                ft_start_adjust_motion_frame_value: Some(1.25),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("FT_START_ADJUST_MOTION_FRAME_arg1".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(
+            rule["category"].as_u64(),
+            Some(CAT_FT_START_ADJUST_MOTION_FRAME as u64)
+        );
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(
+            rule["func"].as_str(),
+            Some("FT_START_ADJUST_MOTION_FRAME_arg1")
+        );
+        assert_eq!(
+            rule["overrides"]["ft_start_adjust_motion_frame_value"].as_f64(),
+            Some(1.25)
+        );
     }
 
     #[test]

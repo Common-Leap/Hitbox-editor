@@ -2473,6 +2473,22 @@ non-numeric shapes remain raw. Live in-game behavior is unverified because no em
 automation was run. The parent E1 entry remains open for `CLR_SPEED`, `SET_AIR`, status-module
 kinetics, and other unmeasured or unsupported sources.
 
+#### [x] E1f — measured `FT_START_ADJUST_MOTION_FRAME_arg1` point events (completed 2026-08-08; live runtime unverified)
+
+The exact one-argument wrapper shape — `FT_START_ADJUST_MOTION_FRAME_arg1(agent, value)` — is the
+next measured movement family. The read-only public corpus contains 19 calls in 17 files, all with
+one numeric payload; the local cache contains none. The vendored wrapper calls the matching
+`sv_animcmd` primitive. The completed slice carries a typed numeric point through the parser/IR,
+editor panel and timeline, capture reconstruction, category-18 live wire rule and Skyline hook,
+generated ACMD export, and numeric value-only source write-back without guessing a semantic name
+for the value.
+
+The related `FT_START_ADJUST_MOTION_FRAME_REVISED_arg1` lines omit `macros::` and `agent` in the
+corpus and remain raw. Structural placement and add/remove changes will remain export/source
+operations. The source parser also preserves the measured corpus's top-level call placement, while
+malformed or revised shapes remain raw. Live game behavior is unverified because no emulator,
+game, or UI automation was run.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their
