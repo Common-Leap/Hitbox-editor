@@ -402,6 +402,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_kinetic_add_speed_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_correct_call(line) {
             stmts.push(stmt);
             continue;
@@ -2013,6 +2017,48 @@ fn parse_change_kinetic_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Parse the measured direct lua-bind vector shape:
+/// `KineticModule::add_speed(agent.module_accessor, &Vector3f{x: ..., y: ..., z: 0.0})`.
+/// HDR uses `boma` for the receiver. The source corpus has a numeric zero z component; a
+/// non-zero or symbolic third component remains `Raw` until the editor has a measured z field.
+fn parse_kinetic_add_speed_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "KineticModule::add_speed(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args_balanced(&line[start..end]);
+    let [module_accessor, vector] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let (speed_x, speed_y) = parse_zero_z_vector(vector)?;
+    Some(ExcuteStmt::KineticAddSpeed(
+        crate::data::KineticAddSpeedCall { speed_x, speed_y },
+    ))
+}
+
+fn parse_zero_z_vector(value: &str) -> Option<(f32, f32)> {
+    let value = value.trim();
+    let value = value.strip_prefix('&')?.trim_start();
+    let value = value.strip_prefix("Vector3f")?.trim_start();
+    let value = value.strip_prefix('{')?.strip_suffix('}')?;
+    let fields = tokenize_args_balanced(value);
+    let [x, y, z] = fields.as_slice() else {
+        return None;
+    };
+    let (x_name, x_value) = x.split_once(':')?;
+    let (y_name, y_value) = y.split_once(':')?;
+    let (z_name, z_value) = z.split_once(':')?;
+    if x_name.trim() != "x" || y_name.trim() != "y" || z_name.trim() != "z" {
+        return None;
+    }
+    let speed_x = x_value.trim().parse::<f32>().ok()?;
+    let speed_y = y_value.trim().parse::<f32>().ok()?;
+    let speed_z = z_value.trim().parse::<f32>().ok()?;
+    (speed_z.is_finite() && speed_z == 0.0).then_some((speed_x, speed_y))
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2181,6 +2227,38 @@ fn tokenize_args(s: &str) -> Vec<String> {
                 current.push(ch);
             }
         }
+    }
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+    tokens
+}
+
+/// Split arguments while treating Rust tuples/arrays/struct literals as one argument. The
+/// regular tokenizer above predates direct `Vector3f{...}` calls and intentionally remains
+/// unchanged for the macro grammar it serves.
+fn tokenize_args_balanced(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut current = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                tokens.push(current.trim().to_string());
+                current = String::new();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
     }
     if !current.trim().is_empty() {
         tokens.push(current.trim().to_string());
@@ -2536,6 +2614,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::ChangeKinetic(call) => format!(
                 "{indent}KineticModule::change_kinetic(agent.module_accessor, {});",
                 call.kinetic_type
+            ),
+            crate::data::ExcuteStmt::KineticAddSpeed(call) => format!(
+                "{indent}KineticModule::add_speed(agent.module_accessor, &Vector3f{{x: {}, y: {}, z: 0.0}});",
+                num(call.speed_x),
+                num(call.speed_y)
             ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
@@ -9083,6 +9166,62 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             1
         );
         assert_eq!(reemitted.matches("unsafe fn visionary_set_air(").count(), 1);
+    }
+
+    #[test]
+    fn kinetic_add_speed_parses_standard_and_hdr_vectors_and_round_trips() {
+        let source = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 0.72, y: -1.5, z: 0.0});
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_add_speed_events();
+        assert_eq!(
+            events,
+            vec![crate::data::KineticAddSpeedEvent {
+                frame: 1,
+                call: crate::data::KineticAddSpeedCall {
+                    speed_x: 0.72,
+                    speed_y: -1.5,
+                },
+                site: 0,
+            }]
+        );
+        let emitted = preview_game_fn(&script, "escape_air");
+        assert!(emitted.contains(
+            "KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 0.72, y: -1.5, z: 0.0});"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_kinetic_add_speed_events(),
+            events
+        );
+
+        let hdr = source.replace("agent.module_accessor", "boma");
+        assert_eq!(
+            parse_acmd_script(&hdr).to_kinetic_add_speed_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_kinetic_add_speed_vectors_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 1.0, y: 2.0, z: 1.0});
+        KineticModule::add_speed(other, &Vector3f{x: 1.0, y: 2.0, z: 0.0});
+        KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 1.0, y: 2.0});
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_kinetic_add_speed_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("z: 1.0"));
+        assert!(emitted.contains("KineticModule::add_speed(other"));
+        assert!(emitted.contains("Vector3f{x: 1.0, y: 2.0}"));
     }
 
     #[test]

@@ -238,6 +238,9 @@ pub const CAT_SET_AIR: u8 = 20;
 /// `KineticModule::change_kinetic` — a direct kinetic-type point. Must equal the editor's wire category.
 pub const CAT_CHANGE_KINETIC: u8 = 21;
 
+/// `KineticModule::add_speed` — a direct x/y vector point. Must equal the editor's wire category.
+pub const CAT_KINETIC_ADD_SPEED: u8 = 22;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -1019,6 +1022,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_CLR_SPEED => "clr_speed",
                     CAT_SET_AIR => "set_air",
                     CAT_CHANGE_KINETIC => "change_kinetic",
+                    CAT_KINETIC_ADD_SPEED => "kinetic_add_speed",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1089,6 +1093,14 @@ fn numeric_point_key(func: &str, args: &[f32]) -> u64 {
         }
     }
     hash
+}
+
+fn numeric_arg_f32(arg: &LuaArg) -> Option<f32> {
+    match arg {
+        LuaArg::Int(value) => Some(*value as f32),
+        LuaArg::Num(value) => value.is_finite().then_some(*value),
+        _ => None,
+    }
 }
 
 fn expression_action(
@@ -1284,6 +1296,60 @@ unsafe fn hook_change_kinetic(
         }
     }
     original!()(boma, kinetic_type)
+}
+
+/// Capture and sparsely override the verified direct kinetic-vector addition.
+///
+/// The editor models the measured source shape's x/y components and requires a zero z component
+/// on source/export. Runtime capture keeps the full vector in the wire line; an edit changes only
+/// x/y and leaves the game's original z untouched until that component has its own evidence-backed
+/// editor field.
+#[skyline::hook(replace = smash::app::lua_bind::KineticModule::add_speed)]
+unsafe fn hook_kinetic_add_speed(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    speed: *const smash::phx::Vector3f,
+) -> u64 {
+    let Some(vector) = speed.as_ref().copied() else {
+        record_for_boma(boma, "KineticModule::add_speed", &[]);
+        return original!()(boma, speed);
+    };
+    let args = [
+        LuaArg::Num(vector.x),
+        LuaArg::Num(vector.y),
+        LuaArg::Num(vector.z),
+    ];
+    record_for_boma(boma, "KineticModule::add_speed", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = numeric_point_key(
+            "KineticModule::add_speed",
+            &[vector.x, vector.y, vector.z],
+        );
+        if let Some((suppress, overrides)) =
+            action_for(CAT_KINETIC_ADD_SPEED, motion, key, frame)
+        {
+            if suppress {
+                return 0;
+            }
+            if let Some(overrides) = overrides {
+                let mut replacement = vector;
+                if let Some(value) = overrides.speed_x {
+                    replacement.x = value;
+                }
+                if let Some(value) = overrides.speed_y {
+                    replacement.y = value;
+                }
+                if replacement.x != vector.x
+                    || replacement.y != vector.y
+                    || replacement.z != vector.z
+                {
+                    return original!()(boma, &replacement);
+                }
+            }
+        }
+    }
+    original!()(boma, speed)
 }
 
 /// Capture and sparsely override the verified `SET_SPEED_EX` shape.
@@ -2573,6 +2639,15 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 );
                 continue;
             }
+            if category == CAT_KINETIC_ADD_SPEED
+                && (args.len() != 3
+                    || inj.command.as_deref() != Some("KineticModule::add_speed"))
+            {
+                crate::slight::diag::note(
+                    "rejected kinetic add_speed injection with wrong command or args",
+                );
+                continue;
+            }
             if category == CAT_GRAB && args.len() == 9 {
                 args.push(LuaArg::Int(
                     *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
@@ -2636,6 +2711,24 @@ pub unsafe fn inject_tick(lua_state: u64) {
                             boma,
                             kinetic_type,
                         );
+                    }
+                    CAT_KINETIC_ADD_SPEED => {
+                        let values = match args.as_slice() {
+                            [x, y, z] => Some((
+                                numeric_arg_f32(x),
+                                numeric_arg_f32(y),
+                                numeric_arg_f32(z),
+                            )),
+                            _ => None,
+                        };
+                        let Some((Some(x), Some(y), Some(z))) = values else {
+                            crate::slight::diag::note(
+                                "rejected kinetic add_speed injection with non-numeric vector",
+                            );
+                            continue;
+                        };
+                        let vector = smash::phx::Vector3f { x, y, z };
+                        smash::app::lua_bind::KineticModule::add_speed(boma, &vector);
                     }
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
@@ -2717,7 +2810,8 @@ pub fn install() {
         hook_ft_start_adjust_motion_frame,
         hook_clr_speed,
         hook_set_air,
-        hook_change_kinetic
+        hook_change_kinetic,
+        hook_kinetic_add_speed
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

@@ -1171,6 +1171,20 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
             check_finite(subject, "SET_SPEED x velocity", call.speed_x, report);
             check_finite(subject, "SET_SPEED y velocity", call.speed_y, report);
         }
+        ExcuteStmt::KineticAddSpeed(call) => {
+            check_finite(
+                subject,
+                "KineticModule::add_speed x velocity",
+                call.speed_x,
+                report,
+            );
+            check_finite(
+                subject,
+                "KineticModule::add_speed y velocity",
+                call.speed_y,
+                report,
+            );
+        }
         ExcuteStmt::Correct(call) if call.kind.trim().is_empty() => {
             report.blocker(subject, "CORRECT has an empty correction kind");
         }

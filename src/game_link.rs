@@ -462,6 +462,9 @@ pub const CAT_SET_AIR: u8 = 20;
 /// Wire category for the direct `KineticModule::change_kinetic` kinetic point.
 pub const CAT_CHANGE_KINETIC: u8 = 21;
 
+/// Wire category for the direct `KineticModule::add_speed` x/y vector point.
+pub const CAT_KINETIC_ADD_SPEED: u8 = 22;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -2799,11 +2802,16 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_CHANGE_KINETIC: u8 = {CAT_CHANGE_KINETIC};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_ADD_SPEED: u8 = {CAT_KINETIC_ADD_SPEED};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::change_kinetic"));
+        assert!(module.contains("replace = smash::app::lua_bind::KineticModule::add_speed"));
+        assert!(module.contains("hook_kinetic_add_speed"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
@@ -2811,6 +2819,9 @@ mod tests {
             (CAT_SET_AIR, CAT_REVERSE_LR),
             (CAT_CHANGE_KINETIC, CAT_SET_AIR),
             (CAT_CHANGE_KINETIC, CAT_CLR_SPEED),
+            (CAT_KINETIC_ADD_SPEED, CAT_CHANGE_KINETIC),
+            (CAT_KINETIC_ADD_SPEED, CAT_SET_AIR),
+            (CAT_KINETIC_ADD_SPEED, CAT_SPEED),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -2858,6 +2869,24 @@ mod tests {
                 inject: None,
                 func: Some("KineticModule::change_kinetic".into()),
             },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_ADD_SPEED,
+                hitbox_id: Some(numeric_point_key(
+                    "KineticModule::add_speed",
+                    &[0.5, -1.25, 0.0],
+                )),
+                suppress: false,
+                frame_start: Some(11.5),
+                frame_end: Some(11.5),
+                overrides: Some(HbOverridesWire {
+                    speed_x: Some(1.5),
+                    speed_y: Some(2.25),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("KineticModule::add_speed".into()),
+            },
         ]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
@@ -2885,6 +2914,13 @@ mod tests {
             rules[2]["func"].as_str(),
             Some("KineticModule::change_kinetic")
         );
+        assert_eq!(
+            rules[3]["category"].as_u64(),
+            Some(CAT_KINETIC_ADD_SPEED as u64)
+        );
+        assert_eq!(rules[3]["func"].as_str(), Some("KineticModule::add_speed"));
+        assert_eq!(rules[3]["overrides"]["speed_x"].as_f64(), Some(1.5));
+        assert_eq!(rules[3]["overrides"]["speed_y"].as_f64(), Some(2.25));
     }
 
     #[test]

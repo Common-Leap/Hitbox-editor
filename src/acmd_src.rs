@@ -4143,6 +4143,156 @@ pub fn sync_change_kinetic(
     })
 }
 
+/// Whether a direct `KineticModule::add_speed` receiver is one of the measured source forms.
+fn is_kinetic_add_speed_receiver(value: &str) -> bool {
+    matches!(value.trim(), "agent.module_accessor" | "boma")
+}
+
+fn parse_source_zero_z_vector(value: &str) -> Option<(f32, f32)> {
+    let value = value.trim();
+    let value = value.strip_prefix('&')?.trim_start();
+    let value = value.strip_prefix("Vector3f")?.trim_start();
+    let value = value.strip_prefix('{')?.strip_suffix('}')?;
+    let fields = split_source_fields(value);
+    let [x, y, z] = fields.as_slice() else {
+        return None;
+    };
+    let (x_name, x_value) = x.split_once(':')?;
+    let (y_name, y_value) = y.split_once(':')?;
+    let (z_name, z_value) = z.split_once(':')?;
+    if x_name.trim() != "x" || y_name.trim() != "y" || z_name.trim() != "z" {
+        return None;
+    }
+    let speed_x = x_value.trim().parse::<f32>().ok()?;
+    let speed_y = y_value.trim().parse::<f32>().ok()?;
+    let speed_z = z_value.trim().parse::<f32>().ok()?;
+    (speed_z.is_finite() && speed_z == 0.0).then_some((speed_x, speed_y))
+}
+
+fn split_source_fields(text: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                fields.push(text[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if !text[start..].trim().is_empty() {
+        fields.push(text[start..].trim());
+    }
+    fields
+}
+
+/// The verified direct `KineticModule::add_speed` calls in source order.
+pub(crate) fn kinetic_add_speed_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(text, crate::data::KineticAddSpeedCall::FUNC, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            site.args.len() == 2
+                && site.arg(text, 0).is_some_and(is_kinetic_add_speed_receiver)
+                && site
+                    .arg(text, 1)
+                    .and_then(parse_source_zero_z_vector)
+                    .is_some()
+        })
+        .collect()
+}
+
+/// Rewrite the measured x/y components of existing direct kinetic-vector additions. The source
+/// receiver is retained (`agent.module_accessor` or HDR's `boma`); only the verified vector
+/// argument is replaced, with the measured zero z component made explicit.
+pub fn rewrite_kinetic_add_speed(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::KineticAddSpeedEvent],
+    edited: &[crate::data::KineticAddSpeedEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = kinetic_add_speed_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `KineticModule::add_speed` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::add_speed` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::add_speed` site {} was retimed from frame {} to {} — source syncing only retunes its authored vector",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::KineticAddSpeedCall::FUNC
+            || site.args.len() != 2
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !is_kinetic_add_speed_receiver(value))
+            || site
+                .arg(text, 1)
+                .and_then(parse_source_zero_z_vector)
+                .is_none()
+        {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::add_speed` site {} no longer has its verified receiver/vector shape",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            let value = format!(
+                "&Vector3f{{x: {}, y: {}, z: 0.0}}",
+                crate::acmd::num(now.call.speed_x),
+                crate::acmd::num(now.call.speed_y)
+            );
+            if let Some(edit) = text_edit(text, span, &value) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited direct kinetic-vector additions into the project's `game_` function.
+pub fn sync_kinetic_add_speed(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::KineticAddSpeedEvent],
+    edited: &[crate::data::KineticAddSpeedEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_kinetic_add_speed(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// The buildable argument-less `SET_AIR` calls and generated helper calls in source order.
 pub(crate) fn set_air_sites(text: &str) -> Vec<MacroSite> {
     let mut sites = scan_macro_sites(text, 0..text.len());
@@ -8010,6 +8160,73 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             crate::acmd::parse_acmd_script(&after).to_change_kinetic_events(),
             edited
         );
+    }
+
+    #[test]
+    fn kinetic_add_speed_source_sync_rewrites_only_the_vector_and_keeps_receiver() {
+        let text = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 0.72, y: -1.5, z: 0.0});
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_kinetic_add_speed_events();
+        let mut edited = pristine.clone();
+        edited[0].call.speed_x = 1.25;
+        edited[0].call.speed_y = 2.0;
+        let (after, report) =
+            rewrite_kinetic_add_speed(text, "mario/escape_air", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(
+            "KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 1.25, y: 2.0, z: 0.0});"
+        ));
+        assert!(after.contains("frame(agent.lua_state_agent, 1.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_kinetic_add_speed_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn kinetic_add_speed_source_sync_rewrites_the_measured_boma_shape() {
+        let text = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 1.0);
+    if is_excute(agent) {
+        KineticModule::add_speed(boma, &Vector3f{x: 0.0, y: 0.8, z: 0.0});
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_kinetic_add_speed_events();
+        let mut edited = pristine.clone();
+        edited[0].call.speed_y = 1.33;
+        let (after, report) =
+            rewrite_kinetic_add_speed(text, "mario/escape_air", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("KineticModule::add_speed(boma, &Vector3f{x: 0.0, y: 1.33, z: 0.0});")
+        );
+        assert!(after.contains("let boma = agent.boma();"));
+    }
+
+    #[test]
+    fn malformed_kinetic_add_speed_vectors_are_source_only() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::add_speed(agent.module_accessor, &Vector3f{x: 1.0, y: 2.0, z: 1.0});
+    }
+}
+"#;
+        assert!(crate::acmd::parse_acmd_script(text)
+            .to_kinetic_add_speed_events()
+            .is_empty());
+        assert!(kinetic_add_speed_sites(text).is_empty());
+        let (after, report) = rewrite_kinetic_add_speed(text, "mario/x", &[], &[]).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.is_empty(), "{report:?}");
     }
 
     #[test]
