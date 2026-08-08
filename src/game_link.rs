@@ -154,6 +154,30 @@ pub struct SpawnInjectWire {
     pub args: Vec<LuaArgWire>,
 }
 
+/// One live effect point-control rule. Matching includes the captured argument vector so two
+/// `ENABLE_AREA` calls on one frame cannot suppress each other accidentally.
+#[derive(Clone, Debug, Serialize)]
+pub struct EffectControlRuleWire {
+    pub motion: Option<u64>,
+    pub func: String,
+    pub args: Vec<LuaArgWire>,
+    pub suppress: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_start: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_end: Option<f32>,
+    /// Re-fire the captured point at a new motion frame after suppressing its pristine call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject: Option<EffectControlInjectWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EffectControlInjectWire {
+    pub frame: f32,
+    pub func: String,
+    pub args: Vec<LuaArgWire>,
+}
+
 /// Wire form of plugin `spawn_rules::EffectAlias` — live transplant kind substitution:
 /// a copy/replaced entry that doesn't exist in the running game spawns as its donor.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -934,6 +958,20 @@ impl GameLink {
     pub fn send_spawn_rules(&self, rules: &[SpawnRuleWire]) {
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "spawn_rules": rules }))
         else {
+            return;
+        };
+        let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
+        if let Ok(mut s) = self.shared.lock() {
+            s.outbox.push(frame);
+            s.edits_tx += 1;
+        }
+    }
+
+    /// Replace the live effect point-control rules (detach and area toggles).
+    pub fn send_effect_control_rules(&self, rules: &[EffectControlRuleWire]) {
+        let Ok(payload) = serde_json::to_string(&serde_json::json!({
+            "effect_control_rules": rules
+        })) else {
             return;
         };
         let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
@@ -2403,6 +2441,44 @@ mod tests {
                 && hooks.contains("LAST_PARTICLE_SET_COLOR")
                 && hooks.contains("apply_pending_particle_tint"),
             "the plugin no longer rewrites the camera-flat modifier hook"
+        );
+    }
+
+    #[test]
+    fn outbound_effect_control_rules_keep_exact_args_and_injection() {
+        let link = GameLink::default();
+        link.send_effect_control_rules(&[EffectControlRuleWire {
+            motion: Some(0x99),
+            func: "ENABLE_AREA".into(),
+            args: vec![LuaArgWire::Int(2)],
+            suppress: true,
+            frame_start: Some(7.5),
+            frame_end: Some(8.5),
+            inject: Some(EffectControlInjectWire {
+                frame: 12.0,
+                func: "ENABLE_AREA".into(),
+                args: vec![LuaArgWire::Int(3)],
+            }),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["effect_control_rules"][0];
+        assert_eq!(rule["func"].as_str(), Some("ENABLE_AREA"));
+        assert_eq!(rule["args"][0]["t"].as_str(), Some("i"));
+        assert_eq!(rule["args"][0]["v"].as_i64(), Some(2));
+        assert_eq!(rule["inject"]["frame"].as_f64(), Some(12.0));
+        assert_eq!(rule["inject"]["args"][0]["v"].as_i64(), Some(3));
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/effect_viewer");
+        let rules = std::fs::read_to_string(root.join("control_rules.rs"))
+            .expect("read the plugin's effect control rules");
+        assert!(
+            rules.contains("pub struct ControlRule")
+                && rules.contains("pub struct ControlInject")
+                && rules.contains("self.args == args"),
+            "the plugin must match controls by their exact captured argument vector"
         );
     }
 

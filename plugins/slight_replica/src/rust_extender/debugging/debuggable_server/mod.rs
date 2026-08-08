@@ -384,6 +384,17 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         return None;
     }
 
+    // Effect point controls: full-list replace (detach and area toggles).
+    if let Some(rules_v) = v.get("effect_control_rules") {
+        match serde_json::from_value::<Vec<crate::slight::effect_viewer::control_rules::ControlRule>>(
+            rules_v.clone(),
+        ) {
+            Ok(rules) => crate::slight::effect_viewer::control_rules::set_rules(rules),
+            Err(e) => crate::slight::diag::note(format!("effect_control_rules parse error: {e}")),
+        }
+        return None;
+    }
+
     if let (Some(id), Some(nv)) = (v.get("id"), v.get("newValue")) {
         let val = if let Some(s) = nv.as_str() {
             serde_json::from_str(s).unwrap_or(nv.clone())

@@ -1298,6 +1298,25 @@ pub fn rewrite_effect_calls(
             ));
             continue;
         }
+        if let Some(control) = &target.control {
+            let Some(was) = pristine[differs[0]].control.as_ref() else {
+                report.skipped.push(format!(
+                    "{label}: `{}` changed into a control command — source syncing does not add or replace calls",
+                    macro_site.name
+                ));
+                continue;
+            };
+            control_edits(
+                text,
+                label,
+                macro_site,
+                was,
+                control,
+                &mut edits,
+                &mut report,
+            );
+            continue;
+        }
         // A colour command has no transform to write and no rate line beneath it — its
         // arguments are a length and four components, and nothing else.
         if let Some(color) = &target.color {
@@ -1535,7 +1554,7 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
             // counted for the same reason and anchors nothing for the same reason: both
             // produce an `EffectCall`, so both consume an ordinal, and neither is what
             // `LAST_EFFECT_SET_*` would find at runtime.
-            adjacent = !is_trail_macro(&site.name) && !crate::data::is_color_command(&site.name);
+            adjacent = crate::acmd::is_effect_spawn_macro(&site.name);
             spawns.push(site);
             modifiers.push(ModifierSites::default());
             continue;
@@ -1582,6 +1601,14 @@ fn is_spawn_macro(name: &str) -> bool {
     crate::acmd::is_effect_spawn_macro(name)
         || is_trail_macro(name)
         || crate::data::is_color_command(name)
+        || is_effect_control_macro(name)
+}
+
+fn is_effect_control_macro(name: &str) -> bool {
+    matches!(
+        name,
+        "EFFECT_DETACH_KIND" | "EFFECT_DETACH_KIND_WORK" | "ENABLE_AREA" | "UNABLE_AREA"
+    )
 }
 
 /// Whether a scanned macro name starts an AFTER_IMAGE trail.
@@ -1615,6 +1642,7 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
         && a.particle_tint == b.particle_tint
         && a.alpha == b.alpha
         && a.color == b.color
+        && a.control == b.control
 }
 
 /// Everything a value rewrite CANNOT change about a call.
@@ -1623,7 +1651,13 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
 /// `EFFECT_OFF_KIND` that closes it, so moving it means moving a different call in a
 /// different frame block, not retuning an argument.
 fn identity_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
-    a.effect_name.eq_ignore_ascii_case(&b.effect_name)
+    let same_control_kind = match (&a.control, &b.control) {
+        (Some(left), Some(right)) => left.command_name() == right.command_name(),
+        (None, None) => true,
+        _ => false,
+    };
+    same_control_kind
+        && a.effect_name.eq_ignore_ascii_case(&b.effect_name)
         && a.effect_name_alt == b.effect_name_alt
         && a.bone_name.eq_ignore_ascii_case(&b.bone_name)
         // A trail's second edge is a joint like the first, and no transform rewrite reaches it.
@@ -1682,6 +1716,109 @@ fn color_edits(text: &str, site: &MacroSite, color: &crate::data::ColorCall) -> 
         .into_iter()
         .filter_map(|(slot, value)| to_f32_edit(text, site.args.get(slot)?, value))
         .collect()
+}
+
+/// Replacements for an existing C4 point command. The command itself is structural and is
+/// therefore required to stay the same; its authored values are safe to retune in place.
+fn control_edits(
+    text: &str,
+    label: &str,
+    site: &MacroSite,
+    was: &crate::data::EffectControl,
+    now: &crate::data::EffectControl,
+    edits: &mut Vec<Replacement>,
+    report: &mut SyncReport,
+) {
+    if was.command_name() != now.command_name() {
+        report.skipped.push(format!(
+            "{label}: `{}` changed control command — source syncing only retunes existing values",
+            site.name
+        ));
+        return;
+    }
+    match (was, now) {
+        (
+            crate::data::EffectControl::DetachKind { .. },
+            crate::data::EffectControl::DetachKind { effect_name, unk },
+        ) => {
+            if let Some(edit) = control_const_edit(text, site, 1, effect_name, true) {
+                edits.push(edit);
+            }
+            control_unk_edit(text, label, site, 2, *unk, edits, report);
+        }
+        (
+            crate::data::EffectControl::DetachKindWork { .. },
+            crate::data::EffectControl::DetachKindWork { work, unk },
+        ) => {
+            if let Some(edit) = control_const_edit(text, site, 1, work, false) {
+                edits.push(edit);
+            }
+            control_unk_edit(text, label, site, 2, *unk, edits, report);
+        }
+        (
+            crate::data::EffectControl::EnableArea { .. },
+            crate::data::EffectControl::EnableArea { kind },
+        )
+        | (
+            crate::data::EffectControl::UnableArea { .. },
+            crate::data::EffectControl::UnableArea { kind },
+        ) => {
+            if let Some(edit) = control_const_edit(text, site, 1, kind, false) {
+                edits.push(edit);
+            }
+        }
+        _ => report.skipped.push(format!(
+            "{label}: `{}` has a control payload that does not match its source command",
+            site.name
+        )),
+    }
+}
+
+fn control_const_edit(
+    text: &str,
+    site: &MacroSite,
+    slot: usize,
+    value: &str,
+    hash: bool,
+) -> Option<Replacement> {
+    let span = site.args.get(slot)?.clone();
+    let replacement = if hash {
+        crate::acmd::hash_arg(value)
+    } else {
+        crate::acmd::const_expr(value)
+    };
+    (text[span.clone()].trim() != replacement).then_some(Replacement {
+        span,
+        value: replacement,
+    })
+}
+
+fn control_unk_edit(
+    text: &str,
+    label: &str,
+    site: &MacroSite,
+    slot: usize,
+    value: i64,
+    edits: &mut Vec<Replacement>,
+    report: &mut SyncReport,
+) {
+    let Some(span) = site.args.get(slot) else {
+        report.skipped.push(format!(
+            "{label}: `{}` has no `unk` argument slot",
+            site.name
+        ));
+        return;
+    };
+    let Some(edit) = int_edit(text, span, value) else {
+        if text[span.clone()].trim().parse::<i64>().is_err() {
+            report.skipped.push(format!(
+                "{label}: `{}` has a non-literal `unk` argument, so source syncing left it unchanged",
+                site.name
+            ));
+        }
+        return;
+    };
+    edits.push(edit);
 }
 
 /// Rewrite one `game_*` function's source with the editor's edited hitbox values.
@@ -4942,6 +5079,48 @@ visionary_set_speed(agent, 9, 10);
             );
         }
         assert!(after.contains(", 1.5, true);"), "{after}");
+    }
+
+    #[test]
+    fn c4_control_values_write_back_without_reordering_the_effect_script() {
+        let source = r#"unsafe extern "C" fn effect_c4(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT_DETACH_KIND(agent, Hash40::new("sys_smoke"), 0);
+        macros::EFFECT_DETACH_KIND_WORK(agent, *WORK_INT, 0);
+        macros::ENABLE_AREA(agent, 2);
+        macros::UNABLE_AREA(agent, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine.len(), 4);
+        let mut edited = pristine.clone();
+        edited[0].control = Some(crate::data::EffectControl::DetachKind {
+            effect_name: "sys_smoke_alt".into(),
+            unk: -1,
+        });
+        edited[1].control = Some(crate::data::EffectControl::DetachKindWork {
+            work: "WORK_INT_ALT".into(),
+            unk: -2,
+        });
+        edited[2].control = Some(crate::data::EffectControl::EnableArea { kind: "3".into() });
+        edited[3].control = Some(crate::data::EffectControl::UnableArea { kind: "4".into() });
+
+        let (after, report) = rewrite_effect_calls(source, "test/c4", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(
+            report.changed, 6,
+            "each edited C4 value is one source replacement"
+        );
+        assert!(after.contains("EFFECT_DETACH_KIND(agent, Hash40::new(\"sys_smoke_alt\"), -1);"));
+        assert!(after.contains("EFFECT_DETACH_KIND_WORK(agent, *WORK_INT_ALT, -2);"));
+        assert!(after.contains("ENABLE_AREA(agent, 3);"));
+        assert!(after.contains("UNABLE_AREA(agent, 4);"));
+        assert_eq!(
+            crate::acmd::parse_effect_script(&after).to_effect_calls(),
+            edited,
+            "source write-back must parse back to the edited control values"
+        );
     }
 
     /// The source editor and the editor panels drive each other, so a value written into the

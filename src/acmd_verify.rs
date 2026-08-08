@@ -761,6 +761,21 @@ fn check_effect_fidelity(
         .into_iter()
         .collect();
     for (want, got) in specified.iter().zip(&exported) {
+        if want.control.is_some() || got.control.is_some() {
+            if want.control != got.control
+                || want.spawn_func != got.spawn_func
+                || want.active_start != got.active_start
+            {
+                report.blocker(
+                    subject,
+                    format!(
+                        "control {} on frame {} did not round-trip",
+                        want.spawn_func, want.active_start
+                    ),
+                );
+            }
+            continue;
+        }
         // A spawn whose macro tail was never recorded is already reported by name as a
         // downgrade; re-listing each of its shifted arguments would bury that.
         if downgraded.contains(&(want.spawn_func.clone(), want.effect_name.clone())) {
@@ -1173,10 +1188,36 @@ fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report)
         // A colour command has no graphic to name it, so it is labelled by its command.
         let label = match &call.color {
             Some(_) => format!("{} on frame {}", call.spawn_func, call.active_start),
+            None if call.control.is_some() => {
+                format!("{} on frame {}", call.spawn_func, call.active_start)
+            }
             None => format!("spawn {} on frame {}", call.effect_name, call.active_start),
         };
         if let Some(color) = &call.color {
             check_color_values(subject, &label, &call.spawn_func, color, report);
+            continue;
+        }
+        if let Some(control) = &call.control {
+            match control {
+                crate::data::EffectControl::DetachKind {
+                    effect_name,
+                    unk: _,
+                } => {
+                    check_hash_name(
+                        subject,
+                        &format!("{label} effect kind"),
+                        effect_name,
+                        report,
+                    );
+                }
+                crate::data::EffectControl::DetachKindWork { work, unk: _ }
+                | crate::data::EffectControl::EnableArea { kind: work }
+                | crate::data::EffectControl::UnableArea { kind: work } => {
+                    if work.trim().is_empty() {
+                        report.blocker(subject, format!("{label} has an empty control value"));
+                    }
+                }
+            }
             continue;
         }
         // Checked for a trail too. Its *transform* is genuinely never emitted — the line rides

@@ -1,6 +1,7 @@
 pub mod acmd_hooks;
 pub mod apply;
 pub mod arcrop;
+pub mod control_rules;
 pub mod effect_data;
 pub mod effect_names;
 pub mod effect_reload;

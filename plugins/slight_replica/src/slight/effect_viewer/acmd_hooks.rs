@@ -945,6 +945,72 @@ unsafe fn override_modifier_args(lua_state: u64, values: &[f32]) {
     }
 }
 
+/// Match a point-control rule against the primitive's authored arguments before the game
+/// consumes them. The capture happens first, so a suppressed authored call still teaches the
+/// editor what the pristine script did.
+unsafe fn control_suppressed(
+    lua_state: u64,
+    func: &str,
+    args: &[crate::slight::hitbox_viewer::LuaArg],
+) -> bool {
+    if !crate::slight::effect_viewer::control_rules::any_for(func) {
+        return false;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return false;
+    }
+    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    crate::slight::effect_viewer::control_rules::suppressed(func, args, motion, frame)
+}
+
+/// `EFFECT_DETACH_KIND` is a point action, not the kill-kind path used by `EFFECT_OFF_KIND`.
+#[skyline::hook(replace = smash::app::sv_animcmd::EFFECT_DETACH_KIND)]
+unsafe fn hook_effect_detach_kind(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 2);
+    crate::slight::hitbox_viewer::record(lua_state, "EFFECT_DETACH_KIND", &typed);
+    if control_suppressed(lua_state, "EFFECT_DETACH_KIND", &typed) {
+        return;
+    }
+    original!()(lua_state);
+}
+
+/// The wrapper resolves `EFFECT_DETACH_KIND_WORK`'s WorkModule slot before reaching this
+/// primitive, so captures contain the runtime handle, not the authored Work ID. That runtime
+/// value is still exact for suppression/retime of the captured call; source parsing retains the
+/// authored token separately.
+#[skyline::hook(replace = smash::app::sv_animcmd::EFFECT_DETACH_KIND_WORK)]
+unsafe fn hook_effect_detach_kind_work(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 2);
+    crate::slight::hitbox_viewer::record(lua_state, "EFFECT_DETACH_KIND_WORK", &typed);
+    if control_suppressed(lua_state, "EFFECT_DETACH_KIND_WORK", &typed) {
+        return;
+    }
+    original!()(lua_state);
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::ENABLE_AREA)]
+unsafe fn hook_enable_area(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(lua_state, "ENABLE_AREA", &typed);
+    if control_suppressed(lua_state, "ENABLE_AREA", &typed) {
+        return;
+    }
+    original!()(lua_state);
+}
+
+#[skyline::hook(replace = smash::app::sv_animcmd::UNABLE_AREA)]
+unsafe fn hook_unable_area(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(lua_state, "UNABLE_AREA", &typed);
+    if control_suppressed(lua_state, "UNABLE_AREA", &typed) {
+        return;
+    }
+    original!()(lua_state);
+}
+
 /// `LAST_EFFECT_SET_RATE` — timeline data and, when the editor has retuned this spawn, a value
 /// to override.
 ///
@@ -1707,6 +1773,10 @@ static EFF_FIRED: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<(u32, usize), (u64, f32)>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
+static CONTROL_FIRED: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<(u32, usize), (u64, f32)>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
 /// Dispatch a captured EFFECT spawn to the matching sv_animcmd function by its short name.
 unsafe fn dispatch_effect(func: &str, lua_state_agent: u64) {
     use smash::app::sv_animcmd as sv;
@@ -1739,8 +1809,73 @@ unsafe fn dispatch_effect(func: &str, lua_state_agent: u64) {
     }
 }
 
+unsafe fn dispatch_control(func: &str, lua_state_agent: u64) {
+    use smash::app::sv_animcmd as sv;
+    match func {
+        "EFFECT_DETACH_KIND" => sv::EFFECT_DETACH_KIND(lua_state_agent),
+        "EFFECT_DETACH_KIND_WORK" => sv::EFFECT_DETACH_KIND_WORK(lua_state_agent),
+        "ENABLE_AREA" => sv::ENABLE_AREA(lua_state_agent),
+        "UNABLE_AREA" => sv::UNABLE_AREA(lua_state_agent),
+        _ => {}
+    }
+}
+
+/// Fire due C4 point-control injections once per motion playback. Work-slot controls replay the
+/// captured runtime handle, which is exact for the live call even though the source editor keeps
+/// the authored Work ID token separately.
+unsafe fn inject_control_tick(lua_state: u64) {
+    use crate::slight::effect_viewer::control_rules;
+    if !control_rules::any_inject() {
+        return;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return;
+    }
+    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let boid = (*boma).battle_object_id;
+    for (idx, injection) in control_rules::injections_for(motion) {
+        let key = (boid, idx);
+        let due = frame >= injection.frame;
+        let already = CONTROL_FIRED
+            .lock()
+            .get(&key)
+            .map(|(m, f)| *m == motion && frame >= *f)
+            .unwrap_or(false);
+        if due && !already {
+            let mut agent = smash::lib::L2CAgent::new(lua_state);
+            agent.clear_lua_stack();
+            for arg in &injection.args {
+                let mut value = arg.to_l2c();
+                agent.push_lua_stack(&mut value);
+            }
+            {
+                let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
+                dispatch_control(&injection.func, agent.lua_state_agent);
+            }
+            agent.clear_lua_stack();
+            CONTROL_FIRED.lock().insert(key, (motion, frame));
+            crate::slight::diag::note(format!(
+                "injected effect control '{}' (motion {motion:#x} frame {frame:.1})",
+                injection.func
+            ));
+        }
+        if !due {
+            let mut fired = CONTROL_FIRED.lock();
+            if let Some((m, f)) = fired.get(&key).copied() {
+                if m != motion || frame < f {
+                    fired.remove(&key);
+                }
+            }
+        }
+    }
+}
+
 /// Fire due effect-retime injections for this agent's current motion (once per playback).
 pub unsafe fn inject_tick(lua_state: u64) {
+    inject_control_tick(lua_state);
     use crate::slight::effect_viewer::spawn_rules;
     if !spawn_rules::any_inject() {
         return;
@@ -1826,6 +1961,10 @@ pub fn install() {
         hook_landing_eff_flip,
         hook_down_eff,
         hook_effect_off_kind,
+        hook_effect_detach_kind,
+        hook_effect_detach_kind_work,
+        hook_enable_area,
+        hook_unable_area,
         hook_last_effect_set_rate,
         hook_last_effect_set_offset_to_camera_flat,
         hook_last_effect_set_color,
@@ -1839,6 +1978,8 @@ pub fn install() {
         hook_start_info_flash_eye,
         hook_col_normal,
     );
-    skyline::println!("[SLight] ACMD effect hooks installed (35 spawn/stop/colour variants)");
+    skyline::println!(
+        "[SLight] ACMD effect hooks installed (39 spawn/stop/colour/control variants)"
+    );
     crate::slight::diag::note("ACMD hooks installed");
 }

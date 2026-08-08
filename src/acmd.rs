@@ -580,6 +580,66 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // Effect lifetime/area controls are point events, not spawns. The wrapper signatures
+        // are fixed and the external corpus supplies real calls for all four members, so accept
+        // only the measured arities. A malformed call remains Raw and is carried rather than
+        // being padded into a command with different semantics.
+        if line.contains("macros::EFFECT_DETACH_KIND(") {
+            if let Some(t) = try_extract("macros::EFFECT_DETACH_KIND(") {
+                if t.len() == 3 {
+                    if let Ok(unk) = t[2].trim().parse::<i64>() {
+                        let effect_name =
+                            extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
+                        macros.push(EffectMacro::Control(
+                            crate::data::EffectControl::DetachKind { effect_name, unk },
+                        ));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if line.contains("macros::EFFECT_DETACH_KIND_WORK(") {
+            if let Some(t) = try_extract("macros::EFFECT_DETACH_KIND_WORK(") {
+                if t.len() == 3 {
+                    if let Ok(unk) = t[2].trim().parse::<i64>() {
+                        macros.push(EffectMacro::Control(
+                            crate::data::EffectControl::DetachKindWork {
+                                work: strip_deref(&t[1]),
+                                unk,
+                            },
+                        ));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if line.contains("macros::ENABLE_AREA(") {
+            if let Some(t) = try_extract("macros::ENABLE_AREA(") {
+                if t.len() == 2 {
+                    macros.push(EffectMacro::Control(
+                        crate::data::EffectControl::EnableArea {
+                            kind: strip_deref(&t[1]),
+                        },
+                    ));
+                    continue;
+                }
+            }
+        }
+        if line.contains("macros::UNABLE_AREA(") {
+            if let Some(t) = try_extract("macros::UNABLE_AREA(") {
+                if t.len() == 2 {
+                    macros.push(EffectMacro::Control(
+                        crate::data::EffectControl::UnableArea {
+                            kind: strip_deref(&t[1]),
+                        },
+                    ));
+                    continue;
+                }
+            }
+        }
+
         if line.contains("macros::EFFECT_OFF_KIND(") {
             if let Some(t) = try_extract("macros::EFFECT_OFF_KIND(") {
                 if t.len() > 1 {
@@ -899,10 +959,9 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::LAST_PARTICLE_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
             || line.contains("macros::LAST_EFFECT_SET_SCALE_W(")
-            // C4's detach/area controls are also intentionally opaque. Their names and wrapper
-            // arities are known, but the local corpus has no calls to establish how they should
-            // bind to a follow effect or an editable area lifetime. Preserve bare forms through
-            // the same residue path until that semantic contract has evidence.
+            // C4's detach/area controls are typed point events. Keep the names in this routing
+            // table because the parser is intentionally line-oriented: the typed parser below
+            // will claim measured forms, while malformed forms remain carried residue.
             || line.contains("macros::EFFECT_DETACH_KIND(")
             || line.contains("macros::EFFECT_DETACH_KIND_WORK(")
             || line.contains("macros::ENABLE_AREA(")
@@ -2504,7 +2563,7 @@ fn tweak_hash(name: &str) -> u64 {
 /// also pass consts, locals, and raw hashes in these slots. Those come back out of the
 /// parser as the expression text, and wrapping them in `Hash40::new("…")` again would emit
 /// a graphic literally named `LOCAL_VARIABLE` — so pass anything expression-shaped through.
-fn hash_arg(name: &str) -> String {
+pub(crate) fn hash_arg(name: &str) -> String {
     let name = name.trim();
     if let Some(hex) = name.strip_prefix("0x") {
         if u64::from_str_radix(hex, 16).is_ok() {
@@ -2515,6 +2574,29 @@ fn hash_arg(name: &str) -> String {
         return name.to_string();
     }
     format!("Hash40::new(\"{name}\")")
+}
+
+/// Emit a typed C4 point event. Controls are kept separate from the spawn path because none of
+/// them owns an effect lifetime or a transform.
+fn emit_effect_control(control: &crate::data::EffectControl, indent: &str) -> String {
+    use crate::data::EffectControl;
+    let line = match control {
+        EffectControl::DetachKind { effect_name, unk } => format!(
+            "macros::EFFECT_DETACH_KIND(agent, {}, {unk});",
+            hash_arg(effect_name)
+        ),
+        EffectControl::DetachKindWork { work, unk } => format!(
+            "macros::EFFECT_DETACH_KIND_WORK(agent, {}, {unk});",
+            const_expr(work)
+        ),
+        EffectControl::EnableArea { kind } => {
+            format!("macros::ENABLE_AREA(agent, {});", const_expr(kind))
+        }
+        EffectControl::UnableArea { kind } => {
+            format!("macros::UNABLE_AREA(agent, {});", const_expr(kind))
+        }
+    };
+    format!("{indent}{line}\n")
 }
 
 /// Emit the spawn call for one effect, reproducing the macro the script actually used.
@@ -2531,6 +2613,9 @@ fn hash_arg(name: &str) -> String {
 /// back to the plain pair. That is the old, compilable behaviour. A tail that is known to be
 /// *empty* is a different thing entirely and is reissued as-is.
 fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
+    if let Some(control) = &call.control {
+        return emit_effect_control(control, indent);
+    }
     // A colour command is not a spawn at all: no graphic, no joint, no transform. Everything
     // below this point would write arguments it does not have.
     if let Some(color) = &call.color {
@@ -2847,6 +2932,11 @@ fn emit_effect_move_fn(
 
             for call in run_calls.iter().copied() {
                 out.push_str(&emit_spawn_call(call, &body));
+                // Colour and C4 control events are already complete point commands. They do
+                // not have a last-effect target, graphic kind, or spawn transform to reconcile.
+                if call.color.is_some() || call.control.is_some() {
+                    continue;
+                }
                 if let Some(offset) = call.camera_offset {
                     out.push_str(&format!(
                         "{body}macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, {offset});\n"
@@ -3031,6 +3121,7 @@ pub fn export_spawn_downgrades(calls: &[crate::data::EffectCall]) -> Vec<(String
         .iter()
         .filter(|call| {
             !call.disabled
+                && call.control.is_none()
                 && call.raw_line.is_none()
                 // A colour command has no tail to be missing — its arguments are its whole
                 // content and are held as values, so it always re-emits under its own name.
@@ -5187,6 +5278,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 particle_tint: None,
                 alpha: None,
                 color: None,
+                control: None,
                 guard: None,
                 leading: Vec::new(),
                 trailing: Vec::new(),
@@ -5213,6 +5305,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 particle_tint: None,
                 alpha: None,
                 color: None,
+                control: None,
                 guard: None,
                 leading: Vec::new(),
                 trailing: Vec::new(),
@@ -5845,12 +5938,11 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
-    /// C4's remaining members have no local corpus calls, so they are not typed into an effect
-    /// lifetime model. Their wrapper names are nevertheless known. Keep a synthetic, signature-
-    /// checked shape opaque: a detach or area toggle must not disappear merely because it cannot
-    /// yet be assigned an editable end-frame or area state.
+    /// The external corpus supplies real calls for all four C4 members. They are point events in
+    /// the effect timeline, not spawn lifetimes: a detach leaves the effect alive and an area
+    /// toggle changes an existing AreaModule state.
     #[test]
-    fn opaque_c4_lifetime_lines_survive_effect_export_and_keep_their_frames() {
+    fn c4_controls_are_typed_points_and_survive_effect_export() {
         let src = r#"unsafe extern "C" fn effect_c4(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 9.0);
     if macros::is_excute(agent) {
@@ -5862,30 +5954,45 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     }
     frame(agent.lua_state_agent, 13.0);
     macros::ENABLE_AREA(agent, 2);
-}
+        }
 "#;
         let source = parse_effect_script(src);
         let (calls, residue) = source.to_effect_calls_and_residue();
-        assert_eq!(calls.len(), 1);
-        for name in [
-            "EFFECT_DETACH_KIND",
-            "EFFECT_DETACH_KIND_WORK",
-            "ENABLE_AREA",
-            "UNABLE_AREA",
-        ] {
-            assert!(
-                calls[0].trailing.iter().any(|line| line.contains(name)),
-                "{name} must stay after the spawn it followed: {:?}",
-                calls[0].trailing
-            );
-        }
+        assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls.iter().map(|c| c.active_start).collect::<Vec<_>>(),
+            [9, 9, 9, 9, 9, 13]
+        );
+        assert_eq!(calls[0].effect_name, "sys_smoke");
+        assert_eq!(
+            calls[0].active_end, 9999,
+            "detach must not end the follow effect"
+        );
+        assert!(matches!(
+            calls[1].control,
+            Some(crate::data::EffectControl::DetachKind { ref effect_name, unk: 0 })
+                if effect_name == "sys_smoke"
+        ));
+        assert!(matches!(
+            calls[2].control,
+            Some(crate::data::EffectControl::DetachKindWork { ref work, unk: 0 })
+                if work == "WORK_INT"
+        ));
+        assert!(matches!(
+            calls[3].control,
+            Some(crate::data::EffectControl::EnableArea { ref kind }) if kind == "2"
+        ));
+        assert!(matches!(
+            calls[4].control,
+            Some(crate::data::EffectControl::UnableArea { ref kind }) if kind == "2"
+        ));
+        assert!(matches!(
+            calls[5].control,
+            Some(crate::data::EffectControl::EnableArea { ref kind }) if kind == "2"
+        ));
         assert!(
-            residue
-                .get(&13)
-                .into_iter()
-                .flatten()
-                .any(|line| line.contains("macros::ENABLE_AREA(agent, 2);")),
-            "the bare area toggle must stay on frame 13: {residue:?}"
+            residue.is_empty(),
+            "typed controls no longer need residue: {residue:?}"
         );
         let lost = unexportable_effect_lines(&source);
         assert!(
@@ -5899,7 +6006,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .iter()
                 .any(|name| line.contains(name))
             }),
-            "opaque C4 lines must not be reported as deleted: {lost:?}"
+            "typed C4 lines must not be reported as deleted: {lost:?}"
         );
 
         let emitted = preview_effect_fn(&calls, "c4", &[], &residue);
@@ -7233,6 +7340,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             particle_tint: None,
             alpha: None,
             color: None,
+            control: None,
             guard: None,
             leading: Vec::new(),
             trailing: Vec::new(),

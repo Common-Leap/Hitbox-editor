@@ -873,19 +873,48 @@ fn fighter_kind_id(name: &str) -> Option<i32> {
 /// Spawn identity for matching effect calls across reloads: (kind hash, frame, bone).
 /// Case-insensitive via the lowercase hashes.
 fn call_sig(c: &crate::data::EffectCall) -> (u64, u64, u64, u32, u64) {
+    let (primary, secondary, bone) = if let Some(control) = &c.control {
+        (
+            hash40::hash40(control.command_name()).0,
+            hash40::hash40(&format!("{:?}", control)).0,
+            0,
+        )
+    } else {
+        (
+            effect_name_hash(&c.effect_name),
+            c.effect_name_alt
+                .as_deref()
+                .map(effect_name_hash)
+                .unwrap_or(0),
+            hash40::hash40(&c.bone_name.to_lowercase()).0,
+        )
+    };
     (
-        effect_name_hash(&c.effect_name),
-        c.effect_name_alt
-            .as_deref()
-            .map(effect_name_hash)
-            .unwrap_or(0),
+        primary,
+        secondary,
         hash40::hash40(&c.spawn_func).0,
         c.active_start,
-        hash40::hash40(&c.bone_name.to_lowercase()).0,
+        bone,
     )
 }
 
 fn effect_call_display_name(call: &crate::data::EffectCall) -> String {
+    if let Some(control) = &call.control {
+        return match control {
+            crate::data::EffectControl::DetachKind { effect_name, unk } => {
+                format!("EFFECT_DETACH_KIND {effect_name} ({unk})")
+            }
+            crate::data::EffectControl::DetachKindWork { work, unk } => {
+                format!("EFFECT_DETACH_KIND_WORK {work} ({unk})")
+            }
+            crate::data::EffectControl::EnableArea { kind } => {
+                format!("ENABLE_AREA {kind}")
+            }
+            crate::data::EffectControl::UnableArea { kind } => {
+                format!("UNABLE_AREA {kind}")
+            }
+        };
+    }
     // A colour command has no graphic, so the command itself is its name. Falling through to
     // the spawn branches would label every one of them with an empty string.
     if call.color.is_some() {
@@ -1148,6 +1177,9 @@ pub struct VisionaryApp {
     /// Live effect spawn rules per "fighter/move" (suppress + per-spawn transform); the
     /// plugin gets the flattened union so edits persist across move switches.
     effect_rules_store: HashMap<String, Vec<crate::game_link::SpawnRuleWire>>,
+    /// Live effect point-control rules per "fighter/move" (detach and area toggles). These
+    /// use the captured primitive arguments as their identity, rather than an effect-kind hash.
+    effect_control_rules_store: HashMap<String, Vec<crate::game_link::EffectControlRuleWire>>,
     /// (move key, hitbox snapshot) — change detection for live hitbox pushes.
     hitbox_watch: Option<(String, Vec<crate::data::Hitbox>)>,
     hitbox_dirty_at: Option<std::time::Instant>,
@@ -1436,6 +1468,7 @@ impl VisionaryApp {
             pin_sync_prompt: None,
             hitbox_rules_store: HashMap::new(),
             effect_rules_store: HashMap::new(),
+            effect_control_rules_store: HashMap::new(),
             hitbox_watch: None,
             hitbox_dirty_at: None,
             captures_seen_seq: 0,
@@ -6269,6 +6302,8 @@ impl VisionaryApp {
                                 // Orange = follows bone, yellow = one-shot, gray = disabled
                                 let dot_color = if effect.disabled {
                                     egui::Color32::DARK_GRAY
+                                } else if effect.control.is_some() {
+                                    egui::Color32::from_rgb(190, 120, 255)
                                 } else if effect.follows_bone {
                                     egui::Color32::from_rgb(255, 165, 0)
                                 } else {
@@ -6283,13 +6318,20 @@ impl VisionaryApp {
                                 }
                                 if ui
                                     .selectable_label(selected, text)
-                                    .on_hover_text(format!(
-                                        "{} · bone {} · f{}-{}",
-                                        effect.spawn_func,
-                                        effect.bone_name,
-                                        effect.active_start,
-                                        effect.active_end
-                                    ))
+                                    .on_hover_text(if effect.control.is_some() {
+                                        format!(
+                                            "{} · event at frame {}",
+                                            effect.spawn_func, effect.active_start
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} · bone {} · f{}-{}",
+                                            effect.spawn_func,
+                                            effect.bone_name,
+                                            effect.active_start,
+                                            effect.active_end
+                                        )
+                                    })
                                     .clicked()
                                 {
                                     self.state.selected_effect_call =
@@ -6338,6 +6380,7 @@ impl VisionaryApp {
                         transition: None,
                         rgba: Some([1.0, 1.0, 1.0, 0.5]),
                     }),
+                    control: None,
                     guard: None,
                     leading: Vec::new(),
                     trailing: Vec::new(),
@@ -6389,6 +6432,7 @@ impl VisionaryApp {
                     // This button adds a spawn. Colour commands are added by their own button
                     // below, because the two share a list but nothing else.
                     color: None,
+                    control: None,
                     guard: None,
                     leading: Vec::new(),
                     trailing: Vec::new(),
@@ -6446,6 +6490,7 @@ impl VisionaryApp {
                     // or transform, so the rows above the colour are suppressed rather than
                     // shown holding the empty strings and zeroes it stores for them.
                     let is_color = ec.color.is_some();
+                    let is_control = ec.control.is_some();
                     let orig = |ui: &mut Ui, txt: String| {
                         ui.label(egui::RichText::new(txt).small().color(egui::Color32::GRAY));
                     };
@@ -6453,7 +6498,7 @@ impl VisionaryApp {
                         .num_columns(3)
                         .striped(true)
                         .show(ui, |ui| {
-                            if !is_color {
+                            if !is_color && !is_control {
                                 ui.label("Effect");
                                 ui.horizontal(|ui| {
                                     changed |= ui
@@ -6507,7 +6552,11 @@ impl VisionaryApp {
                                 }
                             }
 
-                            ui.label(if is_color { "Command" } else { "Spawn command" });
+                            ui.label(if is_color || is_control {
+                                "Command"
+                            } else {
+                                "Spawn command"
+                            });
                             // Owned, because the colour arm below writes the picked command back
                             // into the very field this reads.
                             let spawn_command = if ec.spawn_func.is_empty() {
@@ -6562,6 +6611,12 @@ impl VisionaryApp {
                                         changed = true;
                                         respawn_needed = true;
                                     }
+                                } else if is_control {
+                                    ui.label(egui::RichText::new(ec.spawn_func.clone()).monospace())
+                                        .on_hover_text(
+                                            "A point command on the effect timeline. It does not
+                                             start or end an effect spawn.",
+                                        );
                                 } else {
                                     ui.label(egui::RichText::new(spawn_command).monospace())
                                         .on_hover_text(
@@ -6603,7 +6658,7 @@ impl VisionaryApp {
                             }
                             ui.end_row();
 
-                            if !is_color {
+                            if !is_color && !is_control {
                                 // Named "Bone 1" only when there is a second one to tell it
                                 // apart from, so every non-trail spawn keeps the plain label.
                                 ui.label(if ec.trail_bone2.is_some() {
@@ -6810,6 +6865,63 @@ impl VisionaryApp {
                                 }
                                 if Some(&color) != ec.color.as_ref() {
                                     ec.color = Some(color);
+                                }
+                            } else if is_control {
+                                if let Some(control) = ec.control.as_mut() {
+                                    match control {
+                                        crate::data::EffectControl::DetachKind {
+                                            effect_name,
+                                            unk,
+                                        } => {
+                                            ui.label("Effect kind");
+                                            changed |= ui
+                                                .add(
+                                                    egui::TextEdit::singleline(effect_name)
+                                                        .desired_width(150.0),
+                                                )
+                                                .changed();
+                                            ui.label("");
+                                            ui.end_row();
+                                            ui.label("Unknown");
+                                            changed |= ui
+                                                .add(egui::DragValue::new(unk).speed(1.0))
+                                                .changed();
+                                            ui.label("");
+                                            ui.end_row();
+                                        }
+                                        crate::data::EffectControl::DetachKindWork {
+                                            work,
+                                            unk,
+                                        } => {
+                                            ui.label("Work ID");
+                                            changed |= ui
+                                                .add(
+                                                    egui::TextEdit::singleline(work)
+                                                        .desired_width(180.0),
+                                                )
+                                                .changed();
+                                            ui.label("");
+                                            ui.end_row();
+                                            ui.label("Unknown");
+                                            changed |= ui
+                                                .add(egui::DragValue::new(unk).speed(1.0))
+                                                .changed();
+                                            ui.label("");
+                                            ui.end_row();
+                                        }
+                                        crate::data::EffectControl::EnableArea { kind }
+                                        | crate::data::EffectControl::UnableArea { kind } => {
+                                            ui.label("Area kind");
+                                            changed |= ui
+                                                .add(
+                                                    egui::TextEdit::singleline(kind)
+                                                        .desired_width(180.0),
+                                                )
+                                                .changed();
+                                            ui.label("");
+                                            ui.end_row();
+                                        }
+                                    }
                                 }
                             } else if is_trail {
                                 ui.label("Transform");
@@ -7136,7 +7248,7 @@ impl VisionaryApp {
                             // One-shot effects have no meaningful "end" (they play their own
                             // lifetime), so only follow effects show an end frame — otherwise the
                             // row showed confusing "30-30" or "30-9999" ranges.
-                            ui.label("Spawn frame");
+                            ui.label(if is_control { "Event frame" } else { "Spawn frame" });
                             ui.horizontal(|ui| {
                                 changed |=
                                     ui.add(egui::DragValue::new(&mut ec.active_start)).changed();
@@ -7164,7 +7276,9 @@ impl VisionaryApp {
                             ui.end_row();
 
                             ui.label("Disabled");
-                            changed |= ui.checkbox(&mut ec.disabled, "don't spawn").changed();
+                            changed |= ui
+                                .checkbox(&mut ec.disabled, if is_control { "don't run" } else { "don't spawn" })
+                                .changed();
                             ui.label("");
                             ui.end_row();
 
@@ -8412,8 +8526,10 @@ impl VisionaryApp {
     fn clear_all_game_edits(&mut self) {
         self.game_link.send_reset_pins();
         self.effect_rules_store.clear();
+        self.effect_control_rules_store.clear();
         self.hitbox_rules_store.clear();
         self.game_link.send_spawn_rules(&[]);
+        self.game_link.send_effect_control_rules(&[]);
         self.game_link.send_hitbox_rules(&[]);
         self.game_link.send_effect_aliases(&[]);
         // Tear the live CARRIER down too. Authored colour edits are cloned into it (the
@@ -9490,6 +9606,7 @@ impl VisionaryApp {
             // `effect_capture_layout` above only matches spawn families, so nothing that
             // reaches here is a colour command; those are built by `color_call_from_capture`.
             color: None,
+            control: None,
             // A live capture sees the calls the game actually made, which is the far side of
             // every conditional — the branch not taken produced no call to capture. So there is
             // no guard to record, and recording one would be worse than recording none: it
@@ -9554,6 +9671,73 @@ impl VisionaryApp {
             particle_tint: None,
             alpha: None,
             color: Some(crate::data::ColorCall { transition, rgba }),
+            control: None,
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        })
+    }
+
+    /// C4 control capture → a point `EffectCall`.
+    ///
+    /// `EFFECT_DETACH_KIND_WORK` is intentionally omitted here: its smash-script wrapper resolves
+    /// the authored Work ID before the hooked primitive runs, so the live args contain an effect
+    /// handle rather than a source-valid Work ID. The plugin still captures and can replay that
+    /// runtime call through its control-rule path; the editor keeps the authored token when it
+    /// comes from source.
+    fn control_call_from_capture(
+        func: &str,
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        eff_rev: &HashMap<u64, String>,
+    ) -> Option<crate::data::EffectCall> {
+        use crate::data::EffectControl;
+        let control = match func {
+            "EFFECT_DETACH_KIND" if args.len() == 2 => EffectControl::DetachKind {
+                effect_name: args
+                    .first()
+                    .and_then(|arg| arg.as_hash())
+                    .and_then(|hash| eff_rev.get(&hash).cloned())
+                    .unwrap_or_else(|| {
+                        args.first()
+                            .and_then(|arg| arg.as_hash())
+                            .map(|hash| format!("{hash:#x}"))
+                            .unwrap_or_default()
+                    }),
+                unk: args.get(1).and_then(|arg| arg.as_i64())?,
+            },
+            "ENABLE_AREA" if args.len() == 1 => EffectControl::EnableArea {
+                kind: args.first().and_then(|arg| arg.as_i64())?.to_string(),
+            },
+            "UNABLE_AREA" if args.len() == 1 => EffectControl::UnableArea {
+                kind: args.first().and_then(|arg| arg.as_i64())?.to_string(),
+            },
+            _ => return None,
+        };
+        let start = Self::motion_to_script_frame(frame);
+        Some(crate::data::EffectCall {
+            effect_name: String::new(),
+            effect_name_alt: None,
+            spawn_func: func.to_string(),
+            bone_name: String::new(),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: false,
+            active_start: start,
+            active_end: start,
+            disabled: false,
+            extra_args: None,
+            raw_line: None,
+            trail_off: None,
+            trail_bone2: None,
+            rate: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            color: None,
+            control: Some(control),
             guard: None,
             leading: Vec::new(),
             trailing: Vec::new(),
@@ -10064,6 +10248,13 @@ impl VisionaryApp {
                     }
                 }
                 anchor = pushed.then(|| effects.len() - 1);
+                continue;
+            }
+            if let Some(control) =
+                Self::control_call_from_capture(&line.func, &line.args, line.frame, eff_rev)
+            {
+                effects.push(control);
+                anchor = None;
                 continue;
             }
             // The `LAST_EFFECT_SET_*` modifiers name no effect kind: they modify whatever
@@ -12407,6 +12598,7 @@ impl VisionaryApp {
         }
         for move_key in &affected_moves {
             self.effect_rules_store.remove(move_key);
+            self.effect_control_rules_store.remove(move_key);
         }
         let current_affected = self
             .current_move_key()
@@ -12424,6 +12616,13 @@ impl VisionaryApp {
                 .cloned()
                 .collect();
             self.game_link.send_spawn_rules(&all);
+            let all_controls: Vec<crate::game_link::EffectControlRuleWire> = self
+                .effect_control_rules_store
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            self.game_link.send_effect_control_rules(&all_controls);
         }
     }
 
@@ -14336,6 +14535,11 @@ impl VisionaryApp {
                 .map(|p| effect_name_hash(&p.effect_name))
                 .unwrap_or(hash);
             let window = Self::rule_frame_window(spawn_frame);
+            // C4 controls are point commands, not effect kinds. Their live rules use a
+            // separate control channel; never key the spawn matcher on their empty effect name.
+            if ec.control.is_some() {
+                continue;
+            }
             // A colour command names no effect, so none of the spawn machinery below applies
             // to it — and `effect_name_hash("")` would key every one of them to the same
             // meaningless hash. It gets one rule, keyed on its command instead.
@@ -14502,10 +14706,18 @@ impl VisionaryApp {
                 });
             }
         }
+        let (control_rules, missing_control_capture, unsupported_control) =
+            self.build_effect_control_rules(&effects, &pristines, motion);
         if rules.is_empty() {
             self.effect_rules_store.remove(&mv_key);
         } else {
-            self.effect_rules_store.insert(mv_key, rules);
+            self.effect_rules_store.insert(mv_key.clone(), rules);
+        }
+        if control_rules.is_empty() {
+            self.effect_control_rules_store.remove(&mv_key);
+        } else {
+            self.effect_control_rules_store
+                .insert(mv_key, control_rules);
         }
         let all: Vec<crate::game_link::SpawnRuleWire> = self
             .effect_rules_store
@@ -14514,12 +14726,228 @@ impl VisionaryApp {
             .cloned()
             .collect();
         self.game_link.send_spawn_rules(&all);
+        let all_controls: Vec<crate::game_link::EffectControlRuleWire> = self
+            .effect_control_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_effect_control_rules(&all_controls);
         if missing_capture {
             self.state.status =
                 "Swapped/retimed effect needs a live capture — perform the move in game once so \
                  the change previews live (export applies it regardless)."
                     .into();
+        } else if missing_control_capture {
+            self.state.status =
+                "This effect-control edit needs a live capture — perform the move in game once \
+                 so the point action can be matched safely (export applies it regardless)."
+                    .into();
+        } else if unsupported_control {
+            self.state.status =
+                "This effect control's symbolic/runtime value cannot be reconstructed safely \
+                 for live preview; the authored export still contains the edit."
+                    .into();
         }
+    }
+
+    /// Find the nth captured invocation of one point-control command on one script frame.
+    ///
+    /// The occurrence is part of the identity because a move may enable or disable the same
+    /// area more than once on one frame. Matching only command + frame would make one live rule
+    /// suppress all of those calls.
+    fn effect_control_capture_args(
+        captures: &[crate::game_link::CaptureLine],
+        func: &str,
+        script_frame: u32,
+        occurrence: usize,
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        captures
+            .iter()
+            .filter(|capture| {
+                capture.func == func && Self::motion_to_script_frame(capture.frame) == script_frame
+            })
+            .nth(occurrence)
+            .map(|capture| capture.args.clone())
+    }
+
+    fn effect_control_occurrence(
+        pristines: &[crate::data::EffectCall],
+        index: usize,
+        func: &str,
+        script_frame: u32,
+    ) -> usize {
+        pristines
+            .iter()
+            .take(index)
+            .filter(|call| {
+                call.active_start == script_frame
+                    && call
+                        .control
+                        .as_ref()
+                        .is_some_and(|control| control.command_name() == func)
+            })
+            .count()
+    }
+
+    fn control_integer(token: &str) -> Option<i64> {
+        let token = token.trim();
+        if let Some(hex) = token.strip_prefix("0x") {
+            return i64::from_str_radix(hex, 16).ok();
+        }
+        token.parse().ok()
+    }
+
+    fn control_hash_arg(
+        original: &crate::game_link::LuaArgWire,
+        value: u64,
+    ) -> crate::game_link::LuaArgWire {
+        match original {
+            crate::game_link::LuaArgWire::Int(_) => crate::game_link::LuaArgWire::Int(value as i64),
+            _ => crate::game_link::LuaArgWire::Hash(value),
+        }
+    }
+
+    fn control_integer_arg(
+        original: &crate::game_link::LuaArgWire,
+        value: i64,
+    ) -> crate::game_link::LuaArgWire {
+        match original {
+            crate::game_link::LuaArgWire::Num(_) => crate::game_link::LuaArgWire::Num(value as f32),
+            crate::game_link::LuaArgWire::Bool(_) => crate::game_link::LuaArgWire::Bool(value != 0),
+            _ => crate::game_link::LuaArgWire::Int(value),
+        }
+    }
+
+    /// Rebuild the captured argument vector for a changed point control.
+    ///
+    /// Detach-by-kind has a directly hashable source value. Area constants can be rebuilt only
+    /// when the editor holds a numeric value; an unchanged symbolic area safely reuses the
+    /// captured runtime integer. Work-slot detach is deliberately narrower: the primitive sees
+    /// the resolved effect handle, so only frame/unknown edits can reuse that handle.
+    fn effect_control_injection_args(
+        was: &crate::data::EffectControl,
+        now: &crate::data::EffectControl,
+        donor: &[crate::game_link::LuaArgWire],
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::data::EffectControl;
+        match (was, now) {
+            (EffectControl::DetachKind { .. }, EffectControl::DetachKind { effect_name, unk })
+                if !effect_name.trim().is_empty() && donor.len() == 2 =>
+            {
+                let mut args = donor.to_vec();
+                args[0] = Self::control_hash_arg(&args[0], effect_name_hash(effect_name));
+                args[1] = Self::control_integer_arg(&args[1], *unk);
+                Some(args)
+            }
+            (
+                EffectControl::DetachKindWork { work: old_work, .. },
+                EffectControl::DetachKindWork { work, unk },
+            ) if old_work == work && !work.trim().is_empty() && donor.len() == 2 => {
+                let mut args = donor.to_vec();
+                args[1] = Self::control_integer_arg(&args[1], *unk);
+                Some(args)
+            }
+            (EffectControl::EnableArea { kind: old_kind }, EffectControl::EnableArea { kind })
+            | (EffectControl::UnableArea { kind: old_kind }, EffectControl::UnableArea { kind })
+                if donor.len() == 1 =>
+            {
+                if kind == old_kind {
+                    return Some(donor.to_vec());
+                }
+                let value = Self::control_integer(kind)?;
+                let mut args = donor.to_vec();
+                args[0] = Self::control_integer_arg(&args[0], value);
+                Some(args)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build live suppression/injection rules for edited C4 point controls.
+    ///
+    /// Returns `(rules, missing_capture, unsupported_value)`. A control is never suppressed
+    /// unless its replacement can be built; this keeps an unverified runtime mapping from
+    /// changing the game silently while the source/export path remains complete.
+    fn build_effect_control_rules(
+        &self,
+        effects: &[crate::data::EffectCall],
+        pristines: &[crate::data::EffectCall],
+        motion: Option<u64>,
+    ) -> (Vec<crate::game_link::EffectControlRuleWire>, bool, bool) {
+        let captures = motion
+            .map(|motion| self.captures_for_selected_fighter(motion))
+            .unwrap_or_default();
+        let mut rules = Vec::new();
+        let mut missing_capture = false;
+        let mut unsupported_value = false;
+
+        for (index, now_call) in effects.iter().enumerate() {
+            let Some(now) = now_call.control.as_ref() else {
+                continue;
+            };
+            let Some(was_call) = pristines.get(index) else {
+                missing_capture = true;
+                continue;
+            };
+            let Some(was) = was_call.control.as_ref() else {
+                missing_capture = true;
+                continue;
+            };
+            let func = was.command_name();
+            if func != now.command_name() {
+                unsupported_value = true;
+                continue;
+            }
+            let occurrence =
+                Self::effect_control_occurrence(pristines, index, func, was_call.active_start);
+            let Some(donor) = Self::effect_control_capture_args(
+                &captures,
+                func,
+                was_call.active_start,
+                occurrence,
+            ) else {
+                let changed = was != now
+                    || was_call.active_start != now_call.active_start
+                    || now_call.disabled;
+                if changed {
+                    missing_capture = true;
+                }
+                continue;
+            };
+            let changed_payload = was != now;
+            let retimed = was_call.active_start != now_call.active_start;
+            if !changed_payload && !retimed && !now_call.disabled {
+                continue;
+            }
+
+            let inject = if now_call.disabled {
+                None
+            } else {
+                match Self::effect_control_injection_args(was, now, &donor) {
+                    Some(args) => Some(crate::game_link::EffectControlInjectWire {
+                        frame: Self::script_to_motion_frame(now_call.active_start),
+                        func: now.command_name().to_string(),
+                        args,
+                    }),
+                    None => {
+                        unsupported_value = true;
+                        continue;
+                    }
+                }
+            };
+            let (frame_start, frame_end) = Self::rule_frame_window(was_call.active_start);
+            rules.push(crate::game_link::EffectControlRuleWire {
+                motion,
+                func: func.to_string(),
+                args: donor,
+                suppress: true,
+                frame_start,
+                frame_end,
+                inject,
+            });
+        }
+        (rules, missing_capture, unsupported_value)
     }
 
     /// Build a live injection for a spawn from a captured EFFECT donor (matched by
@@ -15921,6 +16349,15 @@ impl eframe::App for VisionaryApp {
                     .collect();
                 if !spawn.is_empty() {
                     self.game_link.send_spawn_rules(&spawn);
+                }
+                let controls: Vec<crate::game_link::EffectControlRuleWire> = self
+                    .effect_control_rules_store
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect();
+                if !controls.is_empty() {
+                    self.game_link.send_effect_control_rules(&controls);
                 }
                 let hit: Vec<crate::game_link::HitboxRuleWire> = self
                     .hitbox_rules_store
@@ -22270,6 +22707,79 @@ mod blocked_export_writes_nothing_tests {
             outcome.built_source_root.is_some(),
             "generated source was not written, so this control proves nothing about \
              the refusal tests"
+        );
+    }
+}
+
+#[cfg(test)]
+mod effect_control_rule_tests {
+    use super::VisionaryApp;
+    use crate::data::EffectControl;
+    use crate::game_link::{CaptureLine, LuaArgWire as A};
+
+    fn capture(func: &str, frame: f32, args: Vec<A>) -> CaptureLine {
+        CaptureLine {
+            kind: 0,
+            motion: 0,
+            frame,
+            func: func.into(),
+            args,
+            run: 0,
+        }
+    }
+
+    #[test]
+    fn detach_kind_rebuilds_hash_and_unknown_value() {
+        let was = EffectControl::DetachKind {
+            effect_name: "sys_smoke".into(),
+            unk: 0,
+        };
+        let now = EffectControl::DetachKind {
+            effect_name: "sys_fire".into(),
+            unk: -1,
+        };
+        let donor = vec![A::Hash(hash40::hash40("sys_smoke").0), A::Int(0)];
+        assert_eq!(
+            VisionaryApp::effect_control_injection_args(&was, &now, &donor),
+            Some(vec![A::Hash(hash40::hash40("sys_fire").0), A::Int(-1)])
+        );
+    }
+
+    #[test]
+    fn work_detach_reuses_runtime_handle_but_rejects_work_id_changes() {
+        let was = EffectControl::DetachKindWork {
+            work: "WORK_INT".into(),
+            unk: 0,
+        };
+        let retuned = EffectControl::DetachKindWork {
+            work: "WORK_INT".into(),
+            unk: -1,
+        };
+        let changed_work = EffectControl::DetachKindWork {
+            work: "OTHER_WORK".into(),
+            unk: -1,
+        };
+        let donor = vec![A::Int(0x1234), A::Int(0)];
+        assert_eq!(
+            VisionaryApp::effect_control_injection_args(&was, &retuned, &donor),
+            Some(vec![A::Int(0x1234), A::Int(-1)])
+        );
+        assert_eq!(
+            VisionaryApp::effect_control_injection_args(&was, &changed_work, &donor),
+            None,
+            "an authored WorkModule token cannot be guessed from the resolved runtime handle"
+        );
+    }
+
+    #[test]
+    fn repeated_same_frame_controls_select_their_own_capture() {
+        let captures = vec![
+            capture("ENABLE_AREA", 8.0, vec![A::Int(2)]),
+            capture("ENABLE_AREA", 8.0, vec![A::Int(3)]),
+        ];
+        assert_eq!(
+            VisionaryApp::effect_control_capture_args(&captures, "ENABLE_AREA", 9, 1),
+            Some(vec![A::Int(3)])
         );
     }
 }

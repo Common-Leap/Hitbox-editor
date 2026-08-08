@@ -815,7 +815,8 @@ not vacuous. The live surface is built but not exercised against a running game.
   status and undocumented int, bent into geometry. A test caught it; nothing else would have.
 - **Two real bugs found on the way in, both older than this task.** Written up below.
 - Not done, deliberately: `SET_SEARCH_SIZE_EXIST` (moved to **B3**), `ENABLE_AREA` and
-  `UNABLE_AREA` (moved to **C4**). None has a corpus call to test against.
+  `UNABLE_AREA` (moved to **C4**). The local-cache measurement had no calls for the two area
+  toggles; C4's later external-corpus measurement supersedes that evidence boundary.
 
 ### [x] B5a — The short-form `CATCH` bug B5 surfaced (done 2026-08-04)
 
@@ -1739,24 +1740,51 @@ watch-for warned against, and it did not happen.
 - **Watch for:** the EFF loop pushes to `errors`, which is a different failure channel that
   *does* continue. Do not merge the two; a failed EFF write should still leave the rest.
 
-### [!] C4 — Effect lifetime control (blocked: remaining members have zero corpus calls)
+### [!] C4 — Effect lifetime control (typed point controls landed; one runtime mapping remains bounded)
 
 Detach interacts with the follow/off-kind lifetime the editor already models for spawns.
 
-**Not schedulable as written — every remaining member has zero corpus calls.**
+**Historical boundary:** the local cache had no calls for the remaining members, so the entry was
+not schedulable from that cache alone. The external-corpus measurement below supersedes that
+evidence boundary for source-shape work.
 
 **Re-measured 2026-08-05: `SET_PLAY_INHIVIT` is not an effect command and never was.** Its
 signature is `(agent, se: Hash40, unk: ToF32)`, its 10 corpus arguments are all sound-effect
 labels (`se_kirby_dash_stop`, `se_common_dizzy`), and **all 10 calls sit inside `sound_`
 functions.** It suppresses a sound effect, not an effect spawn. It belongs to D1 and has been
-counted there. That leaves this entry with `EFFECT_DETACH_KIND` 0, `EFFECT_DETACH_KIND_WORK` 0,
-`ENABLE_AREA` 0 and `UNABLE_AREA` 0 — nothing to test a round trip against.
+counted there. That left the local cache with `EFFECT_DETACH_KIND` 0, `EFFECT_DETACH_KIND_WORK` 0,
+`ENABLE_AREA` 0 and `UNABLE_AREA` 0 at the time. The external-corpus remeasurement and C4a
+fixture above now provide the source-shape evidence needed for the typed implementation.
 
-**Preservation boundary added 2026-08-08, without claiming C4 complete.** The four known wrapper
-forms now take the effect parser's opaque/residue path even when written bare, so a source line is
-kept at its frame and remains visible in generated effect text and source write-back. A measured
-effect end frame, detach-vs-spawn lifetime rule, panel field, live wire/plugin hook, and semantic
-export are still absent; no local corpus call justifies inventing any of them.
+**Re-measured 2026-08-08 against the read-only external script corpus.** The four known forms are
+real effect-script calls: `EFFECT_DETACH_KIND` 452 calls / 327 files,
+`EFFECT_DETACH_KIND_WORK` 15 calls, `ENABLE_AREA` 14 calls, and `UNABLE_AREA` 12 calls. Their
+wrapper arities are exact: two values after `agent` for each detach form and one for each area
+toggle. The zero-call boundary above is therefore historical local-cache evidence, not a reason
+to keep the feature opaque.
+
+#### [x] C4a — Typed detach and area point controls (completed 2026-08-08; live runtime unverified)
+
+All four commands are now typed as point `EffectCall`s rather than effect lifetimes. They keep
+their script frame, never shorten a following effect, appear as purple event rows in the effect
+panel, export with their measured wrapper shape, and support value-only source write-back. The
+editor and verifier keep them out of spawn transforms, `LAST_EFFECT_SET_*` anchoring, and
+`EFFECT_OFF_KIND` lifetime inference.
+
+The live path captures all four hooked primitives, matches controls by command, exact captured
+arguments, motion, frame window, and occurrence, and supports suppression/retiming/injection for
+controls whose replacement arguments can be rebuilt. The external corpus is evidence for source
+shape, not hardware evidence: no emulator, game, or UI automation was run.
+
+#### [!] C4b — Work-slot detach runtime token boundary
+
+`EFFECT_DETACH_KIND_WORK` reaches its primitive after the smash-script wrapper resolves the
+authored `WorkModule` slot, so the plugin observes the runtime effect handle rather than the
+source Work ID. Unchanged Work IDs can therefore be captured, suppressed, and replayed, and
+frame/unknown-value edits can reuse that captured handle. An edited Work ID cannot be converted
+without a verified runtime mapping; live preview leaves the original call running and reports
+the limitation, while export and source write-back retain the edited authored token. This keeps
+the remaining C4 boundary explicit instead of guessing at WorkModule semantics.
 
 The earlier "measured after A3" line counted `SET_PLAY_INHIVIT` without reading its signature,
 which is the trap two entries above this one warns about, applied to an entry's *own* evidence.

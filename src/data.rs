@@ -3550,6 +3550,37 @@ pub fn fighter_display_name(name: &str) -> String {
 
 // ── Effect script IR ──────────────────────────────────────────────────────────
 
+/// A point control in an `effect_` script.
+///
+/// These commands act on an existing effect handle or on an AreaModule state; they do not
+/// start or end an [`EffectCall`]. Keeping them as their own payload is what prevents a detach
+/// from being mistaken for the `EFFECT_OFF_KIND` that closes a following effect.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum EffectControl {
+    /// Detach every effect of a named kind without killing it.
+    DetachKind { effect_name: String, unk: i64 },
+    /// Detach the effect handle held in a WorkModule slot without killing it.
+    ///
+    /// The token is retained exactly as authored (`*FIGHTER_…` included), because it is a
+    /// source constant rather than a value the editor can safely resolve offline.
+    DetachKindWork { work: String, unk: i64 },
+    /// Enable an existing fighter area.
+    EnableArea { kind: String },
+    /// Disable an existing fighter area.
+    UnableArea { kind: String },
+}
+
+impl EffectControl {
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            Self::DetachKind { .. } => "EFFECT_DETACH_KIND",
+            Self::DetachKindWork { .. } => "EFFECT_DETACH_KIND_WORK",
+            Self::EnableArea { .. } => "ENABLE_AREA",
+            Self::UnableArea { .. } => "UNABLE_AREA",
+        }
+    }
+}
+
 /// A single effect macro call inside an is_excute block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EffectMacro {
@@ -3619,6 +3650,8 @@ pub enum EffectMacro {
     LastParticleSetColor { rgb: [f32; 3] },
     /// LAST_EFFECT_SET_ALPHA — sets the opacity of the last spawned effect.
     LastEffectSetAlpha { alpha: f32 },
+    /// A detach or area-state point command. These are not effect spawns and never close one.
+    Control(EffectControl),
     /// FLASH / BURN_COLOR and their relatives — see [`ColorCall`].
     Color { command: String, color: ColorCall },
     /// Any unrecognised line, preserved verbatim.
@@ -3889,6 +3922,13 @@ pub struct EffectCall {
     /// so nothing tries to close a colour command with an `EFFECT_OFF_KIND`.
     #[serde(default)]
     pub color: Option<ColorCall>,
+    /// Set when this entry is a detach or area-state point command rather than a spawn.
+    ///
+    /// A control has the same frame/selection/edit plumbing as a colour event, but no graphic,
+    /// bone, transform, or effect lifetime. It is deliberately separate from `color` so every
+    /// consumer can reject both non-spawn shapes before touching spawn fields.
+    #[serde(default)]
+    pub control: Option<EffectControl>,
     /// Verbatim header of the conditional this spawn sat inside, or `None` at top level.
     ///
     /// The export re-wraps the spawn's `is_excute` block in this, which is the difference
@@ -4183,6 +4223,7 @@ fn eval_effect_stmts(
                                 particle_tint: None,
                                 alpha: None,
                                 color: None,
+                                control: None,
                                 guard: walk.guard.clone(),
                                 leading: walk.take_pending(),
                                 trailing: Vec::new(),
@@ -4228,6 +4269,7 @@ fn eval_effect_stmts(
                                 particle_tint: None,
                                 alpha: None,
                                 color: None,
+                                control: None,
                                 guard: walk.guard.clone(),
                                 leading: walk.take_pending(),
                                 trailing: Vec::new(),
@@ -4335,6 +4377,41 @@ fn eval_effect_stmts(
                                 calls,
                             ),
                         },
+                        EffectMacro::Control(control) => {
+                            // A control is a point event. It must not close or shorten a
+                            // following effect, and it must not become the anchor for a
+                            // LAST_EFFECT_SET_* modifier. It does get a residue anchor so
+                            // adjacent opaque lines stay beside the control at this frame.
+                            calls.push(EffectCall {
+                                effect_name: String::new(),
+                                effect_name_alt: None,
+                                spawn_func: control.command_name().to_string(),
+                                bone_name: String::new(),
+                                offset: [0.0; 3],
+                                rotation: [0.0; 3],
+                                scale: 1.0,
+                                follows_bone: false,
+                                active_start: script_frame(frame),
+                                active_end: script_frame(frame),
+                                disabled: false,
+                                extra_args: None,
+                                raw_line: None,
+                                trail_off: None,
+                                trail_bone2: None,
+                                rate: None,
+                                camera_offset: None,
+                                tint: None,
+                                particle_tint: None,
+                                alpha: None,
+                                color: None,
+                                control: Some(control.clone()),
+                                guard: walk.guard.clone(),
+                                leading: walk.take_pending(),
+                                trailing: Vec::new(),
+                            });
+                            walk.last_spawn = Some(calls.len() - 1);
+                            anchor = None;
+                        }
                         EffectMacro::Color { command, color } => {
                             calls.push(EffectCall {
                                 effect_name: String::new(),
@@ -4362,6 +4439,7 @@ fn eval_effect_stmts(
                                 particle_tint: None,
                                 alpha: None,
                                 color: Some(color.clone()),
+                                control: None,
                                 guard: walk.guard.clone(),
                                 leading: walk.take_pending(),
                                 trailing: Vec::new(),
@@ -4448,6 +4526,7 @@ impl EffectScript {
                                 m,
                                 EffectMacro::Effect { .. }
                                     | EffectMacro::AfterImage { .. }
+                                    | EffectMacro::Control(..)
                                     | EffectMacro::Color { .. }
                             ) {
                                 out.push(*next);
