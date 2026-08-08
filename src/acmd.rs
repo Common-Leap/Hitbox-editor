@@ -338,6 +338,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_expression_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_sound_call(line) {
             stmts.push(stmt);
             continue;
@@ -389,13 +393,14 @@ pub(crate) const SCRIPT_PREFIXES: [&str; 4] = ["game_", "effect_", "sound_", "ex
 /// free. This shorter list decides the other question: whether a partial project override is
 /// worth a network round trip. Pulling vanilla's `sound_` for text nothing displays would make
 /// an offline user with a perfectly good `game_`+`effect_` project sit out the HTTP timeout
-/// before seeing their own move. `expression_` joins this list when D2 gives it a lane.
+/// before seeing their own move. D2 gives `expression_` the same lane now that its measured
+/// macro slice is being modelled.
 ///
 /// `sound_` joined it at D1d, which is where sounds became editable rather than merely drawn.
 /// The cost the paragraph above describes is now the right trade: a project that overrides only
 /// `game_` needs the mirror's `sound_` to show what the move plays, and without it the sound
 /// section is empty for exactly the projects most likely to want it.
-pub(crate) const DISPLAYED_PREFIXES: [&str; 3] = ["game_", "effect_", "sound_"];
+pub(crate) const DISPLAYED_PREFIXES: [&str; 4] = ["game_", "effect_", "sound_", "expression_"];
 
 /// Fill the categories a project does not define with the mirror's, and return one body.
 ///
@@ -907,6 +912,21 @@ pub fn parse_sound_script(source: &str) -> AcmdScript {
         return AcmdScript::default();
     };
     let lines: Vec<&str> = sound_fn.lines().collect();
+    let body_lines = if lines.len() >= 2 {
+        &lines[1..lines.len() - 1]
+    } else {
+        &lines[..]
+    };
+    let (stmts, _) = parse_stmts(body_lines, 0);
+    AcmdScript { stmts }
+}
+
+/// Parse the `expression_` function's measured camera/rumble calls.
+pub fn parse_expression_script(source: &str) -> AcmdScript {
+    let Some(expression_fn) = extract_function(source, "expression_") else {
+        return AcmdScript::default();
+    };
+    let lines: Vec<&str> = expression_fn.lines().collect();
     let body_lines = if lines.len() >= 2 {
         &lines[1..lines.len() - 1]
     } else {
@@ -1513,6 +1533,56 @@ fn parse_sound_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Read one of the three measured expression calls, or leave the line as `Raw`.
+///
+/// The expression family has several similarly named raw module calls beside these macros, so
+/// the exact `macros::NAME(` spelling and exact arity are both required. Arguments stay as
+/// tokens: source constants and live numeric captures must each survive an export.
+fn parse_expression_call(line: &str) -> Option<ExcuteStmt> {
+    let args = |name: &str| -> Option<Vec<String>> {
+        let needle = format!("macros::{name}(");
+        let start = line.find(&needle)? + needle.len();
+        let end = line[start..].rfind(')')? + start;
+        let tokens = tokenize_args(&line[start..end]);
+        tokens.get(1..).map(ToOwned::to_owned)
+    };
+
+    if line.contains("macros::RUMBLE_HIT(") {
+        let values = args("RUMBLE_HIT")?;
+        let [kind, unk] = values.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::Expression(
+            crate::data::ExpressionCall::RumbleHit {
+                kind: kind.clone(),
+                unk: unk.clone(),
+            },
+        ));
+    }
+    if line.contains("macros::QUAKE(") {
+        let values = args("QUAKE")?;
+        let [kind] = values.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::Expression(crate::data::ExpressionCall::Quake {
+            kind: kind.clone(),
+        }));
+    }
+    if line.contains("macros::FT_ATTACK_ABS_CAMERA_QUAKE(") {
+        let values = args("FT_ATTACK_ABS_CAMERA_QUAKE")?;
+        let [attack_abs_kind, quake_kind] = values.as_slice() else {
+            return None;
+        };
+        return Some(ExcuteStmt::Expression(
+            crate::data::ExpressionCall::FtAttackAbsCameraQuake {
+                attack_abs_kind: attack_abs_kind.clone(),
+                quake_kind: quake_kind.clone(),
+            },
+        ));
+    }
+    None
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -1522,6 +1592,24 @@ fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{indent}macros::{}(agent, {args});", call.func)
+}
+
+fn emit_expression(call: &crate::data::ExpressionCall, indent: &str) -> String {
+    match call {
+        crate::data::ExpressionCall::RumbleHit { kind, unk } => {
+            format!("{indent}macros::{}(agent, {kind}, {unk});", call.func())
+        }
+        crate::data::ExpressionCall::Quake { kind } => {
+            format!("{indent}macros::{}(agent, {kind});", call.func())
+        }
+        crate::data::ExpressionCall::FtAttackAbsCameraQuake {
+            attack_abs_kind,
+            quake_kind,
+        } => format!(
+            "{indent}macros::{}(agent, {attack_abs_kind}, {quake_kind});",
+            call.func()
+        ),
+    }
 }
 
 fn parse_attack_mod_call(line: &str) -> Option<ExcuteStmt> {
@@ -1959,6 +2047,7 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 attack_mod_num(*value)
             ),
             crate::data::ExcuteStmt::Sound(call) => emit_sound(call, indent),
+            crate::data::ExcuteStmt::Expression(call) => emit_expression(call, indent),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -2089,6 +2178,18 @@ fn emit_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, S
 /// which of a fighter's four scripts this one replaces.
 fn emit_sound_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, String) {
     let fn_name = script_function_name("sound", move_name);
+    let mut out = format!("unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n");
+    for line in emit_stmts(&script.stmts, "    ") {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    (fn_name, out)
+}
+
+/// Emit one `expression_` function: its name and full source.
+fn emit_expression_move_fn(script: &crate::data::AcmdScript, move_name: &str) -> (String, String) {
+    let fn_name = script_function_name("expression", move_name);
     let mut out = format!("unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n");
     for line in emit_stmts(&script.stmts, "    ") {
         out.push_str(&line);
@@ -2598,6 +2699,11 @@ pub fn preview_sound_fn(script: &crate::data::AcmdScript, move_name: &str) -> St
     emit_sound_move_fn(script, move_name).1
 }
 
+/// The exact `expression_*` function an export would write for this move.
+pub fn preview_expression_fn(script: &crate::data::AcmdScript, move_name: &str) -> String {
+    emit_expression_move_fn(script, move_name).1
+}
+
 /// The exact `effect_*` function an export would write for this move.
 pub fn preview_effect_fn(
     calls: &[crate::data::EffectCall],
@@ -2733,6 +2839,25 @@ pub fn build_mod_project_full(
     live_tweaks: &[crate::mod_project::LiveTweak],
     plugin_name: &str,
 ) -> ModProject {
+    build_mod_project_full_with_expression(
+        edits,
+        effect_edits,
+        sound_edits,
+        &[],
+        live_tweaks,
+        plugin_name,
+    )
+}
+
+/// Like [`build_mod_project_full`] with editable `expression_` scripts included.
+pub fn build_mod_project_full_with_expression(
+    edits: &[(String, String, crate::data::AcmdScript)],
+    effect_edits: &[EffectExport],
+    sound_edits: &[(String, String, crate::data::AcmdScript)],
+    expression_edits: &[(String, String, crate::data::AcmdScript)],
+    live_tweaks: &[crate::mod_project::LiveTweak],
+    plugin_name: &str,
+) -> ModProject {
     use std::collections::HashMap;
 
     let tweaks: HashMap<u64, crate::mod_project::LiveTweak> = live_tweaks
@@ -2769,6 +2894,14 @@ pub fn build_mod_project_full(
     let mut sfx_by_fighter: HashMap<&str, Vec<(&str, &crate::data::AcmdScript)>> = HashMap::new();
     for (fighter, move_name, script) in sound_edits {
         sfx_by_fighter
+            .entry(fighter.as_str())
+            .or_default()
+            .push((move_name.as_str(), script));
+        by_fighter.entry(fighter.as_str()).or_default();
+    }
+    let mut expr_by_fighter: HashMap<&str, Vec<(&str, &crate::data::AcmdScript)>> = HashMap::new();
+    for (fighter, move_name, script) in expression_edits {
+        expr_by_fighter
             .entry(fighter.as_str())
             .or_default()
             .push((move_name.as_str(), script));
@@ -2941,6 +3074,18 @@ pub fn install() {{
             }
         }
 
+        // Expression scripts for this fighter.
+        if let Some(expression_moves) = expr_by_fighter.get(fighter) {
+            let mut sorted_expression = expression_moves.clone();
+            sorted_expression.sort_by_key(|(m, _)| *m);
+            for (move_name, script) in &sorted_expression {
+                let (fn_name, fn_src) = emit_expression_move_fn(script, move_name);
+                acmd_src.push_str(&fn_src);
+                acmd_src.push('\n');
+                fn_entries.push((fn_name.clone(), fn_name));
+            }
+        }
+
         // install fn
         acmd_src.push_str("pub fn install(agent: &mut smashline::Agent) {\n");
         for (fn_name, acmd_name) in &fn_entries {
@@ -2968,6 +3113,11 @@ pub fn install() {{
                 sound_edits
                     .iter()
                     .map(|(fighter, move_name, _)| format!("- {fighter}: {move_name} (sounds)")),
+            )
+            .chain(
+                expression_edits.iter().map(|(fighter, move_name, _)| {
+                    format!("- {fighter}: {move_name} (expression)")
+                }),
             )
             .collect();
     script_list.sort();
@@ -4372,6 +4522,101 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         ));
         let emitted = export_acmd_source(&script, "mario", "test");
         assert!(emitted.contains("AttackModule::clear(agent.module_accessor, 3, false);"));
+    }
+
+    #[test]
+    fn measured_expression_calls_round_trip_with_raw_neighbors() {
+        let source = r#"
+unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        slope!(agent, *MA_MSC_CMD_SLOPE_SLOPE, *SLOPE_STATUS_LR);
+        macros::FT_ATTACK_ABS_CAMERA_QUAKE(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, *CAMERA_QUAKE_KIND_NONE);
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::RUMBLE_HIT(agent, Hash40::new("rbkind_attackm"), 0);
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_M);
+    }
+}
+"#;
+        let script = parse_expression_script(source);
+        let events = script.to_expression_events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].frame, 1);
+        assert_eq!(events[1].frame, 6);
+        assert_eq!(events[0].call.func(), "FT_ATTACK_ABS_CAMERA_QUAKE");
+        assert_eq!(events[1].call.func(), "RUMBLE_HIT");
+        assert_eq!(events[2].call.func(), "QUAKE");
+
+        let emitted = preview_expression_fn(&script, "throw_hi");
+        assert!(emitted.contains("slope!(agent, *MA_MSC_CMD_SLOPE_SLOPE, *SLOPE_STATUS_LR);"));
+        assert!(emitted.contains(
+            "macros::FT_ATTACK_ABS_CAMERA_QUAKE(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, *CAMERA_QUAKE_KIND_NONE);"
+        ));
+        assert_eq!(
+            parse_expression_script(&emitted).to_expression_events(),
+            events
+        );
+    }
+
+    /// Every measured expression call in the local script cache is typed and survives the same
+    /// parse/emit/read-back path as the fixture above. The cache is the evidence boundary for
+    /// D2: unknown expression lines remain raw, while these three known macros must never
+    /// silently fall through to raw text or disappear from an export.
+    #[test]
+    fn every_measured_expression_call_in_the_corpus_is_typed() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        let mut expression_scripts = 0usize;
+        let mut written = [0usize; 3];
+        let mut typed = [0usize; 3];
+        let mut problems = Vec::new();
+        for (path, body) in &bodies {
+            let Some(interior) = function_interior(body, "expression_") else {
+                continue;
+            };
+            expression_scripts += 1;
+            let names = ["RUMBLE_HIT", "QUAKE", "FT_ATTACK_ABS_CAMERA_QUAKE"];
+            for (index, name) in names.iter().enumerate() {
+                written[index] += interior.matches(&format!("macros::{name}(")).count();
+            }
+
+            let script = parse_expression_script(body);
+            let events = script.to_expression_events();
+            for event in &events {
+                let Some(index) = names.iter().position(|name| *name == event.call.func()) else {
+                    continue;
+                };
+                typed[index] += 1;
+            }
+            let emitted = preview_expression_fn(&script, "corpus_audit");
+            if parse_expression_script(&emitted).to_expression_events() != events {
+                problems.push(format!("{path}: expression events changed on export"));
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} expression scripts changed on export:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+        assert_eq!(
+            typed, written,
+            "the measured expression calls no longer all have typed events"
+        );
+        assert_eq!(
+            expression_scripts, 335,
+            "the local expression corpus changed; update the measured D2 scope deliberately"
+        );
+        assert_eq!(
+            written,
+            [65, 51, 2],
+            "the measured expression macro counts changed; update D2 before expanding scope"
+        );
     }
 
     // ═══ Generated-source compile golden ════════════════════════════════════

@@ -245,6 +245,31 @@ impl LuaArgWire {
     }
 }
 
+/// Stable rule key for one captured expression call. It includes the primitive name and every
+/// pristine Lua argument, so two equal camera calls on the same frame do not share a live rule.
+/// The plugin mirrors this small hash in its expression hooks.
+pub fn expression_key(func: &str, args: &[LuaArgWire]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in func.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for arg in args {
+        let value = match arg {
+            LuaArgWire::Hash(h) => 0x1000_0000_0000_0000 ^ h,
+            LuaArgWire::Num(n) => 0x2000_0000_0000_0000 ^ n.to_bits() as u64,
+            LuaArgWire::Int(i) => 0x3000_0000_0000_0000 ^ *i as u64,
+            LuaArgWire::Bool(b) => 0x4000_0000_0000_0000 ^ *b as u64,
+            LuaArgWire::Nil => 0x5000_0000_0000_0000,
+        };
+        for byte in value.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
+}
+
 /// One captured ACMD call, as streamed by the plugin (`AcmdCapture`).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct CaptureLine {
@@ -336,6 +361,10 @@ pub const CAT_SOUND: u8 = 8;
 /// so the plugin cannot tell them apart and does not try. The editor only models the plain form;
 /// a rule keys on the motion and frame alone, because a rate call has no id.
 pub const CAT_MOTION_RATE: u8 = 9;
+
+/// Wire category for the measured `expression_` camera/rumble primitives. The function name
+/// travels on [`HitboxRuleWire::func`] because the three members have different argument shapes.
+pub const CAT_EXPRESSION: u8 = 10;
 
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
@@ -472,6 +501,10 @@ pub struct HbOverridesWire {
     /// freezes the animation and nothing below the call would run again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_rate: Option<f32>,
+    /// Complete replacement argument vector for a measured expression primitive. The plugin
+    /// preserves the captured Lua types while swapping these values into the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expression_args: Option<Vec<LuaArgWire>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -509,10 +542,12 @@ pub struct HitboxRuleWire {
     pub inject: Option<InjectRuleWire>,
     /// The exact ACMD macro this rule is for, when the category alone does not identify it.
     ///
-    /// Only [`CAT_SOUND`] sets it. Its twelve members share one category and every one of them
-    /// carries a `Hash40` in slot 0, so a rule for `PLAY_SE` would otherwise apply cleanly and
-    /// silently to a `PLAY_SE_REMAIN` on the same frame naming the same sound. Twelve
-    /// categories to keep in step across the wire is a worse trade than one name.
+    /// [`CAT_SOUND`] and [`CAT_EXPRESSION`] set it. Sound members share one category and every
+    /// one of them carries a `Hash40` in slot 0, so a rule for `PLAY_SE` would otherwise apply
+    /// cleanly and silently to a `PLAY_SE_REMAIN` on the same frame naming the same sound.
+    /// Expression members have different argument shapes, so their macro name is equally part
+    /// of the match. Twelve sound categories plus three expression categories to keep in step
+    /// across the wire is a worse trade than one name for each family.
     ///
     /// A plugin predating this field ignores it and matches on the category alone — too broad
     /// rather than silently dead, which is the right way round for a preview.
@@ -2305,6 +2340,70 @@ mod tests {
         assert_eq!(hashes[1].as_u64(), Some(0x123));
     }
 
+    /// Expression rules use the plugin's distinct category, macro discriminator, and complete
+    /// typed argument vector. The three pieces have to travel together: the category selects the
+    /// hook family, `func` selects its exact primitive, and the vector is what gets pushed back
+    /// onto the Lua stack.
+    #[test]
+    fn outbound_expression_rules_match_plugin_field_names() {
+        let link = GameLink::default();
+        let pristine = vec![LuaArgWire::Int(5)];
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_EXPRESSION,
+            hitbox_id: Some(expression_key("QUAKE", &pristine)),
+            suppress: false,
+            frame_start: Some(8.5),
+            frame_end: Some(8.5),
+            overrides: Some(HbOverridesWire {
+                expression_args: Some(vec![LuaArgWire::Int(7)]),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("QUAKE".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let v: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &v["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_EXPRESSION as u64));
+        assert_eq!(rule["func"].as_str(), Some("QUAKE"));
+        assert_eq!(
+            rule["hitbox_id"].as_u64(),
+            Some(expression_key("QUAKE", &pristine))
+        );
+        assert_eq!(
+            rule["overrides"]["expression_args"][0]["t"].as_str(),
+            Some("i")
+        );
+        assert_eq!(
+            rule["overrides"]["expression_args"][0]["v"].as_i64(),
+            Some(7)
+        );
+    }
+
+    /// The editor and plugin agree on the expression category, field, and all three hook names.
+    #[test]
+    fn the_expression_category_and_hooks_match_the_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer");
+        let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        assert!(module.contains(&format!("pub const CAT_EXPRESSION: u8 = {CAT_EXPRESSION};")));
+        assert!(module.contains("pub expression_args: Option<Vec<LuaArg>>,"));
+        for func in ["RUMBLE_HIT", "QUAKE", "FT_ATTACK_ABS_CAMERA_QUAKE"] {
+            assert!(
+                module.contains(&format!("\"{func}\"")),
+                "missing {func} hook"
+            );
+        }
+        for other in [0, CAT_SOUND, CAT_MOTION_RATE] {
+            assert_ne!(
+                CAT_EXPRESSION, other,
+                "CAT_EXPRESSION collides with another family"
+            );
+        }
+    }
+
     /// A rule for any other family carries no `func`, and the field is omitted entirely.
     ///
     /// The plugin reads an absent `func` as "match any member of this category", which is only
@@ -2313,7 +2412,7 @@ mod tests {
     /// current one would compare against a name no macro has and match nothing — a live edit
     /// that silently does nothing, which is the failure B5b cost two tasks to find.
     #[test]
-    fn only_sound_rules_carry_a_macro_name() {
+    fn non_sound_and_non_expression_rules_omit_a_macro_name() {
         let link = GameLink::default();
         link.send_hitbox_rules(&[HitboxRuleWire {
             motion: 0x99,

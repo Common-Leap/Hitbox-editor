@@ -994,6 +994,13 @@ pub enum ExcuteStmt {
     /// `game_` or `effect_` one. It is parsed here anyway because a `sound_` script is read by
     /// the same walker a `game_` script is, and this is where that walker's statements live.
     Sound(SoundCall),
+    /// One of the measured `expression_` camera/rumble calls.
+    ///
+    /// The arguments stay as source tokens rather than being decoded to guessed enums. That
+    /// keeps named lua constants (`*CAMERA_QUAKE_KIND_L`) and captured numeric values both
+    /// compilable and round-trippable while the later live rule surface can operate on their
+    /// typed wire representation.
+    Expression(ExpressionCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1012,6 +1019,53 @@ pub struct SoundCall {
     /// for which the named sound is suppressed — and it is kept as text so a `5` stays a `5`
     /// rather than being re-emitted as `5.0`.
     pub tail: Option<String>,
+}
+
+/// One of the three expression macros measured in the local script corpus.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ExpressionCall {
+    /// `macros::RUMBLE_HIT(agent, kind, unk)`.
+    RumbleHit { kind: String, unk: String },
+    /// `macros::QUAKE(agent, kind)`.
+    Quake { kind: String },
+    /// `macros::FT_ATTACK_ABS_CAMERA_QUAKE(agent, attack_abs_kind, quake_kind)`.
+    FtAttackAbsCameraQuake {
+        attack_abs_kind: String,
+        quake_kind: String,
+    },
+}
+
+impl ExpressionCall {
+    /// The smash-script macro name without its `macros::` path.
+    pub fn func(&self) -> &'static str {
+        match self {
+            Self::RumbleHit { .. } => "RUMBLE_HIT",
+            Self::Quake { .. } => "QUAKE",
+            Self::FtAttackAbsCameraQuake { .. } => "FT_ATTACK_ABS_CAMERA_QUAKE",
+        }
+    }
+
+    /// Source tokens in the order the corresponding `sv_animcmd` primitive receives them.
+    pub fn tokens(&self) -> Vec<&str> {
+        match self {
+            Self::RumbleHit { kind, unk } => vec![kind, unk],
+            Self::Quake { kind } => vec![kind],
+            Self::FtAttackAbsCameraQuake {
+                attack_abs_kind,
+                quake_kind,
+            } => vec![attack_abs_kind, quake_kind],
+        }
+    }
+}
+
+/// A resolved expression call at the one-based game frame it fires on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExpressionEvent {
+    pub frame: u32,
+    pub call: ExpressionCall,
+    /// Source ordinal among expression calls, independent of hitbox/sound sites.
+    #[serde(default)]
+    pub site: usize,
 }
 
 /// A resolved sound with the frame it fires on.
@@ -1294,6 +1348,18 @@ impl AcmdScript {
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.sounds
     }
+
+    /// Flatten the measured expression calls into frame events.
+    ///
+    /// This shares the same frame/wait/loop walk as hitboxes and sounds. Expression scripts are
+    /// stored in the same `AcmdStmt` tree, so a looped or branched call cannot quietly acquire a
+    /// second timing implementation.
+    pub fn to_expression_events(&self) -> Vec<ExpressionEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.expressions
+    }
 }
 
 impl AcmdScript {
@@ -1408,6 +1474,47 @@ impl AcmdScript {
         }
         walk(&mut self.stmts, site, &mut 0)
     }
+
+    /// The expression call an [`ExpressionEvent::site`] refers to, in source order.
+    pub fn expression_stmt_mut(&mut self, site: usize) -> Option<&mut ExpressionCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut ExpressionCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for expression in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::Expression(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(expression);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::Expression(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
 }
 
 /// Everything but hitboxes that one walk of a script resolves.
@@ -1421,6 +1528,7 @@ struct WalkAccum {
     pris: Vec<ColPriState>,
     mods: Vec<AttackModState>,
     sounds: Vec<SoundEvent>,
+    expressions: Vec<ExpressionEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -1431,6 +1539,8 @@ struct WalkAccum {
     next_mod_site: usize,
     /// Site for the next sound call, counted separately again — see [`SoundEvent::site`].
     next_sound_site: usize,
+    /// Site for the next expression call, independent of every other family.
+    next_expression_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -1504,6 +1614,26 @@ fn count_sound_stmts(stmts: &[AcmdStmt]) -> usize {
 /// Does this statement consume a sound site?
 fn is_sound_stmt(stmt: &ExcuteStmt) -> bool {
     matches!(stmt, ExcuteStmt::Sound(_))
+}
+
+/// Does this statement consume an expression site?
+fn is_expression_stmt(stmt: &ExcuteStmt) -> bool {
+    matches!(stmt, ExcuteStmt::Expression(_))
+}
+
+/// Expression calls in a subtree, counted in source order for loop/site resolution.
+fn count_expression_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_expression_stmt(s)).count(),
+            AcmdStmt::Bare(inner) => usize::from(is_expression_stmt(inner)),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_expression_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Attack-modifier statements in a subtree, counted in source order.
@@ -1591,6 +1721,12 @@ impl WalkAccum {
     fn take_sound_site(&mut self) -> usize {
         let site = self.next_sound_site;
         self.next_sound_site += 1;
+        site
+    }
+
+    fn take_expression_site(&mut self) -> usize {
+        let site = self.next_expression_site;
+        self.next_expression_site += 1;
         site
     }
 
@@ -1757,6 +1893,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::Expression(call) => {
+            let site = hurt.take_expression_site();
+            hurt.expressions.push(ExpressionEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -1792,15 +1936,18 @@ fn eval_stmts(
                 let site_at_entry = hurt.next_site;
                 let mod_site_at_entry = hurt.next_mod_site;
                 let sound_site_at_entry = hurt.next_sound_site;
+                let expression_site_at_entry = hurt.next_expression_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
                     hurt.next_sound_site = sound_site_at_entry;
+                    hurt.next_expression_site = expression_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
                 hurt.next_mod_site = mod_site_at_entry + count_attack_mod_stmts(body);
                 hurt.next_sound_site = sound_site_at_entry + count_sound_stmts(body);
+                hurt.next_expression_site = expression_site_at_entry + count_expression_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -1983,6 +2130,12 @@ pub struct AppState {
     pub sounds: Vec<SoundEvent>,
     /// The same list as loaded, before any edit — what write-back diffs against.
     pub sounds_pristine: Vec<SoundEvent>,
+    /// The current move's `expression_` function, kept whole alongside `sound_script`.
+    pub expression_script: AcmdScript,
+    /// Resolved camera/rumble events shown by the expression lane.
+    pub expressions: Vec<ExpressionEvent>,
+    /// The same expression events as loaded, before edits.
+    pub expressions_pristine: Vec<ExpressionEvent>,
     /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
     pub hitboxes_pristine: Vec<Hitbox>,
     /// Hurtbox spans as loaded, for source syncing to diff against.
@@ -2036,6 +2189,9 @@ pub struct AppState {
     /// terms as `effect_call_full`: whole scripts, because an installed one replaces the
     /// fighter's own. A move is in here only once its sounds have actually been changed.
     pub sound_script_edits: HashMap<String, AcmdScript>,
+    /// Edited `expression_` script per "fighter/move" — the complete category script the
+    /// generated plugin installs.
+    pub expression_script_edits: HashMap<String, AcmdScript>,
     pub selected_effect_call: Option<usize>,
     /// Effects panel: show every call, not just the ones active on the current frame.
     pub show_all_effect_calls: bool,
@@ -2073,6 +2229,9 @@ impl Default for AppState {
             sound_script: AcmdScript::default(),
             sounds: Vec::new(),
             sounds_pristine: Vec::new(),
+            expression_script: AcmdScript::default(),
+            expressions: Vec::new(),
+            expressions_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),
@@ -2084,6 +2243,7 @@ impl Default for AppState {
             effect_dropped_lines: HashMap::new(),
             effect_frame_residue: HashMap::new(),
             sound_script_edits: HashMap::new(),
+            expression_script_edits: HashMap::new(),
             selected_effect_call: None,
             show_all_effect_calls: false,
             show_effects_panel: false,

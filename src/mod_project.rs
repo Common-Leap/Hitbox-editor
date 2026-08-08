@@ -48,6 +48,7 @@ impl ModProjectFile {
                 && f.effect_calls.values().all(|v| v.is_empty())
                 && f.effect_calls_full.values().all(|v| v.is_empty())
                 && f.sound_scripts.values().all(|s| s.stmts.is_empty())
+                && f.expression_scripts.values().all(|s| s.stmts.is_empty())
                 && f.eff.as_ref().map(|e| e.is_empty()).unwrap_or(true)
                 && f.live_tweaks.is_empty()
         })
@@ -96,6 +97,10 @@ pub struct FighterMod {
     /// loadable — they simply have no sounds, which is what was true when they were written.
     #[serde(default)]
     pub sound_scripts: HashMap<String, crate::data::AcmdScript>,
+    /// move name → whole edited `expression_` script. Like `sound_scripts`, installing one
+    /// replaces that category for the move, so the complete statement tree is stored.
+    #[serde(default)]
+    pub expression_scripts: HashMap<String, crate::data::AcmdScript>,
     /// move name → warning recorded when the move was loaded from one live-capture path while
     /// the cached source contained runtime branches. This is provenance, not an edit: it keeps
     /// an export from presenting an observed arm as if it were the complete source.

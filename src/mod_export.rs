@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::acmd::{build_mod_project_full, ModProject};
+use crate::acmd::ModProject;
 use crate::mod_project::{EffMod, LiveTweak, ModProjectFile, PROJECT_VERSION};
 
 /// A filesystem-, Cargo-, and Rust-friendly project name.
@@ -70,6 +70,7 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
     let mut acmd_edits = Vec::new();
     let mut effect_edits = Vec::new();
     let mut sound_edits = Vec::new();
+    let mut expression_edits = Vec::new();
     let mut tweaks: Vec<LiveTweak> = Vec::new();
     let mut dropped: HashMap<String, Vec<String>> = HashMap::new();
     let mut incomplete = Vec::new();
@@ -123,6 +124,14 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
             }
             sound_edits.push((fighter.clone(), move_name.clone(), script.clone()));
         }
+        let mut expression_moves: Vec<_> = edits.expression_scripts.iter().collect();
+        expression_moves.sort_by(|a, b| a.0.cmp(b.0));
+        for (move_name, script) in expression_moves {
+            if script.stmts.is_empty() {
+                continue;
+            }
+            expression_edits.push((fighter.clone(), move_name.clone(), script.clone()));
+        }
 
         // A provenance note is useful only beside a function this export actually ships. A
         // saved project may retain a note for a move whose edit was later removed, and reporting
@@ -132,6 +141,11 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
                 || edits.effect_calls_full.contains_key(move_name)
                 || edits
                     .sound_scripts
+                    .get(move_name)
+                    .is_some_and(|script| !script.stmts.is_empty());
+            let exported = exported
+                || edits
+                    .expression_scripts
                     .get(move_name)
                     .is_some_and(|script| !script.stmts.is_empty());
             if exported {
@@ -173,13 +187,18 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
             uncovered_tweaks.join(", ")
         );
     }
-    if acmd_edits.is_empty() && effect_edits.is_empty() && sound_edits.is_empty() {
+    if acmd_edits.is_empty()
+        && effect_edits.is_empty()
+        && sound_edits.is_empty()
+        && expression_edits.is_empty()
+    {
         return Ok(None);
     }
-    let built = build_mod_project_full(
+    let built = crate::acmd::build_mod_project_full_with_expression(
         &acmd_edits,
         &effect_edits,
         &sound_edits,
+        &expression_edits,
         &tweaks,
         &plugin_name(project),
     );
@@ -187,11 +206,12 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
     // Nothing reaches disk until the generated code has been read back and matched against the
     // edits it came from. A mod that will not compile, or that ships numbers other than the
     // ones on screen, is worse than an export that stops and says why.
-    let report = crate::acmd_verify::verify_export(
+    let report = crate::acmd_verify::verify_export_with_expression(
         &built,
         &acmd_edits,
         &effect_edits,
         &sound_edits,
+        &expression_edits,
         &tweaks,
         &dropped,
     );
@@ -746,6 +766,60 @@ unsafe extern "C" fn effect_x(agent: &mut L2CAgentBase) {
         };
         only_note.fighters.insert("kirby".into(), orphan);
         assert!(source_project(&only_note).unwrap().is_none());
+    }
+
+    /// Expression scripts are a first-class export surface, not just a panel representation:
+    /// they must survive JSON persistence, appear in the fighter source, install under the
+    /// expression script name, and pass the same read-back verifier as the other ACMD families.
+    #[test]
+    fn an_expression_script_survives_a_saved_project_export() {
+        let source = r#"
+unsafe extern "C" fn expression_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::RUMBLE_HIT(agent, Hash40::new("rbkind_attackm"), 0);
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_M);
+    }
+}
+"#;
+        let script = crate::acmd::parse_expression_script(source);
+        assert_eq!(script.to_expression_events().len(), 2);
+
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "expression_export".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                expression_scripts: std::collections::HashMap::from([(
+                    "attack_air_n".into(),
+                    script,
+                )]),
+                ..Default::default()
+            },
+        );
+
+        let json = serde_json::to_string(&project).unwrap();
+        let reloaded: ModProjectFile = serde_json::from_str(&json).unwrap();
+        let generated = source_project(&reloaded)
+            .unwrap()
+            .expect("expression script should export");
+        assert!(generated.warnings.is_empty(), "{:?}", generated.warnings);
+        let acmd = generated
+            .project
+            .files
+            .iter()
+            .find(|file| file.rel_path == "src/mario/acmd.rs")
+            .map(|file| file.contents.as_str())
+            .expect("generated fighter ACMD");
+        assert!(acmd.contains("unsafe extern \"C\" fn expression_attackairn"));
+        assert!(acmd.contains("macros::RUMBLE_HIT(agent"));
+        assert!(acmd.contains("macros::QUAKE(agent"));
+        assert!(acmd.contains(
+            "agent.acmd(\"expression_attackairn\", expression_attackairn, smashline::Priority::Default);"
+        ));
     }
 
     /// End to end: a script the user actually wrote → parsed → carried through a saved

@@ -2243,7 +2243,7 @@ Only the third round — reporting *every* early return, with a budget reset per
 the branch. **A branch that returns silently is invisible in exactly the case you are debugging
 it**, and the cost of adding a line to each one is nothing next to a restart.
 
-### [ ] D2 — `expression_` scripts
+### [x] D2 — `expression_` scripts (completed 2026-08-08; live runtime unverified)
 
 Blocked by: D1 (reuse its loading and round-trip machinery wholesale).
 
@@ -2258,6 +2258,15 @@ Implement the three measured expression macros through the same staged parse/IR,
 export, and source-write-back gate. Unknown expression lines stay verbatim until a later
 measured slice; a parser that drops raw rumble or slope/module lines is not full expression
 coverage.
+
+**Result 2026-08-08.** The measured slice now has one shared IR/event/site walk, an editable
+`expression_` panel and source checkout, timeline coverage, capture adoption, sparse live rules,
+portable project persistence, generated Skyline source, export read-back verification, and
+argument-only source write-back. `RUMBLE_HIT`, `QUAKE`, and `FT_ATTACK_ABS_CAMERA_QUAKE` retain
+their source tokens; structural changes are reported instead of invented. The local corpus gate
+still measures 335 expression bodies and exactly 65, 51, and 2 calls respectively, all typed and
+round-tripped. The plugin's category-10 wire lane and three hooks build successfully; live game
+behaviour remains unverified because no emulator or UI automation was run.
 
 ## Gameplay
 
@@ -2917,7 +2926,7 @@ was then dropped by the claim**, silently.
   invisible from this crate and its failure is silent by construction: a dropped capture line
   looks exactly like a call the game never made.
 
-### [~] R12 — Exporting from a live capture silently drops the branches that were not taken (in progress 2026-08-07)
+### [x] R12 — Exporting from a live capture silently drops the branches that were not taken (done 2026-08-07)
 
 **Not a capture bug — a provenance hazard, found while explaining one.** `effect_attacklw4`
 chooses between `sys_whirlwind_l` and `sys_whirlwind_r` on `SO_VAR_FLOAT_LR`, the facing
@@ -2939,12 +2948,11 @@ cases. Same for any ground/air, flag, or costume branch, and `RawBlock` is commo
 - **Do not try to merge the two sources automatically.** Which arm a captured call came from is
   not recoverable, so a merge would have to guess where to reinsert it, and a wrong guess writes a
   condition the author never had. Warning is honest; merging is not.
-- **Implemented first warning slice 2026-08-07.** A live capture now counts runtime branches in
-  the cached source, records a provenance warning beside the move, carries it through
-  `modproject.json`, and includes it in the generated export warning channel only when that move
-  is actually shipped. The older edit-log export also keeps the warning in its status line. No
-  source arms are merged or guessed. The remaining work is to expose the warning consistently in
-  any future capture/export surface added after this path.
+- **Implemented 2026-08-07.** A live capture now counts runtime branches in the cached source,
+  records a provenance warning beside the move, carries it through `modproject.json`, and
+  includes it in the generated export warning channel only when that move is actually shipped.
+  The older edit-log export also keeps the warning in its status line. No source arms are merged
+  or guessed; the warning is the explicit boundary for every current capture/export surface.
 - **Related and already true:** performing the move under both conditions in one capture window
   records both arms (R11 made repeat performances land in the same run), but they arrive as two
   unconditional calls, not as a branch — which is *worse* than one arm, because the export would

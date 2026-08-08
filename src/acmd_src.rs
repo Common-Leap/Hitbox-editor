@@ -1537,7 +1537,7 @@ fn transform_edits(
     // agent, graphic[, flipped graphic], joint, x, y, z, zr, yr, xr, size — the same layout
     // the parser reads, including the reversed rotation slots.
     let off = usize::from(call.effect_name_alt.is_some());
-    let mut edits = Vec::new();
+    let mut edits: Vec<Replacement> = Vec::new();
     let slots: [(usize, f32); 7] = [
         (3 + off, call.offset[0]),
         (4 + off, call.offset[1]),
@@ -2914,6 +2914,138 @@ pub fn sync_motion_rates(
     })
 }
 
+// ── Expression write-back ───────────────────────────────────────────────────
+
+/// The measured expression calls in source order, with the leading `agent` included in the
+/// arity just as [`MacroSite::args`] stores it.
+pub(crate) fn expression_sites(text: &str) -> Vec<MacroSite> {
+    const CALLS: &[(&str, usize)] = &[
+        ("RUMBLE_HIT", 3),
+        ("QUAKE", 2),
+        ("FT_ATTACK_ABS_CAMERA_QUAKE", 3),
+    ];
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            CALLS
+                .iter()
+                .any(|(name, arity)| site.name == *name && site.args.len() == *arity)
+        })
+        .collect()
+}
+
+fn expression_tokens(call: &crate::data::ExpressionCall) -> Vec<&str> {
+    match call {
+        crate::data::ExpressionCall::RumbleHit { kind, unk } => vec![kind, unk],
+        crate::data::ExpressionCall::Quake { kind } => vec![kind],
+        crate::data::ExpressionCall::FtAttackAbsCameraQuake {
+            attack_abs_kind,
+            quake_kind,
+        } => vec![attack_abs_kind, quake_kind],
+    }
+}
+
+/// Rewrite the argument tokens of the measured expression calls in the user's own source.
+///
+/// This is intentionally token-based rather than numeric. Camera/rumble constants are not one
+/// collision namespace: a mod can use a named constant, a raw capture value, or a project-local
+/// expression, and replacing any of those with a guessed `Hash40`/integer would change the
+/// caller's intent. Frames, macro names, and call count are structural and are reported rather
+/// than moved or invented. A looped call is one source line, so all unrolled events from that
+/// site must agree on the replacement.
+pub fn rewrite_expressions(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::ExpressionEvent],
+    edited: &[crate::data::ExpressionEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = expression_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != edited.len() {
+        report.skipped.push(format!(
+            "{label}: {} expression call(s) were added or removed — source syncing only retunes existing calls",
+            edited.len().abs_diff(pristine.len())
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits: Vec<Replacement> = Vec::new();
+    for (before, now) in pristine.iter().zip(edited.iter()) {
+        if before == now {
+            continue;
+        }
+        let Some(site) = sites.get(before.site) else {
+            report.skipped.push(format!(
+                "{label}: expression call #{} has no matching source call",
+                before.site
+            ));
+            continue;
+        };
+        if before.site != now.site || before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `{}` on frame {} was moved or reordered — source syncing cannot change expression structure",
+                before.call.func(),
+                before.frame
+            ));
+            continue;
+        }
+        if before.call.func() != now.call.func() || site.name != before.call.func() {
+            report.skipped.push(format!(
+                "{label}: expression call #{} changed macro — source syncing only rewrites its argument values",
+                before.site
+            ));
+            continue;
+        }
+        let old_tokens = expression_tokens(&before.call);
+        let new_tokens = expression_tokens(&now.call);
+        if old_tokens.len() != new_tokens.len() || site.args.len() != old_tokens.len() + 1 {
+            report.skipped.push(format!(
+                "{label}: `{}` on frame {} has an unsupported argument shape",
+                before.call.func(),
+                before.frame
+            ));
+            continue;
+        }
+        for (index, (old, new)) in old_tokens.iter().zip(new_tokens).enumerate() {
+            if *old == new {
+                continue;
+            }
+            let Some(span) = site.args.get(index + 1) else {
+                continue;
+            };
+            let Some(edit) = text_edit(text, span, new) else {
+                continue;
+            };
+            match edits.iter().find(|existing| existing.span == edit.span) {
+                Some(existing) if existing.value == edit.value => {}
+                Some(_) => report.skipped.push(format!(
+                    "{label}: looped `{}` on frame {} was given conflicting values in one source line",
+                    before.call.func(),
+                    before.frame
+                )),
+                None => edits.push(edit),
+            }
+        }
+    }
+
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Write measured expression arguments back into the project's own `expression_` function.
+pub fn sync_expressions(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::ExpressionEvent],
+    edited: &[crate::data::ExpressionEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("expression", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_expressions(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 // ── Sound write-back ─────────────────────────────────────────────────────────
 
 /// The sound calls in `text`, in document order — index `n` is site `n`.
@@ -3131,6 +3263,59 @@ mod tests {
             "a flat script must not be refused: {:?}",
             ok.skipped
         );
+    }
+
+    #[test]
+    fn an_expression_token_edit_rewrites_only_that_argument() {
+        let source = r#"unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        // Keep this comment and the unknown expression line byte-for-byte.
+        slope!(agent, *MA_MSC_CMD_SLOPE_SLOPE, *SLOPE_STATUS_LR);
+        macros::RUMBLE_HIT(agent, Hash40::new("rbkind_attackm"), 0);
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_M);
+    }
+}
+"#;
+        let script = crate::acmd::parse_expression_script(source);
+        let pristine = script.to_expression_events();
+        let mut edited_script = script.clone();
+        let call = edited_script.expression_stmt_mut(0).unwrap();
+        *call = crate::data::ExpressionCall::RumbleHit {
+            kind: "Hash40::new(\"rbkind_attackl\")".into(),
+            unk: "0".into(),
+        };
+        let edited = edited_script.to_expression_events();
+
+        let (out, report) =
+            rewrite_expressions(source, "kirby/throw_hi", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(out.contains("Hash40::new(\"rbkind_attackl\")"));
+        assert!(out.contains("slope!(agent, *MA_MSC_CMD_SLOPE_SLOPE, *SLOPE_STATUS_LR);"));
+        assert!(out.contains("// Keep this comment"));
+        assert_eq!(
+            crate::acmd::parse_expression_script(&out).to_expression_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn an_expression_retime_is_reported_without_touching_source() {
+        let source = r#"unsafe extern "C" fn expression_x(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_S);
+    }
+}
+"#;
+        let script = crate::acmd::parse_expression_script(source);
+        let pristine = script.to_expression_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 5;
+        let (out, report) = rewrite_expressions(source, "kirby/x", &pristine, &edited).unwrap();
+        assert_eq!(out, source);
+        assert_eq!(report.changed, 0);
+        assert!(report.skipped.iter().any(|note| note.contains("moved")));
     }
 
     /// `FT_MOTION_RATE_RANGE` must not be counted as a rate site.

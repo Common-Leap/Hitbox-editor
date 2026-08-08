@@ -149,11 +149,33 @@ impl Report {
 /// either the edits or the output. A move missing from the map had no source in hand, which is
 /// not the same as a move that had one and lost nothing — but both produce no findings, so the
 /// distinction costs nothing to collapse and empty lists are not stored.
+#[allow(dead_code)]
 pub fn verify_export(
     project: &ModProject,
     acmd_edits: &[(String, String, AcmdScript)],
     effect_edits: &[crate::acmd::EffectExport],
     sound_edits: &[(String, String, AcmdScript)],
+    tweaks: &[LiveTweak],
+    dropped: &HashMap<String, Vec<String>>,
+) -> Report {
+    verify_export_with_expression(
+        project,
+        acmd_edits,
+        effect_edits,
+        sound_edits,
+        &[],
+        tweaks,
+        dropped,
+    )
+}
+
+/// [`verify_export`] with the measured `expression_` script family included.
+pub fn verify_export_with_expression(
+    project: &ModProject,
+    acmd_edits: &[(String, String, AcmdScript)],
+    effect_edits: &[crate::acmd::EffectExport],
+    sound_edits: &[(String, String, AcmdScript)],
+    expression_edits: &[(String, String, AcmdScript)],
     tweaks: &[LiveTweak],
     dropped: &HashMap<String, Vec<String>>,
 ) -> Report {
@@ -220,7 +242,38 @@ pub fn verify_export(
         }
     }
 
+    for (fighter, move_name, script) in expression_edits {
+        let subject = format!("{fighter} / {move_name}");
+        let emitted = crate::acmd::preview_expression_fn(script, move_name);
+        verify_expression_move(&subject, script, &emitted, &mut report);
+        if !sources.iter().any(|text| text.contains(&emitted)) {
+            report.blocker(
+                &subject,
+                "the generated expression script is missing from the exported project",
+            );
+        }
+    }
+
     report
+}
+
+/// Verify the typed expression calls that the editor models. Unknown expression lines remain
+/// raw and are checked by the generated Rust/source-presence checks around this function.
+pub fn verify_expression_move(
+    subject: &str,
+    script: &AcmdScript,
+    emitted: &str,
+    report: &mut Report,
+) {
+    let expected = script.to_expression_events();
+    let round_tripped = crate::acmd::parse_expression_script(emitted).to_expression_events();
+    if expected == round_tripped {
+        return;
+    }
+    report.blocker(
+        subject,
+        "the generated expression script does not reproduce the measured camera/rumble calls",
+    );
 }
 
 /// Verify one move's sound script: read the emitted function back and compare what it plays.

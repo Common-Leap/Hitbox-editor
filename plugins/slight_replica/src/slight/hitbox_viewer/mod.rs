@@ -199,6 +199,10 @@ pub const CAT_SOUND: u8 = 8;
 /// a rate.
 pub const CAT_MOTION_RATE: u8 = 9;
 
+/// The measured `expression_` camera/rumble primitives. The exact macro name is carried on the
+/// rule because the three members have different argument shapes.
+pub const CAT_EXPRESSION: u8 = 10;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -852,6 +856,8 @@ pub struct HbOverrides {
     /// if it is not finite and positive, because a zero rate freezes the animation and nothing
     /// below the call would ever run.
     pub motion_rate: Option<f32>,
+    /// Complete replacement argument vector for a measured expression primitive.
+    pub expression_args: Option<Vec<LuaArg>>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -890,10 +896,11 @@ pub struct HitboxRule {
     pub inject: Option<InjectRule>,
     /// The exact ACMD macro this rule is for, when the category alone does not identify it.
     ///
-    /// Only [`CAT_SOUND`] sends it — its twelve members share a category and all of them carry
-    /// a `Hash40` in slot 0, so without this a rule for one applies silently to another. Every
-    /// other family either has a category per macro or an argument layout that makes a
-    /// cross-member write impossible.
+    /// [`CAT_SOUND`] and [`CAT_EXPRESSION`] send it. Sound members share a category and all of
+    /// them carry a `Hash40` in slot 0, so without this a rule for one applies silently to
+    /// another. Expression members have different argument shapes, so their macro name is part
+    /// of the match for the same reason. Every other family either has a category per macro or
+    /// an argument layout that makes a cross-member write impossible.
     ///
     /// `None` matches any member, which is what an editor older than this build sends. Read
     /// that way round on purpose: too broad is recoverable, silently dead is not.
@@ -944,6 +951,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_ATK_SETOFF_MUL => "atk_setoff",
                     CAT_SEARCH => "search",
                     CAT_SOUND => "sound",
+                    CAT_EXPRESSION => "expression",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -978,6 +986,106 @@ fn action_for(
         .find(|r| r.inject.is_none() && r.matches(category, motion, id, frame))
         .map(|r| (r.suppress, r.overrides.clone()))
 }
+
+/// Stable key for one pristine expression call. Keep in lockstep with
+/// `game_link::expression_key`: the editor can derive the key from a live capture, while this
+/// side derives it from the actual Lua stack just before the game's primitive runs.
+fn expression_key(func: &str, args: &[LuaArg]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in func.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for arg in args {
+        let value = arg.dedupe_bits();
+        for byte in value.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
+}
+
+fn expression_action(
+    motion: u64,
+    frame: f32,
+    func: &str,
+    args: &[LuaArg],
+) -> Option<(bool, Option<HbOverrides>)> {
+    let key = expression_key(func, args);
+    let rules = RULES.lock();
+    rules
+        .iter()
+        .find(|rule| {
+            rule.inject.is_none()
+                && rule.category == CAT_EXPRESSION
+                && rule.func.as_deref() == Some(func)
+                && rule.matches(CAT_EXPRESSION, motion, key, frame)
+        })
+        .map(|rule| (rule.suppress, rule.overrides.clone()))
+}
+
+unsafe fn rewrite_expression_args(
+    lua_state: u64,
+    overrides: &HbOverrides,
+    args: &[LuaArg],
+    expected: usize,
+) {
+    let Some(replacement) = overrides
+        .expression_args
+        .as_ref()
+        .filter(|replacement| replacement.len() == expected)
+    else {
+        return;
+    };
+    if replacement == args {
+        return;
+    }
+    rewrite_args(lua_state, replacement);
+}
+
+macro_rules! expression_hook {
+    ($hook_name:ident, $target:path, $func:literal, $arity:literal) => {
+        #[skyline::hook(replace = $target)]
+        unsafe fn $hook_name(lua_state: u64) {
+            let args = read_args_exact(lua_state, $arity);
+            record(lua_state, $func, &args);
+            if any_rules() {
+                let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                    as *mut smash::app::BattleObjectModuleAccessor;
+                if !boma.is_null() {
+                    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                    if let Some((suppress, overrides)) =
+                        expression_action(motion, frame, $func, &args)
+                    {
+                        if suppress {
+                            return;
+                        }
+                        if let Some(overrides) = overrides {
+                            rewrite_expression_args(lua_state, &overrides, &args, $arity);
+                        }
+                    }
+                }
+            }
+            original!()(lua_state)
+        }
+    };
+}
+
+expression_hook!(
+    hook_rumble_hit,
+    smash::app::sv_animcmd::RUMBLE_HIT,
+    "RUMBLE_HIT",
+    2
+);
+expression_hook!(hook_quake, smash::app::sv_animcmd::QUAKE, "QUAKE", 1);
+expression_hook!(
+    hook_ft_attack_abs_camera_quake,
+    smash::app::sv_animcmd::FT_ATTACK_ABS_CAMERA_QUAKE,
+    "FT_ATTACK_ABS_CAMERA_QUAKE",
+    2
+);
 
 /// Inject rules for a motion, tagged with the collision family to fire through.
 fn injection_fingerprint(motion: u64, category: u8, injection: &InjectRule) -> u64 {
@@ -1969,7 +2077,10 @@ pub fn install() {
         hook_col_pri,
         hook_hit_reset_all,
         hook_atk_power,
-        hook_atk_set_shield_setoff_mul
+        hook_atk_set_shield_setoff_mul,
+        hook_rumble_hit,
+        hook_quake,
+        hook_ft_attack_abs_camera_quake
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

@@ -150,6 +150,22 @@ fn adopt_captured_sounds(
     true
 }
 
+/// Adopt measured expression calls from a live capture only when no fetched expression script
+/// is already present. A capture is one observed path, so replacing a real source would discard
+/// unknown expression lines and conditional structure that the export preserves verbatim.
+fn adopt_captured_expressions(
+    captured: crate::data::AcmdScript,
+    state: &mut crate::data::AppState,
+) -> bool {
+    if !state.expression_script.stmts.is_empty() || captured.stmts.is_empty() {
+        return false;
+    }
+    state.expression_script = captured;
+    state.expressions = state.expression_script.to_expression_events();
+    state.expressions_pristine = state.expressions.clone();
+    true
+}
+
 fn resolve_sound_state(
     parsed: &crate::data::AcmdScript,
     saved: Option<crate::data::AcmdScript>,
@@ -164,12 +180,27 @@ fn resolve_sound_state(
     (script, shown, baseline)
 }
 
+/// Pick the expression script to show and preserve its pristine event baseline.
+fn resolve_expression_state(
+    parsed: &crate::data::AcmdScript,
+    saved: Option<crate::data::AcmdScript>,
+) -> (
+    crate::data::AcmdScript,
+    Vec<crate::data::ExpressionEvent>,
+    Vec<crate::data::ExpressionEvent>,
+) {
+    let baseline = parsed.to_expression_events();
+    let script = saved.unwrap_or_else(|| parsed.clone());
+    let shown = script.to_expression_events();
+    (script, shown, baseline)
+}
+
 /// Count source branches that a single live performance cannot reveal.
 ///
 /// The three parsed categories use their typed statement trees, which excludes the ubiquitous
-/// `is_excute` wrapper and counts only runtime conditions. Expression scripts are intentionally
-/// still raw while D2 is being staged, so their non-`is_excute` `if` headers are counted here as
-/// well. This is a warning metric, not an evaluator: it never tries to decide which arm ran.
+/// `is_excute` wrapper and counts only runtime conditions. Unknown expression lines remain raw,
+/// so their non-`is_excute` `if` headers are counted here as well. This is a warning metric, not
+/// an evaluator: it never tries to decide which arm ran.
 fn source_branch_count(body: &str) -> usize {
     let known = crate::acmd::parse_acmd_script(body).branch_count()
         + crate::acmd::parse_effect_script(body).branch_count()
@@ -219,6 +250,7 @@ fn timeline_frame_extent(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
     sounds: &[crate::data::SoundEvent],
+    expressions: &[crate::data::ExpressionEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -240,9 +272,11 @@ fn timeline_frame_extent(
     // plays a landing thud tens of frames after the last hitbox closed, and clipping the
     // timeline there would put that sound past the right-hand edge with no way to reach it.
     let sound_frames = sounds.iter().map(|sound| sound.frame);
+    let expression_frames = expressions.iter().map(|expression| expression.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
+        .chain(expression_frames)
         .max()
         .unwrap_or(0)
 }
@@ -914,6 +948,12 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
 }
 
 type AcmdFetchResult = (String, String, Result<String, String>);
+type SourceMirror = (
+    Vec<crate::data::Hitbox>,
+    Vec<crate::data::EffectCall>,
+    Vec<crate::data::SoundEvent>,
+    Vec<crate::data::ExpressionEvent>,
+);
 
 /// One ACMD function checked out of the linked project for editing.
 ///
@@ -940,7 +980,7 @@ struct SourceBuffer {
     /// parses to nonsense, and blanking the panels on every keystroke is unusable.
     settling: Option<(String, std::time::Instant)>,
     /// The panel state the buffer text currently reflects.
-    mirrored: Option<(Vec<crate::data::Hitbox>, Vec<crate::data::EffectCall>)>,
+    mirrored: Option<SourceMirror>,
     /// Why the last reconcile declined to write, shown under the editor.
     note: Option<String>,
 }
@@ -978,6 +1018,32 @@ impl SourceBuffer {
     /// Whether this buffer holds the `game_*` (hitbox) side of the move.
     fn is_game_script(&self) -> bool {
         self.script.starts_with("game_")
+    }
+
+    fn is_effect_script(&self) -> bool {
+        self.script.starts_with("effect_")
+    }
+
+    fn is_sound_script(&self) -> bool {
+        self.script.starts_with("sound_")
+    }
+
+    fn is_expression_script(&self) -> bool {
+        self.script.starts_with("expression_")
+    }
+
+    fn category(&self) -> &'static str {
+        if self.is_game_script() {
+            "game"
+        } else if self.is_effect_script() {
+            "effect"
+        } else if self.is_sound_script() {
+            "sound"
+        } else if self.is_expression_script() {
+            "expression"
+        } else {
+            "unknown"
+        }
     }
 }
 
@@ -2092,18 +2158,20 @@ impl VisionaryApp {
         let Some(move_name) = self.state.selected_move.as_ref().map(|m| m.name.clone()) else {
             return (String::new(), Default::default());
         };
-        let only_game = self
+        let only_category = self
             .acmd_src_buffer
             .as_ref()
             .filter(|buffer| buffer.move_name == move_name)
-            .map(SourceBuffer::is_game_script);
+            .map(SourceBuffer::category);
+        let show_category =
+            |category: &str| only_category.is_none_or(|selected| selected == category);
 
         let mut out = String::new();
         let mut report = crate::acmd_verify::Report::default();
 
         let has_hitbox_script =
             !self.state.hitboxes.is_empty() || !self.state.script.stmts.is_empty();
-        if only_game != Some(false) && has_hitbox_script {
+        if show_category("game") && has_hitbox_script {
             let script = if self.state.script.stmts.is_empty() {
                 synthesize_script_from_hitboxes(&self.state.hitboxes)
             } else {
@@ -2114,7 +2182,7 @@ impl VisionaryApp {
             out.push_str(&emitted);
         }
 
-        if only_game != Some(true) && !self.state.effects.is_empty() {
+        if show_category("effect") && !self.state.effects.is_empty() {
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -2156,7 +2224,7 @@ impl VisionaryApp {
         let sound_edited = self
             .current_move_key()
             .is_some_and(|key| self.state.sound_script_edits.contains_key(&key));
-        if only_game != Some(true) && sound_edited && !self.state.sound_script.stmts.is_empty() {
+        if show_category("sound") && sound_edited && !self.state.sound_script.stmts.is_empty() {
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -2164,6 +2232,26 @@ impl VisionaryApp {
             crate::acmd_verify::verify_sound_move(
                 &move_name,
                 &self.state.sound_script,
+                &emitted,
+                &mut report,
+            );
+            out.push_str(&emitted);
+        }
+        let expression_edited = self
+            .current_move_key()
+            .is_some_and(|key| self.state.expression_script_edits.contains_key(&key));
+        if show_category("expression")
+            && expression_edited
+            && !self.state.expression_script.stmts.is_empty()
+        {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let emitted =
+                crate::acmd::preview_expression_fn(&self.state.expression_script, &move_name);
+            crate::acmd_verify::verify_expression_move(
+                &move_name,
+                &self.state.expression_script,
                 &emitted,
                 &mut report,
             );
@@ -2233,15 +2321,24 @@ impl VisionaryApp {
         // a couple of dozen structs carrying eight owned strings apiece.
         let buffer = self.acmd_src_buffer.as_mut().expect("checked above");
         let had_baseline = match &buffer.mirrored {
-            Some((hitboxes, effects)) => {
-                if *hitboxes == self.state.hitboxes && *effects == self.state.effects {
+            Some((hitboxes, effects, sounds, expressions)) => {
+                if *hitboxes == self.state.hitboxes
+                    && *effects == self.state.effects
+                    && *sounds == self.state.sounds
+                    && *expressions == self.state.expressions
+                {
                     return;
                 }
                 true
             }
             None => false,
         };
-        buffer.mirrored = Some((self.state.hitboxes.clone(), self.state.effects.clone()));
+        buffer.mirrored = Some((
+            self.state.hitboxes.clone(),
+            self.state.effects.clone(),
+            self.state.sounds.clone(),
+            self.state.expressions.clone(),
+        ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
         if had_baseline {
@@ -2258,9 +2355,9 @@ impl VisionaryApp {
         let Some(buffer) = self.acmd_src_buffer.as_ref() else {
             return;
         };
-        let (text, is_game) = (buffer.text.clone(), buffer.is_game_script());
+        let (text, script) = (buffer.text.clone(), buffer.script.clone());
 
-        let note = if is_game {
+        let note = if script.starts_with("game_") {
             let script = crate::acmd::parse_acmd_script(&text);
             let mut hitboxes = script.to_hitboxes();
             // Mid-edit source parses to nothing. Holding the last good state is much better
@@ -2274,7 +2371,7 @@ impl VisionaryApp {
                 self.state.set_script(script);
                 None
             }
-        } else {
+        } else if script.starts_with("effect_") {
             let effect_script = crate::acmd::parse_effect_script(&text);
             let calls = effect_script.to_effect_calls();
             if calls.is_empty() && !self.state.effects.is_empty() {
@@ -2288,12 +2385,29 @@ impl VisionaryApp {
                 self.push_effect_rules();
                 None
             }
+        } else if script.starts_with("sound_") {
+            let sound_script = crate::acmd::parse_sound_script(&text);
+            let sounds = sound_script.to_sound_events();
+            self.state.sounds_pristine = sounds.clone();
+            self.state.sounds = sounds;
+            self.state.sound_script = sound_script;
+            None
+        } else if script.starts_with("expression_") {
+            let expression_script = crate::acmd::parse_expression_script(&text);
+            let expressions = expression_script.to_expression_events();
+            self.state.expressions_pristine = expressions.clone();
+            self.state.expressions = expressions;
+            self.state.expression_script = expression_script;
+            None
+        } else {
+            Some("This source buffer is not a displayed ACMD category")
         };
 
         self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
             &self.state.hitboxes,
             &self.state.effects,
             &self.state.sounds,
+            &self.state.expressions,
         ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -2317,13 +2431,29 @@ impl VisionaryApp {
                 &self.state.hitboxes_pristine,
                 &self.state.hitboxes,
             )
-        } else {
+        } else if buffer.is_effect_script() {
             crate::acmd_src::rewrite_effect_calls(
                 &buffer.text,
                 &label,
                 &self.state.effects_pristine,
                 &self.state.effects,
             )
+        } else if buffer.is_sound_script() {
+            crate::acmd_src::rewrite_sounds(
+                &buffer.text,
+                &label,
+                &self.state.sounds_pristine,
+                &self.state.sounds,
+            )
+        } else if buffer.is_expression_script() {
+            crate::acmd_src::rewrite_expressions(
+                &buffer.text,
+                &label,
+                &self.state.expressions_pristine,
+                &self.state.expressions,
+            )
+        } else {
+            Ok((buffer.text.clone(), Default::default()))
         };
         let Some(buffer) = self.acmd_src_buffer.as_mut() else {
             return;
@@ -2491,6 +2621,31 @@ impl VisionaryApp {
                 }
             }
         }
+        if index
+            .script(
+                &fighter,
+                &crate::acmd::acmd_script_name("expression", &move_name),
+            )
+            .is_some()
+        {
+            ran = true;
+            if self.state.expressions != self.state.expressions_pristine {
+                match crate::acmd_src::sync_expressions(
+                    index,
+                    &fighter,
+                    &move_name,
+                    &self.state.expressions_pristine,
+                    &self.state.expressions,
+                ) {
+                    Ok(report) => {
+                        changed += report.changed;
+                        files.extend(report.files);
+                        notes.extend(report.skipped);
+                    }
+                    Err(e) => notes.push(e.to_string()),
+                }
+            }
+        }
 
         if !ran {
             self.state.status =
@@ -2535,6 +2690,9 @@ impl VisionaryApp {
         }
         if state.sounds != state.sounds_pristine {
             edited.push("sound_");
+        }
+        if state.expressions != state.expressions_pristine {
+            edited.push("expression_");
         }
         edited
     }
@@ -2686,6 +2844,13 @@ impl VisionaryApp {
             .iter()
             .map(|hitbox| hitbox.active_start)
             .chain(self.state.effects.iter().map(|effect| effect.active_start))
+            .chain(self.state.sounds.iter().map(|sound| sound.frame))
+            .chain(
+                self.state
+                    .expressions
+                    .iter()
+                    .map(|expression| expression.frame),
+            )
             .min()
         {
             self.state.current_frame = first.max(FIRST_GAME_FRAME);
@@ -2753,6 +2918,7 @@ impl VisionaryApp {
                 // move with sounds but no hitboxes is a real script, the same argument that
                 // stopped effects being thrown away for an effect-only mod.
                 let sound_script = crate::acmd::parse_sound_script(&body);
+                let expression_script = crate::acmd::parse_expression_script(&body);
 
                 let mut hitboxes = script.to_hitboxes();
                 // A move with effects but no hitboxes is a real script, not a failed load.
@@ -2766,6 +2932,8 @@ impl VisionaryApp {
                 self.state.sound_script = sound_script;
                 self.state.loaded_body = body.clone();
                 self.apply_saved_sound_edits_to_current();
+                self.state.expression_script = expression_script;
+                self.apply_saved_expression_edits_to_current();
                 let effects_only = hitboxes.is_empty() && !effect_script.stmts.is_empty();
                 if hitboxes.is_empty() && !effects_only {
                     self.acmd_error = Some(format!(
@@ -2803,6 +2971,7 @@ impl VisionaryApp {
                         &self.state.hitboxes,
                         &self.state.effects,
                         &self.state.sounds,
+                        &self.state.expressions,
                     ));
 
                     self.jump_to_earliest_active_frame();
@@ -2833,6 +3002,9 @@ impl VisionaryApp {
                 self.state.sounds = Vec::new();
                 self.state.sounds_pristine = Vec::new();
                 self.state.sound_script = crate::data::AcmdScript::default();
+                self.state.expression_script = crate::data::AcmdScript::default();
+                self.state.expressions = Vec::new();
+                self.state.expressions_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
         }
@@ -2975,22 +3147,26 @@ impl VisionaryApp {
 
             // Everything that needs `&self` is resolved before the buffer is borrowed
             // mutably below — closures capturing both would not borrow-check.
-            let scripts: Vec<(&str, String, bool, bool)> =
-                [("game", "Hitboxes"), ("effect", "Effects")]
-                    .into_iter()
-                    .map(|(prefix, label)| {
-                        let name = crate::acmd::acmd_script_name(prefix, &move_name);
-                        let present = self
-                            .acmd_src
-                            .as_ref()
-                            .is_some_and(|index| index.script(&fighter, &name).is_some());
-                        let showing = self
-                            .acmd_src_buffer
-                            .as_ref()
-                            .is_some_and(|b| b.script == name);
-                        (label, name, present, showing)
-                    })
-                    .collect();
+            let scripts: Vec<(&str, String, bool, bool)> = [
+                ("game", "Hitboxes"),
+                ("effect", "Effects"),
+                ("sound", "Sounds"),
+                ("expression", "Expression"),
+            ]
+            .into_iter()
+            .map(|(prefix, label)| {
+                let name = crate::acmd::acmd_script_name(prefix, &move_name);
+                let present = self
+                    .acmd_src
+                    .as_ref()
+                    .is_some_and(|index| index.script(&fighter, &name).is_some());
+                let showing = self
+                    .acmd_src_buffer
+                    .as_ref()
+                    .is_some_and(|b| b.script == name);
+                (label, name, present, showing)
+            })
+            .collect();
             let any_script = scripts.iter().any(|(_, _, present, _)| *present);
             let reason = match self.acmd_src.as_ref() {
                 None => NoSource::NotLinked,
@@ -3001,7 +3177,7 @@ impl VisionaryApp {
 
             if view != SourceView::Generated {
                 ui.horizontal_wrapped(|ui| {
-                    for (index, (label, name, present, showing)) in scripts.iter().enumerate() {
+                    for (prefix, (label, name, present, showing)) in scripts.iter().enumerate() {
                         if ui
                             .add_enabled(
                                 *present && !*showing,
@@ -3014,7 +3190,12 @@ impl VisionaryApp {
                             })
                             .clicked()
                         {
-                            checkout = Some(if index == 0 { "game" } else { "effect" });
+                            checkout = Some(match prefix {
+                                0 => "game",
+                                1 => "effect",
+                                2 => "sound",
+                                _ => "expression",
+                            });
                         }
                     }
                     if ui
@@ -4196,6 +4377,7 @@ impl VisionaryApp {
                         &self.state.hitboxes,
                         &self.state.effects,
                         &self.state.sounds,
+                        &self.state.expressions,
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -4524,6 +4706,7 @@ impl VisionaryApp {
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
             self.draw_sound_section(ui);
+            self.draw_expression_section(ui);
         });
     }
 
@@ -4863,6 +5046,267 @@ impl VisionaryApp {
         let (start, _) = Self::rule_frame_window(*first);
         let (_, end) = Self::rule_frame_window(*last);
         (start, end)
+    }
+
+    /// Convert a source expression token to the Lua type the captured primitive expects.
+    ///
+    /// The live rule is keyed by the pristine capture, so symbolic constants need only be
+    /// understood when they are changed. Unknown project-local constants are refused here
+    /// rather than sent as a guessed integer that could make a different camera or rumble fire.
+    fn expression_arg_wire(
+        token: &str,
+        donor: &crate::game_link::LuaArgWire,
+        func: &str,
+        index: usize,
+    ) -> Option<crate::game_link::LuaArgWire> {
+        use crate::game_link::LuaArgWire as A;
+        let token = token.trim();
+        let unstarred = token.strip_prefix('*').unwrap_or(token);
+        let constant = match unstarred {
+            "CAMERA_QUAKE_KIND_NONE" => Some(0),
+            "CAMERA_QUAKE_KIND_S_HALF" | "CAMERA_QUAKE_KIND_SMALL_HF" => Some(2),
+            "CAMERA_QUAKE_KIND_S" | "CAMERA_QUAKE_KIND_SMALL" => Some(3),
+            "CAMERA_QUAKE_KIND_M" | "CAMERA_QUAKE_KIND_MIDDLE" => Some(5),
+            "CAMERA_QUAKE_KIND_L" | "CAMERA_QUAKE_KIND_LARGE" => Some(7),
+            "CAMERA_QUAKE_KIND_MORE_LARGE" => Some(9),
+            "CAMERA_QUAKE_KIND_MAX" => Some(14),
+            "FIGHTER_ATTACK_ABSOLUTE_KIND_THROW" => Some(0),
+            "FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH" => Some(1),
+            "FIGHTER_ATTACK_ABSOLUTE_KIND_THROW_MEWTWO" => Some(2),
+            _ => None,
+        };
+        if let Some(value) = constant {
+            return match donor {
+                A::Int(_) | A::Num(_) => Some(if matches!(donor, A::Num(_)) {
+                    A::Num(value as f32)
+                } else {
+                    A::Int(value)
+                }),
+                A::Hash(_) if func == "RUMBLE_HIT" && index == 0 => Some(A::Hash(value as u64)),
+                _ => None,
+            };
+        }
+        if let Some(inner) = token
+            .strip_prefix("Hash40::new(\"")
+            .and_then(|value| value.strip_suffix("\")"))
+        {
+            return Some(A::Hash(hash40::hash40(inner).0));
+        }
+        if let Some(raw) = token
+            .strip_prefix("Hash40::new_raw(")
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            let raw = raw.trim().replace('_', "");
+            let value = raw
+                .strip_prefix("0x")
+                .or_else(|| raw.strip_prefix("0X"))
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                .or_else(|| raw.parse::<u64>().ok())?;
+            return Some(A::Hash(value));
+        }
+        match donor {
+            A::Hash(_) => token.parse::<u64>().ok().map(A::Hash),
+            A::Int(_) => token.parse::<i64>().ok().map(A::Int),
+            A::Num(_) => token
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map(A::Num),
+            A::Bool(_) => token.parse::<bool>().ok().map(A::Bool),
+            A::Nil => None,
+        }
+    }
+
+    fn expression_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::ExpressionEvent],
+        index: usize,
+        event: &crate::data::ExpressionEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame && other.call.func() == event.call.func())
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == event.call.func()
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .nth(occurrence)
+    }
+
+    fn expression_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::ExpressionEvent],
+        shown: &[crate::data::ExpressionEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::HitboxRuleWire;
+        if pristine.len() != shown.len() {
+            // The plugin can replace arguments in an observed call, but it cannot safely add,
+            // remove, or reorder a source call. Keep the whole live update out rather than
+            // applying a partial zip and making the staged project disagree with the game.
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame || was.call.func() != now.call.func() {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::expression_capture_for(captures, pristine, index, was) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let tokens = now.call.tokens();
+            let Some(args) = tokens
+                .iter()
+                .enumerate()
+                .map(|(slot, token)| {
+                    Self::expression_arg_wire(token, donor.args.get(slot)?, was.call.func(), slot)
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_EXPRESSION,
+                hitbox_id: Some(crate::game_link::expression_key(
+                    was.call.func(),
+                    &donor.args,
+                )),
+                suppress: false,
+                frame_start: Self::rule_frame_window(was.frame).0,
+                frame_end: Self::rule_frame_window(was.frame).1,
+                overrides: Some(crate::game_link::HbOverridesWire {
+                    expression_args: Some(args),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(was.call.func().into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    /// Send changed camera/rumble arguments to the plugin, keyed on the pristine Lua call.
+    fn push_expression_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::expression_rules_for(
+            motion,
+            &captures,
+            &self.state.expressions_pristine,
+            &self.state.expressions,
+        );
+        let key = format!("{mv_key}#expression");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "Expression edit staged, but {unrepresentable} call(s) need a live capture or a numeric/hash value before they can apply live"
+            );
+        }
+    }
+
+    /// The measured camera/rumble calls from the move's `expression_` script.
+    ///
+    /// The arguments stay source tokens rather than being decoded into guessed constant
+    /// namespaces. That makes a named camera constant, a raw captured number, and a mod author's
+    /// own expression equally safe to round-trip. This panel therefore edits the token text
+    /// directly; frame movement and macro replacement remain structural and are left to export.
+    fn draw_expression_section(&mut self, ui: &mut Ui) {
+        use crate::data::ExpressionCall;
+
+        if self.state.expressions.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Expression");
+            ui.colored_label(egui::Color32::from_rgb(210, 180, 245), "expression_ script");
+        })
+        .response
+        .on_hover_text(
+            "Measured camera and rumble calls from the expression_ script. Unknown expression \
+             commands stay in the source and are not silently regenerated here.",
+        );
+
+        let mut edit: Option<(usize, ExpressionCall)> = None;
+        for event in &self.state.expressions {
+            let active = event.frame == self.state.current_frame;
+            let mut call = event.call.clone();
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    if active {
+                        egui::Color32::from_rgb(210, 180, 245)
+                    } else {
+                        egui::Color32::from_gray(140)
+                    },
+                    if active { "◆" } else { "◇" },
+                );
+                ui.label(format!("[{}] {}", event.frame, call.func()));
+                match &mut call {
+                    ExpressionCall::RumbleHit { kind, unk } => {
+                        changed |= expression_token_edit(ui, kind, (event.site, 0));
+                        changed |= expression_token_edit(ui, unk, (event.site, 1));
+                    }
+                    ExpressionCall::Quake { kind } => {
+                        changed |= expression_token_edit(ui, kind, (event.site, 0));
+                    }
+                    ExpressionCall::FtAttackAbsCameraQuake {
+                        attack_abs_kind,
+                        quake_kind,
+                    } => {
+                        changed |= expression_token_edit(ui, attack_abs_kind, (event.site, 0));
+                        changed |= expression_token_edit(ui, quake_kind, (event.site, 1));
+                    }
+                }
+            });
+            if changed {
+                edit = Some((event.site, call));
+            }
+        }
+
+        if let Some((site, replacement)) = edit {
+            if let Some(call) = self.state.expression_script.expression_stmt_mut(site) {
+                *call = replacement;
+                self.state.expressions = self.state.expression_script.to_expression_events();
+                if let Some(key) = self.current_move_key() {
+                    self.state
+                        .expression_script_edits
+                        .insert(key, self.state.expression_script.clone());
+                }
+                self.state.status =
+                    "Expression edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_expression_rules();
+            }
+        }
     }
 
     /// Post-hoc tuning of hitboxes that are already out, below the hurtbox section.
@@ -6302,6 +6746,20 @@ impl VisionaryApp {
         self.state.sounds_pristine = baseline;
     }
 
+    /// Put this move's saved expression script back over the freshly parsed one, preserving the
+    /// parsed event list as the live-rule baseline.
+    fn apply_saved_expression_edits_to_current(&mut self) {
+        let saved = self
+            .current_move_key()
+            .and_then(|key| self.state.expression_script_edits.get(&key))
+            .cloned();
+        let (script, shown, baseline) =
+            resolve_expression_state(&self.state.expression_script, saved);
+        self.state.expression_script = script;
+        self.state.expressions = shown;
+        self.state.expressions_pristine = baseline;
+    }
+
     /// Rebuild `state.effects` from the pristine parse + this move's saved edits.
     /// Idempotent — used at move load and after loading a project.
     /// The loss note a saved project should carry for one move, if any.
@@ -6502,6 +6960,18 @@ impl VisionaryApp {
                 .entry(fighter.to_string())
                 .or_default()
                 .sound_scripts
+                .insert(mv.to_string(), script.clone());
+        }
+        for (key, script) in &self.state.expression_script_edits {
+            if script.stmts.is_empty() {
+                continue;
+            }
+            let (fighter, mv) = key.split_once('/').unwrap_or(("unknown", key.as_str()));
+            project
+                .fighters
+                .entry(fighter.to_string())
+                .or_default()
+                .expression_scripts
                 .insert(mv.to_string(), script.clone());
         }
         for (fighter, eff) in &self.eff_mods {
@@ -6835,6 +7305,7 @@ impl VisionaryApp {
         self.state.effect_dropped_lines.clear();
         self.state.effect_frame_residue.clear();
         self.state.sound_script_edits.clear();
+        self.state.expression_script_edits.clear();
         self.state.capture_branch_warnings.clear();
         self.eff_mods.clear();
         self.live_overrides = crate::game_link::LiveOverrides::default();
@@ -6891,6 +7362,11 @@ impl VisionaryApp {
             for (mv, script) in fm.sound_scripts {
                 self.state
                     .sound_script_edits
+                    .insert(format!("{fighter}/{mv}"), script);
+            }
+            for (mv, script) in fm.expression_scripts {
+                self.state
+                    .expression_script_edits
                     .insert(format!("{fighter}/{mv}"), script);
             }
             for (mv, warning) in fm.capture_branch_warnings {
@@ -7442,10 +7918,16 @@ impl VisionaryApp {
         let hurt = Self::script_from_captures(&captures, &bone_rev);
         let captured_sounds = Self::sound_script_from_captures(&captures, &self.state.labels);
         let n_snd = captured_sounds.to_sound_events().len();
+        let captured_expressions = Self::expression_script_from_captures(&captures);
+        let n_expr = captured_expressions.to_expression_events().len();
 
-        if let Some(message) =
-            nothing_to_load(hitboxes.len(), effects.len(), hurt.stmts.len(), n_snd)
-        {
+        if let Some(message) = nothing_to_load(
+            hitboxes.len(),
+            effects.len(),
+            hurt.stmts.len(),
+            n_snd,
+            n_expr,
+        ) {
             self.state.status = message;
             return;
         }
@@ -7475,6 +7957,7 @@ impl VisionaryApp {
         // and gating on the wrong emptiness would then either drop live sounds or overwrite a
         // fetched sound script with a capture-only copy.
         adopt_captured_sounds(captured_sounds, &mut self.state);
+        adopt_captured_expressions(captured_expressions, &mut self.state);
         if !effects.is_empty() {
             self.state.effects_pristine = effects.clone();
             self.state.effects = effects;
@@ -7491,6 +7974,7 @@ impl VisionaryApp {
             &self.state.hitboxes,
             &self.state.effects,
             &self.state.sounds,
+            &self.state.expressions,
         ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
@@ -7516,9 +8000,9 @@ impl VisionaryApp {
         // the game not run any, or did the editor not read them", and hiding it to keep the line
         // short is what made this invisible.
         let mut status = format!(
-            "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) + {n_hurt} \
-             hurtbox state(s) + {n_mod} tuning call(s) + {n_rate} rate call(s) from live game \
-             capture"
+            "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) + {n_expr} \
+             expression call(s) + {n_hurt} hurtbox state(s) + {n_mod} tuning call(s) + {n_rate} \
+             rate call(s) from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
@@ -8414,6 +8898,71 @@ impl VisionaryApp {
         }
     }
 
+    /// Rebuild the measured expression subset from one live playback.
+    ///
+    /// The source side deliberately keeps expression arguments as tokens. A capture has already
+    /// crossed the Lua boundary, so it cannot recover a project's symbolic constant spelling;
+    /// numeric/hash raw forms are the honest portable representation for a live-only script.
+    fn expression_script_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+    ) -> crate::data::AcmdScript {
+        use crate::data::{AcmdStmt, ExcuteStmt, ExpressionCall};
+        let mut by_frame: std::collections::BTreeMap<u32, Vec<ExcuteStmt>> = Default::default();
+        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
+
+        for (_, line) in ordered {
+            let call = match line.func.as_str() {
+                "RUMBLE_HIT" if line.args.len() == 2 => {
+                    let kind = line.args.first().and_then(|arg| {
+                        arg.as_hash()
+                            .map(|hash| format!("Hash40::new_raw({hash:#x})"))
+                    });
+                    let unk = line
+                        .args
+                        .get(1)
+                        .and_then(|arg| arg.as_i64())
+                        .map(|v| v.to_string());
+                    kind.zip(unk)
+                        .map(|(kind, unk)| ExpressionCall::RumbleHit { kind, unk })
+                }
+                "QUAKE" if line.args.len() == 1 => {
+                    line.args.first().and_then(|arg| arg.as_i64()).map(|kind| {
+                        ExpressionCall::Quake {
+                            kind: kind.to_string(),
+                        }
+                    })
+                }
+                "FT_ATTACK_ABS_CAMERA_QUAKE" if line.args.len() == 2 => {
+                    let attack_abs_kind = line.args.first().and_then(|arg| arg.as_i64());
+                    let quake_kind = line.args.get(1).and_then(|arg| arg.as_i64());
+                    attack_abs_kind
+                        .zip(quake_kind)
+                        .map(|(attack_abs_kind, quake_kind)| {
+                            ExpressionCall::FtAttackAbsCameraQuake {
+                                attack_abs_kind: attack_abs_kind.to_string(),
+                                quake_kind: quake_kind.to_string(),
+                            }
+                        })
+                }
+                _ => None,
+            };
+            if let Some(call) = call {
+                by_frame
+                    .entry(Self::motion_to_script_frame(line.frame))
+                    .or_default()
+                    .push(ExcuteStmt::Expression(call));
+            }
+        }
+
+        crate::data::AcmdScript {
+            stmts: by_frame
+                .into_iter()
+                .flat_map(|(frame, stmts)| [AcmdStmt::Frame(frame as f32), AcmdStmt::Excute(stmts)])
+                .collect(),
+        }
+    }
+
     /// Reconstruct effect timeline spans from the locked playback's spawn and stop events.
     /// Every distinct spawn from that one execution is retained; time ordering and kill-kind
     /// semantics are then applied to the complete snapshot.
@@ -9242,6 +9791,8 @@ impl VisionaryApp {
             // frame onward rather than of any one collision, so `push_motion_rate_rules` sends
             // it under its own category and this diff leaves it alone.
             motion_rate: None,
+            // Expression primitives use their own category and replacement vector.
+            expression_args: None,
         }
     }
 
@@ -12416,6 +12967,7 @@ impl VisionaryApp {
             &self.state.hitboxes,
             &self.state.effects,
             &self.state.sounds,
+            &self.state.expressions,
         ));
         if total == 0 {
             return;
@@ -14258,6 +14810,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::ColNormal
                 | ExcuteStmt::AttackMod { .. }
                 | ExcuteStmt::Sound(_)
+                | ExcuteStmt::Expression(_)
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -14769,6 +15322,9 @@ fn clear_move_state(state: &mut crate::data::AppState) {
     state.sound_script = crate::data::AcmdScript::default();
     state.sounds = Vec::new();
     state.sounds_pristine = Vec::new();
+    state.expression_script = crate::data::AcmdScript::default();
+    state.expressions = Vec::new();
+    state.expressions_pristine = Vec::new();
     state.acmd_source = String::new();
 }
 
@@ -14786,10 +15342,12 @@ fn nothing_to_load(
     effects: usize,
     hurt_stmts: usize,
     sounds: usize,
+    expressions: usize,
 ) -> Option<String> {
-    if hitboxes == 0 && effects == 0 && hurt_stmts == 0 && sounds == 0 {
+    if hitboxes == 0 && effects == 0 && hurt_stmts == 0 && sounds == 0 && expressions == 0 {
         return Some(
-            "Capture has no hitbox, effect, hurtbox or sound lines for this move yet.".into(),
+            "Capture has no hitbox, effect, hurtbox, sound or expression lines for this move yet."
+                .into(),
         );
     }
     None
@@ -14809,6 +15367,15 @@ fn nothing_to_load(
 /// per row, so it is scoped to the call being edited.
 ///
 /// Returns whether the name changed.
+fn expression_token_edit(ui: &mut Ui, token: &mut String, salt: (usize, usize)) -> bool {
+    ui.add(
+        egui::TextEdit::singleline(token)
+            .id_salt(("expression_token", salt.0, salt.1))
+            .desired_width(220.0),
+    )
+    .changed()
+}
+
 fn sound_name_picker(
     ui: &mut Ui,
     name: &mut String,
@@ -16004,6 +16571,80 @@ mod live_effect_capture_tests {
         );
     }
 
+    fn expression_capture(func: &str, frame: f32, args: Vec<A>) -> CaptureLine {
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("throw_hi").0,
+            frame,
+            func: func.into(),
+            args,
+            run: 1,
+        }
+    }
+
+    #[test]
+    fn a_live_expression_capture_becomes_an_editable_expression_script() {
+        let captures = vec![
+            expression_capture(
+                "RUMBLE_HIT",
+                5.0,
+                vec![A::Hash(hash40::hash40("rbkind_attackm").0), A::Int(0)],
+            ),
+            expression_capture("QUAKE", 8.0, vec![A::Int(5)]),
+            expression_capture(
+                "FT_ATTACK_ABS_CAMERA_QUAKE",
+                10.0,
+                vec![A::Int(0), A::Int(7)],
+            ),
+        ];
+        let script = VisionaryApp::expression_script_from_captures(&captures);
+        let events = script.to_expression_events();
+        assert_eq!(events.len(), 3);
+        let expected_kind = format!("Hash40::new_raw({:#x})", hash40::hash40("rbkind_attackm").0);
+        assert!(matches!(
+            &events[0].call,
+            crate::data::ExpressionCall::RumbleHit { kind, unk }
+                if kind == &expected_kind && unk == "0"
+        ));
+        assert_eq!(events[1].call.func(), "QUAKE");
+        assert_eq!(events[2].frame, 11);
+    }
+
+    #[test]
+    fn an_expression_rule_is_keyed_on_the_pristine_capture_and_names_its_macro() {
+        let pristine = vec![crate::data::ExpressionEvent {
+            frame: 5,
+            site: 0,
+            call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+        }];
+        let shown = vec![crate::data::ExpressionEvent {
+            frame: 5,
+            site: 0,
+            call: crate::data::ExpressionCall::Quake { kind: "7".into() },
+        }];
+        let captures = vec![expression_capture("QUAKE", 4.0, vec![A::Int(5)])];
+        let (rules, unrepresentable) = VisionaryApp::expression_rules_for(
+            hash40::hash40("throw_hi").0,
+            &captures,
+            &pristine,
+            &shown,
+        );
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one expression rule, got {}", rules.len());
+        };
+        assert_eq!(rule.category, crate::game_link::CAT_EXPRESSION);
+        assert_eq!(rule.func.as_deref(), Some("QUAKE"));
+        assert_eq!(
+            rule.hitbox_id,
+            Some(crate::game_link::expression_key("QUAKE", &[A::Int(5)]))
+        );
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().expression_args,
+            Some(vec![A::Int(7)])
+        );
+    }
+
     // ── D1f: sound capture and live rules ────────────────────────────────────
 
     fn sound_capture(func: &str, frame: f32, args: Vec<A>) -> CaptureLine {
@@ -16505,13 +17146,13 @@ mod live_effect_capture_tests {
     /// rather than "I did not look for what you have".
     #[test]
     fn a_capture_with_only_sounds_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 0, 2).is_none());
+        assert!(nothing_to_load(0, 0, 0, 2, 0).is_none());
     }
 
     /// Likewise one carrying only hurtbox statements.
     #[test]
     fn a_capture_with_only_hurtboxes_is_still_loaded() {
-        assert!(nothing_to_load(0, 0, 4, 0).is_none());
+        assert!(nothing_to_load(0, 0, 4, 0, 0).is_none());
     }
 
     /// A genuinely empty capture is refused, and says what it looked for.
@@ -16520,8 +17161,8 @@ mod live_effect_capture_tests {
     /// returned `None` would pass both of them and load an empty capture over the user's script.
     #[test]
     fn a_capture_with_nothing_in_it_is_refused_and_names_every_family() {
-        let message = nothing_to_load(0, 0, 0, 0).expect("an empty capture must be refused");
-        for family in ["hitbox", "effect", "hurtbox", "sound"] {
+        let message = nothing_to_load(0, 0, 0, 0, 0).expect("an empty capture must be refused");
+        for family in ["hitbox", "effect", "hurtbox", "sound", "expression"] {
             assert!(
                 message.contains(family),
                 "the refusal must name {family}, or the next family added is dropped silently \
@@ -16533,10 +17174,11 @@ mod live_effect_capture_tests {
     /// Each family on its own is enough.
     #[test]
     fn any_single_family_is_enough_to_load() {
-        assert!(nothing_to_load(1, 0, 0, 0).is_none());
-        assert!(nothing_to_load(0, 1, 0, 0).is_none());
-        assert!(nothing_to_load(0, 0, 1, 0).is_none());
-        assert!(nothing_to_load(0, 0, 0, 1).is_none());
+        assert!(nothing_to_load(1, 0, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 1, 0, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 1, 0, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 1, 0).is_none());
+        assert!(nothing_to_load(0, 0, 0, 0, 1).is_none());
     }
 
     /// Switching moves drops every field that belonged to the previous one.
@@ -16590,6 +17232,15 @@ mod live_effect_capture_tests {
         assert!(state.sound_script.stmts.is_empty(), "sound_script");
         assert!(state.sounds.is_empty(), "sounds");
         assert!(state.sounds_pristine.is_empty(), "sounds_pristine");
+        assert!(
+            state.expression_script.stmts.is_empty(),
+            "expression_script"
+        );
+        assert!(state.expressions.is_empty(), "expressions");
+        assert!(
+            state.expressions_pristine.is_empty(),
+            "expressions_pristine"
+        );
         assert!(state.hurtboxes_pristine.0.is_empty(), "hurtboxes_pristine");
         assert!(
             state.attack_mods_pristine.is_empty(),
@@ -18580,7 +19231,7 @@ mod live_effect_capture_tests {
                 ..Default::default()
             })
             .collect();
-        assert_eq!(timeline_frame_extent(&dense_capture, &[], &[]), 45);
+        assert_eq!(timeline_frame_extent(&dense_capture, &[], &[], &[]), 45);
 
         let context = egui::Context::default();
         let input = egui::RawInput {
@@ -18627,10 +19278,16 @@ mod live_effect_capture_tests {
             active_end: 8,
             ..Default::default()
         }];
-        assert_eq!(timeline_frame_extent(&hitbox, &[], &[]), 8);
-        assert_eq!(timeline_frame_extent(&hitbox, &[], &[sound(83)]), 83);
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[], &[]), 8);
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[sound(83)], &[]), 83);
         // And a sound inside the move does not shrink it.
-        assert_eq!(timeline_frame_extent(&hitbox, &[], &[sound(2)]), 8);
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[sound(2)], &[]), 8);
+        let expression = [crate::data::ExpressionEvent {
+            frame: 83,
+            call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+            site: 0,
+        }];
+        assert_eq!(timeline_frame_extent(&hitbox, &[], &[], &expression), 83);
     }
 
     #[test]
