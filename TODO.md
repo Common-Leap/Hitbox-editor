@@ -3546,9 +3546,14 @@ the target reached by the exported
 `(FighterManager*, u32, u32, f32, i32, bool) -> ()`; the plugin trampoline and callback now match
 those argument positions. This removes the previous Rust six-integer ABI mismatch.
 
-R3 remains open because `A64HookFunction`'s trampoline still fails under Eden's JIT and no
-physical Switch or proven compatible hook run is available. Do not enable the inline hook based
-on static analysis alone.
+The pinned `skyline-smash` bindings do expose the exported wrapper, but the 13.0.4 dump shows that
+the wrapper branches to the scanned body and that other game sites call the body directly. A
+wrapper-only hook would therefore miss collision notifications; the body pattern remains the
+complete static target, with 10 direct `BL` callers found in the dump.
+
+R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
+trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
+enable the inline hook based on static analysis alone.
 
 ### [x] R4 — Guard against the double-plugin footgun (done 2026-08-05)
 

@@ -68,12 +68,13 @@ pub fn install() {
 
     register_callback(collision_queue_callback);
 
-    // The pinned bindings do not expose this direct FighterManager member as a stable
-    // `skyline::hook(replace=…)` target, so the collision hit notify remains a manual
-    // `A64HookFunction` pattern hook. Static 13.0.4 analysis has corrected the trampoline's
-    // native ABI above, but Eden's dynarmic JIT still produces a bad trampoline that null-jumps
-    // when a hit fires. It only feeds the damage *log* (not multiplier application), so disable it
-    // until the trampoline is proven on hardware or with a compatible hook implementation.
+    // The pinned bindings expose the exported FighterManager wrapper, but static 13.0.4 analysis
+    // shows that the wrapper branches to this body and that other game sites call the body
+    // directly. Hook the body so those sites are not missed; a wrapper-only
+    // `skyline::hook(replace=…)` would provide incomplete collision coverage. The trampoline's
+    // native ABI is corrected above, but an earlier Eden run still produced a bad trampoline that
+    // null-jumped when a hit fired. Keep this disabled until the corrected path is proven on
+    // hardware or with a compatible hook implementation.
     if !ENABLE_INLINE_COLLISION_HOOK {
         skyline::println!("[SLight] Skyline Hook: inline collision hook disabled (Eden-unsafe)");
         return;
