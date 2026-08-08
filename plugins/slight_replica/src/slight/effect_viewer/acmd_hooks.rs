@@ -1846,7 +1846,7 @@ unsafe fn inject_control_tick(lua_state: u64) {
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
     let boid = (*boma).battle_object_id;
-    for (idx, injection) in control_rules::injections_for(motion) {
+    for (idx, injection, work_slot) in control_rules::injections_for(motion) {
         let key = (boid, idx);
         let due = frame >= injection.frame;
         let already = CONTROL_FIRED
@@ -1857,7 +1857,18 @@ unsafe fn inject_control_tick(lua_state: u64) {
         if due && !already {
             let mut agent = smash::lib::L2CAgent::new(lua_state);
             agent.clear_lua_stack();
-            for arg in &injection.args {
+            let mut args = injection.args.clone();
+            if let Some(slot) = work_slot {
+                if injection.func != "EFFECT_DETACH_KIND_WORK" || args.len() != 2 {
+                    crate::slight::diag::note(
+                        "effect control work-slot injection rejected: unexpected command shape",
+                    );
+                    continue;
+                }
+                let handle = smash::app::lua_bind::WorkModule::get_int64(boma, slot);
+                args[0] = crate::slight::hitbox_viewer::LuaArg::Int(handle as i64);
+            }
+            for arg in &args {
                 let mut value = arg.to_l2c();
                 agent.push_lua_stack(&mut value);
             }

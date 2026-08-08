@@ -29,6 +29,10 @@ pub struct ControlRule {
     pub frame_start: Option<f32>,
     #[serde(default)]
     pub frame_end: Option<f32>,
+    /// Numeric WorkModule slot to resolve when injecting `EFFECT_DETACH_KIND_WORK`. The source
+    /// token is often symbolic; the desktop sends this only when the edited token is numeric.
+    #[serde(default)]
+    pub work_slot: Option<i32>,
 }
 
 impl ControlRule {
@@ -78,7 +82,7 @@ pub fn any_inject() -> bool {
         .unwrap_or(false)
 }
 
-pub fn injections_for(motion: u64) -> Vec<(usize, ControlInject)> {
+pub fn injections_for(motion: u64) -> Vec<(usize, ControlInject, Option<i32>)> {
     let Some(rules) = RULES.try_lock() else {
         return Vec::new();
     };
@@ -88,6 +92,6 @@ pub fn injections_for(motion: u64) -> Vec<(usize, ControlInject)> {
         .filter(|(_, rule)| {
             rule.inject.is_some() && rule.motion.map(|wanted| wanted == motion).unwrap_or(true)
         })
-        .map(|(index, rule)| (index, rule.inject.clone().unwrap()))
+        .map(|(index, rule)| (index, rule.inject.clone().unwrap(), rule.work_slot))
         .collect()
 }

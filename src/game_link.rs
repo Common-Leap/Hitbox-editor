@@ -166,6 +166,10 @@ pub struct EffectControlRuleWire {
     pub frame_start: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_end: Option<f32>,
+    /// Numeric replacement WorkModule slot for `EFFECT_DETACH_KIND_WORK` injection. Symbolic
+    /// Work IDs remain source/export-only because the primitive receives the resolved handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_slot: Option<i32>,
     /// Re-fire the captured point at a new motion frame after suppressing its pristine call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject: Option<EffectControlInjectWire>,
@@ -2578,37 +2582,67 @@ mod tests {
     #[test]
     fn outbound_effect_control_rules_keep_exact_args_and_injection() {
         let link = GameLink::default();
-        link.send_effect_control_rules(&[EffectControlRuleWire {
-            motion: Some(0x99),
-            func: "ENABLE_AREA".into(),
-            args: vec![LuaArgWire::Int(2)],
-            suppress: true,
-            frame_start: Some(7.5),
-            frame_end: Some(8.5),
-            inject: Some(EffectControlInjectWire {
-                frame: 12.0,
+        link.send_effect_control_rules(&[
+            EffectControlRuleWire {
+                motion: Some(0x99),
                 func: "ENABLE_AREA".into(),
-                args: vec![LuaArgWire::Int(3)],
-            }),
-        }]);
+                args: vec![LuaArgWire::Int(2)],
+                suppress: true,
+                frame_start: Some(7.5),
+                frame_end: Some(8.5),
+                work_slot: None,
+                inject: Some(EffectControlInjectWire {
+                    frame: 12.0,
+                    func: "ENABLE_AREA".into(),
+                    args: vec![LuaArgWire::Int(3)],
+                }),
+            },
+            EffectControlRuleWire {
+                motion: Some(0x99),
+                func: "EFFECT_DETACH_KIND_WORK".into(),
+                args: vec![LuaArgWire::Int(0x1234), LuaArgWire::Int(2)],
+                suppress: true,
+                frame_start: Some(7.5),
+                frame_end: Some(8.5),
+                work_slot: Some(17),
+                inject: Some(EffectControlInjectWire {
+                    frame: 12.0,
+                    func: "EFFECT_DETACH_KIND_WORK".into(),
+                    args: vec![LuaArgWire::Int(0x5678), LuaArgWire::Int(3)],
+                }),
+            },
+        ]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
         let value: serde_json::Value = serde_json::from_str(inner).unwrap();
-        let rule = &value["effect_control_rules"][0];
-        assert_eq!(rule["func"].as_str(), Some("ENABLE_AREA"));
-        assert_eq!(rule["args"][0]["t"].as_str(), Some("i"));
-        assert_eq!(rule["args"][0]["v"].as_i64(), Some(2));
-        assert_eq!(rule["inject"]["frame"].as_f64(), Some(12.0));
-        assert_eq!(rule["inject"]["args"][0]["v"].as_i64(), Some(3));
+        let area = &value["effect_control_rules"][0];
+        assert_eq!(area["func"].as_str(), Some("ENABLE_AREA"));
+        assert_eq!(area["args"][0]["t"].as_str(), Some("i"));
+        assert_eq!(area["args"][0]["v"].as_i64(), Some(2));
+        assert_eq!(area["inject"]["frame"].as_f64(), Some(12.0));
+        assert_eq!(area["inject"]["args"][0]["v"].as_i64(), Some(3));
+
+        let work = &value["effect_control_rules"][1];
+        assert_eq!(work["func"].as_str(), Some("EFFECT_DETACH_KIND_WORK"));
+        assert_eq!(work["args"][0]["t"].as_str(), Some("i"));
+        assert_eq!(work["args"][0]["v"].as_i64(), Some(0x1234));
+        assert_eq!(work["work_slot"].as_i64(), Some(17));
+        assert_eq!(work["inject"]["frame"].as_f64(), Some(12.0));
+        assert_eq!(work["inject"]["args"][0]["v"].as_i64(), Some(0x5678));
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/slight_replica/src/slight/effect_viewer");
         let rules = std::fs::read_to_string(root.join("control_rules.rs"))
             .expect("read the plugin's effect control rules");
+        let hooks = std::fs::read_to_string(root.join("acmd_hooks.rs"))
+            .expect("read the plugin's ACMD hooks");
         assert!(
             rules.contains("pub struct ControlRule")
                 && rules.contains("pub struct ControlInject")
-                && rules.contains("self.args == args"),
+                && rules.contains("pub work_slot: Option<i32>")
+                && rules.contains("self.args == args")
+                && hooks.contains("WorkModule::get_int64")
+                && hooks.contains("effect control work-slot injection rejected"),
             "the plugin must match controls by their exact captured argument vector"
         );
     }

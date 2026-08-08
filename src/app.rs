@@ -19423,6 +19423,13 @@ impl VisionaryApp {
         token.parse().ok()
     }
 
+    /// A numeric `EFFECT_DETACH_KIND_WORK` token can be resolved at live-injection time. The
+    /// source may also contain symbolic Work IDs, but those need a game-specific constant map
+    /// that the editor intentionally does not invent.
+    fn control_work_slot(work: &str) -> Option<i32> {
+        Self::control_integer(work).and_then(|value| i32::try_from(value).ok())
+    }
+
     fn control_hash_arg(
         original: &crate::game_link::LuaArgWire,
         value: u64,
@@ -19448,8 +19455,9 @@ impl VisionaryApp {
     ///
     /// Detach-by-kind has a directly hashable source value. Area constants can be rebuilt only
     /// when the editor holds a numeric value; an unchanged symbolic area safely reuses the
-    /// captured runtime integer. Work-slot detach is deliberately narrower: the primitive sees
-    /// the resolved effect handle, so only frame/unknown edits can reuse that handle.
+    /// captured runtime integer. Work-slot detach is deliberately narrower: unchanged or
+    /// symbolic calls reuse the captured handle, while a changed numeric token is sent as a
+    /// separately validated WorkModule slot for the plugin to resolve at injection time.
     fn effect_control_injection_args(
         was: &crate::data::EffectControl,
         now: &crate::data::EffectControl,
@@ -19468,7 +19476,10 @@ impl VisionaryApp {
             (
                 EffectControl::DetachKindWork { work: old_work, .. },
                 EffectControl::DetachKindWork { work, unk },
-            ) if old_work == work && !work.trim().is_empty() && donor.len() == 2 => {
+            ) if (old_work == work || Self::control_work_slot(work).is_some())
+                && !work.trim().is_empty()
+                && donor.len() == 2 =>
+            {
                 let mut args = donor.to_vec();
                 args[1] = Self::control_integer_arg(&args[1], *unk);
                 Some(args)
@@ -19561,6 +19572,17 @@ impl VisionaryApp {
                     }
                 }
             };
+            let work_slot = if now_call.disabled {
+                None
+            } else {
+                match (was, now) {
+                    (
+                        crate::data::EffectControl::DetachKindWork { work: old_work, .. },
+                        crate::data::EffectControl::DetachKindWork { work, .. },
+                    ) if old_work != work => Self::control_work_slot(work),
+                    _ => None,
+                }
+            };
             let (frame_start, frame_end) = Self::rule_frame_window(was_call.active_start);
             rules.push(crate::game_link::EffectControlRuleWire {
                 motion,
@@ -19569,6 +19591,7 @@ impl VisionaryApp {
                 suppress: true,
                 frame_start,
                 frame_end,
+                work_slot,
                 inject,
             });
         }
@@ -29803,7 +29826,7 @@ mod effect_control_rule_tests {
     }
 
     #[test]
-    fn work_detach_reuses_runtime_handle_but_rejects_work_id_changes() {
+    fn work_detach_reuses_runtime_handle_and_accepts_numeric_work_slot_changes() {
         let was = EffectControl::DetachKindWork {
             work: "WORK_INT".into(),
             unk: 0,
@@ -29816,6 +29839,10 @@ mod effect_control_rule_tests {
             work: "OTHER_WORK".into(),
             unk: -1,
         };
+        let changed_numeric_work = EffectControl::DetachKindWork {
+            work: "17".into(),
+            unk: -1,
+        };
         let donor = vec![A::Int(0x1234), A::Int(0)];
         assert_eq!(
             VisionaryApp::effect_control_injection_args(&was, &retuned, &donor),
@@ -29826,6 +29853,17 @@ mod effect_control_rule_tests {
             None,
             "an authored WorkModule token cannot be guessed from the resolved runtime handle"
         );
+        assert_eq!(
+            VisionaryApp::effect_control_injection_args(&was, &changed_numeric_work, &donor),
+            Some(vec![A::Int(0x1234), A::Int(-1)])
+        );
+        assert_eq!(
+            VisionaryApp::control_work_slot("WORK_INT"),
+            None,
+            "symbolic source tokens remain unresolved for live replacement"
+        );
+        assert_eq!(VisionaryApp::control_work_slot("17"), Some(17));
+        assert_eq!(VisionaryApp::control_work_slot("0x12"), Some(18));
     }
 
     #[test]
