@@ -502,6 +502,9 @@ pub const CAT_WORK_FLAG: u8 = 32;
 /// `unable_transition_term` point overrides.
 pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
 
+/// Wire category for direct `WorkModule::set_int` / `set_float` point overrides.
+pub const CAT_WORK_MODULE_SET: u8 = 34;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -670,6 +673,15 @@ pub struct HbOverridesWire {
     /// Replacement numeric transition term for direct WorkModule transition-term calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_transition_term: Option<i64>,
+    /// Replacement integer value for a direct `WorkModule::set_int` call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_module_set_int_value: Option<i64>,
+    /// Replacement float value for a direct `WorkModule::set_float` call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_module_set_float_value: Option<f32>,
+    /// Replacement WorkModule slot for either direct value setter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_module_set_slot: Option<i64>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_speed_kinetic_kind: Option<i64>,
@@ -2900,6 +2912,9 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_WORK_TRANSITION_TERM: u8 = {CAT_WORK_TRANSITION_TERM};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_WORK_MODULE_SET: u8 = {CAT_WORK_MODULE_SET};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
@@ -2907,6 +2922,9 @@ mod tests {
         assert!(module.contains("pub kinetic_ground_friction_energy: Option<i64>"));
         assert!(module.contains("pub work_flag: Option<i64>"));
         assert!(module.contains("pub work_transition_term: Option<i64>"));
+        assert!(module.contains("pub work_module_set_int_value: Option<i64>"));
+        assert!(module.contains("pub work_module_set_float_value: Option<f32>"));
+        assert!(module.contains("pub work_module_set_slot: Option<i64>"));
         assert!(module.contains("pub motion_module_rate: Option<f32>"));
         assert!(module.contains("pub motion_module_helper_calculation: Option<bool>"));
         assert!(module.contains("pub motion_module_rate_partial: Option<f32>"));
@@ -2933,6 +2951,10 @@ mod tests {
         assert!(module.contains("smash::app::lua_bind::WorkModule::unable_transition_term,"));
         assert!(module.contains("hook_work_module_enable_transition_term"));
         assert!(module.contains("hook_work_module_unable_transition_term"));
+        assert!(module.contains("replace = smash::app::lua_bind::WorkModule::set_int)"));
+        assert!(module.contains("replace = smash::app::lua_bind::WorkModule::set_float)"));
+        assert!(module.contains("hook_work_module_set_int"));
+        assert!(module.contains("hook_work_module_set_float"));
         assert!(rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_rate"));
         assert!(rate_hooks.contains("hook_motion_module_set_rate"));
         assert!(rate_hooks
@@ -2976,6 +2998,7 @@ mod tests {
             ),
             (CAT_WORK_FLAG, CAT_MOTION_MODULE_SET_RATE_PARTIAL),
             (CAT_WORK_TRANSITION_TERM, CAT_WORK_FLAG),
+            (CAT_WORK_MODULE_SET, CAT_WORK_TRANSITION_TERM),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -3131,6 +3154,39 @@ mod tests {
             Some("WorkModule::enable_transition_term")
         );
         assert_eq!(rule["overrides"]["work_transition_term"].as_i64(), Some(9));
+    }
+
+    #[test]
+    fn outbound_work_module_set_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let key = numeric_point_key("WorkModule::set_int", &[1.0, 7.0]);
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_WORK_MODULE_SET,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(13.5),
+            frame_end: Some(13.5),
+            overrides: Some(HbOverridesWire {
+                work_module_set_int_value: Some(3),
+                work_module_set_slot: Some(9),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("WorkModule::set_int".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_WORK_MODULE_SET as u64));
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(rule["func"].as_str(), Some("WorkModule::set_int"));
+        assert_eq!(
+            rule["overrides"]["work_module_set_int_value"].as_i64(),
+            Some(3)
+        );
+        assert_eq!(rule["overrides"]["work_module_set_slot"].as_i64(), Some(9));
     }
 
     #[test]

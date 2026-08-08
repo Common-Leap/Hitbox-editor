@@ -2362,7 +2362,7 @@ direct `KineticModule::change_kinetic` call measured in the local `game_` corpus
 the measured `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and
 `unable_energy` toggles, the argument-less `KineticModule::clear_speed_all` point, the direct
 `KineticModule::set_consider_ground_friction` point, and the direct WorkModule transition-term
-toggles now have editable slices
+toggles and measured value setters now have editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
@@ -2797,6 +2797,24 @@ changes, duplicate same-frame identities, malformed calls, and symbolic-only liv
 remain explicitly source/export-only. No emulator, game, or UI automation was run, so live hook
 behavior remains explicitly unverified. Other WorkModule status calls, including getter-driven
 conditional logic, remain open under E1.
+
+#### [x] E1u — direct `WorkModule::set_int` / `set_float` points (completed 2026-08-08; live runtime unverified)
+
+The local 462-file script cache contains exactly five standard-shape `WorkModule::set_int` calls
+and one standard-shape `WorkModule::set_float` call. Every measured call uses
+`agent.module_accessor`; the pinned `skyline-smash` bindings verify
+`set_int(receiver, i32, i32) -> ()` and `set_float(receiver, f32, i32) -> ()`. HDR `boma`
+forms and other value expressions remain raw until a matching source/runtime contract is
+measured.
+
+The five surfaces are covered for that exact standard shape: typed parser/IR and site walk,
+editable Movement / Status panel and timeline lane, capture reconstruction, category-34 sparse
+live rules and matching Skyline hooks, generated ACMD export, project persistence, and value/slot
+source write-back. Source/export retain numeric and dereferenced tokens; live replacement is
+numeric-only and requires a captured value and slot. Operation/frame/receiver changes, duplicate
+same-frame identities, malformed calls, and symbolic-only live replacements remain
+source/export-only. No emulator, game, or UI automation was run, so live hook behavior remains
+explicitly unverified.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

@@ -1348,6 +1348,11 @@ pub enum ExcuteStmt {
     /// transition term. Only the measured direct receiver and one-token shape is typed; the
     /// authored transition token remains source-owned for export and source sync.
     WorkTransitionTerm(WorkTransitionTermCall),
+    /// `WorkModule::set_int` / `WorkModule::set_float` — write one value into a work slot.
+    ///
+    /// Only the measured direct receiver and numeric/dereferenced value and slot tokens are
+    /// typed; authored names remain source-owned for export and source sync.
+    WorkModuleSet(WorkModuleSetCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1662,6 +1667,42 @@ impl WorkTransitionTermCall {
     }
 }
 
+/// Which direct WorkModule value setter a source call performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WorkModuleSetKind {
+    Int,
+    Float,
+}
+
+impl WorkModuleSetKind {
+    pub const fn func(self) -> &'static str {
+        match self {
+            Self::Int => "WorkModule::set_int",
+            Self::Float => "WorkModule::set_float",
+        }
+    }
+
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float)
+    }
+}
+
+/// A parsed direct `WorkModule::{set_int,set_float}(receiver, value, slot)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkModuleSetCall {
+    pub kind: WorkModuleSetKind,
+    /// Authored value token, numeric for `set_float` and numeric/dereferenced for `set_int`.
+    pub value: String,
+    /// Authored WorkModule slot token, usually a dereferenced lua constant.
+    pub slot: String,
+}
+
+impl WorkModuleSetCall {
+    pub fn func(&self) -> &'static str {
+        self.kind.func()
+    }
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1837,6 +1878,15 @@ pub struct WorkFlagEvent {
 pub struct WorkTransitionTermEvent {
     pub frame: u32,
     pub call: WorkTransitionTermCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct WorkModule value-set point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkModuleSetEvent {
+    pub frame: u32,
+    pub call: WorkModuleSetCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -2289,6 +2339,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.work_transition_terms
+    }
+
+    /// Flatten direct WorkModule value setters into authored-token point events.
+    pub fn to_work_module_set_events(&self) -> Vec<WorkModuleSetEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.work_module_sets
     }
 }
 
@@ -3121,6 +3179,47 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The direct WorkModule value-set call an event site's ordinal refers to.
+    pub fn work_module_set_stmt_mut(&mut self, site: usize) -> Option<&mut WorkModuleSetCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut WorkModuleSetCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::WorkModuleSet(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::WorkModuleSet(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove a `SET_AIR` source statement at its source ordinal.
     pub fn remove_set_air(&mut self, site: usize) -> bool {
         fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
@@ -3476,6 +3575,7 @@ struct WalkAccum {
     kinetic_add_speeds: Vec<KineticAddSpeedEvent>,
     work_flags: Vec<WorkFlagEvent>,
     work_transition_terms: Vec<WorkTransitionTermEvent>,
+    work_module_sets: Vec<WorkModuleSetEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -3537,6 +3637,9 @@ struct WalkAccum {
     /// Site for the next direct WorkModule transition-term call, independent of every other
     /// point event family.
     next_work_transition_term_site: usize,
+    /// Site for the next direct WorkModule value-set call, independent of every other point
+    /// event family.
+    next_work_module_set_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -4013,6 +4116,27 @@ fn count_work_transition_term_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// Direct WorkModule value-set calls in a subtree, counted in source order for loop/site
+/// resolution.
+fn count_work_module_set_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::WorkModuleSet(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::WorkModuleSet(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_work_module_set_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -4218,6 +4342,12 @@ impl WalkAccum {
     fn take_work_transition_term_site(&mut self) -> usize {
         let site = self.next_work_transition_term_site;
         self.next_work_transition_term_site += 1;
+        site
+    }
+
+    fn take_work_module_set_site(&mut self) -> usize {
+        let site = self.next_work_module_set_site;
+        self.next_work_module_set_site += 1;
         site
     }
 
@@ -4564,6 +4694,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::WorkModuleSet(call) => {
+            let site = hurt.take_work_module_set_site();
+            hurt.work_module_sets.push(WorkModuleSetEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -4623,6 +4761,7 @@ fn eval_stmts(
                 let kinetic_add_speed_site_at_entry = hurt.next_kinetic_add_speed_site;
                 let work_flag_site_at_entry = hurt.next_work_flag_site;
                 let work_transition_term_site_at_entry = hurt.next_work_transition_term_site;
+                let work_module_set_site_at_entry = hurt.next_work_module_set_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -4651,6 +4790,7 @@ fn eval_stmts(
                     hurt.next_kinetic_add_speed_site = kinetic_add_speed_site_at_entry;
                     hurt.next_work_flag_site = work_flag_site_at_entry;
                     hurt.next_work_transition_term_site = work_transition_term_site_at_entry;
+                    hurt.next_work_module_set_site = work_module_set_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -4692,6 +4832,8 @@ fn eval_stmts(
                 hurt.next_work_flag_site = work_flag_site_at_entry + count_work_flag_stmts(body);
                 hurt.next_work_transition_term_site =
                     work_transition_term_site_at_entry + count_work_transition_term_stmts(body);
+                hurt.next_work_module_set_site =
+                    work_module_set_site_at_entry + count_work_module_set_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -4937,6 +5079,9 @@ pub struct AppState {
     /// Direct WorkModule transition-term point events as loaded, for sparse live rules and source
     /// syncing.
     pub work_transition_term_pristine: Vec<WorkTransitionTermEvent>,
+    /// Direct WorkModule value-set point events as loaded, for sparse live rules and source
+    /// syncing.
+    pub work_module_set_pristine: Vec<WorkModuleSetEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -5044,6 +5189,7 @@ impl Default for AppState {
             kinetic_add_speed_pristine: Vec::new(),
             work_flag_pristine: Vec::new(),
             work_transition_term_pristine: Vec::new(),
+            work_module_set_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -5092,6 +5238,7 @@ impl AppState {
         self.kinetic_add_speed_pristine = script.to_kinetic_add_speed_events();
         self.work_flag_pristine = script.to_work_flag_events();
         self.work_transition_term_pristine = script.to_work_transition_term_events();
+        self.work_module_set_pristine = script.to_work_module_set_events();
         self.script = script;
     }
 }

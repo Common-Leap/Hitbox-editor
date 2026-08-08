@@ -4872,6 +4872,151 @@ pub fn sync_work_transition_terms(
     })
 }
 
+/// The verified direct `WorkModule::set_int` / `set_float` calls in source order. The local
+/// cache contains the standard `agent.module_accessor` receiver for this family; other receiver
+/// forms remain source-only until measured.
+pub(crate) fn work_module_set_sites(text: &str) -> Vec<MacroSite> {
+    let mut sites = Vec::new();
+    for kind in [
+        crate::data::WorkModuleSetKind::Int,
+        crate::data::WorkModuleSetKind::Float,
+    ] {
+        sites.extend(scan_named_sites(text, kind.func(), 0..text.len()));
+    }
+    sites.sort_by_key(|site| site.span.start);
+    sites
+        .into_iter()
+        .filter(|site| {
+            let kind = match site.name.as_str() {
+                "WorkModule::set_int" => crate::data::WorkModuleSetKind::Int,
+                "WorkModule::set_float" => crate::data::WorkModuleSetKind::Float,
+                _ => return false,
+            };
+            site.args.len() == 3
+                && site
+                    .arg(text, 0)
+                    .is_some_and(|value| value.trim() == "agent.module_accessor")
+                && site
+                    .arg(text, 1)
+                    .is_some_and(|value| valid_work_module_set_value(value, kind))
+                && site.arg(text, 2).is_some_and(valid_work_flag_token)
+        })
+        .collect()
+}
+
+fn valid_work_module_set_value(value: &str, kind: crate::data::WorkModuleSetKind) -> bool {
+    let value = value.trim();
+    if kind.is_float() {
+        value.parse::<f32>().is_ok_and(f32::is_finite)
+    } else {
+        valid_work_flag_token(value)
+    }
+}
+
+/// Rewrite only authored value and slot tokens of existing direct WorkModule setters.
+pub fn rewrite_work_module_sets(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::WorkModuleSetEvent],
+    edited: &[crate::data::WorkModuleSetEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = work_module_set_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable direct WorkModule set call(s), while the editor has {} pristine and {} edited point(s) — malformed or unmeasured calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: WorkModule set site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: WorkModule set site {} was retimed from frame {} to {} — source syncing only retunes authored value/slot tokens",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        if before.call.kind != now.call.kind {
+            report.skipped.push(format!(
+                "{label}: WorkModule set site {} changed between set_int and set_float — source syncing preserves the authored operation",
+                before.site
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != before.call.func()
+            || site.args.len() != 3
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| value.trim() != "agent.module_accessor")
+            || site
+                .arg(text, 1)
+                .is_none_or(|value| value.trim() != before.call.value.trim())
+            || site
+                .arg(text, 2)
+                .is_none_or(|value| value.trim() != before.call.slot.trim())
+        {
+            report.skipped.push(format!(
+                "{label}: WorkModule set site {} no longer has its verified receiver/operation/value/slot shape",
+                before.site
+            ));
+            continue;
+        }
+        if !valid_work_module_set_value(&now.call.value, now.call.kind)
+            || !valid_work_flag_token(&now.call.slot)
+        {
+            report.skipped.push(format!(
+                "{label}: WorkModule set site {} has an unsupported or empty value/slot token — source syncing leaves the authored call intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.value.trim()) {
+                edits.push(edit);
+            }
+        }
+        if let Some(span) = site.args.get(2) {
+            if let Some(edit) = text_edit(text, span, now.call.slot.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited WorkModule value setters into the project's `game_` function.
+pub fn sync_work_module_sets(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::WorkModuleSetEvent],
+    edited: &[crate::data::WorkModuleSetEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_work_module_sets(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// Whether a direct `KineticModule::add_speed` receiver is one of the measured source forms.
 fn is_kinetic_add_speed_receiver(value: &str) -> bool {
     matches!(value.trim(), "agent.module_accessor" | "boma")
@@ -9587,6 +9732,59 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         edited[1].call.transition_term = "make_term()".into();
         let (after, report) =
             rewrite_work_transition_terms(text, "mario/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert_eq!(report.changed, 0, "{report:?}");
+        assert_eq!(report.skipped.len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn work_module_set_source_sync_rewrites_value_and_slot_tokens() {
+        let text = r#"unsafe extern "C" fn game_itemgrasspull(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        WorkModule::set_int(agent.module_accessor, *FIGHTER_ITEM_GRASS_PULL_STEP_PICKUP, *FIGHTER_STATUS_ITEM_GRASS_PULL_WORK_INT_NEXT_STEP);
+    }
+    frame(agent.lua_state_agent, 47.0);
+    if macros::is_excute(agent) {
+        WorkModule::set_float(agent.module_accessor, 5.0, *FIGHTER_INSTANCE_WORK_ID_FLOAT_FINISH_CAMERA_THROW_RAY_LENGTH);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_work_module_set_events();
+        let mut edited = pristine.clone();
+        edited[0].call.value = "4".into();
+        edited[0].call.slot = "9".into();
+        edited[1].call.value = "6.25".into();
+        edited[1].call.slot = "12".into();
+
+        let (after, report) =
+            rewrite_work_module_sets(text, "kirby/item_grass_pull", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 4, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("WorkModule::set_int(agent.module_accessor, 4, 9);"));
+        assert!(after.contains("WorkModule::set_float(agent.module_accessor, 6.25, 12);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_work_module_set_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn work_module_set_source_sync_refuses_retiming_kind_and_malformed_edits() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        WorkModule::set_int(agent.module_accessor, 1, 7);
+        WorkModule::set_float(agent.module_accessor, 2.0, 8);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_work_module_set_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 2;
+        edited[1].call.kind = crate::data::WorkModuleSetKind::Int;
+        edited[1].call.value = "make_value()".into();
+        let (after, report) =
+            rewrite_work_module_sets(text, "mario/x", &pristine, &edited).unwrap();
         assert_eq!(after, text);
         assert_eq!(report.changed, 0, "{report:?}");
         assert_eq!(report.skipped.len(), 2, "{report:?}");

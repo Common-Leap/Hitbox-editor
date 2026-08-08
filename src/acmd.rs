@@ -438,6 +438,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_work_module_set_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_correct_call(line) {
             stmts.push(stmt);
             continue;
@@ -2334,6 +2338,61 @@ fn parse_work_transition_term_call(line: &str) -> Option<ExcuteStmt> {
     None
 }
 
+/// Parse the measured direct WorkModule value-set shapes from the local cache:
+/// `WorkModule::set_int(agent.module_accessor, value, slot)` and
+/// `WorkModule::set_float(agent.module_accessor, value, slot)`. The cache contains only the
+/// standard receiver for this family, so HDR `boma` calls remain raw until separately measured.
+fn parse_work_module_set_call(line: &str) -> Option<ExcuteStmt> {
+    for (func, kind) in [
+        ("WorkModule::set_int", crate::data::WorkModuleSetKind::Int),
+        (
+            "WorkModule::set_float",
+            crate::data::WorkModuleSetKind::Float,
+        ),
+    ] {
+        let needle = format!("{func}(");
+        let Some(start) = line.find(&needle).map(|index| index + needle.len()) else {
+            continue;
+        };
+        let end = line[start..].rfind(')')? + start;
+        let tokens = tokenize_args(&line[start..end]);
+        let [module_accessor, value, slot] = tokens.as_slice() else {
+            continue;
+        };
+        if module_accessor.trim() != "agent.module_accessor" {
+            continue;
+        }
+        let value = value.trim();
+        let valid_value = if kind.is_float() {
+            value.parse::<f32>().is_ok_and(f32::is_finite)
+        } else {
+            value.parse::<i64>().is_ok()
+                || value.strip_prefix('*').is_some_and(|name| {
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                })
+        };
+        let slot = slot.trim();
+        let valid_slot = slot.parse::<i64>().is_ok()
+            || slot.strip_prefix('*').is_some_and(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            });
+        if valid_value && valid_slot {
+            return Some(ExcuteStmt::WorkModuleSet(crate::data::WorkModuleSetCall {
+                kind,
+                value: value.to_string(),
+                slot: slot.to_string(),
+            }));
+        }
+    }
+    None
+}
+
 fn parse_zero_z_vector(value: &str) -> Option<(f32, f32)> {
     let value = value.trim();
     let value = value.strip_prefix('&')?.trim_start();
@@ -2953,6 +3012,12 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 "{indent}{}(agent.module_accessor, {});",
                 call.func(),
                 call.transition_term
+            ),
+            crate::data::ExcuteStmt::WorkModuleSet(call) => format!(
+                "{indent}{}(agent.module_accessor, {}, {});",
+                call.func(),
+                call.value,
+                call.slot
             ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
@@ -9683,6 +9748,78 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("WorkModule::unable_transition_term(other, 2);"));
         assert!(emitted
             .contains("WorkModule::unable_transition_term(agent.module_accessor, make_term());"));
+    }
+
+    #[test]
+    fn work_module_value_setters_parse_export_and_round_trip_the_measured_shape() {
+        let source = r#"unsafe extern "C" fn game_itemgrasspull(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        WorkModule::set_int(agent.module_accessor, *FIGHTER_ITEM_GRASS_PULL_STEP_PICKUP, *FIGHTER_STATUS_ITEM_GRASS_PULL_WORK_INT_NEXT_STEP);
+    }
+    frame(agent.lua_state_agent, 47.0);
+    if is_excute(agent) {
+        WorkModule::set_float(agent.module_accessor, 5.0, *FIGHTER_INSTANCE_WORK_ID_FLOAT_FINISH_CAMERA_THROW_RAY_LENGTH);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_work_module_set_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 5);
+        assert_eq!(events[0].call.kind, crate::data::WorkModuleSetKind::Int);
+        assert_eq!(events[0].call.value, "*FIGHTER_ITEM_GRASS_PULL_STEP_PICKUP");
+        assert_eq!(
+            events[0].call.slot,
+            "*FIGHTER_STATUS_ITEM_GRASS_PULL_WORK_INT_NEXT_STEP"
+        );
+        assert_eq!(events[1].frame, 47);
+        assert_eq!(events[1].call.kind, crate::data::WorkModuleSetKind::Float);
+        assert_eq!(events[1].call.value, "5.0");
+
+        let emitted = preview_game_fn(&script, "item_grass_pull");
+        assert!(emitted.contains(
+            "WorkModule::set_int(agent.module_accessor, *FIGHTER_ITEM_GRASS_PULL_STEP_PICKUP, *FIGHTER_STATUS_ITEM_GRASS_PULL_WORK_INT_NEXT_STEP);"
+        ));
+        assert!(emitted.contains(
+            "WorkModule::set_float(agent.module_accessor, 5.0, *FIGHTER_INSTANCE_WORK_ID_FLOAT_FINISH_CAMERA_THROW_RAY_LENGTH);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_work_module_set_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_work_module_value_setter_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        WorkModule::set_int(agent.module_accessor, 1);
+        WorkModule::set_int(agent.module_accessor, 1, 2, 3);
+        WorkModule::set_int(other.module_accessor, 1, 2);
+        WorkModule::set_int(agent.module_accessor, make_value(), 2);
+        WorkModule::set_float(agent.module_accessor, value, 2);
+        WorkModule::set_float(agent.module_accessor, NaN, 2);
+        WorkModule::set_float(agent.module_accessor, 1.0, make_slot());
+        WorkModule::set_int(agent.module_accessor, 1, slot);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert_eq!(script.to_work_module_set_events().len(), 0);
+        let emitted = preview_game_fn(&script, "x");
+        for line in [
+            "WorkModule::set_int(agent.module_accessor, 1);",
+            "WorkModule::set_int(agent.module_accessor, 1, 2, 3);",
+            "WorkModule::set_int(other.module_accessor, 1, 2);",
+            "WorkModule::set_int(agent.module_accessor, make_value(), 2);",
+            "WorkModule::set_float(agent.module_accessor, value, 2);",
+            "WorkModule::set_float(agent.module_accessor, NaN, 2);",
+            "WorkModule::set_float(agent.module_accessor, 1.0, make_slot());",
+            "WorkModule::set_int(agent.module_accessor, 1, slot);",
+        ] {
+            assert!(emitted.contains(line), "raw line lost: {line}\n{emitted}");
+        }
     }
 
     #[test]

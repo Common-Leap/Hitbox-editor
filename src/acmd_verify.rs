@@ -1240,6 +1240,14 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
                 "WorkModule transition-term call has an empty transition term token",
             );
         }
+        ExcuteStmt::WorkModuleSet(call)
+            if call.value.trim().is_empty() || call.slot.trim().is_empty() =>
+        {
+            report.blocker(
+                subject,
+                "WorkModule value-set call has an empty value or slot token",
+            );
+        }
         _ => {}
     }
 }
@@ -1736,6 +1744,26 @@ mod tests {
         assert!(
             text.contains("hitbox_attr") && text.contains("0.35") && text.contains("0.3"),
             "the report must name the field and both values:\n{text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_work_module_set_token_is_reported_as_a_blocker() {
+        let script = AcmdScript {
+            stmts: vec![AcmdStmt::Excute(vec![ExcuteStmt::WorkModuleSet(
+                crate::data::WorkModuleSetCall {
+                    kind: crate::data::WorkModuleSetKind::Int,
+                    value: String::new(),
+                    slot: String::new(),
+                },
+            )])],
+        };
+        let mut report = Report::default();
+        check_script_values("test", &script, &mut report);
+        assert!(report.has_blockers(), "{report:?}");
+        assert!(
+            messages(&report).contains("WorkModule value-set call has an empty value or slot"),
+            "{report:?}"
         );
     }
 

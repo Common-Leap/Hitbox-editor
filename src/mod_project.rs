@@ -598,7 +598,7 @@ mod tests {
     fn kinetic_acmd_points_survive_project_round_trip() {
         use crate::data::{
             AcmdScript, AcmdStmt, ClrSpeedCall, ExcuteStmt, WorkFlagAction, WorkFlagCall,
-            WorkTransitionTermAction, WorkTransitionTermCall,
+            WorkModuleSetCall, WorkModuleSetKind, WorkTransitionTermAction, WorkTransitionTermCall,
         };
 
         let script = AcmdScript {
@@ -616,6 +616,11 @@ mod tests {
                     ExcuteStmt::WorkTransitionTerm(WorkTransitionTermCall {
                         action: WorkTransitionTermAction::Enable,
                         transition_term: "*FIGHTER_STATUS_TRANSITION_TERM_ID_DASH_TO_RUN".into(),
+                    }),
+                    ExcuteStmt::WorkModuleSet(WorkModuleSetCall {
+                        kind: WorkModuleSetKind::Int,
+                        value: "4".into(),
+                        slot: "*FIGHTER_STATUS_WORK_INT_NEXT_STEP".into(),
                     }),
                 ]),
             ],
@@ -648,6 +653,10 @@ mod tests {
         assert_eq!(
             loaded.to_work_transition_term_events(),
             script.to_work_transition_term_events()
+        );
+        assert_eq!(
+            loaded.to_work_module_set_events(),
+            script.to_work_module_set_events()
         );
     }
 

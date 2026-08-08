@@ -276,6 +276,9 @@ pub const CAT_WORK_FLAG: u8 = 32;
 /// editor's wire category.
 pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
 
+/// Direct `WorkModule::set_int` / `set_float` point. Must equal the editor's wire category.
+pub const CAT_WORK_MODULE_SET: u8 = 34;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -960,6 +963,12 @@ pub struct HbOverrides {
     pub work_flag: Option<i64>,
     /// Replacement numeric transition term for direct WorkModule transition-term calls.
     pub work_transition_term: Option<i64>,
+    /// Replacement integer value for a direct `WorkModule::set_int` call.
+    pub work_module_set_int_value: Option<i64>,
+    /// Replacement float value for a direct `WorkModule::set_float` call.
+    pub work_module_set_float_value: Option<f32>,
+    /// Replacement WorkModule slot for either direct value setter.
+    pub work_module_set_slot: Option<i64>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     pub clr_speed_kinetic_kind: Option<i64>,
     /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
@@ -1093,6 +1102,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_MOTION_MODULE_SET_RATE_PARTIAL => "motion_module_set_rate_partial",
                     CAT_WORK_FLAG => "work_flag",
                     CAT_WORK_TRANSITION_TERM => "work_transition_term",
+                    CAT_WORK_MODULE_SET => "work_module_set",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1687,6 +1697,95 @@ work_transition_term_hook!(
     smash::app::lua_bind::WorkModule::unable_transition_term,
     "WorkModule::unable_transition_term"
 );
+
+/// Capture and sparsely override the verified direct WorkModule value setters.
+///
+/// The slot and value are both part of the numeric identity. The editor keeps their authored
+/// source tokens, while a live rule can replace only the numeric values proven by a capture.
+#[skyline::hook(replace = smash::app::lua_bind::WorkModule::set_int)]
+unsafe fn hook_work_module_set_int(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    value: i32,
+    slot: i32,
+) {
+    let args = [LuaArg::Int(value as i64), LuaArg::Int(slot as i64)];
+    record_for_boma(boma, "WorkModule::set_int", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = numeric_point_key(
+            "WorkModule::set_int",
+            &[value as f32, slot as f32],
+        );
+        if let Some((suppress, overrides)) = action_for_func(
+            CAT_WORK_MODULE_SET,
+            motion,
+            key,
+            frame,
+            "WorkModule::set_int",
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(overrides) = overrides {
+                let replacement_value = overrides
+                    .work_module_set_int_value
+                    .and_then(|item| i32::try_from(item).ok())
+                    .unwrap_or(value);
+                let replacement_slot = overrides
+                    .work_module_set_slot
+                    .and_then(|item| i32::try_from(item).ok())
+                    .unwrap_or(slot);
+                if replacement_value != value || replacement_slot != slot {
+                    original!()(boma, replacement_value, replacement_slot);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, value, slot)
+}
+
+#[skyline::hook(replace = smash::app::lua_bind::WorkModule::set_float)]
+unsafe fn hook_work_module_set_float(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    value: f32,
+    slot: i32,
+) {
+    let args = [LuaArg::Num(value), LuaArg::Int(slot as i64)];
+    record_for_boma(boma, "WorkModule::set_float", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = numeric_point_key("WorkModule::set_float", &[value, slot as f32]);
+        if let Some((suppress, overrides)) = action_for_func(
+            CAT_WORK_MODULE_SET,
+            motion,
+            key,
+            frame,
+            "WorkModule::set_float",
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(overrides) = overrides {
+                let replacement_value = overrides
+                    .work_module_set_float_value
+                    .filter(|item| item.is_finite())
+                    .unwrap_or(value);
+                let replacement_slot = overrides
+                    .work_module_set_slot
+                    .and_then(|item| i32::try_from(item).ok())
+                    .unwrap_or(slot);
+                if replacement_value != value || replacement_slot != slot {
+                    original!()(boma, replacement_value, replacement_slot);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, value, slot)
+}
 
 /// Capture and sparsely override the verified `SET_SPEED_EX` shape.
 ///
@@ -3206,7 +3305,9 @@ pub fn install() {
         hook_work_module_on_flag,
         hook_work_module_off_flag,
         hook_work_module_enable_transition_term,
-        hook_work_module_unable_transition_term
+        hook_work_module_unable_transition_term,
+        hook_work_module_set_int,
+        hook_work_module_set_float
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to
