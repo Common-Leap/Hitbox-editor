@@ -3542,9 +3542,10 @@ copy of every spawn onto the timeline.
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs` carries the manual pattern hook used to
 keep the core effect viewer usable. Static 13.0.4 analysis (2026-08-08) found the scanned body at
 the target reached by the exported
-`FighterManager__notify_log_event_collision_hit_impl` wrapper. Its native ABI is
-`(FighterManager*, u32, u32, f32, i32, bool) -> ()`; the plugin trampoline and callback now match
-those argument positions. This removes the previous Rust six-integer ABI mismatch.
+`FighterManager__notify_log_event_collision_hit_impl` wrapper. Its pinned binding ABI is
+`(FighterManager*, u32, u32, f32, i32, bool) -> u64`; the plugin trampoline and callback now
+match those argument positions and preserve the binding's return register. This removes the
+previous Rust six-integer ABI mismatch.
 
 The pinned `skyline-smash` bindings do expose the exported wrapper, but the 13.0.4 dump shows that
 the wrapper branches to the scanned body and that other game sites call the body directly. A

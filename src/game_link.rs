@@ -2446,6 +2446,7 @@ mod tests {
             "damage: f32",
             "collision_id: i32",
             "flags: bool",
+            "    bool,\n) -> u64;",
             "orig(",
         ] {
             assert!(

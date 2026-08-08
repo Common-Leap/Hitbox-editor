@@ -33,7 +33,7 @@ type CollisionHitTrampoline = unsafe extern "C" fn(
     f32,
     i32,
     bool,
-);
+) -> u64;
 
 type CollisionCallback = fn(&CollisionContext);
 
@@ -149,7 +149,7 @@ unsafe extern "C" fn collision_hit_hook(
     damage: f32,
     collision_id: i32,
     flags: bool,
-) {
+) -> u64 {
     let tick = crate::slight::frame_context::match_ticks();
     let ctx = CollisionContext {
         manager: manager as u64,
@@ -171,7 +171,9 @@ unsafe extern "C" fn collision_hit_hook(
             damage,
             collision_id,
             flags,
-        );
+        )
+    } else {
+        0
     }
 }
 
