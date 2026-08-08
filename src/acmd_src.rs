@@ -106,6 +106,69 @@ pub fn scan_macro_sites(text: &str, range: Range<usize>) -> Vec<MacroSite> {
     sites
 }
 
+/// Every direct call to `name(...)` in `text[range]`, in document order.
+///
+/// This covers the small number of generated helpers that deliberately do not live under the
+/// `macros::` namespace. It shares the same literal/comment and balanced-argument handling as
+/// [`scan_macro_sites`], while excluding a function declaration whose name happens to match.
+fn scan_named_sites(text: &str, name: &str, range: Range<usize>) -> Vec<MacroSite> {
+    let bytes = text.as_bytes();
+    let mut sites = Vec::new();
+    let mut i = range.start;
+    while i < range.end {
+        if let Some(next) = skip_trivia(text, i) {
+            i = next;
+            continue;
+        }
+        if !text.is_char_boundary(i) || !text[i..range.end].starts_with(name) {
+            i += 1;
+            while i < range.end && !text.is_char_boundary(i) {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Do not match a qualified or longer identifier that merely ends with `name`.
+        if text[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':')
+        {
+            i += name.len();
+            continue;
+        }
+
+        let name_end = i + name.len();
+        let mut open = name_end;
+        while open < range.end && bytes[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        if open >= range.end || bytes[open] != b'(' {
+            i = name_end.max(i + 1);
+            continue;
+        }
+
+        // The generated helper is nested in the exported ACMD function. Its declaration has the
+        // same token sequence as a call after the name, but it is not an editable event site.
+        if text[..i].trim_end().ends_with("fn") {
+            i = open + 1;
+            continue;
+        }
+
+        let Some((args, close)) = split_call_args(text, open + 1, range.end) else {
+            i = open + 1;
+            continue;
+        };
+        sites.push(MacroSite {
+            name: name.to_string(),
+            span: i..close + 1,
+            args,
+        });
+        i = close + 1;
+    }
+    sites
+}
+
 /// A raw `effect(*MA_MSC_CMD_…, …)` trail call starting at `i`, as a site the rewriters can use.
 ///
 /// Only the commands in [`crate::data::RAW_TRAIL_COMMANDS`] match, and the returned `args`
@@ -3242,11 +3305,17 @@ pub fn sync_speed_ex(
     })
 }
 
-/// The buildable `SET_SPEED` calls in source order.
+/// The buildable direct `SET_SPEED` calls and generated helper calls in source order.
 pub(crate) fn speed_sites(text: &str) -> Vec<MacroSite> {
-    scan_macro_sites(text, 0..text.len())
+    let mut sites = scan_macro_sites(text, 0..text.len());
+    sites.extend(scan_named_sites(text, "visionary_set_speed", 0..text.len()));
+    sites.sort_by_key(|site| site.span.start);
+    sites
         .into_iter()
-        .filter(|site| site.name == "SET_SPEED" && site.args.len() == 3)
+        .filter(|site| {
+            matches!(site.name.as_str(), "SET_SPEED" | "visionary_set_speed")
+                && site.args.len() == 3
+        })
         .collect()
 }
 
@@ -3291,7 +3360,11 @@ pub fn rewrite_speed(
         let Some(site) = sites.get(index) else {
             continue;
         };
-        if site.name != crate::data::SetSpeedCall::FUNC || site.args.len() != 3 {
+        if !matches!(
+            site.name.as_str(),
+            crate::data::SetSpeedCall::FUNC | "visionary_set_speed"
+        ) || site.args.len() != 3
+        {
             report.skipped.push(format!(
                 "{label}: `SET_SPEED` site {} no longer has its verified three-argument shape",
                 before.site
@@ -6801,6 +6874,42 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(report.skipped.is_empty(), "{report:?}");
         assert!(after.contains("macros::SET_SPEED(agent, 1.25, 2);"));
         assert!(after.contains("frame(agent.lua_state_agent, 4.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_speed_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn generated_set_speed_helper_write_back_round_trips_without_touching_definition() {
+        let source = r#"unsafe extern "C" fn game_speed(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::SET_SPEED(agent, 0, -3.8);
+    }
+}
+"#;
+        let script = crate::acmd::parse_acmd_script(source);
+        let generated = crate::acmd::preview_game_fn(&script, "speed");
+        let pristine = crate::acmd::parse_acmd_script(&generated).to_speed_events();
+        assert_eq!(speed_sites(&generated).len(), 1, "{generated}");
+        assert!(
+            generated.contains("unsafe fn visionary_set_speed(")
+                && generated.contains("visionary_set_speed(agent, 0.0, -3.8);"),
+            "{generated}"
+        );
+
+        let mut edited = pristine.clone();
+        edited[0].call.speed_x = 1.25;
+        edited[0].call.speed_y = 2.0;
+        let (after, report) = rewrite_speed(&generated, "mario/speed", &pristine, &edited).unwrap();
+
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(
+            "unsafe fn visionary_set_speed(agent: &mut L2CAgentBase, speed_x: f32, speed_y: f32)"
+        ));
+        assert!(after.contains("visionary_set_speed(agent, 1.25, 2);"));
         assert_eq!(
             crate::acmd::parse_acmd_script(&after).to_speed_events(),
             edited

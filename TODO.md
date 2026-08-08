@@ -2406,7 +2406,9 @@ reconstruction, portable project persistence, category-16 live rules with a matc
 hook, generated ACMD export, and value-only write-back of the two velocity arguments. Because the
 vendored Rust macro layer exposes no safe `SET_SPEED` wrapper, generated source calls a local
 helper that prepares the Lua stack and invokes the linked primitive; editable source retains the
-original `macros::SET_SPEED` spelling.
+original `macros::SET_SPEED` spelling. Source syncing also recognizes the generated
+`visionary_set_speed` helper calls, while excluding the helper definition itself from the event
+ordinal.
 
 The two measured external calls and all exact local shapes round-trip; malformed arities remain
 raw. Live replacement is frame-only and refuses same-frame pairs because the command has no
