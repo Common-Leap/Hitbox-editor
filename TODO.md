@@ -2779,6 +2779,13 @@ there is no measured wrapper or capture contract that identifies its value. The 
 remain raw until a version-matched source or runtime capture establishes that missing argument;
 no parser, export helper, write-back slot, or live hook should guess it.
 
+A bounded static audit of the version-matched 13.0.4 image resolves the native side only: all three
+exported partial-frame wrappers normalize the native boolean register before their vtable
+dispatch. The wrappers do not reveal the Lua-side argument count or a default for the missing
+source value, and no direct text callers were found for these exported symbols. This confirms the
+ABI shape without closing the source/runtime evidence gap, so the three-argument calls remain
+source-preserved and untyped.
+
 #### [x] E1s — direct `WorkModule::on_flag` / `off_flag` points (completed 2026-08-08; live runtime unverified)
 
 The retained public dumped-script corpus contains 9,855 exact `on_flag` calls and 2,091 exact
