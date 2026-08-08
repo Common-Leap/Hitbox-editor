@@ -126,6 +126,8 @@ const ATTACK_ARGC: i32 = 36;
 const CATCH_ARGC: i32 = 11;
 /// `ATTACK_ABS` takes sixteen — a different family, not a short `ATTACK`.
 const ATTACK_ABS_ARGC: i32 = 16;
+/// `ATTACK_FP` takes 41 arguments after `agent` and has its own layout.
+const ATTACK_FP_ARGC: i32 = 41;
 /// `SEARCH`: id, part, bone, size, x/y/z, the capsule triple, collision kind, hit status, an
 /// undocumented int, then the situation/category/part masks and a trailing flag.
 const SEARCH_ARGC: i32 = 17;
@@ -141,6 +143,9 @@ pub const CAT_WIND: u8 = 2;
 /// layout shares nothing positionally with `ATTACK`, and its rule key is the absolute kind
 /// rather than the id, which every vanilla call writes as 0.
 pub const CAT_ABS: u8 = 4;
+/// `ATTACK_FP` — fighter-position collision with a separate 41-slot layout.
+/// **Must equal the editor's `game_link::CAT_ATTACK_FP`.**
+pub const CAT_ATTACK_FP: u8 = 12;
 /// Hurtbox state (`HIT_NODE` / `HIT_NO` / `WHOLE_HIT`), which is not a collision at all — it
 /// changes how the fighter *receives* hits. It rides the same rule pipeline because the matching
 /// key is the same shape (motion + target + frame window), but it is deliberately absent from
@@ -665,12 +670,16 @@ fn mark_capture_motion(
 /// Does this captured function put a collision out? Kept in step with the editor, which
 /// buckets captures the same way (`ATTACK*` / `CATCH` / `AREA_WIND*`).
 fn is_collision_func(func: &str) -> bool {
-    // `ATTACK_ABS` shares the prefix and is not a collision: it has no volume, and nothing in
-    // the vanilla corpus clears it. Arming the gate for one would make the next
-    // `AttackModule::clear_all` look like it ended something.
-    func.starts_with("ATTACK") && func != "ATTACK_CLEAR_ALL" && func != "ATTACK_ABS"
-        || func == "CATCH"
-        || func.starts_with("AREA_WIND") && func != "AREA_WIND_ERASE"
+    // Name equality is intentional. `ATTACK_ABS` has no volume, and prefix bucketing would make
+    // a different ATTACK-family layout arm the ordinary clear gate by accident.
+    matches!(func, "ATTACK" | "ATTACK_IGNORE_THROW" | "ATTACK_FP" | "CATCH")
+        || matches!(
+            func,
+            "AREA_WIND_2ND"
+                | "AREA_WIND_2ND_RAD"
+                | "AREA_WIND_2ND_arg10"
+                | "AREA_WIND_2ND_RAD_arg9"
+        )
 }
 
 /// Note that a collision came out (or was cleared) on `boid`, and report whether a clear is
@@ -953,6 +962,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_ATK_POWER => "atk_power",
                     CAT_ATK_SETOFF_MUL => "atk_setoff",
                     CAT_SEARCH => "search",
+                    CAT_ATTACK_FP => "attack_fp",
                     CAT_SOUND => "sound",
                     CAT_EXPRESSION => "expression",
                     CAT_REVERSE_LR => "reverse_lr",
@@ -1265,6 +1275,66 @@ unsafe fn rewrite_attack_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg])
     }
 }
 
+/// Rewrite the established `ATTACK_FP` fields at their own slot indices. Geometry and the
+/// undocumented tail stay exactly as the captured call supplied them.
+unsafe fn rewrite_attack_fp_args(lua_state: u64, ov: &HbOverrides, args: &[LuaArg]) {
+    let mut vals: Vec<LuaArg> = args.to_vec();
+    let set_num = |idx: usize, value: Option<f32>, vals: &mut Vec<LuaArg>| {
+        let Some(value) = value else { return };
+        if idx >= vals.len() {
+            return;
+        }
+        vals[idx] = match vals[idx] {
+            LuaArg::Int(_) => LuaArg::Int(value as i64),
+            _ => LuaArg::Num(value),
+        };
+    };
+    let set_int = |idx: usize, value: Option<i64>, vals: &mut Vec<LuaArg>| {
+        let Some(value) = value else { return };
+        if idx >= vals.len() {
+            return;
+        }
+        vals[idx] = match vals[idx] {
+            LuaArg::Num(_) => LuaArg::Num(value as f32),
+            LuaArg::Bool(_) => LuaArg::Bool(value != 0),
+            _ => LuaArg::Int(value),
+        };
+    };
+    let set_flag = |idx: usize, value: Option<bool>, vals: &mut Vec<LuaArg>| {
+        let Some(value) = value else { return };
+        if idx >= vals.len() {
+            return;
+        }
+        vals[idx] = match vals[idx] {
+            LuaArg::Int(_) => LuaArg::Int(value as i64),
+            LuaArg::Num(_) => LuaArg::Num(if value { 1.0 } else { 0.0 }),
+            _ => LuaArg::Bool(value),
+        };
+    };
+    set_int(1, ov.part, &mut vals);
+    set_num(3, ov.damage, &mut vals);
+    set_int(4, ov.angle, &mut vals);
+    set_int(5, ov.kbg, &mut vals);
+    set_int(6, ov.fkb, &mut vals);
+    set_int(7, ov.bkb, &mut vals);
+    set_num(14, ov.hitlag, &mut vals);
+    set_num(15, ov.sdi, &mut vals);
+    set_flag(16, ov.clang, &mut vals);
+    set_int(19, ov.sound_level, &mut vals);
+    set_int(20, ov.sound_attr, &mut vals);
+    set_int(21, ov.ground_or_air, &mut vals);
+    set_int(23, ov.attack_region, &mut vals);
+    set_flag(29, ov.reflectable, &mut vals);
+    set_flag(30, ov.absorbable, &mut vals);
+    set_int(34, ov.lr_check, &mut vals);
+    if let Some(hash) = ov.collision_attr {
+        if vals.len() > 12 {
+            vals[12] = LuaArg::Hash(hash);
+        }
+    }
+    rewrite_args(lua_state, &vals);
+}
+
 macro_rules! attack_hook {
     ($hook_name:ident, $target:path, $func:literal) => {
         #[skyline::hook(replace = $target)]
@@ -1310,6 +1380,39 @@ attack_hook!(
     smash::app::sv_animcmd::ATTACK_IGNORE_THROW,
     "ATTACK_IGNORE_THROW"
 );
+
+/// `ATTACK_FP` has the same collision lifecycle as ATTACK but a different 41-slot payload.
+#[skyline::hook(replace = smash::app::sv_animcmd::ATTACK_FP)]
+unsafe fn hook_attack_fp(lua_state: u64) {
+    let args = read_args_exact(lua_state, ATTACK_FP_ARGC);
+    if args.len() >= ATTACK_FP_ARGC as usize {
+        record(lua_state, "ATTACK_FP", &args);
+        if any_rules() {
+            let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                as *mut smash::app::BattleObjectModuleAccessor;
+            if !boma.is_null() {
+                let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+                let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                let id = match args.first() {
+                    Some(LuaArg::Int(value)) => *value as u64,
+                    Some(LuaArg::Num(value)) => *value as u64,
+                    _ => u64::MAX,
+                };
+                if let Some((suppress, overrides)) =
+                    action_for(CAT_ATTACK_FP, motion, id, frame)
+                {
+                    if suppress {
+                        return;
+                    }
+                    if let Some(overrides) = overrides {
+                        rewrite_attack_fp_args(lua_state, &overrides, &args);
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
 
 /// `AttackModule::clear_all` — when hitboxes STOP.
 ///
@@ -2032,6 +2135,16 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 ));
                 continue;
             }
+            if category == CAT_ATTACK_FP
+                && (args.len() != ATTACK_FP_ARGC as usize
+                    || inj.command.as_deref() != Some("ATTACK_FP"))
+            {
+                crate::slight::diag::note(format!(
+                    "rejected ATTACK_FP injection with {} args or wrong command",
+                    args.len()
+                ));
+                continue;
+            }
             for a in &args {
                 let mut v = a.to_l2c();
                 agent.push_lua_stack(&mut v);
@@ -2046,6 +2159,9 @@ pub unsafe fn inject_tick(lua_state: u64) {
                     }
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
+                    CAT_ATTACK_FP => {
+                        smash::app::sv_animcmd::ATTACK_FP(agent.lua_state_agent)
+                    }
                     CAT_WIND => match inj.command.as_deref() {
                         Some("AREA_WIND_2ND_RAD") => {
                             smash::app::sv_animcmd::AREA_WIND_2ND_RAD(agent.lua_state_agent)
@@ -2092,6 +2208,7 @@ pub fn install() {
     skyline::install_hooks!(
         hook_attack,
         hook_attack_ignore_throw,
+        hook_attack_fp,
         hook_catch,
         hook_search,
         hook_wind_2nd,

@@ -278,6 +278,15 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
         if line.is_empty() {
             continue;
         }
+        // `ATTACK_FP` starts with `ATTACK` but has a different fixed 41-slot layout. Keep its
+        // complete-name dispatch ahead of the ordinary family so a future addition to
+        // `ATTACK_FUNCS` cannot route it through the 36-slot parser.
+        if line.contains("macros::ATTACK_FP(") {
+            if let Some(call) = parse_attack_fp_call(line) {
+                stmts.push(ExcuteStmt::AttackFp(call));
+                continue;
+            }
+        }
         if ATTACK_FUNCS
             .iter()
             .any(|name| line.contains(&format!("macros::{name}(")))
@@ -1393,6 +1402,26 @@ fn parse_attack_abs_call(line: &str) -> Option<crate::data::AttackAbsCall> {
     })
 }
 
+/// Parse `macros::ATTACK_FP(...)`, whose 41 arguments after `agent` are not the ordinary
+/// `ATTACK` layout. The family has no corpus oracle, so the slot count is enforced directly
+/// against the `smash-script` declaration and every token is retained for lossless export.
+fn parse_attack_fp_call(line: &str) -> Option<crate::data::AttackFpCall> {
+    const NEEDLE: &str = "macros::ATTACK_FP(";
+    let start = line.find(NEEDLE)? + NEEDLE.len();
+    let end = line[start..].rfind(')')? + start;
+    let args = tokenize_args(&line[start..end]);
+    let args = args.get(1..)?;
+    if args.len() != crate::data::ATTACK_FP_ARGC {
+        return None;
+    }
+    Some(crate::data::AttackFpCall {
+        args: args
+            .iter()
+            .map(|arg| crate::data::AttackFpArg::Source(arg.clone()))
+            .collect(),
+    })
+}
+
 /// Parse one hurtbox-state or colour-blend line, or `None` if this is not one.
 ///
 /// Every member has exactly one arity in the vanilla archive — `HIT_NODE` 30 calls of
@@ -1811,6 +1840,11 @@ fn hash40_expr(attr: &str) -> String {
     }
 }
 
+/// Hash40 renderer shared by the FP IR conversion and this module's emitters.
+pub(crate) fn hash40_expr_for_data(attr: &str) -> String {
+    hash40_expr(attr)
+}
+
 pub fn const_expr(s: &str) -> String {
     let t = s.trim();
     if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
@@ -1909,6 +1943,18 @@ fn emit_attack(call: &AttackCall, indent: &str) -> String {
     )
 }
 
+/// Emit `macros::ATTACK_FP` from its own complete slot table. Unsupported or unknown slots are
+/// emitted from the preserved token/type rather than reconstructed from ordinary ATTACK fields.
+fn emit_attack_fp(call: &crate::data::AttackFpCall, indent: &str) -> String {
+    let args = call
+        .args
+        .iter()
+        .map(crate::data::AttackFpArg::source)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{indent}macros::ATTACK_FP(agent, {args});")
+}
+
 /// Emit the `macros::CATCH` call for a grab box.
 ///
 /// `CATCH` is a fixed-arity function whose capsule endpoints are `Option<f32>`, so a
@@ -2000,6 +2046,7 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::Attack(call) => emit_attack(call, indent),
             crate::data::ExcuteStmt::Catch(call) => emit_catch(call, indent),
             crate::data::ExcuteStmt::AttackAbs(call) => emit_attack_abs(call, indent),
+            crate::data::ExcuteStmt::AttackFp(call) => emit_attack_fp(call, indent),
             crate::data::ExcuteStmt::Search(call) => emit_search(call, indent),
             crate::data::ExcuteStmt::GrabClearAll => {
                 format!("{indent}GrabModule::clear_all(agent.module_accessor);")
@@ -4596,6 +4643,54 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             grab.active_end, 19,
             "and leaves the grab running to its own clear"
         );
+    }
+
+    #[test]
+    fn attack_fp_uses_its_own_slot_table_and_preserves_unknowns() {
+        let src = r#"unsafe extern "C" fn game_fp(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK_FP(agent, 2, 3, Hash40::new("top"), 9.5, 45, 100, 2, 30, 4.0, 1.0, 2.0, 3.0, Hash40::new_raw(0x123456), 0.25, 0.5, 0.75, true, false, 0, 3, 4, 0, true, 7, 8, false, 9, false, true, false, false, 10, true, false, *ATTACK_LR_CHECK_POS, false, true, false, false, false, 12);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let boxes = script.to_hitboxes();
+        assert_eq!(boxes.len(), 1, "{boxes:#?}");
+        let fp = &boxes[0];
+        assert_eq!(fp.category, crate::data::CAT_ATTACK_FP);
+        assert_eq!(fp.func, "ATTACK_FP");
+        assert_eq!((fp.id, fp.part, fp.damage, fp.angle), (2, 3, 9.5, 45));
+        assert_eq!(fp.collision_attr, "0x123456");
+        assert_eq!(fp.lr_check, "ATTACK_LR_CHECK_POS");
+        assert_eq!(
+            fp.fp.as_ref().unwrap().args.len(),
+            crate::data::ATTACK_FP_ARGC
+        );
+        // Slot 31 is undocumented `rehit`; it must not disappear just because the editor only
+        // exposes the established shared fields.
+        assert_eq!(fp.fp.as_ref().unwrap().args[31].source(), "10");
+
+        let emitted = preview_game_fn(&script, "fp");
+        assert!(
+            emitted.contains("macros::ATTACK_FP(agent, 2, 3"),
+            "{emitted}"
+        );
+        let round_trip = parse_acmd_script(&emitted).to_hitboxes();
+        assert_eq!(round_trip.len(), 1);
+        assert_eq!(round_trip[0].category, crate::data::CAT_ATTACK_FP);
+        assert_eq!(round_trip[0].damage, fp.damage);
+        assert_eq!(round_trip[0].collision_attr, "0x123456");
+        for slot in [
+            2usize, 8, 9, 10, 11, 13, 17, 18, 22, 24, 25, 26, 27, 28, 31, 32, 33, 35, 36, 37, 38,
+            39, 40,
+        ] {
+            assert_eq!(
+                round_trip[0].fp.as_ref().unwrap().args[slot],
+                fp.fp.as_ref().unwrap().args[slot],
+                "unmodeled ATTACK_FP slot {slot}"
+            );
+        }
     }
 
     #[test]

@@ -937,7 +937,8 @@ fn wide_slider_u32(
 }
 
 /// Preview color by collision family: attack keeps the per-type palette, grab = cyan,
-/// wind = green. Used everywhere hitboxes are drawn so the three categories read distinctly.
+/// wind = green, and ATTACK_FP = magenta. Used everywhere hitboxes are drawn so the distinct
+/// slot families read clearly.
 fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
     match hb.category {
         1 => Color32::from_rgba_premultiplied(80, 200, 255, 180), // grab — cyan
@@ -948,6 +949,8 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
         // Detection — amber. It has a real volume and draws in the viewport, so it needs to be
         // told apart from a hitbox at a glance: it looks like one and hits nothing.
         crate::data::CAT_SEARCH => Color32::from_rgba_premultiplied(255, 210, 90, 150),
+        // ATTACK_FP has a collision payload but no safe bone-local viewport interpretation.
+        crate::data::CAT_ATTACK_FP => Color32::from_rgba_premultiplied(240, 120, 220, 180),
         _ => hitbox_color(hb.hitbox_type),
     }
 }
@@ -4414,6 +4417,14 @@ impl VisionaryApp {
                             hb.active_start,
                             hb.active_end
                         ),
+                        crate::data::CAT_ATTACK_FP => format!(
+                            "◇ ATTACK_FP #{} {:.1}dmg {} [{}-{}]",
+                            hb.id,
+                            hb.damage,
+                            angle_short_label(hb.angle),
+                            hb.active_start,
+                            hb.active_end
+                        ),
                         _ => format!(
                             "{} #{} {} {:.1}dmg {} [{}-{}]",
                             shape,
@@ -4471,6 +4482,9 @@ impl VisionaryApp {
                         }
                         crate::data::CAT_SEARCH => {
                             ("Detection box", egui::Color32::from_rgb(255, 210, 90))
+                        }
+                        crate::data::CAT_ATTACK_FP => {
+                            ("ATTACK_FP hitbox", egui::Color32::from_rgb(240, 120, 220))
                         }
                         _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
                     };
@@ -4530,31 +4544,36 @@ impl VisionaryApp {
                     // Wind areas are object-relative 2D regions rather than bone-local attack
                     // spheres. Attack/grab retain the normal bone selector.
                     if hb.category != 2 && hb.category != crate::data::CAT_ABS {
-                        ui.horizontal(|ui| {
-                            ui.label("Bone:");
-                            if bone_names.is_empty() {
-                                ui.text_edit_singleline(&mut hb.bone_name);
-                            } else {
-                                egui::ComboBox::from_id_salt("edit_bone_select")
-                                    .selected_text(&hb.bone_name)
-                                    .show_ui(ui, |ui| {
-                                        for name in &bone_names {
-                                            ui.selectable_value(
-                                                &mut hb.bone_name,
-                                                name.clone(),
-                                                name,
-                                            );
-                                        }
-                                    });
-                            }
-                        });
+                        if hb.category != crate::data::CAT_ATTACK_FP {
+                            ui.horizontal(|ui| {
+                                ui.label("Bone:");
+                                if bone_names.is_empty() {
+                                    ui.text_edit_singleline(&mut hb.bone_name);
+                                } else {
+                                    egui::ComboBox::from_id_salt("edit_bone_select")
+                                        .selected_text(&hb.bone_name)
+                                        .show_ui(ui, |ui| {
+                                            for name in &bone_names {
+                                                ui.selectable_value(
+                                                    &mut hb.bone_name,
+                                                    name.clone(),
+                                                    name,
+                                                );
+                                            }
+                                        });
+                                }
+                            });
+                        }
                         ui.horizontal(|ui| {
                             ui.label("ID:");
                             ui.add(egui::DragValue::new(&mut hb.id));
                             // `SEARCH` takes a part slot too, and the write-back keys on it —
                             // so it has to be visible here, or a box could never be told apart
                             // from another with the same id.
-                            if hb.category == 0 || hb.category == crate::data::CAT_SEARCH {
+                            if hb.category == 0
+                                || hb.category == crate::data::CAT_SEARCH
+                                || hb.category == crate::data::CAT_ATTACK_FP
+                            {
                                 ui.label("Part:");
                                 ui.add(egui::DragValue::new(&mut hb.part));
                             }
@@ -4587,6 +4606,38 @@ impl VisionaryApp {
                         wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
                         wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
                         wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                    }
+
+                    // ATTACK_FP keeps its own complete payload and has no proven bone-local
+                    // geometry editing surface. These are the fields whose meanings and slots
+                    // match the ordinary hit-property controls; every other FP slot remains
+                    // preserved from the source/capture.
+                    if hb.category == crate::data::CAT_ATTACK_FP {
+                        ui.weak(
+                            "ATTACK_FP geometry is preserved but not shown as a bone-local volume.",
+                        );
+                        wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
+                        angle_picker(ui, &mut hb.angle);
+                        wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
+                        wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
+                        wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                        ui.collapsing("Supported Hit Properties", |ui| {
+                            wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag Mult");
+                            wide_slider_f32(ui, &mut hb.sdi_mult, 0.0..=5.0, "SDI Mult");
+                            lr_check_combo(ui, &mut hb.lr_check, "fp_lr_check");
+                            ui.add(
+                                egui::DragValue::new(&mut hb.ground_or_air).prefix("Ground/Air: "),
+                            );
+                            ui.checkbox(&mut hb.is_clang, "Clang");
+                            ui.checkbox(&mut hb.is_reflectable, "Reflectable");
+                            ui.checkbox(&mut hb.is_absorbable, "Absorbable");
+                        });
+                        ui.collapsing("Effect / Sound", |ui| {
+                            collision_attr_combo(ui, &mut hb.collision_attr, "fp_col_attr");
+                            sound_level_combo(ui, &mut hb.sound_level, "fp_snd_lvl");
+                            sound_attr_combo(ui, &mut hb.sound_attr, "fp_snd_attr");
+                            attack_region_combo(ui, &mut hb.attack_region, "fp_region");
+                        });
                     }
 
                     // The same combat block for a throw, minus the macro dropdown — there is
@@ -4679,7 +4730,9 @@ impl VisionaryApp {
                                 "This legacy project has no wind payload. Fetch the move again.",
                             );
                         }
-                    } else if hb.category != crate::data::CAT_ABS {
+                    } else if hb.category != crate::data::CAT_ABS
+                        && hb.category != crate::data::CAT_ATTACK_FP
+                    {
                         wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
                         ui.collapsing("Position / Shape", |ui| {
                             wide_slider_f32(ui, &mut hb.offset_x, -20.0..=20.0, "Offset X");
@@ -8497,7 +8550,77 @@ impl VisionaryApp {
             catch: None,
             abs: None,
             search: None,
+            fp: None,
         })
+    }
+
+    /// `ATTACK_FP` capture args → display Hitbox. This is deliberately separate from the
+    /// ordinary ATTACK reader: the family has 41 slots, no capsule triple, and several fields
+    /// whose meaning is not established. The complete typed payload stays in `fp`; only the
+    /// proven shared hit properties are decoded into editor controls.
+    fn hitbox_from_capture_fp(
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        bone_rev: &HashMap<u64, String>,
+        labels: &HashMap<u64, String>,
+    ) -> Option<crate::data::Hitbox> {
+        use crate::data::{AttackFpArg, AttackFpCall};
+        if args.len() < crate::data::ATTACK_FP_ARGC {
+            return None;
+        }
+        let fp_args = args
+            .iter()
+            .take(crate::data::ATTACK_FP_ARGC)
+            .map(|arg| match arg {
+                crate::game_link::LuaArgWire::Hash(value) => AttackFpArg::Hash(*value),
+                crate::game_link::LuaArgWire::Num(value) => AttackFpArg::Num(*value),
+                crate::game_link::LuaArgWire::Int(value) => AttackFpArg::Int(*value),
+                crate::game_link::LuaArgWire::Bool(value) => AttackFpArg::Bool(*value),
+                crate::game_link::LuaArgWire::Nil => AttackFpArg::Nil,
+            })
+            .collect();
+        let call = AttackFpCall { args: fp_args };
+        let mut hitbox = call.to_hitbox(Self::motion_to_script_frame(frame));
+        let i64_at = |slot: usize| args.get(slot).and_then(|arg| arg.as_i64());
+        let f32_at = |slot: usize| args.get(slot).and_then(|arg| arg.as_f32());
+        let bool_at = |slot: usize| i64_at(slot).is_some_and(|value| value != 0);
+        let const_at = |slot: usize, table: crate::param_labels::ConstTable| {
+            i64_at(slot)
+                .map(|value| {
+                    crate::param_labels::const_name(table, value)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string())
+                })
+                .unwrap_or_default()
+        };
+
+        if let Some(hash) = args.get(2).and_then(|arg| arg.as_hash()) {
+            hitbox.bone_name = bone_rev
+                .get(&hash)
+                .cloned()
+                .unwrap_or_else(|| format!("{hash:#x}"));
+        }
+        hitbox.collision_attr = args
+            .get(12)
+            .and_then(|arg| arg.as_hash())
+            .and_then(|hash| labels.get(&hash).cloned())
+            .or_else(|| {
+                args.get(12)
+                    .and_then(|arg| arg.as_hash())
+                    .map(|hash| format!("{hash:#x}"))
+            })
+            .unwrap_or_default();
+        hitbox.lr_check = const_at(34, crate::param_labels::LR_CHECK);
+        hitbox.sound_level = const_at(19, crate::param_labels::SOUND_LEVEL);
+        hitbox.sound_attr = const_at(20, crate::param_labels::SOUND_ATTR);
+        hitbox.attack_region = const_at(23, crate::param_labels::ATTACK_REGION);
+        hitbox.is_clang = bool_at(16);
+        hitbox.ground_or_air = i64_at(21).unwrap_or(0) as i32;
+        hitbox.is_reflectable = bool_at(29);
+        hitbox.is_absorbable = bool_at(30);
+        hitbox.hitlag_mult = f32_at(14).unwrap_or(1.0);
+        hitbox.sdi_mult = f32_at(15).unwrap_or(1.0);
+        Some(hitbox)
     }
 
     /// CATCH (grabbox) capture → display Hitbox with category=1 (grab).
@@ -8868,10 +8991,9 @@ impl VisionaryApp {
         for (_, line) in ordered {
             if line.func == "ATTACK_CLEAR_ALL" {
                 let end = Self::motion_to_script_frame(line.frame).saturating_sub(1);
-                for hb in hitboxes
-                    .iter_mut()
-                    .filter(|h| h.category != 2 && h.active_end == u32::MAX)
-                {
+                for hb in hitboxes.iter_mut().filter(|h| {
+                    crate::data::is_attack_category(h.category) && h.active_end == u32::MAX
+                }) {
                     hb.active_end = end.max(hb.active_start);
                 }
             } else if line.func == "AREA_WIND_ERASE" {
@@ -8903,7 +9025,27 @@ impl VisionaryApp {
                         hitboxes.push(hb);
                     }
                 }
-            } else if line.func.starts_with("ATTACK") {
+            } else if line.func == "ATTACK_FP" {
+                if let Some(hb) =
+                    Self::hitbox_from_capture_fp(&line.args, line.frame, bone_rev, attr_labels)
+                {
+                    if !hitboxes.iter().any(|h| {
+                        h.category == crate::data::CAT_ATTACK_FP
+                            && h.id == hb.id
+                            && h.active_start == hb.active_start
+                    }) {
+                        let end = hb.active_start.saturating_sub(1);
+                        if let Some(open) = hitboxes.iter_mut().find(|h| {
+                            crate::data::is_attack_category(h.category)
+                                && h.id == hb.id
+                                && h.active_end == u32::MAX
+                        }) {
+                            open.active_end = end.max(open.active_start);
+                        }
+                        hitboxes.push(hb);
+                    }
+                }
+            } else if line.func == "ATTACK" || line.func == "ATTACK_IGNORE_THROW" {
                 if let Some(hb) = Self::hitbox_from_capture(
                     &line.func,
                     &line.args,
@@ -9439,6 +9581,7 @@ impl VisionaryApp {
             2 => "AREA_WIND",
             // Not a prefix of anything else: `SET_SEARCH_SIZE_EXIST` starts with `SET_`.
             crate::data::CAT_SEARCH => "SEARCH",
+            crate::data::CAT_ATTACK_FP => "ATTACK_FP",
             _ => "ATTACK",
         };
         let donor_for = |cat: u8, id: u32| {
@@ -9446,10 +9589,19 @@ impl VisionaryApp {
             captures
                 .iter()
                 .find(|c| {
-                    c.func.starts_with(pre)
+                    (cat == crate::data::CAT_ATTACK_FP && c.func == "ATTACK_FP"
+                        || cat != crate::data::CAT_ATTACK_FP && c.func.starts_with(pre))
                         && c.args.first().and_then(|a| a.as_i64()) == Some(id as i64)
                 })
-                .or_else(|| captures.iter().find(|c| c.func.starts_with(pre)))
+                .or_else(|| {
+                    captures.iter().find(|c| {
+                        if cat == crate::data::CAT_ATTACK_FP {
+                            c.func == "ATTACK_FP"
+                        } else {
+                            c.func.starts_with(pre)
+                        }
+                    })
+                })
         };
         // Frame window around a hit's spawn frame, converted into the MOTION frames the
         // plugin matches against. The `+1.5` this used to carry was covering the one-frame
@@ -9526,6 +9678,9 @@ impl VisionaryApp {
                 1 => Self::build_catch_args(h, donor_for(1, h.id)),
                 2 => Self::build_wind_args(h),
                 crate::data::CAT_SEARCH => Self::build_search_args(h),
+                crate::data::CAT_ATTACK_FP => {
+                    Self::build_attack_fp_args(h, donor_for(crate::data::CAT_ATTACK_FP, h.id))
+                }
                 _ => Self::build_attack_args(h, donor_for(0, h.id)),
             };
             let command = Self::inject_command(h);
@@ -9873,6 +10028,7 @@ impl VisionaryApp {
                 1 => "CATCH",
                 2 => "AREA_WIND",
                 crate::data::CAT_SEARCH => "SEARCH",
+                crate::data::CAT_ATTACK_FP => "ATTACK_FP",
                 _ => "ATTACK",
             };
             let donor_for = |category: u8, id: u32| {
@@ -9880,13 +10036,19 @@ impl VisionaryApp {
                 captures
                     .iter()
                     .find(|capture| {
-                        capture.func.starts_with(prefix)
+                        (category == crate::data::CAT_ATTACK_FP && capture.func == "ATTACK_FP"
+                            || category != crate::data::CAT_ATTACK_FP
+                                && capture.func.starts_with(prefix))
                             && capture.args.first().and_then(|arg| arg.as_i64()) == Some(id as i64)
                     })
                     .or_else(|| {
-                        captures
-                            .iter()
-                            .find(|capture| capture.func.starts_with(prefix))
+                        captures.iter().find(|capture| {
+                            if category == crate::data::CAT_ATTACK_FP {
+                                capture.func == "ATTACK_FP"
+                            } else {
+                                capture.func.starts_with(prefix)
+                            }
+                        })
                     })
             };
             let pristine = &record.hitboxes_pristine;
@@ -9956,6 +10118,10 @@ impl VisionaryApp {
                 let args = match edited.category {
                     1 => Self::build_catch_args(edited, donor_for(1, edited.id)),
                     2 => Self::build_wind_args(edited),
+                    crate::data::CAT_ATTACK_FP => Self::build_attack_fp_args(
+                        edited,
+                        donor_for(crate::data::CAT_ATTACK_FP, edited.id),
+                    ),
                     _ => Self::build_attack_args(edited, donor_for(0, edited.id)),
                 };
                 let command = Self::inject_command(edited);
@@ -10020,6 +10186,9 @@ impl VisionaryApp {
         h: &crate::data::Hitbox,
         p: &crate::data::Hitbox,
     ) -> crate::game_link::HbOverridesWire {
+        if h.category == crate::data::CAT_ATTACK_FP || p.category == crate::data::CAT_ATTACK_FP {
+            return Self::hitbox_fp_overrides(h, p);
+        }
         use crate::param_labels as pl;
         fn changed<T: PartialEq + Copy>(now: T, was: T) -> Option<T> {
             (now != was).then_some(now)
@@ -10095,6 +10264,51 @@ impl VisionaryApp {
             motion_rate: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
+        }
+    }
+
+    /// Sparse live overrides for the established `ATTACK_FP` slots. The plugin keeps the
+    /// captured payload's geometry and undocumented tail untouched.
+    fn hitbox_fp_overrides(
+        h: &crate::data::Hitbox,
+        p: &crate::data::Hitbox,
+    ) -> crate::game_link::HbOverridesWire {
+        use crate::param_labels as pl;
+        fn changed<T: PartialEq + Copy>(now: T, was: T) -> Option<T> {
+            (now != was).then_some(now)
+        }
+        let sound_level = |now: &str, was: &str| {
+            (now != was)
+                .then(|| pl::encode_const(pl::SOUND_LEVEL, now))
+                .flatten()
+        };
+        crate::game_link::HbOverridesWire {
+            part: changed(h.part as i64, p.part as i64),
+            damage: changed(h.damage, p.damage),
+            angle: changed(h.angle as i64, p.angle as i64),
+            kbg: changed(h.kb_scaling as i64, p.kb_scaling as i64),
+            fkb: changed(h.fkb as i64, p.fkb as i64),
+            bkb: changed(h.kb_base as i64, p.kb_base as i64),
+            hitlag: changed(h.hitlag_mult, p.hitlag_mult),
+            sdi: changed(h.sdi_mult, p.sdi_mult),
+            clang: changed(h.is_clang, p.is_clang),
+            ground_or_air: changed(h.ground_or_air as i64, p.ground_or_air as i64),
+            reflectable: changed(h.is_reflectable, p.is_reflectable),
+            absorbable: changed(h.is_absorbable, p.is_absorbable),
+            collision_attr: (h.collision_attr != p.collision_attr)
+                .then(|| pl::encode_collision_attr(&h.collision_attr))
+                .flatten(),
+            sound_level: sound_level(&h.sound_level, &p.sound_level),
+            sound_attr: (h.sound_attr != p.sound_attr)
+                .then(|| pl::encode_const(pl::SOUND_ATTR, &h.sound_attr))
+                .flatten(),
+            attack_region: (h.attack_region != p.attack_region)
+                .then(|| pl::encode_const(pl::ATTACK_REGION, &h.attack_region))
+                .flatten(),
+            lr_check: (h.lr_check != p.lr_check)
+                .then(|| pl::encode_const(pl::LR_CHECK, &h.lr_check))
+                .flatten(),
+            ..Default::default()
         }
     }
 
@@ -10180,6 +10394,49 @@ impl VisionaryApp {
             if args.len() > 32 {
                 args[32] = A::Hash(hash);
             }
+        }
+        Some(args)
+    }
+
+    /// Full 41-slot `ATTACK_FP` vector for injection. A captured FP donor supplies every
+    /// unknown value and its Lua type; only the modeled fields are replaced from the editor.
+    fn build_attack_fp_args(
+        h: &crate::data::Hitbox,
+        donor: Option<&crate::game_link::CaptureLine>,
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::game_link::LuaArgWire as A;
+        let mut args = donor
+            .filter(|capture| capture.func == "ATTACK_FP" && capture.args.len() >= 41)?
+            .args
+            .clone();
+        args[0] = A::Int(h.id as i64);
+        args[1] = A::Int(h.part as i64);
+        args[3] = A::Num(h.damage);
+        args[4] = A::Int(h.angle as i64);
+        args[5] = A::Int(h.kb_scaling as i64);
+        args[6] = A::Int(h.fkb as i64);
+        args[7] = A::Int(h.kb_base as i64);
+        args[14] = A::Num(h.hitlag_mult);
+        args[15] = A::Num(h.sdi_mult);
+        args[16] = A::Bool(h.is_clang);
+        args[21] = A::Int(h.ground_or_air as i64);
+        args[29] = A::Bool(h.is_reflectable);
+        args[30] = A::Bool(h.is_absorbable);
+        use crate::param_labels as pl;
+        if let Some(value) = pl::encode_const(pl::SOUND_LEVEL, &h.sound_level) {
+            args[19] = A::Int(value);
+        }
+        if let Some(value) = pl::encode_const(pl::SOUND_ATTR, &h.sound_attr) {
+            args[20] = A::Int(value);
+        }
+        if let Some(value) = pl::encode_const(pl::ATTACK_REGION, &h.attack_region) {
+            args[23] = A::Int(value);
+        }
+        if let Some(value) = pl::encode_const(pl::LR_CHECK, &h.lr_check) {
+            args[34] = A::Int(value);
+        }
+        if let Some(value) = pl::encode_collision_attr(&h.collision_attr) {
+            args[12] = A::Hash(value);
         }
         Some(args)
     }
@@ -14701,7 +14958,9 @@ impl eframe::App for VisionaryApp {
                             // and offsets are zero because the call has no such arguments, so
                             // drawing it would put a dot at the model's origin that looks like
                             // a hitbox the script does not have.
-                            if hb.category == crate::data::CAT_ABS {
+                            if hb.category == crate::data::CAT_ABS
+                                || hb.category == crate::data::CAT_ATTACK_FP
+                            {
                                 continue;
                             }
                             let active = hb.active_frames_empty()
@@ -15186,6 +15445,7 @@ fn rebuild_script_from_hitboxes(
                 // Collisions are rebuilt from the edited list below; keeping the source's own
                 // as well would double every hitbox.
                 ExcuteStmt::Attack(_)
+                | ExcuteStmt::AttackFp(_)
                 | ExcuteStmt::Catch(_)
                 | ExcuteStmt::AttackAbs(_)
                 | ExcuteStmt::Search(_)
@@ -15327,6 +15587,19 @@ fn rebuild_script_from_hitboxes(
                     ends.entry(end.saturating_add(1))
                         .or_default()
                         .push(ExcuteStmt::Clear(hitbox.id));
+                }
+            }
+            crate::data::CAT_ATTACK_FP => {
+                if let Some(call) = hitbox.to_attack_fp_call() {
+                    spawns
+                        .entry(start)
+                        .or_default()
+                        .push(ExcuteStmt::AttackFp(call));
+                    if end < 9999 {
+                        ends.entry(end.saturating_add(1))
+                            .or_default()
+                            .push(ExcuteStmt::Clear(hitbox.id));
+                    }
                 }
             }
             2 => {
@@ -15650,6 +15923,18 @@ pub fn synthesize_script_from_hitboxes(
             if hb.active_end < 9999 {
                 grab_clear_at = Some(
                     grab_clear_at
+                        .unwrap_or(0)
+                        .max(hb.active_end.saturating_add(1)),
+                );
+            }
+        } else if hb.category == crate::data::CAT_ATTACK_FP {
+            if let Some(call) = hb.to_attack_fp_call() {
+                spawns
+                    .entry(hb.active_start)
+                    .or_default()
+                    .push(ExcuteStmt::AttackFp(call));
+                attack_clear_at = Some(
+                    attack_clear_at
                         .unwrap_or(0)
                         .max(hb.active_end.saturating_add(1)),
                 );
@@ -17063,6 +17348,77 @@ mod live_effect_capture_tests {
         );
     }
 
+    #[test]
+    fn a_captured_attack_fp_keeps_its_complete_payload_and_family() {
+        let attr = hash40::hash40("collision_attr_fire").0;
+        let args = vec![
+            A::Int(2),
+            A::Int(3),
+            A::Hash(hash40::hash40("top").0),
+            A::Num(9.5),
+            A::Int(45),
+            A::Int(100),
+            A::Int(2),
+            A::Int(30),
+            A::Num(4.0),
+            A::Num(1.0),
+            A::Num(2.0),
+            A::Num(3.0),
+            A::Hash(attr),
+            A::Num(0.25),
+            A::Num(0.5),
+            A::Num(0.75),
+            A::Bool(true),
+            A::Bool(false),
+            A::Int(0),
+            A::Int(3),
+            A::Int(4),
+            A::Int(0),
+            A::Bool(true),
+            A::Int(7),
+            A::Int(8),
+            A::Bool(false),
+            A::Int(9),
+            A::Bool(false),
+            A::Bool(true),
+            A::Bool(false),
+            A::Bool(false),
+            A::Int(10),
+            A::Bool(true),
+            A::Bool(false),
+            A::Int(0),
+            A::Bool(false),
+            A::Bool(true),
+            A::Bool(false),
+            A::Bool(false),
+            A::Bool(false),
+            A::Int(12),
+        ];
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame: 4.0,
+            func: "ATTACK_FP".into(),
+            args,
+            run: 1,
+        }];
+        let mut bones = HashMap::new();
+        bones.insert(hash40::hash40("top").0, "top".into());
+        let mut attrs = HashMap::new();
+        attrs.insert(attr, "collision_attr_fire".into());
+        let hitboxes = VisionaryApp::hitboxes_from_captures(&captures, &bones, &attrs);
+        assert_eq!(hitboxes.len(), 1, "{hitboxes:#?}");
+        let fp = &hitboxes[0];
+        assert_eq!(fp.category, crate::data::CAT_ATTACK_FP);
+        assert_eq!(fp.func, "ATTACK_FP");
+        assert_eq!(
+            fp.fp.as_ref().unwrap().args.len(),
+            crate::data::ATTACK_FP_ARGC
+        );
+        assert_eq!(fp.collision_attr, "collision_attr_fire");
+        assert_eq!(fp.lr_check, "ATTACK_LR_CHECK_POS");
+    }
+
     fn expression_capture(func: &str, frame: f32, args: Vec<A>) -> CaptureLine {
         CaptureLine {
             kind: 6,
@@ -18124,7 +18480,7 @@ mod live_effect_capture_tests {
     /// did nothing. A search box would have collided with `ATTACK_ABS` the same way.
     #[test]
     fn a_collisions_wire_category_is_the_one_the_plugin_matches() {
-        use crate::game_link::{wire_category, CAT_ABS, CAT_SEARCH};
+        use crate::game_link::{wire_category, CAT_ABS, CAT_ATTACK_FP, CAT_SEARCH};
         // Unchanged where the spaces agree.
         assert_eq!(wire_category(0), 0);
         assert_eq!(wire_category(1), 1);
@@ -18132,6 +18488,7 @@ mod live_effect_capture_tests {
         // Translated where they do not.
         assert_eq!(wire_category(crate::data::CAT_ABS), CAT_ABS);
         assert_eq!(wire_category(crate::data::CAT_SEARCH), CAT_SEARCH);
+        assert_eq!(wire_category(crate::data::CAT_ATTACK_FP), CAT_ATTACK_FP);
         // The two that used to collide now differ, and neither lands on the hurtbox category.
         assert_ne!(
             wire_category(crate::data::CAT_ABS),
@@ -19704,6 +20061,48 @@ mod live_effect_capture_tests {
             run: 1,
         };
         assert!(VisionaryApp::build_attack_args(&Hitbox::default(), Some(&donor)).is_none());
+    }
+
+    #[test]
+    fn attack_fp_injection_keeps_the_donor_tail_and_uses_fp_slots() {
+        let donor = CaptureLine {
+            kind: 6,
+            motion: 1,
+            frame: 1.0,
+            func: "ATTACK_FP".into(),
+            args: (0..crate::data::ATTACK_FP_ARGC)
+                .map(|index| A::Int(index as i64))
+                .collect(),
+            run: 1,
+        };
+        let hitbox = Hitbox {
+            id: 4,
+            part: 5,
+            category: crate::data::CAT_ATTACK_FP,
+            damage: 12.5,
+            angle: 63,
+            kb_scaling: 111,
+            fkb: 7,
+            kb_base: 44,
+            hitlag_mult: 0.75,
+            sdi_mult: 1.25,
+            is_clang: true,
+            ground_or_air: 2,
+            is_reflectable: true,
+            is_absorbable: false,
+            ..Default::default()
+        };
+        let args = VisionaryApp::build_attack_fp_args(&hitbox, Some(&donor)).unwrap();
+        assert_eq!(args.len(), crate::data::ATTACK_FP_ARGC);
+        assert_eq!(args[0], A::Int(4));
+        assert_eq!(args[1], A::Int(5));
+        assert_eq!(args[3], A::Num(12.5));
+        assert_eq!(args[14], A::Num(0.75));
+        assert_eq!(args[16], A::Bool(true));
+        assert_eq!(args[29], A::Bool(true));
+        // The unmodelled tail remains the donor's original typed payload.
+        assert_eq!(args[31], A::Int(31));
+        assert_eq!(args[40], A::Int(40));
     }
 
     #[test]

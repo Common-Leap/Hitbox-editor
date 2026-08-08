@@ -1595,7 +1595,7 @@ pub fn rewrite_hitboxes(
     let sites = scan_macro_sites(text, 0..text.len());
     let attacks: Vec<&MacroSite> = sites
         .iter()
-        .filter(|s| crate::acmd::ATTACK_FUNCS.contains(&s.name.as_str()))
+        .filter(|s| crate::acmd::ATTACK_FUNCS.contains(&s.name.as_str()) || s.name == "ATTACK_FP")
         .collect();
     let catches: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "CATCH").collect();
     let abs: Vec<&MacroSite> = sites.iter().filter(|s| s.name == "ATTACK_ABS").collect();
@@ -1662,6 +1662,66 @@ pub fn rewrite_hitboxes(
                 report.skipped.push(format!(
                     "{label}: the {want} throw damage changed {}, but its `ATTACK_ABS` call in \
                      the source is too short to have those arguments",
+                    missing.join(", ")
+                ));
+            }
+            edits.extend(call_edits);
+            continue;
+        }
+        // `ATTACK_FP` is a collision, but its 41-slot payload is not the ordinary ATTACK
+        // layout. Its source path has a separate table just as its parser and live hook do.
+        if hitbox.category == crate::data::CAT_ATTACK_FP
+            || before.category == crate::data::CAT_ATTACK_FP
+        {
+            if before.func != hitbox.func {
+                report.skipped.push(format!(
+                    "{label}: hitbox {} changed from `{}` to `{}` — source syncing rewrites \
+                     argument values, not the macro being called",
+                    before.id, before.func, hitbox.func
+                ));
+                continue;
+            }
+            if before.id != hitbox.id || before.part != hitbox.part {
+                report.skipped.push(format!(
+                    "{label}: ATTACK_FP hitbox {} was renumbered — source syncing only rewrites \
+                     argument values",
+                    before.id
+                ));
+                continue;
+            }
+            let matching: Vec<&MacroSite> = sites
+                .iter()
+                .filter(|site| {
+                    site.name == "ATTACK_FP"
+                        && site.arg(text, 1).and_then(|a| a.trim().parse::<u32>().ok())
+                            == Some(before.id)
+                        && site.arg(text, 2).and_then(|a| a.trim().parse::<u32>().ok())
+                            == Some(before.part)
+                })
+                .collect();
+            let [macro_site] = matching[..] else {
+                report.skipped.push(format!(
+                    "{label}: ATTACK_FP hitbox {} matches {} calls in the source — cannot tell \
+                     which one to retune",
+                    before.id,
+                    matching.len()
+                ));
+                continue;
+            };
+            if before.active_start != hitbox.active_start || before.active_end != hitbox.active_end
+            {
+                report.skipped.push(format!(
+                    "{label}: ATTACK_FP hitbox {} was retimed — its frames are the block it sits \
+                     in, not arguments, so source syncing cannot move it",
+                    before.id
+                ));
+            }
+            let (call_edits, missing) = attack_fp_edits(text, macro_site, before, hitbox);
+            if !missing.is_empty() {
+                report.skipped.push(format!(
+                    "{label}: ATTACK_FP hitbox {} changed {}, but its call in the source is too \
+                     short to have those arguments",
+                    before.id,
                     missing.join(", ")
                 ));
             }
@@ -2034,6 +2094,131 @@ fn attack_edits(
     ];
 
     apply_slots(text, site, &shift_past_absent_capsule(text, site, slots))
+}
+
+/// Replacements for the established editor fields in one `ATTACK_FP` call.
+///
+/// The site indices include `agent`; the FP slots after it are independently documented in the
+/// `smash-script` wrapper. Geometry and the remaining unknown fields are intentionally absent:
+/// source syncing must not turn an ordinary ATTACK interpretation into a guess about FP.
+fn attack_fp_edits(
+    text: &str,
+    site: &MacroSite,
+    before: &crate::data::Hitbox,
+    after: &crate::data::Hitbox,
+) -> (Vec<Replacement>, Vec<&'static str>) {
+    let attr = match after.collision_attr.strip_prefix("0x") {
+        Some(hex) => format!("Hash40::new_raw(0x{hex})"),
+        None => format!("Hash40::new(\"{}\")", after.collision_attr),
+    };
+    let konst = crate::acmd::const_expr;
+    let slots: [(usize, &'static str, bool, ArgValue); 12] = [
+        (
+            4,
+            "damage",
+            before.damage != after.damage,
+            ArgValue::Float(after.damage),
+        ),
+        (
+            5,
+            "angle",
+            before.angle != after.angle,
+            ArgValue::Int(after.angle as i64),
+        ),
+        (
+            6,
+            "knockback scaling",
+            before.kb_scaling != after.kb_scaling,
+            ArgValue::Int(after.kb_scaling as i64),
+        ),
+        (
+            7,
+            "fixed knockback",
+            before.fkb != after.fkb,
+            ArgValue::Int(after.fkb as i64),
+        ),
+        (
+            8,
+            "base knockback",
+            before.kb_base != after.kb_base,
+            ArgValue::Int(after.kb_base as i64),
+        ),
+        (
+            13,
+            "collision attribute",
+            before.collision_attr != after.collision_attr,
+            ArgValue::Text(attr),
+        ),
+        (
+            15,
+            "hitlag multiplier",
+            before.hitlag_mult != after.hitlag_mult,
+            ArgValue::Float(after.hitlag_mult),
+        ),
+        (
+            16,
+            "SDI multiplier",
+            before.sdi_mult != after.sdi_mult,
+            ArgValue::Float(after.sdi_mult),
+        ),
+        (
+            17,
+            "clang",
+            before.is_clang != after.is_clang,
+            ArgValue::Text(after.is_clang.to_string()),
+        ),
+        (
+            22,
+            "ground/air",
+            before.ground_or_air != after.ground_or_air,
+            ArgValue::Int(after.ground_or_air as i64),
+        ),
+        (
+            30,
+            "reflectable",
+            before.is_reflectable != after.is_reflectable,
+            ArgValue::Text(after.is_reflectable.to_string()),
+        ),
+        (
+            31,
+            "absorbable",
+            before.is_absorbable != after.is_absorbable,
+            ArgValue::Text(after.is_absorbable.to_string()),
+        ),
+    ];
+    let (mut edits, mut missing) = apply_slots(text, site, &slots);
+    let tail: [(usize, &'static str, bool, ArgValue); 4] = [
+        (
+            20,
+            "sound level",
+            before.sound_level != after.sound_level,
+            ArgValue::Text(konst(&after.sound_level)),
+        ),
+        (
+            21,
+            "sound attribute",
+            before.sound_attr != after.sound_attr,
+            ArgValue::Text(konst(&after.sound_attr)),
+        ),
+        (
+            24,
+            "attack region",
+            before.attack_region != after.attack_region,
+            ArgValue::Text(konst(&after.attack_region)),
+        ),
+        (
+            35,
+            "facing check",
+            before.lr_check != after.lr_check,
+            ArgValue::Text(konst(&after.lr_check)),
+        ),
+    ];
+    let (tail_edits, tail_missing) = apply_slots(text, site, &tail);
+    edits.extend(tail_edits);
+    missing.extend(tail_missing);
+    missing.sort_unstable();
+    missing.dedup();
+    (edits, missing)
 }
 
 /// Re-aim an `ATTACK` slot table at a call written without the optional capsule triple.
@@ -6005,5 +6190,39 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(after, text, "the ATTACK call must not move");
         assert_eq!(report.changed, 0);
         assert_eq!(report.skipped.len(), 1, "{report:?}");
+    }
+
+    #[test]
+    fn an_attack_fp_edit_uses_its_own_source_slots() {
+        let text = r#"unsafe extern "C" fn game_fp(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK_FP(agent, 2, 3, Hash40::new("top"), 9.5, 45, 100, 2, 30, 4.0, 1.0, 2.0, 3.0, Hash40::new("collision_attr_fire"), 0.25, 0.5, 0.75, true, false, 0, 3, 4, 0, true, 7, 8, false, 9, false, true, false, false, 10, true, false, *ATTACK_LR_CHECK_POS, false, true, false, false, false, 12);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_hitboxes();
+        assert_eq!(pristine.len(), 1, "{pristine:#?}");
+        assert_eq!(pristine[0].category, crate::data::CAT_ATTACK_FP);
+        let mut edited = pristine.clone();
+        edited[0].damage = 14.25;
+        edited[0].lr_check = "ATTACK_LR_CHECK_F".into();
+        edited[0].collision_attr = "collision_attr_elec".into();
+        edited[0].is_reflectable = true;
+
+        let (after, report) = rewrite_hitboxes(text, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 4, "{report:?}");
+        assert!(
+            after.contains(
+                "Hash40::new(\"top\"), 14.25, 45, 100, 2, 30, 4.0, 1.0, 2.0, 3.0, Hash40::new(\"collision_attr_elec\")"
+            ),
+            "{after}"
+        );
+        assert!(after.contains("*ATTACK_LR_CHECK_F, false, true"), "{after}");
+        assert!(
+            crate::acmd::parse_acmd_script(&after).to_hitboxes()[0].is_reflectable,
+            "{after}"
+        );
     }
 }

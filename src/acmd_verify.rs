@@ -682,6 +682,37 @@ fn hitbox_differences(want: &Hitbox, got: &Hitbox) -> Vec<String> {
             want.catch, got.catch
         ));
     }
+    // ATTACK_FP's modeled slots are rebuilt from Hitbox controls on export, so their source
+    // spelling may legitimately normalize. The remaining slots have no editor representation
+    // and must survive byte-for-byte as typed/raw IR.
+    if let (Some(want), Some(got)) = (&want.fp, &got.fp) {
+        const MODELED: &[usize] = &[
+            0, 1, 3, 4, 5, 6, 7, 12, 14, 15, 16, 19, 20, 21, 23, 29, 30, 34,
+        ];
+        let unknown_want: Vec<_> = want
+            .args
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !MODELED.contains(index))
+            .collect();
+        let unknown_got: Vec<_> = got
+            .args
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !MODELED.contains(index))
+            .collect();
+        if unknown_want != unknown_got {
+            out.push(format!(
+                "ATTACK_FP preserved slots — specified {:?}, exported {:?}",
+                unknown_want, unknown_got
+            ));
+        }
+    } else if want.fp != got.fp {
+        out.push(format!(
+            "ATTACK_FP payload — specified {:?}, exported {:?}",
+            want.fp, got.fp
+        ));
+    }
     out
 }
 
@@ -978,7 +1009,8 @@ fn check_script_values(subject: &str, script: &AcmdScript, report: &mut Report) 
         // `ATTACK_ABS` has no joint slot at all — it applies to an opponent already caught, so
         // there is nothing to attach to. Its empty bone name means "not applicable" rather than
         // "the author left it blank", and demanding one here would fail every Kirby throw.
-        if hitbox.category != crate::data::CAT_ABS {
+        if hitbox.category != crate::data::CAT_ABS && hitbox.category != crate::data::CAT_ATTACK_FP
+        {
             check_hash_name(
                 subject,
                 &format!("{label} joint"),

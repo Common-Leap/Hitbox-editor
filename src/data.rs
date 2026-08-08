@@ -8,6 +8,90 @@ pub fn default_attack_func() -> String {
     "ATTACK".to_string()
 }
 
+/// One `ATTACK_FP` argument kept losslessly across source parsing, project export, and live
+/// capture. Source-backed values retain their original token so symbolic constants and unusual
+/// expressions are not rewritten merely by opening and exporting a project; captured values
+/// carry the type the game actually pushed.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AttackFpArg {
+    /// A Rust source token from a user's or the mirror's ACMD file.
+    Source(String),
+    Hash(u64),
+    Num(f32),
+    Int(i64),
+    Bool(bool),
+    Nil,
+}
+
+impl AttackFpArg {
+    pub fn source(&self) -> String {
+        match self {
+            Self::Source(value) => value.clone(),
+            Self::Hash(value) => format!("Hash40::new_raw({value:#x})"),
+            Self::Num(value) => crate::acmd::num(*value),
+            Self::Int(value) => value.to_string(),
+            Self::Bool(value) => value.to_string(),
+            // The wrapper declares every FP slot as a concrete value, so Nil is not a valid
+            // source spelling. A captured Void is retained in the IR for fidelity, and zero is
+            // the only compiling scalar fallback if an authoring tool nevertheless supplies it.
+            Self::Nil => "0".to_string(),
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::Num(value) => Some(*value),
+            Self::Int(value) => Some(*value as f32),
+            Self::Source(value) => value.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(value) => Some(*value),
+            Self::Num(value) => Some(*value as i64),
+            Self::Bool(value) => Some(*value as i64),
+            Self::Source(value) => value.trim().trim_start_matches('*').parse().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            Self::Int(value) => Some(*value != 0),
+            Self::Num(value) => Some(*value != 0.0),
+            Self::Source(value) => value.trim().parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Return the string inside `Hash40::new("…")`, or the source token for a raw hash/value.
+    /// This is intentionally not a reverse hash40 lookup: a captured hash has no recoverable
+    /// author-facing name.
+    pub fn hash_text(&self) -> Option<String> {
+        match self {
+            Self::Source(value) => {
+                let value = value.trim();
+                value
+                    .strip_prefix("Hash40::new(\"")
+                    .and_then(|value| value.strip_suffix("\")"))
+                    .map(str::to_string)
+                    .or_else(|| {
+                        value
+                            .strip_prefix("Hash40::new_raw(")
+                            .and_then(|value| value.strip_suffix(')'))
+                            .map(str::to_string)
+                    })
+                    .or_else(|| Some(value.trim_start_matches('*').to_string()))
+            }
+            Self::Hash(value) => Some(format!("{value:#x}")),
+            _ => None,
+        }
+    }
+}
+
 /// A single hitbox — used for display, timeline, and viewport rendering.
 /// `active_start`/`active_end` are computed from the script structure.
 /// When `capsule_end` is `Some`, the hitbox is a capsule; otherwise a sphere.
@@ -85,6 +169,11 @@ pub struct Hitbox {
     /// The `SEARCH` arguments category 4 has no editable field for — see [`SearchExtras`].
     #[serde(default)]
     pub search: Option<SearchExtras>,
+    /// Complete `ATTACK_FP` payload. The family has a different 41-slot layout and several
+    /// undocumented fields, so it is kept separately from the ordinary `ATTACK` fields. The
+    /// editor hides FP geometry and only rewrites the slots whose meaning is established.
+    #[serde(default)]
+    pub fp: Option<AttackFpExtras>,
 }
 
 impl Default for Hitbox {
@@ -133,6 +222,7 @@ impl Default for Hitbox {
             catch: None,
             abs: None,
             search: None,
+            fp: None,
         }
     }
 }
@@ -425,6 +515,15 @@ pub const CAT_ABS: u8 = 3;
 /// in the ACMD. So it draws like a collision and carries none of the attack fields.
 pub const CAT_SEARCH: u8 = 4;
 
+/// `ATTACK_FP` is a collision volume with its own slot table and fighter-position semantics.
+/// Keeping it distinct from category 0 prevents ordinary ATTACK controls, live rules, and
+/// viewport geometry from being applied to the wrong family.
+pub const CAT_ATTACK_FP: u8 = 5;
+
+pub fn is_attack_category(category: u8) -> bool {
+    category == 0 || category == CAT_ATTACK_FP
+}
+
 /// The `SEARCH` arguments that have no counterpart field on a [`Hitbox`].
 ///
 /// Scoped the way [`CatchExtras`] and [`AbsExtras`] are: id, part, bone, size, offsets and the
@@ -529,6 +628,135 @@ pub struct AbsExtras {
     /// control whose meaning is a guess is worse than no control — but dropping them would
     /// change the call, so they are kept.
     pub unknowns: (f32, f32, bool),
+}
+
+/// The portions of an `ATTACK_FP` call that do not have a safe editor control.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AttackFpExtras {
+    /// The 41 arguments after `agent`, in the order declared by `smash-script::ATTACK_FP`.
+    pub args: Vec<AttackFpArg>,
+}
+
+pub const ATTACK_FP_ARGC: usize = 41;
+
+/// A parsed `macros::ATTACK_FP` call. Its slot layout is intentionally independent from
+/// [`AttackCall`], even where both calls happen to expose fields with the same meaning.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AttackFpCall {
+    pub args: Vec<AttackFpArg>,
+}
+
+impl AttackFpCall {
+    fn arg(&self, slot: usize) -> Option<&AttackFpArg> {
+        self.args.get(slot)
+    }
+
+    fn int(&self, slot: usize, default: i64) -> i64 {
+        self.arg(slot)
+            .and_then(AttackFpArg::as_i64)
+            .unwrap_or(default)
+    }
+
+    fn float(&self, slot: usize, default: f32) -> f32 {
+        self.arg(slot)
+            .and_then(AttackFpArg::as_f32)
+            .unwrap_or(default)
+    }
+
+    fn flag(&self, slot: usize, default: bool) -> bool {
+        self.arg(slot)
+            .and_then(AttackFpArg::as_bool)
+            .unwrap_or(default)
+    }
+
+    fn text(&self, slot: usize, default: &str) -> String {
+        self.arg(slot)
+            .map(AttackFpArg::source)
+            .map(|value| value.trim_start_matches('*').to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    fn hash(&self, slot: usize, default: &str) -> String {
+        self.arg(slot)
+            .and_then(AttackFpArg::hash_text)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    /// Convert to a display row. The geometry values remain in the row for lossless project
+    /// edits, but the UI and viewport recognize `fp` and suppress those controls/drawing because
+    /// this macro's fighter-position semantics are not interchangeable with a bone-local sphere.
+    pub fn to_hitbox(&self, active_start: u32) -> Hitbox {
+        Hitbox {
+            func: "ATTACK_FP".into(),
+            id: self.int(0, 0).max(0) as u32,
+            part: self.int(1, 0).max(0) as u32,
+            bone_name: self
+                .arg(2)
+                .and_then(AttackFpArg::hash_text)
+                .unwrap_or_default(),
+            damage: self.float(3, 0.0),
+            angle: self.int(4, 0) as i32,
+            kb_scaling: self.int(5, 0) as i32,
+            fkb: self.int(6, 0) as i32,
+            kb_base: self.int(7, 0) as i32,
+            size: self.float(8, 0.0),
+            offset_x: self.float(9, 0.0),
+            offset_y: self.float(10, 0.0),
+            offset_z: self.float(11, 0.0),
+            hitlag_mult: self.float(14, 1.0),
+            sdi_mult: self.float(15, 1.0),
+            is_clang: self.flag(16, false),
+            ground_or_air: self.int(21, 0) as i32,
+            is_reflectable: self.flag(29, false),
+            is_absorbable: self.flag(30, false),
+            lr_check: self.text(34, "ATTACK_LR_CHECK_POS"),
+            collision_attr: self.hash(12, "collision_attr_normal"),
+            sound_level: self.text(19, "ATTACK_SOUND_LEVEL_M"),
+            sound_attr: self.text(20, "COLLISION_SOUND_ATTR_PUNCH"),
+            attack_region: self.text(23, "ATTACK_REGION_PUNCH"),
+            active_start,
+            active_end: u32::MAX,
+            category: CAT_ATTACK_FP,
+            fp: Some(AttackFpExtras {
+                args: self.args.clone(),
+            }),
+            ..Default::default()
+        }
+    }
+}
+
+impl Hitbox {
+    /// Rebuild an `ATTACK_FP` call, retaining every unmodelled slot and applying the editor's
+    /// supported fields at this family's own indices.
+    pub fn to_attack_fp_call(&self) -> Option<AttackFpCall> {
+        let extras = self.fp.as_ref()?;
+        let mut args = extras.args.clone();
+        if args.len() != ATTACK_FP_ARGC {
+            return None;
+        }
+        let source = |value: String| AttackFpArg::Source(value);
+        args[0] = AttackFpArg::Int(self.id as i64);
+        args[1] = AttackFpArg::Int(self.part as i64);
+        args[3] = AttackFpArg::Num(self.damage);
+        args[4] = AttackFpArg::Int(self.angle as i64);
+        args[5] = AttackFpArg::Int(self.kb_scaling as i64);
+        args[6] = AttackFpArg::Int(self.fkb as i64);
+        args[7] = AttackFpArg::Int(self.kb_base as i64);
+        args[12] = source(crate::acmd::hash40_expr_for_data(&self.collision_attr));
+        args[14] = AttackFpArg::Num(self.hitlag_mult);
+        args[15] = AttackFpArg::Num(self.sdi_mult);
+        args[16] = AttackFpArg::Bool(self.is_clang);
+        args[19] = source(crate::acmd::const_expr(&self.sound_level));
+        args[20] = source(crate::acmd::const_expr(&self.sound_attr));
+        args[21] = AttackFpArg::Int(self.ground_or_air as i64);
+        args[23] = source(crate::acmd::const_expr(&self.attack_region));
+        args[29] = AttackFpArg::Bool(self.is_reflectable);
+        args[30] = AttackFpArg::Bool(self.is_absorbable);
+        args[34] = source(crate::acmd::const_expr(&self.lr_check));
+        Some(AttackFpCall { args })
+    }
 }
 
 /// A parsed `macros::CATCH` call — a grab box.
@@ -677,6 +905,7 @@ impl AttackCall {
             catch: None,
             abs: None,
             search: None,
+            fp: None,
         }
     }
 }
@@ -938,6 +1167,8 @@ pub enum ExcuteStmt {
     Catch(CatchCall),
     /// ATTACK_ABS — damage applied to an opponent already caught. No volume, no bone.
     AttackAbs(AttackAbsCall),
+    /// ATTACK_FP — fighter-position collision with a separate 41-slot payload.
+    AttackFp(AttackFpCall),
     /// SEARCH — a detection volume. Its own family for the same reason `CATCH` is: it shares
     /// no argument layout with `ATTACK`, and nothing in a `game_` script takes it back.
     Search(SearchCall),
@@ -1892,6 +2123,17 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
             }
             hitboxes.push(call.to_hitbox(script_frame(frame)));
         }
+        ExcuteStmt::AttackFp(call) => {
+            let spawn = script_frame(frame);
+            if let Some(existing) = hitboxes.iter_mut().find(|h| {
+                is_attack_category(h.category)
+                    && h.id == call.int(0, 0).max(0) as u32
+                    && h.active_end == u32::MAX
+            }) {
+                existing.active_end = spawn.saturating_sub(1).max(existing.active_start);
+            }
+            hitboxes.push(call.to_hitbox(spawn));
+        }
         ExcuteStmt::Wind(wind) => {
             let spawn = script_frame(frame);
             if let Some(existing) = hitboxes.iter_mut().find(|hitbox| {
@@ -1927,7 +2169,9 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
         ExcuteStmt::Clear(id) => {
             let end = script_frame(frame).saturating_sub(1);
             for hitbox in hitboxes.iter_mut().filter(|hitbox| {
-                hitbox.category == 0 && hitbox.id == *id && hitbox.active_end == u32::MAX
+                is_attack_category(hitbox.category)
+                    && hitbox.id == *id
+                    && hitbox.active_end == u32::MAX
             }) {
                 hitbox.active_end = end.max(hitbox.active_start);
             }
@@ -1939,7 +2183,10 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
         // and the timeline draws nothing at all.
         ExcuteStmt::ClearAll => {
             let end = script_frame(frame).saturating_sub(1);
-            for hb in hitboxes.iter_mut().filter(|hitbox| hitbox.category == 0) {
+            for hb in hitboxes
+                .iter_mut()
+                .filter(|hitbox| is_attack_category(hitbox.category))
+            {
                 if hb.active_end == u32::MAX {
                     hb.active_end = end.max(hb.active_start);
                 }

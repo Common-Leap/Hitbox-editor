@@ -569,24 +569,26 @@ bugs rather than hypotheticals:**
 Verified: 302 tests, clippy clean, `build_check.sh`, plugin builds. Both corpus oracles cover
 all 32 calls. Live rules and hooks are built but not exercised against a running game.
 
-### [ ] B2 — `ATTACK_FP` (fighter-position hitboxes)
+### [~] B2 — `ATTACK_FP` (fighter-position hitboxes; authoring path implemented 2026-08-08)
 
-Blocked by: B1 in practice — but read this before scheduling it.
+Blocked by: vanilla evidence, not implementation work.
 
 **Measured after A3: `ATTACK_FP` appears ZERO times in the local corpus.** smash-script
 declares it, so it is emittable, but there is no vanilla call anywhere in the 461 cached
-scripts. That breaks two things the old "same shape as B1, do it immediately after" framing
-assumed:
+scripts. That means the original definition of done — a round-trip test built from a **real**
+vanilla call — cannot be met from the available archive, and the corpus oracles cannot validate
+the slot table.
 
-- The definition of done requires a round-trip test built from a **real** vanilla call. There
-  is none to build it from, so this task cannot meet that bar as written.
-- Nothing exercises it in the corpus oracles either, so a wrong slot table here would pass
-  every check in the project and only fail on a user's mod.
+**Chosen path: deliberate authoring convenience, not a vanilla-complete claim.** The complete
+41-slot payload is now retained as typed/raw data through parse and IR, project export, live
+capture and rule injection, and source write-back. The panel exposes only established shared
+hit properties; fighter-position geometry and undocumented fields are preserved but not guessed
+or drawn as ordinary bone-local volumes. Export and source-sync use a separate `ATTACK_FP`
+slot table, and synthetic parse/export/write-back tests cover that path.
 
-Do not do this on the strength of "it is next in the list". Either fetch more of the archive
-first and re-measure, or take it deliberately as an unverifiable convenience for mod authors
-who write `ATTACK_FP` by hand — and say which in the entry, since the second is a real choice
-and not a default.
+This entry remains `[~]` because vanilla verification is still open: no local corpus oracle
+exists, and live hardware/game execution was not used to manufacture evidence. Re-measure a
+larger archive or validate a real mod call before promoting this to `[x]`.
 
 ### [x] B3 — Post-hoc hitbox tuning (done 2026-08-04)
 

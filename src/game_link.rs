@@ -316,6 +316,12 @@ pub const CAT_ABS: u8 = 4;
 /// Wire category for `SEARCH`. **Must equal the plugin's value.**
 pub const CAT_SEARCH: u8 = 7;
 
+/// Wire category for `ATTACK_FP`. **Must equal the plugin's `CAT_ATTACK_FP`.**
+///
+/// The value is kept outside the display-category range because the plugin's wire categories
+/// already reserve 3 for hurtbox state and 4 for `ATTACK_ABS`.
+pub const CAT_ATTACK_FP: u8 = 12;
+
 /// Translate a [`crate::data::Hitbox`]'s display category into the one the plugin matches on.
 ///
 /// Every place that puts a collision on the wire goes through this. Passing the display number
@@ -326,6 +332,7 @@ pub fn wire_category(display: u8) -> u8 {
     match display {
         crate::data::CAT_ABS => CAT_ABS,
         crate::data::CAT_SEARCH => CAT_SEARCH,
+        crate::data::CAT_ATTACK_FP => CAT_ATTACK_FP,
         // Attack, grab and wind agree in both spaces.
         other => other,
     }
