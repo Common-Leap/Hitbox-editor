@@ -4381,6 +4381,47 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// A real opaque C7 line is not a modifier site, so retuning the spawn beside it must leave
+    /// the source call untouched. The generic macro scanner sees the line, but the effect
+    /// rewriter only owns the transform and the three established modifiers; this is the source
+    /// write-back half of keeping an unmodelled command present without inventing an edit field.
+    #[test]
+    fn syncing_a_spawn_does_not_delete_the_unwrapped_work_int_line_beside_it() {
+        let source = r#"unsafe extern "C" fn effect_tornadostart(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("metaknight_tornado"), Hash40::new("trans"), 0, 0, 0, 0, 0, 0, 1, false);
+        macros::LAST_EFFECT_SET_WORK_INT(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].offset[0] = 2.5;
+
+        let (after, report) =
+            rewrite_effect_calls(source, "kirby/tornadostart", &pristine, &edited).unwrap();
+        assert_eq!(
+            report.changed, 1,
+            "only the spawn transform changed: {report:?}"
+        );
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_WORK_INT(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);"),
+            "source write-back must not delete an opaque C7 line:\n{after}"
+        );
+        assert_eq!(
+            after
+                .matches("macros::LAST_EFFECT_SET_WORK_INT(agent,")
+                .count(),
+            1,
+            "the unmodeled line must remain exactly once:\n{after}"
+        );
+        assert!(
+            after.contains(", 2.5, 0, 0, 0, 0, 0, 1, false);"),
+            "{after}"
+        );
+    }
+
     /// The source editor and the editor panels drive each other, so a value written into the
     /// text has to parse back to exactly what was written. Any drift — a rounding difference,
     /// a reformat — reads as a fresh edit on the next frame and the two ping-pong forever.

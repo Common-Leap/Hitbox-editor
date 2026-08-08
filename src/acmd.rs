@@ -833,6 +833,14 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::LAST_EFFECT_SET_RATE(")
             || line.contains("macros::LAST_EFFECT_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_ALPHA(")
+            // These four are deliberately still opaque C7 lines. They belong to the effect
+            // timeline when written bare, though, so route them through the same residue path
+            // as an unknown line inside `is_excute` instead of dropping the whole statement.
+            // Their argument meaning and live/export contracts remain unmodelled below.
+            || line.contains("macros::LAST_PARTICLE_SET_COLOR(")
+            || line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
+            || line.contains("macros::LAST_EFFECT_SET_SCALE_W(")
+            || line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(")
             || color_macro_layout(line).is_some();
         if is_effect_macro {
             let effect_macros = parse_excute_block_effects(&[line]);
@@ -5348,6 +5356,170 @@ unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
             round_tripped.iter().map(|c| c.rate).collect::<Vec<_>>(),
             vec![Some(2.0), Some(1.5)],
             "reading the export back must find the same rates on the same spawns"
+        );
+    }
+
+    /// Kirby's real `TornadoStart` call is the one corpus use of `LAST_EFFECT_SET_WORK_INT`.
+    /// The line is not an editable effect field: `sv_animcmd` exposes the primitive, but
+    /// `smash-script` has no wrapper. It must nevertheless remain in the generated source so the
+    /// verifier can refuse the missing-wrapper export for the line the user actually wrote.
+    #[test]
+    fn the_unwrapped_work_int_effect_line_is_carried_and_refused_loudly() {
+        let src = r#"unsafe extern "C" fn effect_tornadostart(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("metaknight_tornado"), Hash40::new("trans"), 0, 0, 0, 0, 0, 0, 1, false);
+        macros::LAST_EFFECT_SET_WORK_INT(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);
+    }
+}
+"#;
+        let source = parse_effect_script(src);
+        let (calls, residue) = source.to_effect_calls_and_residue();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            residue.is_empty(),
+            "the line shares the spawn's frame: {residue:?}"
+        );
+        assert_eq!(
+            calls[0].trailing,
+            vec![
+                "if macros::is_excute(agent) {",
+                "macros::LAST_EFFECT_SET_WORK_INT(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);",
+                "}",
+            ]
+        );
+
+        let emitted = preview_effect_fn(&calls, "tornadostart", &[], &residue);
+        assert_eq!(
+            emitted
+                .matches("macros::LAST_EFFECT_SET_WORK_INT(agent,")
+                .count(),
+            1,
+            "the opaque source line must reach generated text exactly once:\n{emitted}"
+        );
+        assert!(
+            unexportable_effect_lines(&source).is_empty(),
+            "a carried line is not a dropped line"
+        );
+
+        let mut report = crate::acmd_verify::Report::default();
+        crate::acmd_verify::verify_effect_move(
+            "kirby / tornadostart",
+            &calls,
+            &emitted,
+            &[],
+            Some(&unexportable_effect_lines(&source)),
+            &residue,
+            &mut report,
+        );
+        assert!(report.has_blockers());
+        assert!(
+            report
+                .blockers()
+                .any(|finding| finding.message.contains("no wrapper")),
+            "the missing wrapper must be an export blocker: {report:?}"
+        );
+    }
+
+    /// Bare C7 calls have no typed editor field yet, but they are still effect-timeline lines.
+    /// Routing them through the existing residue emitter keeps the source visible and positioned
+    /// without pretending to know what any of the four calls does.
+    #[test]
+    fn bare_c7_effect_lines_reach_frame_residue_without_becoming_typed_calls() {
+        let src = r#"unsafe extern "C" fn effect_c7(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 7.0);
+    macros::LAST_PARTICLE_SET_COLOR(agent, 1, 2, 3);
+    macros::LAST_EFFECT_SET_WORK_INT(agent, *WORK_INT);
+    macros::LAST_EFFECT_SET_SCALE_W(agent, 1, 2, 3);
+    macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 4);
+}
+"#;
+        let source = parse_effect_script(src);
+        let (calls, residue) = source.to_effect_calls_and_residue();
+        assert!(calls.is_empty(), "opaque C7 lines are not effect spawns");
+        let lines = residue.get(&7).expect("bare calls keep their frame");
+        for name in [
+            "LAST_PARTICLE_SET_COLOR",
+            "LAST_EFFECT_SET_WORK_INT",
+            "LAST_EFFECT_SET_SCALE_W",
+            "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(name)),
+                "{name} was not carried: {lines:?}"
+            );
+        }
+        let emitted = preview_effect_fn(&calls, "c7", &[], &residue);
+        for name in [
+            "LAST_PARTICLE_SET_COLOR",
+            "LAST_EFFECT_SET_WORK_INT",
+            "LAST_EFFECT_SET_SCALE_W",
+            "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
+        ] {
+            assert_eq!(
+                emitted.matches(name).count(),
+                1,
+                "{name} must be emitted once:\n{emitted}"
+            );
+        }
+    }
+
+    /// Kirby's `SetInkColor` is the one corpus use of `LAST_PARTICLE_SET_COLOR`. The dump emits
+    /// the colour through three preceding `WorkModule::get_float` stack pushes and then writes a
+    /// zero-argument macro call. Keep the observed line, but leave the stack plumbing and the
+    /// wrapper mismatch explicit instead of inventing three editor values.
+    #[test]
+    fn the_dumped_particle_color_stack_form_is_carried_and_marked_unbuildable() {
+        let src = r#"unsafe extern "C" fn effect_set_ink_color(agent: &mut L2CAgentBase) {
+    WorkModule::get_float(agent.module_accessor, *FIGHTER_KIRBY_INSTANCE_WORK_ID_FLOAT_INKLING_SPECIAL_N_INK_R);
+    WorkModule::get_float(agent.module_accessor, -1165490952, *FIGHTER_KIRBY_INSTANCE_WORK_ID_FLOAT_INKLING_SPECIAL_N_INK_G);
+    WorkModule::get_float(agent.module_accessor, -1165490952, *FIGHTER_KIRBY_INSTANCE_WORK_ID_FLOAT_INKLING_SPECIAL_N_INK_B);
+    if macros::is_excute(agent) {
+        macros::LAST_PARTICLE_SET_COLOR(agent);
+    }
+}
+"#;
+        let source = parse_effect_script(src);
+        let (calls, residue) = source.to_effect_calls_and_residue();
+        assert!(calls.is_empty(), "the dump has no typed effect spawn");
+        let lines = residue
+            .get(&1)
+            .expect("the particle call still has a frame");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "macros::LAST_PARTICLE_SET_COLOR(agent);"),
+            "the stack-form macro was dropped: {lines:?}"
+        );
+        let emitted = preview_effect_fn(&calls, "set_ink_color", &[], &residue);
+        assert_eq!(
+            emitted
+                .matches("macros::LAST_PARTICLE_SET_COLOR(agent);")
+                .count(),
+            1,
+            "the observed particle call must reach generated text once:\n{emitted}"
+        );
+        let lost = unexportable_effect_lines(&source);
+        assert!(
+            lost.iter()
+                .any(|line| line.contains("WorkModule::get_float")),
+            "the stack inputs remain an explicit unmodelled loss: {lost:?}"
+        );
+
+        let mut report = crate::acmd_verify::Report::default();
+        crate::acmd_verify::verify_effect_move(
+            "kirby / set_ink_color",
+            &calls,
+            &emitted,
+            &[],
+            Some(&lost),
+            &residue,
+            &mut report,
+        );
+        assert!(
+            report
+                .blockers()
+                .any(|finding| finding.message.contains("zero-argument")),
+            "the wrapper mismatch must be explicit: {report:?}"
         );
     }
 

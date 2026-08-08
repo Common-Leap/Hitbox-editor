@@ -999,6 +999,16 @@ declaration list:
 | `LAST_EFFECT_SET_SCALE_W` | 3 (`ToF32`) | 0 | yes |
 | `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` | 1 (`ToF32`) | 0 | yes |
 
+**Boundary added 2026-08-08, without claiming C7 complete.** Opaque C7 lines inside an
+`is_excute` block were already carried by C6; bare forms now take that same frame-residue path
+instead of becoming statement-level losses. The real `TornadoStart` line survives the generated
+effect text and source write-back, while the verifier refuses the export because
+`LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper. The real `SetInkColor` particle line is
+also carried, but its three preceding `WorkModule::get_float` stack inputs remain unmodelled and
+the dump's zero-argument `LAST_PARTICLE_SET_COLOR(agent)` spelling is explicitly unbuildable.
+There is still no typed panel field, live wire/plugin hook, or safe semantic export for this
+family, so this entry remains open.
+
 **This is a low-value entry and should probably stay open forever.** Two of the four appear
 nowhere in the corpus, and the other two appear once each. C1's result is the argument against
 doing it: modelling a whole family recovered five real calls. Take it only if a user asks for

@@ -920,7 +920,10 @@ fn check_dropped_lines(subject: &str, lost: &[String], report: &mut Report) {
 ///   a mystery from `cargo build`.
 ///
 /// A warning, on the same reasoning as the dropped-line check: refusing the export helps nobody
-/// who can read the message and fix the line.
+/// who can read the message and fix the line. A known `smash-script` wrapper gap is the one
+/// exception: the generated source is not buildable in that case, so it is a blocker rather than
+/// a warning. C7's `LAST_EFFECT_SET_WORK_INT` is the measured example, and the decompiler's
+/// zero-argument `LAST_PARTICLE_SET_COLOR(agent)` spelling is another known non-buildable shape.
 fn check_carried_lines(
     subject: &str,
     calls: &[EffectCall],
@@ -928,6 +931,7 @@ fn check_carried_lines(
     report: &mut Report,
 ) {
     let mut seen: Vec<String> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
     for line in calls
         .iter()
         .filter(|call| !call.disabled)
@@ -944,7 +948,12 @@ fn check_carried_lines(
         if text.contains("is_excute") || !text.chars().any(|c| c.is_alphanumeric()) {
             continue;
         }
-        if !seen.iter().any(|s| s == text) {
+        if let Some(message) = carried_line_blocker(text) {
+            if !blocked.iter().any(|s| s == text) {
+                blocked.push(text.to_string());
+                report.blocker(subject, message);
+            }
+        } else if !seen.iter().any(|s| s == text) {
             seen.push(text.to_string());
         }
     }
@@ -957,6 +966,35 @@ fn check_carried_lines(
             ),
         );
     }
+}
+
+/// Return a blocker for an opaque effect line that the generated Rust cannot compile as written.
+///
+/// `sv_animcmd` exposes more primitives than `smash-script::macros`, so a dumped source line can
+/// be a real game call while still naming no callable wrapper in an exported Skyline project.
+/// `LAST_EFFECT_SET_WORK_INT` is the one C7 member with that measured gap. The particle colour
+/// wrapper does exist, but the real dump's stack-form line has no explicit RGB arguments; emitting
+/// it unchanged would call a three-argument wrapper with only `agent`. Do not broaden this to all
+/// opaque lines: a decompiled condition or a project-specific raw helper is a warning, not enough
+/// evidence for a new compile rule.
+fn carried_line_blocker(line: &str) -> Option<String> {
+    if line.contains("macros::LAST_EFFECT_SET_WORK_INT(") {
+        return Some(
+            "the generated script carries `macros::LAST_EFFECT_SET_WORK_INT`, but smash-script \
+             provides no wrapper for it; resolve this line to a supported `sv_animcmd` call before \
+             exporting"
+                .to_string(),
+        );
+    }
+    if line == "macros::LAST_PARTICLE_SET_COLOR(agent);" {
+        return Some(
+            "the generated script carries the dump's zero-argument `LAST_PARTICLE_SET_COLOR`, \
+             but smash-script's wrapper requires three colour arguments; resolve its Lua-stack \
+             inputs before exporting"
+                .to_string(),
+        );
+    }
+    None
 }
 
 fn effect_order(call: &EffectCall) -> (u32, String, String) {
@@ -1393,8 +1431,10 @@ mod tests {
     }
 
     /// The property the whole module exists for, checked against every script the app has ever
-    /// fetched. A clean run here means the emitter is a faithful inverse of the parser across
-    /// a thousand real functions, not just across the cases someone thought to write down.
+    /// fetched. The one intentional exception is the corpus's real `LAST_EFFECT_SET_WORK_INT`
+    /// line: it is carried faithfully but cannot compile because `smash-script` has no wrapper,
+    /// so the verifier must report that blocker rather than let this oracle hide it. Everything
+    /// else still has to be a faithful inverse of the parser across a thousand real functions.
     #[test]
     fn every_cached_script_survives_its_own_export() {
         let cache = crate::scratch_dirs::app_storage_root().join("script-cache");
@@ -1446,11 +1486,34 @@ mod tests {
         }
         assert!(checked > 100, "the cache held almost nothing: {checked}");
         let blockers: Vec<String> = report.blockers().map(|f| f.to_string()).collect();
-        assert!(
-            blockers.is_empty(),
-            "{} of {checked} scripts do not export faithfully:\n{}",
-            blockers.len(),
+        let expected_c7: Vec<&String> = blockers
+            .iter()
+            .filter(|line| {
+                line.contains("kirby/TornadoStart.txt") && line.contains("LAST_EFFECT_SET_WORK_INT")
+            })
+            .collect();
+        assert_eq!(
+            expected_c7.len(),
+            1,
+            "the measured C7 wrapper blocker changed shape or disappeared:\n{}",
             blockers.join("\n")
+        );
+        let unexpected: Vec<&String> = blockers
+            .iter()
+            .filter(|line| {
+                !(line.contains("kirby/TornadoStart.txt")
+                    && line.contains("LAST_EFFECT_SET_WORK_INT"))
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "{} unexpected blockers among {checked} scripts; the C7 exception is intentional:\n{}",
+            unexpected.len(),
+            unexpected
+                .iter()
+                .map(|line| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
