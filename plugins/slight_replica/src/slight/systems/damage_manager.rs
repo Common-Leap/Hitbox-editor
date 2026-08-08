@@ -71,7 +71,7 @@ pub fn on_collision_hit(ctx: &crate::slight::systems::skyline_hook::CollisionCon
     let attacker_kind = agent_kind(ctx.attacker_boid);
     let defender_kind = agent_kind(ctx.defender_boid);
     let rec = CollisionHitRecord {
-        meta: ctx.param_2,
+        meta: ctx.manager,
         attacker_boid: ctx.attacker_boid,
         defender_boid: ctx.defender_boid,
         collision_id: ctx.collision_id,

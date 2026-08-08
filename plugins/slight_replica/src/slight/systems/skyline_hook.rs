@@ -21,11 +21,19 @@ const COLLISION_PATTERN: [u8; 40] = [
     0xfd, 0xc3, 0x02, 0x91, 0xfb, 0x03, 0x00, 0xaa,
 ];
 
-/// Hook replacement — Jorge `notify_log_event_collision_hit` (6 args).
-type CollisionHitHook = unsafe extern "C" fn(u32, u64, u32, u32, u32, u32) -> u64;
-
-/// Original game function — Jorge calls trampoline with **5** args (no param_1).
-type CollisionHitTrampoline = unsafe extern "C" fn(u64, u32, u32, u32, u32) -> u64;
+/// The 13.0.4 `FighterManager::notify_log_event_collision_hit` ABI reached by the scanned
+/// wrapper. The first two integers are the attacker/defender battle-object IDs; the native
+/// function also carries the hit value, collision id, and a boolean flag in their ABI-native
+/// registers. Keep the float and bool in their real positions — treating this as six integer
+/// arguments corrupts both the callback fields and the return path on AArch64.
+type CollisionHitTrampoline = unsafe extern "C" fn(
+    *mut smash::app::FighterManager,
+    u32,
+    u32,
+    f32,
+    i32,
+    bool,
+);
 
 type CollisionCallback = fn(&CollisionContext);
 
@@ -40,13 +48,14 @@ pub struct HitRecord {
     pub tick: u64,
 }
 
-/// Context passed to registered callbacks — mirrors Jorge `local_158` bundle.
+/// Context passed to registered callbacks — the fields that survive the 13.0.4 native notify
+/// boundary, plus the opaque manager receiver retained for diagnostics.
 #[derive(Clone, Debug)]
 pub struct CollisionContext {
-    pub log_kind: u32,
-    pub param_2: u64,
+    pub manager: u64,
     pub attacker_boid: u32,
     pub defender_boid: u32,
+    pub damage: f32,
     pub collision_id: u32,
     pub flags: u32,
     pub tick: u64,
@@ -59,11 +68,12 @@ pub fn install() {
 
     register_callback(collision_queue_callback);
 
-    // The collision hit notify is hooked with a manual `A64HookFunction` inline hook (there's no
-    // clean L2C symbol to `skyline::hook(replace=…)`). That inline hook + Eden's dynarmic JIT
-    // produces a bad trampoline that null-jumps when a hit fires (crash in `collision_hit_hook`).
-    // It only feeds the damage *log* (not multiplier application), so disable it under the emulator
-    // to keep the core effect viewer usable. TODO: robust 13.0.4 hook (or run on real hardware).
+    // The pinned bindings do not expose this direct FighterManager member as a stable
+    // `skyline::hook(replace=…)` target, so the collision hit notify remains a manual
+    // `A64HookFunction` pattern hook. Static 13.0.4 analysis has corrected the trampoline's
+    // native ABI above, but Eden's dynarmic JIT still produces a bad trampoline that null-jumps
+    // when a hit fires. It only feeds the damage *log* (not multiplier application), so disable it
+    // until the trampoline is proven on hardware or with a compatible hook implementation.
     if !ENABLE_INLINE_COLLISION_HOOK {
         skyline::println!("[SLight] Skyline Hook: inline collision hook disabled (Eden-unsafe)");
         return;
@@ -132,30 +142,35 @@ fn scan_collision_pattern() -> Option<usize> {
 }
 
 unsafe extern "C" fn collision_hit_hook(
-    param_1: u32,
-    param_2: u64,
-    attacker: u32,
-    defender: u32,
-    collision_id: u32,
-    flags: u32,
-) -> u64 {
+    manager: *mut smash::app::FighterManager,
+    attacker_boid: u32,
+    defender_boid: u32,
+    damage: f32,
+    collision_id: i32,
+    flags: bool,
+) {
     let tick = crate::slight::frame_context::match_ticks();
     let ctx = CollisionContext {
-        log_kind: param_1,
-        param_2,
-        attacker_boid: attacker,
-        defender_boid: defender,
-        collision_id,
-        flags,
+        manager: manager as u64,
+        attacker_boid,
+        defender_boid,
+        damage,
+        collision_id: collision_id as u32,
+        flags: flags as u32,
         tick,
     };
 
     run_callbacks(&ctx);
 
     if let Some(orig) = TRAMPOLINE {
-        orig(param_2, attacker, defender, collision_id, flags)
-    } else {
-        0
+        orig(
+            manager,
+            attacker_boid,
+            defender_boid,
+            damage,
+            collision_id,
+            flags,
+        );
     }
 }
 
@@ -169,15 +184,16 @@ fn collision_queue_callback(ctx: &CollisionContext) {
     notify_log_event_collision_hit(ctx);
 }
 
-/// Jorge @ 71000eb4b0 — collision hit notify + damage/overload queues.
+/// Collision hit notify + damage/overload queues.
 pub fn notify_log_event_collision_hit(ctx: &CollisionContext) {
     record_hit(ctx.attacker_boid, ctx.defender_boid, ctx.tick);
     crate::slight::systems::damage_manager::on_collision_hit(ctx);
     if crate::slight::smash_utils::debug_logging_enabled() {
         skyline::println!(
-            "[SLight] notify_log_event_collision_hit {} -> {} id={} flags={}",
+            "[SLight] notify_log_event_collision_hit {} -> {} damage={:.2} id={} flags={}",
             ctx.attacker_boid,
             ctx.defender_boid,
+            ctx.damage,
             ctx.collision_id,
             ctx.flags
         );

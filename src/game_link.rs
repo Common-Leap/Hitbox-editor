@@ -2428,6 +2428,37 @@ mod tests {
         );
     }
 
+    /// The collision hook's Rust ABI must stay aligned with the 13.0.4 native target.
+    ///
+    /// The plugin is a separate Skyline crate, so the desktop workspace cannot type-check it as
+    /// part of `cargo test`. The plugin release build catches compiler-level drift, while this
+    /// source assertion makes the important native argument classes visible to the desktop gate:
+    /// the manager receiver, two object IDs, a float hit value, an i32 collision ID, and a bool.
+    #[test]
+    fn the_plugin_collision_hook_keeps_the_1304_native_abi() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/systems/skyline_hook.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for needle in [
+            "type CollisionHitTrampoline = unsafe extern \"C\" fn(",
+            "*mut smash::app::FighterManager",
+            "damage: f32",
+            "collision_id: i32",
+            "flags: bool",
+            "orig(",
+        ] {
+            assert!(
+                source.contains(needle),
+                "collision hook ABI guard is missing {needle:?}"
+            );
+        }
+        assert!(
+            !source.contains("type CollisionHitHook =") && !source.contains("param_1: u32"),
+            "the obsolete six-integer collision hook ABI is still present"
+        );
+    }
+
     /// The rate category and override field the editor sends are the ones the plugin reads.
     ///
     /// Same mechanism and same weakness as the sound checks above: this pins the plugin's

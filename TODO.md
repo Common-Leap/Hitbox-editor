@@ -3537,11 +3537,18 @@ copy of every spawn onto the timeline.
   why a change is safe is a claim to be measured like any other. This one was written confidently
   in a commit message and was wrong within the hour.
 
-### [!] R3 — Robust Skyline 13.0.4 hook (blocked: needs a physical Switch or proven hook evidence)
+### [!] R3 — Robust Skyline 13.0.4 hook (ABI corrected; runtime trampoline still unverified)
 
-`plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
-the source: the current hook is a workaround to keep the core effect viewer usable. Wants
-either a proper 13.0.4 hook or a run on real hardware.
+`plugins/slight_replica/src/slight/systems/skyline_hook.rs` carries the manual pattern hook used to
+keep the core effect viewer usable. Static 13.0.4 analysis (2026-08-08) found the scanned body at
+the target reached by the exported
+`FighterManager__notify_log_event_collision_hit_impl` wrapper. Its native ABI is
+`(FighterManager*, u32, u32, f32, i32, bool) -> ()`; the plugin trampoline and callback now match
+those argument positions. This removes the previous Rust six-integer ABI mismatch.
+
+R3 remains open because `A64HookFunction`'s trampoline still fails under Eden's JIT and no
+physical Switch or proven compatible hook run is available. Do not enable the inline hook based
+on static analysis alone.
 
 ### [x] R4 — Guard against the double-plugin footgun (done 2026-08-05)
 
