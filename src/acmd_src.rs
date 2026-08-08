@@ -1284,6 +1284,18 @@ pub fn rewrite_effect_calls(
         modifier_edits(
             text,
             label,
+            "particle tint",
+            "LAST_PARTICLE_SET_COLOR",
+            macro_site,
+            was.particle_tint.map(|v| v.to_vec()),
+            target.particle_tint.map(|v| v.to_vec()),
+            sites.and_then(|s| s.particle_tint.as_ref()),
+            &mut edits,
+            &mut report,
+        );
+        modifier_edits(
+            text,
+            label,
             "opacity",
             "LAST_EFFECT_SET_ALPHA",
             macro_site,
@@ -1352,7 +1364,8 @@ fn sync_script(
 ///
 /// Each of these lives on its own line, so turning one on or off is a call added or removed —
 /// structural, and reported. Only retuning an existing one is a value edit. The four differ
-/// only in which property they carry — rate, camera offset, opacity, or three-component tint —
+/// only in which property they carry — rate, camera offset, opacity, effect tint, or
+/// particle tint —
 /// and every rule around them is the same. `noun` names the property in the user's terms and
 /// `command` names the line to look for.
 #[allow(clippy::too_many_arguments)]
@@ -1400,9 +1413,10 @@ fn modifier_edits(
     }
 }
 
-/// The `LAST_EFFECT_SET_*` lines a spawn can carry, in the spelling `scan_macro_sites` reports.
+/// The `LAST_EFFECT_SET_*` / `LAST_PARTICLE_SET_COLOR` lines a spawn can carry, in the spelling
+/// `scan_macro_sites` reports.
 ///
-/// Only these four break nothing when they sit between a spawn and a later modifier of its
+/// Only these five break nothing when they sit between a spawn and a later modifier of its
 /// own; every other macro ends the run. Adding a member of the family to
 /// [`crate::data::EffectCall`] means adding it here too, or its line will end the run and the
 /// modifier after it will be reported as unfindable.
@@ -1410,15 +1424,17 @@ const MODIFIER_COMMANDS: &[&str] = &[
     "LAST_EFFECT_SET_RATE",
     "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
     "LAST_EFFECT_SET_COLOR",
+    "LAST_PARTICLE_SET_COLOR",
     "LAST_EFFECT_SET_ALPHA",
 ];
 
-/// The `LAST_EFFECT_SET_*` lines belonging to one spawn, each present only if the source has it.
+/// The last-target modifier lines belonging to one spawn, each present only if the source has it.
 #[derive(Default)]
 struct ModifierSites {
     rate: Option<MacroSite>,
     camera_offset: Option<MacroSite>,
     tint: Option<MacroSite>,
+    particle_tint: Option<MacroSite>,
     alpha: Option<MacroSite>,
 }
 
@@ -1426,7 +1442,8 @@ struct ModifierSites {
 ///
 /// These macros name no effect, so the only thing tying one to a spawn is that it comes
 /// directly after it — the same rule `eval_effect_stmts` uses to fill `EffectCall::rate`,
-/// `camera_offset`, `tint`, and `alpha`, and the two must agree or a value would be read off one call and
+/// `camera_offset`, `tint`, `particle_tint`, and `alpha`, and the two must agree or a value would
+/// be read off one call and
 /// written into another. Anything else between them, including a macro this scanner does not
 /// recognise, breaks the pairing rather than reaching further back for a spawn to claim.
 ///
@@ -1470,11 +1487,20 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
         let Some(entry) = modifiers.last_mut() else {
             continue;
         };
+        let valid_arity = match site.name.as_str() {
+            "LAST_EFFECT_SET_COLOR" | "LAST_PARTICLE_SET_COLOR" => site.args.len() == 4,
+            _ => site.args.len() == 2,
+        };
+        if !valid_arity {
+            adjacent = false;
+            continue;
+        }
         // A second line of the same kind overwrites the first, because in game the later call
         // wins and that is the value the parser will have read.
         let slot = match site.name.as_str() {
             "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT" => &mut entry.camera_offset,
             "LAST_EFFECT_SET_COLOR" => &mut entry.tint,
+            "LAST_PARTICLE_SET_COLOR" => &mut entry.particle_tint,
             "LAST_EFFECT_SET_ALPHA" => &mut entry.alpha,
             _ => &mut entry.rate,
         };
@@ -1514,8 +1540,8 @@ fn is_trail_macro(name: &str) -> bool {
 /// of a loop body agrees, since they all come off one line of source.
 ///
 /// The `LAST_EFFECT_SET_*` modifiers count: each is written back from its own line, but that
-/// line is inside the loop body too, so a per-iteration rate, camera offset, tint, or opacity is no more
-/// expressible than a per-iteration position.
+/// line is inside the loop body too, so a per-iteration rate, camera offset, effect tint, particle
+/// tint, or opacity is no more expressible than a per-iteration position.
 fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
     a.offset == b.offset
         && a.rotation == b.rotation
@@ -1523,6 +1549,7 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
         && a.rate == b.rate
         && a.camera_offset == b.camera_offset
         && a.tint == b.tint
+        && a.particle_tint == b.particle_tint
         && a.alpha == b.alpha
         && a.color == b.color
 }
@@ -4956,6 +4983,27 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             after.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.75);"),
             "the second spawn's modifier must be retuned:\n{after}"
         );
+    }
+
+    #[test]
+    fn a_particle_tint_edit_rewrites_only_its_particle_modifier_line() {
+        const PARTICLE: &str = r#"unsafe extern "C" fn effect_particle(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 7.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_hit"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(PARTICLE).to_effect_calls();
+        assert_eq!(pristine[0].particle_tint, Some([0.1, 1.2, 0.3]));
+        let mut edited = pristine.clone();
+        edited[0].particle_tint = Some([0.1, 0.5, 0.3]);
+        let (after, report) = rewrite_effect_calls(PARTICLE, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 1);
+        assert!(after.contains("macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 0.5, 0.3);"));
+        assert!(!after.contains("LAST_EFFECT_SET_COLOR"));
     }
 
     /// Two spawns, each with a different mix of the three modifiers, and a rate written *after*

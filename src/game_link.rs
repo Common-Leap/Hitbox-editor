@@ -124,6 +124,11 @@ pub struct SpawnRuleWire {
     /// spawn of one effect, like everything else above them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tint: Option<[f32; 3]>,
+    /// Per-spawn particle tint — the live counterpart of `LAST_PARTICLE_SET_COLOR`. It is
+    /// separate from `tint` because the game primitive targets the last particle, not the last
+    /// effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub particle_tint: Option<[f32; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
     /// Live values for a colour command. For such a rule `eff_hash` is hash40 of the
@@ -2333,6 +2338,7 @@ mod tests {
             rate: None,
             camera_offset: Some(0.4),
             tint: None,
+            particle_tint: Some([0.1, 1.2, 0.3]),
             alpha: None,
             color: None,
             transition: None,
@@ -2349,6 +2355,19 @@ mod tests {
             Some(true),
             "the camera-flat value must use the plugin's field name"
         );
+        assert_eq!(
+            v["spawn_rules"][0]["particle_tint"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_f64)
+                        .map(|value| value as f32)
+                        .collect::<Vec<_>>()
+                }),
+            Some(vec![0.1, 1.2, 0.3]),
+            "the particle tint must use its own wire field"
+        );
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/slight_replica/src/slight/effect_viewer");
@@ -2356,7 +2375,9 @@ mod tests {
             .expect("read the plugin's spawn rules");
         assert!(
             rules.contains("pub camera_offset: Option<f32>,")
-                && rules.contains("pub fn camera_offset_for"),
+                && rules.contains("pub fn camera_offset_for")
+                && rules.contains("pub particle_tint: Option<[f32; 3]>")
+                && rules.contains("pub fn particle_tint_for"),
             "the plugin no longer exposes the camera-flat rule field and lookup"
         );
         let hooks = std::fs::read_to_string(root.join("acmd_hooks.rs"))
@@ -2365,7 +2386,9 @@ mod tests {
             hooks.contains(
                 "replace = smash::app::sv_animcmd::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT"
             ) && hooks.contains("hook_last_effect_set_offset_to_camera_flat")
-                && hooks.contains("apply_pending_camera_offset"),
+                && hooks.contains("apply_pending_camera_offset")
+                && hooks.contains("LAST_PARTICLE_SET_COLOR")
+                && hooks.contains("apply_pending_particle_tint"),
             "the plugin no longer rewrites the camera-flat modifier hook"
         );
     }

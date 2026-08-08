@@ -3263,6 +3263,12 @@ pub enum EffectMacro {
     /// is [`LastEffectSetAlpha`](Self::LastEffectSetAlpha), a separate line and a separate
     /// decision. Keeping them apart is what lets a script that sets only one export only one.
     LastEffectSetColor { rgb: [f32; 3] },
+    /// LAST_PARTICLE_SET_COLOR — retints the last spawned particle.
+    ///
+    /// This is deliberately separate from [`LastEffectSetColor`](Self::LastEffectSetColor):
+    /// the game exposes two different "last" targets, and a particle colour must not be
+    /// exported as an effect colour merely because both carry three floats.
+    LastParticleSetColor { rgb: [f32; 3] },
     /// LAST_EFFECT_SET_ALPHA — sets the opacity of the last spawned effect.
     LastEffectSetAlpha { alpha: f32 },
     /// FLASH / BURN_COLOR and their relatives — see [`ColorCall`].
@@ -3509,6 +3515,12 @@ pub struct EffectCall {
     /// `BURN_COLOR` command — that one tints the *fighter*, this one tints one spawned effect.
     #[serde(default)]
     pub tint: Option<[f32; 3]>,
+    /// Tint from a `LAST_PARTICLE_SET_COLOR` line following this spawn, as red, green, blue.
+    ///
+    /// Kept distinct from [`tint`](Self::tint): the primitive targets the last particle rather
+    /// than the last effect, so aliasing the fields would change which renderer object is edited.
+    #[serde(default)]
+    pub particle_tint: Option<[f32; 3]>,
     /// Opacity from a `LAST_EFFECT_SET_ALPHA` line following this spawn.
     ///
     /// Its own field rather than a fourth component of [`tint`](Self::tint), because the two
@@ -3820,6 +3832,7 @@ fn eval_effect_stmts(
                                 rate: None,
                                 camera_offset: None,
                                 tint: None,
+                                particle_tint: None,
                                 alpha: None,
                                 color: None,
                                 guard: walk.guard.clone(),
@@ -3864,6 +3877,7 @@ fn eval_effect_stmts(
                                 rate: None,
                                 camera_offset: None,
                                 tint: None,
+                                particle_tint: None,
                                 alpha: None,
                                 color: None,
                                 guard: walk.guard.clone(),
@@ -3924,7 +3938,7 @@ fn eval_effect_stmts(
                             // `anchor` is left in place: two rate lines in a row both name the
                             // same spawn, and the later one wins, exactly as in game. The same
                             // is true across modifiers — a colour line after a rate line still
-                            // names the spawn above both — which is why none of these three
+                            // names the spawn above both — which is why none of these modifiers
                             // arms clears it.
                             match anchor {
                                 Some(index) => calls[index].rate = Some(*rate),
@@ -3951,6 +3965,16 @@ fn eval_effect_stmts(
                             None => walk.residue(
                                 &format!(
                                     "macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});",
+                                    rgb[0], rgb[1], rgb[2]
+                                ),
+                                calls,
+                            ),
+                        },
+                        EffectMacro::LastParticleSetColor { rgb } => match anchor {
+                            Some(index) => calls[index].particle_tint = Some(*rgb),
+                            None => walk.residue(
+                                &format!(
+                                    "macros::LAST_PARTICLE_SET_COLOR(agent, {}, {}, {});",
                                     rgb[0], rgb[1], rgb[2]
                                 ),
                                 calls,
@@ -3987,6 +4011,7 @@ fn eval_effect_stmts(
                                 rate: None,
                                 camera_offset: None,
                                 tint: None,
+                                particle_tint: None,
                                 alpha: None,
                                 color: Some(color.clone()),
                                 guard: walk.guard.clone(),

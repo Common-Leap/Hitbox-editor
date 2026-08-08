@@ -774,7 +774,8 @@ unsafe fn log_req_vtable_once(boma: *mut smash::app::BattleObjectModuleAccessor)
 
 // ── Per-spawn LAST_EFFECT_SET_* modifiers ─────────────────────────────────────
 //
-// None of these three takes an effect kind: they modify whatever spawned last. So a rule that
+// None of these last-target modifiers takes an effect kind: they modify whatever spawned last. So
+// a rule that
 // retunes one spawn cannot be matched at the modifier line itself — there is nothing there to
 // match on. The spawn hook, which does know the kind, leaves the wanted values here for the two
 // places that need them: the handle it applies to right after the spawn, and the script's own
@@ -813,6 +814,8 @@ static PENDING_ALPHA: PendingValue = PendingValue::new();
 // set and read on its own, and `pending_tint` only reports a colour when all three are present.
 static PENDING_TINT: [PendingValue; 3] =
     [PendingValue::new(), PendingValue::new(), PendingValue::new()];
+static PENDING_PARTICLE_TINT: [PendingValue; 3] =
+    [PendingValue::new(), PendingValue::new(), PendingValue::new()];
 
 fn set_pending_rate(rate: Option<f32>) {
     PENDING_RATE.set(rate);
@@ -842,6 +845,20 @@ fn pending_tint() -> Option<[f32; 3]> {
         PENDING_TINT[0].get()?,
         PENDING_TINT[1].get()?,
         PENDING_TINT[2].get()?,
+    ])
+}
+
+fn set_pending_particle_tint(tint: Option<[f32; 3]>) {
+    for (slot, component) in PENDING_PARTICLE_TINT.iter().enumerate() {
+        component.set(tint.map(|rgb| rgb[slot]));
+    }
+}
+
+fn pending_particle_tint() -> Option<[f32; 3]> {
+    Some([
+        PENDING_PARTICLE_TINT[0].get()?,
+        PENDING_PARTICLE_TINT[1].get()?,
+        PENDING_PARTICLE_TINT[2].get()?,
     ])
 }
 
@@ -883,6 +900,25 @@ unsafe fn apply_pending_camera_offset(lua_state: u64) {
     let mut value = L2CValue::new_num(offset);
     agent.push_lua_stack(&mut value);
     hook_last_effect_set_offset_to_camera_flat(lua_state);
+    agent.clear_lua_stack();
+}
+
+/// Apply a particle tint even when the live rule is editing a source that has no authored
+/// `LAST_PARTICLE_SET_COLOR` line, or when a retime injection replays only the captured spawn.
+/// The hooked primitive is used instead of guessing an `EffectModule` setter for a particle's
+/// distinct target; capture is suppressed because this is editor plumbing, not authored ACMD.
+unsafe fn apply_pending_particle_tint(lua_state: u64) {
+    let Some([r, g, b]) = pending_particle_tint() else {
+        return;
+    };
+    let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
+    let mut agent = smash::lib::L2CAgent::new(lua_state);
+    agent.clear_lua_stack();
+    for value in [r, g, b] {
+        let mut value = L2CValue::new_num(value);
+        agent.push_lua_stack(&mut value);
+    }
+    hook_last_particle_set_color(lua_state);
     agent.clear_lua_stack();
 }
 
@@ -939,6 +975,20 @@ unsafe fn hook_last_effect_set_color(lua_state: u64) {
     original!()(lua_state);
 }
 
+/// `LAST_PARTICLE_SET_COLOR` — recorded and overridden separately from the effect tint because
+/// its target is the last particle, not the last spawned effect.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_PARTICLE_SET_COLOR)]
+unsafe fn hook_last_particle_set_color(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 3);
+    crate::slight::hitbox_viewer::record(lua_state, "LAST_PARTICLE_SET_COLOR", &typed);
+
+    if let Some(rgb) = pending_particle_tint() {
+        override_modifier_args(lua_state, &rgb);
+    }
+
+    original!()(lua_state);
+}
+
 /// `LAST_EFFECT_SET_ALPHA` — recorded and overridden on the same terms as the rate above.
 #[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_ALPHA)]
 unsafe fn hook_last_effect_set_alpha(lua_state: u64) {
@@ -989,6 +1039,9 @@ unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_befor
     // which is why each `hook_last_effect_set_*` rewrites its arguments as well.
     apply_pending_modifiers(boma, h_before, h_after);
     apply_pending_camera_offset(lua_state);
+    if h_after != 0 && h_after != h_before {
+        apply_pending_particle_tint(lua_state);
+    }
     super::track_spawn(
         boma,
         0,
@@ -1044,6 +1097,7 @@ macro_rules! effect_hook {
                 set_pending_rate(None);
                 set_pending_camera_offset(None);
                 set_pending_tint(None, None);
+                set_pending_particle_tint(None);
                 // Eff-editor spawn rules: suppression + PER-SPAWN transform, both scoped to
                 // (motion, frame window) so editing one spawn doesn't affect the others.
                 let mut scoped_transform = false;
@@ -1116,6 +1170,13 @@ macro_rules! effect_hook {
                     )
                     .unwrap_or((None, None));
                     set_pending_tint(tint, alpha);
+                    set_pending_particle_tint(
+                        crate::slight::effect_viewer::spawn_rules::particle_tint_for(
+                            args.eff_hash,
+                            motion,
+                            frame,
+                        ),
+                    );
                 }
                 // Global kind pin (color/speed multipliers, or legacy global pos/rot) —
                 // only when no per-spawn transform already rewrote the args.
@@ -1768,6 +1829,7 @@ pub fn install() {
         hook_last_effect_set_rate,
         hook_last_effect_set_offset_to_camera_flat,
         hook_last_effect_set_color,
+        hook_last_particle_set_color,
         hook_last_effect_set_alpha,
         hook_flash,
         hook_flash_frm,
@@ -1777,6 +1839,6 @@ pub fn install() {
         hook_start_info_flash_eye,
         hook_col_normal,
     );
-    skyline::println!("[SLight] ACMD effect hooks installed (34 spawn/stop/colour variants)");
+    skyline::println!("[SLight] ACMD effect hooks installed (35 spawn/stop/colour variants)");
     crate::slight::diag::note("ACMD hooks installed");
 }

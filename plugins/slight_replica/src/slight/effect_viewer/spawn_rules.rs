@@ -64,6 +64,10 @@ pub struct SpawnRule {
     /// name. These two scope to one spawn of one effect kind, like everything else above them.
     #[serde(default)]
     pub tint: Option<[f32; 3]>,
+    /// Per-spawn particle tint — the live form of `LAST_PARTICLE_SET_COLOR`. This is separate
+    /// from `tint` because the game primitive targets the last particle, not the last effect.
+    #[serde(default)]
+    pub particle_tint: Option<[f32; 3]>,
     #[serde(default)]
     pub alpha: Option<f32>,
     /// Live values for a colour command — `FLASH`, `BURN_COLOR`, and the rest of the family.
@@ -199,6 +203,21 @@ pub fn tint_for(
                 && r.matches(eff_hash, motion, motion_frame)
         })
         .map(|r| (r.tint, r.alpha))
+}
+
+/// Per-spawn particle tint for the FIRST non-suppress rule matching this spawn.
+pub fn particle_tint_for(
+    eff_hash: u64,
+    motion: u64,
+    motion_frame: f32,
+) -> Option<[f32; 3]> {
+    let rules = RULES.try_lock()?;
+    rules
+        .iter()
+        .find(|r| {
+            !r.suppress && r.particle_tint.is_some() && r.matches(eff_hash, motion, motion_frame)
+        })
+        .and_then(|r| r.particle_tint)
 }
 
 /// Live colour and interpolation length for the FIRST non-suppress rule matching this colour

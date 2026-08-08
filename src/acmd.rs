@@ -697,6 +697,24 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // `LAST_PARTICLE_SET_COLOR` has the same three numeric slots as the effect colour
+        // modifier, but it targets the last particle rather than the last effect. Keep that
+        // distinction in the IR so export, source sync, and live rules cannot silently retint
+        // the wrong renderer object. A malformed arity stays raw and is carried by the residue
+        // path instead of being padded with a guessed component.
+        if line.contains("macros::LAST_PARTICLE_SET_COLOR(") {
+            if let Some(t) = try_extract("macros::LAST_PARTICLE_SET_COLOR(") {
+                if t.len() == 4 {
+                    let component = |i: usize| t[i].trim().parse::<f32>().ok();
+                    if let (Some(r), Some(g), Some(b)) = (component(1), component(2), component(3))
+                    {
+                        macros.push(EffectMacro::LastParticleSetColor { rgb: [r, g, b] });
+                        continue;
+                    }
+                }
+            }
+        }
+
         if line.contains("macros::LAST_EFFECT_SET_ALPHA(") {
             if let Some(t) = try_extract("macros::LAST_EFFECT_SET_ALPHA(") {
                 if t.len() > 1 {
@@ -852,11 +870,10 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(")
             || line.contains("macros::LAST_EFFECT_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_ALPHA(")
-            // These three remaining members are deliberately still opaque C7 lines. They belong
-            // to the effect timeline when written bare, though, so route them through the same
-            // residue path
-            // as an unknown line inside `is_excute` instead of dropping the whole statement.
-            // Their argument meaning and live/export contracts remain unmodelled below.
+            // The remaining opaque C7 members, plus the typed particle modifier when it has no
+            // spawn to bind to, belong to the effect timeline when written bare. Route them
+            // through the same residue path as an unknown line inside `is_excute` instead of
+            // dropping the whole statement.
             || line.contains("macros::LAST_PARTICLE_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
             || line.contains("macros::LAST_EFFECT_SET_SCALE_W(")
@@ -2542,7 +2559,8 @@ fn emit_spawn_stop(call: &crate::data::EffectCall, indent: &str) -> String {
 /// list: calls grouped by spawn frame, disabled calls omitted. `tweaks` (keyed by effect
 /// hash) adds LAST_EFFECT_SET_COLOR / LAST_EFFECT_SET_RATE lines after matching spawns so
 /// live color/speed multipliers ship with the mod. Authored per-spawn modifiers, including
-/// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT`, are emitted from their `EffectCall` fields.
+/// `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` and `LAST_PARTICLE_SET_COLOR` are emitted from their
+/// `EffectCall` fields.
 /// `residue` is the second half of
 /// [`EffectScript::to_effect_calls_and_residue`](crate::data::EffectScript::to_effect_calls_and_residue):
 /// wrapped lines that belong to a frame rather than to any one call, because their frame block
@@ -2713,6 +2731,14 @@ fn emit_effect_move_fn(
                     // re-exported vanilla script textually identical to the one it came from.
                     out.push_str(&format!(
                         "{body}macros::LAST_EFFECT_SET_COLOR(agent, {}, {}, {});\n",
+                        num(r),
+                        num(g),
+                        num(b)
+                    ));
+                }
+                if let Some([r, g, b]) = call.particle_tint {
+                    out.push_str(&format!(
+                        "{body}macros::LAST_PARTICLE_SET_COLOR(agent, {}, {}, {});\n",
                         num(r),
                         num(g),
                         num(b)
@@ -5015,6 +5041,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 rate: None,
                 camera_offset: None,
                 tint: None,
+                particle_tint: None,
                 alpha: None,
                 color: None,
                 guard: None,
@@ -5040,6 +5067,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 rate: None,
                 camera_offset: None,
                 tint: None,
+                particle_tint: None,
                 alpha: None,
                 color: None,
                 guard: None,
@@ -5465,6 +5493,51 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    #[test]
+    fn particle_colour_is_typed_separately_and_malformed_calls_are_carried() {
+        let source = r#"unsafe extern "C" fn effect_particle(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 7.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_hit"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3);
+    }
+}
+"#;
+        let calls = parse_effect_script(source).to_effect_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tint, None);
+        assert_eq!(calls[0].particle_tint, Some([0.1, 1.2, 0.3]));
+        let (_, emitted) =
+            emit_effect_move_fn(&calls, "particle", &Default::default(), &Default::default());
+        assert!(emitted.contains("macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3);"));
+
+        let malformed = source.replace(
+            "macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3);",
+            "macros::LAST_PARTICLE_SET_COLOR(agent);",
+        );
+        let (calls, residue) = parse_effect_script(&malformed).to_effect_calls_and_residue();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].particle_tint, None);
+        assert!(calls[0]
+            .trailing
+            .iter()
+            .any(|line| line.contains("LAST_PARTICLE_SET_COLOR(agent);")));
+        assert!(residue.is_empty());
+
+        let over_arity = source.replace(
+            "macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3);",
+            "macros::LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3, 4.0);",
+        );
+        let (calls, residue) = parse_effect_script(&over_arity).to_effect_calls_and_residue();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].particle_tint, None);
+        assert!(calls[0]
+            .trailing
+            .iter()
+            .any(|line| line.contains("LAST_PARTICLE_SET_COLOR(agent, 0.1, 1.2, 0.3, 4.0);")));
+        assert!(residue.is_empty());
+    }
+
     /// Kirby's real `TornadoStart` call is the one corpus use of `LAST_EFFECT_SET_WORK_INT`.
     /// The line is not an editable effect field: `sv_animcmd` exposes the primitive, but
     /// `smash-script` has no wrapper. It must nevertheless remain in the generated source so the
@@ -5526,9 +5599,9 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
     }
 
-    /// Bare C7 calls have no typed editor field yet, but they are still effect-timeline lines.
-    /// Routing them through the existing residue emitter keeps the source visible and positioned
-    /// without pretending to know what any of the four calls does.
+    /// Bare C7 calls have no spawn to bind their modifier fields to, but they are still
+    /// effect-timeline lines. Routing them through the existing residue emitter keeps the source
+    /// visible and positioned without pretending that any of the four calls is an effect spawn.
     #[test]
     fn bare_c7_effect_lines_reach_frame_residue_without_becoming_typed_calls() {
         let src = r#"unsafe extern "C" fn effect_c7(agent: &mut L2CAgentBase) {
@@ -7014,6 +7087,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             rate: None,
             camera_offset: None,
             tint: None,
+            particle_tint: None,
             alpha: None,
             color: None,
             guard: None,

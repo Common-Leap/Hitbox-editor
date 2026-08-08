@@ -6003,6 +6003,7 @@ impl VisionaryApp {
                     rate: None,
                     camera_offset: None,
                     tint: None,
+                    particle_tint: None,
                     alpha: None,
                     color: Some(crate::data::ColorCall {
                         transition: None,
@@ -6054,6 +6055,7 @@ impl VisionaryApp {
                     rate: None,
                     camera_offset: None,
                     tint: None,
+                    particle_tint: None,
                     alpha: None,
                     // This button adds a spawn. Colour commands are added by their own button
                     // below, because the two share a list but nothing else.
@@ -6701,6 +6703,60 @@ impl VisionaryApp {
                                     Some(Some(was)) => orig(
                                         ui,
                                         format!("orig [{:.3} {:.3} {:.3}]", was[0], was[1], was[2]),
+                                    ),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+
+                                // Particle tint — `LAST_PARTICLE_SET_COLOR` is not an alias for
+                                // `LAST_EFFECT_SET_COLOR`: the game applies it to the last
+                                // particle, so keep a separate optional value and live rule.
+                                ui.label("Particle tint");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.particle_tint.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Recolour THIS PARTICLE. Off writes no LAST_PARTICLE_SET_COLOR line at all.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.particle_tint = on.then_some([1.0, 1.0, 1.0]);
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(tint) = ec.particle_tint.as_mut() {
+                                        let mut picked = tint.map(|v| v.clamp(0.0, 1.0));
+                                        if ui.color_edit_button_rgb(&mut picked).changed() {
+                                            *tint = picked;
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                        for v in tint.iter_mut() {
+                                            if ui.add(egui::DragValue::new(v).speed(0.01)).changed()
+                                            {
+                                                changed = true;
+                                                respawn_needed = true;
+                                            }
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.particle_tint) {
+                                    Some(Some(was)) => orig(
+                                        ui,
+                                        format!(
+                                            "orig [{:.3} {:.3} {:.3}]",
+                                            was[0], was[1], was[2]
+                                        ),
                                     ),
                                     Some(None) => orig(ui, "orig none".to_string()),
                                     None => {
@@ -9056,12 +9112,13 @@ impl VisionaryApp {
             raw_line: None,
             trail_off: None,
             trail_bone2: None,
-            // A spawn call carries none of the four modifiers of its own — each arrives as its
+            // A spawn call carries none of the five modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
             rate: None,
             camera_offset: None,
             tint: None,
+            particle_tint: None,
             alpha: None,
             // `effect_capture_layout` above only matches spawn families, so nothing that
             // reaches here is a colour command; those are built by `color_call_from_capture`.
@@ -9127,6 +9184,7 @@ impl VisionaryApp {
             rate: None,
             camera_offset: None,
             tint: None,
+            particle_tint: None,
             alpha: None,
             color: Some(crate::data::ColorCall { transition, rgba }),
             guard: None,
@@ -9628,7 +9686,7 @@ impl VisionaryApp {
             // spawned last, so each binds to the capture line above it exactly as the parser
             // binds it to the macro above it in a script. The sort is stable and the lines share
             // a frame, so the spawn is still the previous entry here. `anchor` survives all
-            // four, because a second modifier line targets the same spawn and the later one
+            // five, because a second modifier line targets the same spawn and the later one
             // wins — and a tint followed by a rate or camera offset is still one spawn's data.
             if line.func == "LAST_EFFECT_SET_RATE" {
                 if let (Some(rate), Some(index)) =
@@ -9652,6 +9710,15 @@ impl VisionaryApp {
                     (component(0), component(1), component(2), anchor)
                 {
                     effects[index].tint = Some([r, g, b]);
+                }
+                continue;
+            }
+            if line.func == "LAST_PARTICLE_SET_COLOR" {
+                let component = |slot: usize| line.args.get(slot).and_then(|arg| arg.as_f32());
+                if let (Some(r), Some(g), Some(b), Some(index)) =
+                    (component(0), component(1), component(2), anchor)
+                {
+                    effects[index].particle_tint = Some([r, g, b]);
                 }
                 continue;
             }
@@ -13383,6 +13450,7 @@ impl VisionaryApp {
                                 rate: None,
                                 camera_offset: None,
                                 tint: None,
+                                particle_tint: None,
                                 alpha: None,
                                 color: None,
                                 transition: None,
@@ -13400,6 +13468,7 @@ impl VisionaryApp {
                                 rate: None,
                                 camera_offset: None,
                                 tint: None,
+                                particle_tint: None,
                                 alpha: None,
                                 color: None,
                                 transition: None,
@@ -13556,6 +13625,7 @@ impl VisionaryApp {
                     rate: None,
                     camera_offset: None,
                     tint: None,
+                    particle_tint: None,
                     alpha: None,
                     color: None,
                     transition: None,
@@ -13580,6 +13650,7 @@ impl VisionaryApp {
                     rate: None,
                     camera_offset: None,
                     tint: None,
+                    particle_tint: None,
                     alpha: None,
                     color: None,
                     transition: None,
@@ -13615,6 +13686,7 @@ impl VisionaryApp {
                         rate: None,
                         camera_offset: None,
                         tint: None,
+                        particle_tint: None,
                         alpha: None,
                         color: None,
                         transition: None,
@@ -13639,6 +13711,7 @@ impl VisionaryApp {
                         rate: ec.rate,
                         camera_offset: ec.camera_offset,
                         tint: ec.tint,
+                        particle_tint: ec.particle_tint,
                         alpha: ec.alpha,
                         color: None,
                         transition: None,
@@ -13653,7 +13726,7 @@ impl VisionaryApp {
             let moved = pristine
                 .map(|p| p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale)
                 .unwrap_or(true);
-            // The four `LAST_EFFECT_SET_*` modifiers ride along on the same rule, and each is
+            // The five last-target modifiers ride along on the same rule, and each is
             // sent on its own terms: a spawn whose rate changed but which has not been moved
             // still needs a rule, and one that moved but kept its rate must not claim to set
             // one. Sending a modifier unconditionally would override the script's own line
@@ -13669,6 +13742,9 @@ impl VisionaryApp {
             let refaded = pristine
                 .map(|p| p.alpha != ec.alpha)
                 .unwrap_or(ec.alpha.is_some());
+            let particle_retinted = pristine
+                .map(|p| p.particle_tint != ec.particle_tint)
+                .unwrap_or(ec.particle_tint.is_some());
             let camera_offset_changed = pristine
                 .map(|p| p.camera_offset != ec.camera_offset)
                 .unwrap_or(ec.camera_offset.is_some());
@@ -13685,6 +13761,7 @@ impl VisionaryApp {
                     rate: retuned.then_some(ec.rate).flatten(),
                     camera_offset: camera_offset_changed.then_some(ec.camera_offset).flatten(),
                     tint: retinted.then_some(ec.tint).flatten(),
+                    particle_tint: particle_retinted.then_some(ec.particle_tint).flatten(),
                     alpha: refaded.then_some(ec.alpha).flatten(),
                     color: None,
                     transition: None,
@@ -13798,6 +13875,7 @@ impl VisionaryApp {
             rate: None,
             camera_offset: None,
             tint: None,
+            particle_tint: None,
             alpha: None,
             color: None,
             transition: None,
@@ -19345,6 +19423,26 @@ mod live_effect_capture_tests {
                 .collect::<Vec<_>>(),
             vec![Some(-5.0), Some(0.4)]
         );
+    }
+
+    #[test]
+    fn a_captured_particle_tint_binds_to_the_spawn_above_it() {
+        let smoke = hash40::hash40("sys_atk_smoke").0;
+        let particle = CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame: 5.0,
+            func: "LAST_PARTICLE_SET_COLOR".into(),
+            args: vec![A::Num(0.1), A::Num(1.2), A::Num(0.3)],
+            run: 1,
+        };
+        let captures = vec![spawn("EFFECT", 5.0, smoke), particle];
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([(smoke, "sys_atk_smoke".into())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tint, None);
+        assert_eq!(calls[0].particle_tint, Some([0.1, 1.2, 0.3]));
     }
 
     /// A move captured live used to come back without its screen or body colouring at all —

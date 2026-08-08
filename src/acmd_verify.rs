@@ -774,7 +774,11 @@ fn check_effect_fidelity(
             // Opacity has no live override to legitimately replace it, unlike the tint and
             // rate below, so any difference at all is the export losing or inventing a
             // `LAST_EFFECT_SET_ALPHA` line.
+            camera_offset,
             alpha,
+            // Particle tint is a separate last-particle primitive with no live multiplier
+            // fallback. It must round-trip as its own field instead of being folded into tint.
+            particle_tint,
         );
         for difference in out {
             report.blocker(
@@ -1177,6 +1181,19 @@ fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report)
                 report.warn(
                     subject,
                     format!("{label} has a negative rate ({rate}), which will not play backwards"),
+                );
+            }
+        }
+        if let Some(offset) = call.camera_offset {
+            check_finite(subject, &format!("{label} camera offset"), offset, report);
+        }
+        if let Some([r, g, b]) = call.particle_tint {
+            for (axis, value) in ["r", "g", "b"].iter().zip([r, g, b]) {
+                check_finite(
+                    subject,
+                    &format!("{label} particle tint {axis}"),
+                    value,
+                    report,
                 );
             }
         }

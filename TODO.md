@@ -269,7 +269,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**422 unit + 6 integration after D1f**; the integration ones
+- [ ] `cargo test` passes (**512 unit + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -283,7 +283,7 @@ paraphrase it from memory.
       `acmd::tests::a_partial_project_override_keeps_every_category_it_does_not_define`,
       `acmd::tests::every_sound_call_in_the_corpus_is_typed_rather_than_left_raw` and
       `acmd::tests::every_corpus_sound_site_lands_on_a_call_of_its_own_macro`. They run
-      the new code over every script the app has ever fetched (currently 461 files under
+      the new code over every script the app has ever fetched (currently 462 files under
       `~/.cache/visionary/script-cache`, ~1000 functions). The third asserts a *number* — how
       many effect scripts still lose a line — so it fails on a regression rather than only on a
       crash, and the fifth pins the byte-exact count for the same reason.
@@ -359,7 +359,7 @@ C3 (69 occurrences) beat C1 (65) and was taken first, and B4 (45) beats B3 (23).
 carries its own measured counts; go by those. Blocking relationships are the only thing the
 order still encodes.
 
-Counts are occurrences in the local 461-file corpus, which is what the app has fetched so far
+Counts are occurrences in the local 462-file corpus, which is what the app has fetched so far
 — a proxy for how often real scripts use a macro, not a census of the game.
 
 ## Foundations
@@ -988,7 +988,7 @@ repeat this exactly.
   matching each macro's own spelling is what keeps a re-exported vanilla script textually
   identical to its source.
 
-### [ ] C7 — The last four `LAST_EFFECT_SET_*` members
+### [!] C7 — The last four `LAST_EFFECT_SET_*` members (two evidence-blocked members remain)
 
 What C1 left. Local cache counts and wrapper status, verified against the full `macros.rs`
 declaration list. A separate public dumped-script corpus was checked read-only for shape and
@@ -1009,11 +1009,12 @@ slice taken from that oracle so far.
 `is_excute` block were already carried by C6; bare forms now take that same frame-residue path
 instead of becoming statement-level losses. The real `TornadoStart` line survives the generated
 effect text and source write-back, while the verifier refuses the export because
-`LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper. The real `SetInkColor` particle line is
-also carried, but its three preceding `WorkModule::get_float` stack inputs remain unmodelled and
-the dump's zero-argument `LAST_PARTICLE_SET_COLOR(agent)` spelling is explicitly unbuildable.
-The offset member below is now typed; the other three still have no complete five-surface
-contract, so this parent entry remains open.
+`LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper. The valid three-value
+`LAST_PARTICLE_SET_COLOR` shape is now typed below, but the local `SetInkColor` call still uses
+the dump's zero-argument spelling after three preceding `WorkModule::get_float` stack inputs;
+that malformed form remains explicitly carried. `LAST_EFFECT_SET_SCALE_W` still has only a
+malformed one-argument external hit, so the two remaining members keep this parent evidence
+boundary open.
 
 #### [x] C7a — `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` (completed 2026-08-08; live runtime unverified)
 
@@ -1027,14 +1028,26 @@ Offline regression coverage includes source parse/export read-back, source write
 capture reconstruction, wire-field parity, and a standalone plugin release build. No emulator,
 game, or UI automation was run, so live in-game behavior remains unverified.
 
-The remaining three members stay separately bounded:
+The remaining two members stay separately bounded:
 
-- `LAST_PARTICLE_SET_COLOR` targets the last *particle*, not the last effect, and its observed
-  stack form still does not supply a buildable three-value source call.
 - `LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper and remains parse/carry-only with an
   export blocker.
 - `LAST_EFFECT_SET_SCALE_W` has only the malformed one-argument external hit, not the measured
   three-argument wrapper shape.
+
+#### [x] C7b — `LAST_PARTICLE_SET_COLOR` (completed 2026-08-08; live runtime unverified)
+
+The measured three-value wrapper shape now has its own `EffectMacro` and `EffectCall::particle_tint`
+field, separate from effect tint because the game targets the last particle rather than the last
+effect. It has an optional Particle tint row in the effect panel, capture reconstruction, a
+per-spawn JSON rule and Skyline primitive hook, generated ACMD export, and value-only source
+write-back for an existing `LAST_PARTICLE_SET_COLOR` line.
+
+The malformed local `SetInkColor` zero-argument line remains carried residue; it is not padded
+with values from the preceding `WorkModule` stack operations. Offline regression coverage checks
+typed parsing, malformed preservation, export read-back, source write-back, capture binding, and
+wire/plugin field parity. The plugin release build passes. No emulator, game, or UI automation was
+run, so live in-game behavior remains unverified.
 
 ### [x] C2 — Sword trails (done 2026-08-05)
 
@@ -1726,7 +1739,7 @@ watch-for warned against, and it did not happen.
 - **Watch for:** the EFF loop pushes to `errors`, which is a different failure channel that
   *does* continue. Do not merge the two; a failed EFF write should still leave the rest.
 
-### [ ] C4 — Effect lifetime control
+### [!] C4 — Effect lifetime control (blocked: remaining members have zero corpus calls)
 
 Detach interacts with the follow/off-kind lifetime the editor already models for spawns.
 
@@ -1793,8 +1806,8 @@ the reason to defer it, "largest coverage gap" is the reason to take it.
   5. **[x] D1e (done 2026-08-05)** — Let write-back *create* the category function a
      project does not have. This is the one surface D1b left open, and D1d turned it from an
      edge case into the ordinary one.
-  6. **[~] D1f (built 2026-08-06; install and capture confirmed in game, live edit not yet)** — Plugin hooks for the sound
-     primitives, capture, then live. See the sub-entry below.
+  6. **[x] D1f (done 2026-08-06)** — Plugin hooks, capture, and live edits for the sound
+     primitives. See the sub-entry below.
 
 **Work order revised 2026-08-05, and this is the correction Rule 5 asks for.** The old steps 4
 and 5 were "plugin hooks, capture, then live" followed by "export + write-back", and *both
@@ -3067,7 +3080,7 @@ copy of every spawn onto the timeline.
   why a change is safe is a claim to be measured like any other. This one was written confidently
   in a commit message and was wrong within the hour.
 
-### [ ] R3 — Robust Skyline 13.0.4 hook
+### [!] R3 — Robust Skyline 13.0.4 hook (blocked: needs a physical Switch or proven hook evidence)
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs:66` carries the only TODO left in
 the source: the current hook is a workaround to keep the core effect viewer usable. Wants
