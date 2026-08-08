@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**596 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**604 passed, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2358,8 +2358,8 @@ Unmeasured `sv_kinetic_energy` and status-module kinetic calls remain preserved 
 direct `KineticModule::change_kinetic` call measured in the local `game_` corpus is covered by E1h below.
 `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, `SET_SPEED_EX`, direct `KineticModule::add_speed`,
 the measured `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and
-`unable_energy` toggles, and the argument-less `KineticModule::clear_speed_all` point now have
-editable slices
+`unable_energy` toggles, the argument-less `KineticModule::clear_speed_all` point, and the
+direct `KineticModule::set_consider_ground_friction` point now have editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
@@ -2597,8 +2597,8 @@ reported rather than guessed.
 Offline validation passed: full desktop tests (585 unit tests, 1 ignored + 6 integration), strict
 Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and the
 Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
-behavior remains unverified. The E1 parent stays open for ground-friction controls, broader
-status-module calls, and the absent `sv_kinetic_energy` corpus family.
+behavior remains unverified. The E1 parent stays open for broader status-module calls and the
+absent `sv_kinetic_energy` corpus family.
 
 #### [x] E1l — direct `KineticModule::enable_energy` and `unable_energy` points (completed 2026-08-08; live runtime unverified)
 
@@ -2614,14 +2614,14 @@ Skyline direct-pointer hooks, generated ACMD export, and value-only source write
 constants remain intact for export/source sync; live replacements require a numeric capture and
 preserve the enable/unable operation and measured receiver. Malformed arities, other receivers,
 empty IDs, structural operation changes, and source branches/loops remain raw or are reported
-rather than guessed. The E1 parent remains open for ground-friction controls, broader
-status-module calls, and the absent `sv_kinetic_energy` corpus family.
+rather than guessed. The E1 parent remains open for broader status-module calls and the absent
+`sv_kinetic_energy` corpus family.
 
 Offline validation passed: full desktop tests (590 unit tests, 1 ignored + 6 integration), strict
 Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and the
 Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
-behavior remains unverified. The E1 parent stays open for ground-friction controls, broader
-status-module calls, and the absent `sv_kinetic_energy` corpus family.
+behavior remains unverified. The E1 parent stays open for broader status-module calls and the
+absent `sv_kinetic_energy` corpus family.
 
 #### [x] E1m — direct `KineticModule::clear_speed_all` points (completed 2026-08-08; live runtime unverified)
 
@@ -2641,8 +2641,32 @@ family remain preserved rather than guessed.
 Offline validation passed: the complete desktop suite (596 unit tests, 1 ignored + 6 integration),
 strict Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and
 the Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
-behavior remains unverified. The E1 parent remains open for ground-friction controls, broader
-status-module calls, and the absent `sv_kinetic_energy` corpus family.
+behavior remains unverified. The E1 parent remains open for broader status-module calls and the
+absent `sv_kinetic_energy` corpus family.
+
+#### [x] E1n — direct `KineticModule::set_consider_ground_friction` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 34 exact calls in both the verbose `smashline`
+and HDR trees. Every call uses the three-argument direct shape with `agent.module_accessor` in
+the standard tree or the measured `boma` alias in HDR, the boolean literals `false` or `true`, and
+`*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN` as the authored reserve attribute. The measured values
+are 32 `false` calls and 2 `true` calls in each tree. The linked binding is the direct
+`(module_accessor, bool, kinetic_energy_attribute: c_int) -> ()` primitive.
+
+The completed slice carries the bool and authored attribute token through typed parser/IR events,
+the Movement panel and timeline, capture reconstruction, category-28 wire rules and the matching
+Skyline direct hook, generated ACMD export, and flat-source write-back. Named reserve tokens stay
+intact in export and source sync; live value replacements use the captured numeric boolean and
+attribute. Structural add/remove/retime edits use suppression/injection rules live, while linked
+source sync only edits a verified flat call layout and reports branches, loops, malformed shapes,
+or source-site mismatches. Unknown receivers, non-literal toggles, other attributes, and broader
+status-module calls remain preserved rather than guessed.
+
+Offline validation passed: the complete desktop suite (604 passed, 1 ignored + 6 integration),
+strict Clippy, format/diff checks, the locked release build, the debug build-check wrapper, and
+the Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
+behavior remains unverified. The E1 parent remains open for broader status-module calls and the
+absent `sv_kinetic_energy` corpus family.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

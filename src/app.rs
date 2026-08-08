@@ -84,6 +84,7 @@ fn timeline_content_height_with_change_kinetic(
     kinetic_energy: usize,
     kinetic_add_speed: usize,
     kinetic_clear_speed_all: usize,
+    kinetic_set_consider_ground_friction: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
@@ -111,7 +112,8 @@ fn timeline_content_height_with_change_kinetic(
         + band(change_kinetic)
         + band(kinetic_energy)
         + band(kinetic_add_speed)
-        + band(kinetic_clear_speed_all))
+        + band(kinetic_clear_speed_all)
+        + band(kinetic_set_consider_ground_friction))
     .max(24.0)
 }
 
@@ -147,6 +149,7 @@ fn timeline_content_height(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        0,
         0,
         0,
         0,
@@ -336,6 +339,7 @@ fn timeline_frame_extent_with_change_kinetic(
     kinetic_energy: &[crate::data::KineticEnergyEvent],
     kinetic_add_speed: &[crate::data::KineticAddSpeedEvent],
     kinetic_clear_speed_all: &[crate::data::KineticClearSpeedAllEvent],
+    kinetic_set_consider_ground_friction: &[crate::data::KineticSetConsiderGroundFrictionEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -372,6 +376,9 @@ fn timeline_frame_extent_with_change_kinetic(
     let kinetic_energy_frames = kinetic_energy.iter().map(|event| event.frame);
     let kinetic_add_speed_frames = kinetic_add_speed.iter().map(|event| event.frame);
     let kinetic_clear_speed_all_frames = kinetic_clear_speed_all.iter().map(|event| event.frame);
+    let kinetic_set_consider_ground_friction_frames = kinetic_set_consider_ground_friction
+        .iter()
+        .map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
@@ -389,6 +396,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .chain(kinetic_energy_frames)
         .chain(kinetic_add_speed_frames)
         .chain(kinetic_clear_speed_all_frames)
+        .chain(kinetic_set_consider_ground_friction_frames)
         .max()
         .unwrap_or(0)
 }
@@ -425,6 +433,7 @@ fn timeline_frame_extent(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        &[],
         &[],
         &[],
         &[],
@@ -1149,6 +1158,7 @@ type SourceMirror = (
     Vec<crate::data::KineticEnergyEvent>,
     Vec<crate::data::KineticAddSpeedEvent>,
     Vec<crate::data::KineticClearSpeedAllEvent>,
+    Vec<crate::data::KineticSetConsiderGroundFrictionEvent>,
 );
 
 /// One ACMD function checked out of the linked project for editing.
@@ -2563,6 +2573,7 @@ impl VisionaryApp {
                 kinetic_energy,
                 kinetic_add_speed,
                 kinetic_clear_speed_all,
+                kinetic_set_consider_ground_friction,
             )) => {
                 if *hitboxes == self.state.hitboxes
                     && *effects == self.state.effects
@@ -2583,6 +2594,11 @@ impl VisionaryApp {
                     && *kinetic_add_speed == self.state.script.to_kinetic_add_speed_events()
                     && *kinetic_clear_speed_all
                         == self.state.script.to_kinetic_clear_speed_all_events()
+                    && *kinetic_set_consider_ground_friction
+                        == self
+                            .state
+                            .script
+                            .to_kinetic_set_consider_ground_friction_events()
                 {
                     return;
                 }
@@ -2608,6 +2624,9 @@ impl VisionaryApp {
             self.state.script.to_kinetic_energy_events(),
             self.state.script.to_kinetic_add_speed_events(),
             self.state.script.to_kinetic_clear_speed_all_events(),
+            self.state
+                .script
+                .to_kinetic_set_consider_ground_friction_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
@@ -2694,6 +2713,10 @@ impl VisionaryApp {
                     &self.state.script.to_kinetic_energy_events(),
                     &self.state.script.to_kinetic_add_speed_events(),
                     &self.state.script.to_kinetic_clear_speed_all_events(),
+                    &self
+                        .state
+                        .script
+                        .to_kinetic_set_consider_ground_friction_events(),
                 ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
@@ -2882,7 +2905,20 @@ impl VisionaryApp {
                                                                                 report.changed += kinetic_clear_speed_all_report.changed;
                                                                                 report.files.extend(kinetic_clear_speed_all_report.files);
                                                                                 report.skipped.extend(kinetic_clear_speed_all_report.skipped);
-                                                                                Ok((updated, report))
+                                                                                match crate::acmd_src::rewrite_kinetic_set_consider_ground_friction(
+                                                                                    &updated,
+                                                                                    &label,
+                                                                                    &self.state.kinetic_set_consider_ground_friction_pristine,
+                                                                                    &self.state.script.to_kinetic_set_consider_ground_friction_events(),
+                                                                                ) {
+                                                                                    Ok((updated, friction_report)) => {
+                                                                                        report.changed += friction_report.changed;
+                                                                                        report.files.extend(friction_report.files);
+                                                                                        report.skipped.extend(friction_report.skipped);
+                                                                                        Ok((updated, report))
+                                                                                    }
+                                                                                    Err(error) => Err(error),
+                                                                                }
                                                                             }
                                                                             Err(error) => Err(error),
                                                                         }
@@ -3272,6 +3308,24 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_kinetic_set_consider_ground_friction(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.kinetic_set_consider_ground_friction_pristine,
+                &self
+                    .state
+                    .script
+                    .to_kinetic_set_consider_ground_friction_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
         // Sounds get a pass of their own, and unlike the three above it writes a *different
         // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
@@ -3378,6 +3432,10 @@ impl VisionaryApp {
             || state.script.to_kinetic_add_speed_events() != state.kinetic_add_speed_pristine
             || state.script.to_kinetic_clear_speed_all_events()
                 != state.kinetic_clear_speed_all_pristine
+            || state
+                .script
+                .to_kinetic_set_consider_ground_friction_events()
+                != state.kinetic_set_consider_ground_friction_pristine
         {
             edited.push("game_");
         }
@@ -3674,6 +3732,8 @@ impl VisionaryApp {
                     self.push_change_kinetic_rules();
                     self.push_kinetic_energy_rules();
                     self.push_kinetic_add_speed_rules();
+                    self.push_kinetic_clear_speed_all_rules();
+                    self.push_kinetic_set_consider_ground_friction_rules();
 
                     self.state.total_frames =
                         self.state
@@ -3696,6 +3756,10 @@ impl VisionaryApp {
                                 &self.state.script.to_kinetic_energy_events(),
                                 &self.state.script.to_kinetic_add_speed_events(),
                                 &self.state.script.to_kinetic_clear_speed_all_events(),
+                                &self
+                                    .state
+                                    .script
+                                    .to_kinetic_set_consider_ground_friction_events(),
                             ));
 
                     self.jump_to_earliest_active_frame();
@@ -3741,6 +3805,7 @@ impl VisionaryApp {
                 self.state.kinetic_energy_pristine = Vec::new();
                 self.state.kinetic_add_speed_pristine = Vec::new();
                 self.state.kinetic_clear_speed_all_pristine = Vec::new();
+                self.state.kinetic_set_consider_ground_friction_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
         }
@@ -4623,7 +4688,12 @@ impl VisionaryApp {
             || self.state.script.to_kinetic_add_speed_events()
                 != self.state.kinetic_add_speed_pristine
             || self.state.script.to_kinetic_clear_speed_all_events()
-                != self.state.kinetic_clear_speed_all_pristine;
+                != self.state.kinetic_clear_speed_all_pristine
+            || self
+                .state
+                .script
+                .to_kinetic_set_consider_ground_friction_events()
+                != self.state.kinetic_set_consider_ground_friction_pristine;
         if self.state.hitboxes == self.state.hitboxes_pristine
             && !script_points_edited
             && !already_logged
@@ -5155,6 +5225,10 @@ impl VisionaryApp {
                         &self.state.script.to_kinetic_energy_events(),
                         &self.state.script.to_kinetic_add_speed_events(),
                         &self.state.script.to_kinetic_clear_speed_all_events(),
+                        &self
+                            .state
+                            .script
+                            .to_kinetic_set_consider_ground_friction_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -5534,6 +5608,7 @@ impl VisionaryApp {
             self.draw_kinetic_energy_section(ui);
             self.draw_kinetic_add_speed_section(ui);
             self.draw_kinetic_clear_speed_all_section(ui);
+            self.draw_kinetic_set_consider_ground_friction_section(ui);
             self.draw_set_air_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
@@ -6240,6 +6315,10 @@ impl VisionaryApp {
                             &self.state.script.to_kinetic_energy_events(),
                             &self.state.script.to_kinetic_add_speed_events(),
                             &self.state.script.to_kinetic_clear_speed_all_events(),
+                            &self
+                                .state
+                                .script
+                                .to_kinetic_set_consider_ground_friction_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "REVERSE_LR edit staged — export or sync it into the linked source project."
@@ -6962,6 +7041,10 @@ impl VisionaryApp {
                             &self.state.script.to_kinetic_energy_events(),
                             &self.state.script.to_kinetic_add_speed_events(),
                             &self.state.script.to_kinetic_clear_speed_all_events(),
+                            &self
+                                .state
+                                .script
+                                .to_kinetic_set_consider_ground_friction_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "KineticModule::clear_speed_all edit staged — export or sync it into the linked source project."
@@ -6970,6 +7053,182 @@ impl VisionaryApp {
                 }
                 .into();
                 self.push_kinetic_clear_speed_all_rules();
+            }
+        }
+    }
+
+    /// Edit the measured bool and authored reserve-attribute token for direct ground-friction
+    /// points. Presence and frame are structural, so the same controls also stage flat
+    /// add/remove/retime operations for export, source write-back, and live capture rules.
+    fn draw_kinetic_set_consider_ground_friction_section(&mut self, ui: &mut Ui) {
+        let events = self
+            .state
+            .script
+            .to_kinetic_set_consider_ground_friction_events();
+        if events.is_empty() && self.state.script.stmts.is_empty() && self.state.hitboxes.is_empty()
+        {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(
+                egui::Color32::from_rgb(235, 205, 120),
+                "KineticModule::set_consider_ground_friction",
+            );
+        })
+        .response
+        .on_hover_text(
+            "Sets whether a kinetic energy considers ground friction. The bool is editable; the reserve attribute remains an authored token for source/export and becomes a live numeric override only when capture proves it.",
+        );
+
+        let mut value_edit: Option<(usize, bool, String)> = None;
+        let mut structural_action: Option<(usize, Option<u32>)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut consider_ground_friction = event.call.consider_ground_friction;
+            let mut kinetic_energy_attribute = event.call.kinetic_energy_attribute.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(235, 205, 120)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("f{}", event.frame));
+                    let mut changed = ui
+                        .checkbox(&mut consider_ground_friction, "consider ground friction")
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut kinetic_energy_attribute)
+                                .desired_width(280.0)
+                                .hint_text("*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN"),
+                        )
+                        .changed();
+                    if ui
+                        .small_button("Move here")
+                        .on_hover_text(
+                            "Move this ground-friction point to the current playhead frame.",
+                        )
+                        .clicked()
+                        && event.frame != self.state.current_frame
+                    {
+                        structural_action = Some((event.site, Some(self.state.current_frame)));
+                    }
+                    if ui
+                        .small_button("Remove")
+                        .on_hover_text("Remove this ground-friction call from the exported script.")
+                        .clicked()
+                    {
+                        structural_action = Some((event.site, None));
+                    }
+                    changed
+                })
+                .inner;
+            if changed {
+                value_edit = Some((
+                    event.site,
+                    consider_ground_friction,
+                    kinetic_energy_attribute,
+                ));
+            }
+        }
+
+        if ui
+            .small_button(format!("＋ Add at frame {}", self.state.current_frame))
+            .on_hover_text(
+                "Insert an unconditional set_consider_ground_friction call using the measured reserve-main attribute.",
+            )
+            .clicked()
+        {
+            structural_action = Some((usize::MAX, Some(self.state.current_frame)));
+        }
+
+        if let Some((site, consider_ground_friction, kinetic_energy_attribute)) = value_edit {
+            if let Some(call) = self
+                .state
+                .script
+                .kinetic_set_consider_ground_friction_stmt_mut(site)
+            {
+                if !kinetic_energy_attribute.trim().is_empty() {
+                    call.consider_ground_friction = consider_ground_friction;
+                    call.kinetic_energy_attribute = kinetic_energy_attribute;
+                    self.state.status = "set_consider_ground_friction edit staged — export or sync it into the linked source project.".into();
+                    self.push_kinetic_set_consider_ground_friction_rules();
+                }
+            }
+        }
+
+        if let Some((site, destination)) = structural_action {
+            let changed = if site == usize::MAX {
+                self.state
+                    .script
+                    .insert_kinetic_set_consider_ground_friction_at_frame(
+                        destination.unwrap_or(FIRST_GAME_FRAME),
+                        crate::data::KineticSetConsiderGroundFrictionCall {
+                            consider_ground_friction: false,
+                            kinetic_energy_attribute: "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN"
+                                .into(),
+                        },
+                    )
+            } else if let Some(frame) = destination {
+                let call = events
+                    .iter()
+                    .find(|event| event.site == site)
+                    .map(|event| event.call.clone());
+                call.is_some_and(|call| {
+                    self.state
+                        .script
+                        .remove_kinetic_set_consider_ground_friction(site)
+                        && self
+                            .state
+                            .script
+                            .insert_kinetic_set_consider_ground_friction_at_frame(frame, call)
+                })
+            } else {
+                self.state
+                    .script
+                    .remove_kinetic_set_consider_ground_friction(site)
+            };
+            if changed {
+                self.state.total_frames =
+                    self.state
+                        .total_frames
+                        .max(timeline_frame_extent_with_change_kinetic(
+                            &self.state.hitboxes,
+                            &self.state.effects,
+                            &self.state.sounds,
+                            &self.state.expressions,
+                            &self.state.script.to_reverse_lr_events(),
+                            &self.state.script.to_speed_ex_events(),
+                            &self.state.script.to_speed_events(),
+                            &self.state.script.to_add_speed_no_limit_events(),
+                            &self.state.script.to_correct_events(),
+                            &self.state.script.to_ft_catch_stop_events(),
+                            &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                            &self.state.script.to_clr_speed_events(),
+                            &self.state.script.to_set_air_events(),
+                            &self.state.script.to_change_kinetic_events(),
+                            &self.state.script.to_kinetic_energy_events(),
+                            &self.state.script.to_kinetic_add_speed_events(),
+                            &self.state.script.to_kinetic_clear_speed_all_events(),
+                            &self
+                                .state
+                                .script
+                                .to_kinetic_set_consider_ground_friction_events(),
+                        ));
+                self.state.status = if destination.is_some() {
+                    "set_consider_ground_friction edit staged — export or sync it into the linked source project."
+                } else {
+                    "set_consider_ground_friction removed — export or sync to apply the structural edit."
+                }
+                .into();
+                self.push_kinetic_set_consider_ground_friction_rules();
             }
         }
     }
@@ -7065,6 +7324,10 @@ impl VisionaryApp {
                             &self.state.script.to_kinetic_energy_events(),
                             &self.state.script.to_kinetic_add_speed_events(),
                             &self.state.script.to_kinetic_clear_speed_all_events(),
+                            &self
+                                .state
+                                .script
+                                .to_kinetic_set_consider_ground_friction_events(),
                         ));
                 self.state.status = if destination.is_some() {
                     "SET_AIR edit staged — export or sync it into the linked source project."
@@ -8900,6 +9163,10 @@ impl VisionaryApp {
         let source_kinetic_energy = self.state.script.to_kinetic_energy_events();
         let source_kinetic_add_speed = self.state.script.to_kinetic_add_speed_events();
         let source_kinetic_clear_speed_all = self.state.script.to_kinetic_clear_speed_all_events();
+        let source_kinetic_set_consider_ground_friction = self
+            .state
+            .script
+            .to_kinetic_set_consider_ground_friction_events();
         let had_source_script = !self.state.script.stmts.is_empty();
         self.state.set_script(record.script);
         // A saved record is the edited script, not the live/source baseline. Preserve the
@@ -8919,6 +9186,8 @@ impl VisionaryApp {
             self.state.kinetic_energy_pristine = source_kinetic_energy;
             self.state.kinetic_add_speed_pristine = source_kinetic_add_speed;
             self.state.kinetic_clear_speed_all_pristine = source_kinetic_clear_speed_all;
+            self.state.kinetic_set_consider_ground_friction_pristine =
+                source_kinetic_set_consider_ground_friction;
         }
         self.state.hitboxes = record.hitboxes;
         true
@@ -9464,6 +9733,8 @@ impl VisionaryApp {
         self.push_change_kinetic_rules();
         self.push_kinetic_energy_rules();
         self.push_kinetic_add_speed_rules();
+        self.push_kinetic_clear_speed_all_rules();
+        self.push_kinetic_set_consider_ground_friction_rules();
         let pending_hitbox_live = self.push_all_saved_hitbox_rules();
         self.push_effect_rules();
         self.push_effect_aliases();
@@ -10090,6 +10361,8 @@ impl VisionaryApp {
         let n_kinetic_energy = hurt.to_kinetic_energy_events().len();
         let n_kinetic_add_speed = hurt.to_kinetic_add_speed_events().len();
         let n_kinetic_clear_speed_all = hurt.to_kinetic_clear_speed_all_events().len();
+        let n_kinetic_set_consider_ground_friction =
+            hurt.to_kinetic_set_consider_ground_friction_events().len();
 
         if let Some(message) = nothing_to_load_with_kinetics(
             hitboxes.len(),
@@ -10110,6 +10383,7 @@ impl VisionaryApp {
             n_kinetic_energy,
             n_kinetic_add_speed,
             n_kinetic_clear_speed_all,
+            n_kinetic_set_consider_ground_friction,
         ) {
             self.state.status = message;
             return;
@@ -10166,6 +10440,7 @@ impl VisionaryApp {
         self.push_kinetic_energy_rules();
         self.push_kinetic_add_speed_rules();
         self.push_kinetic_clear_speed_all_rules();
+        self.push_kinetic_set_consider_ground_friction_rules();
         self.state.total_frames =
             self.state
                 .total_frames
@@ -10187,6 +10462,10 @@ impl VisionaryApp {
                     &self.state.script.to_kinetic_energy_events(),
                     &self.state.script.to_kinetic_add_speed_events(),
                     &self.state.script.to_kinetic_clear_speed_all_events(),
+                    &self
+                        .state
+                        .script
+                        .to_kinetic_set_consider_ground_friction_events(),
                 ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
@@ -10223,7 +10502,8 @@ impl VisionaryApp {
              + {n_clr_speed} CLR_SPEED point(s) + {n_set_air} SET_AIR point(s) \
              + {n_change_kinetic} change_kinetic point(s) + {n_kinetic_energy} kinetic-energy \
              point(s) + {n_kinetic_add_speed} direct kinetic-vector point(s) \
-             + {n_kinetic_clear_speed_all} clear-speed-all point(s) from live game capture"
+             + {n_kinetic_clear_speed_all} clear-speed-all point(s) \
+             + {n_kinetic_set_consider_ground_friction} ground-friction point(s) from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
@@ -10243,7 +10523,8 @@ impl VisionaryApp {
                 + n_change_kinetic
                 + n_kinetic_energy
                 + n_kinetic_add_speed
-                + n_kinetic_clear_speed_all)
+                + n_kinetic_clear_speed_all
+                + n_kinetic_set_consider_ground_friction)
                 > 0
         {
             status.push_str(
@@ -11241,6 +11522,17 @@ impl VisionaryApp {
                 }
                 "KineticModule::clear_speed_all" if line.args.is_empty() => {
                     Some(ExcuteStmt::KineticClearSpeedAll)
+                }
+                "KineticModule::set_consider_ground_friction" if line.args.len() == 2 => {
+                    Some(ExcuteStmt::KineticSetConsiderGroundFriction(
+                        crate::data::KineticSetConsiderGroundFrictionCall {
+                            consider_ground_friction: match line.args.first()? {
+                                crate::game_link::LuaArgWire::Bool(value) => *value,
+                                _ => return None,
+                            },
+                            kinetic_energy_attribute: line.args.get(1)?.to_source_arg()?,
+                        },
+                    ))
                 }
                 "SET_AIR" if line.args.is_empty() => Some(ExcuteStmt::SetAir),
                 "REVERSE_LR" if line.args.is_empty() => Some(ExcuteStmt::ReverseLr),
@@ -13472,6 +13764,243 @@ impl VisionaryApp {
         self.game_link.send_hitbox_rules(&all);
     }
 
+    fn kinetic_set_consider_ground_friction_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+        index: usize,
+        event: &crate::data::KineticSetConsiderGroundFrictionEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::KineticSetConsiderGroundFrictionCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+                    && line.args.len() == 2
+            })
+            .nth(occurrence)
+    }
+
+    fn kinetic_set_consider_ground_friction_key(
+        consider_ground_friction: bool,
+        kinetic_energy_attribute: i64,
+    ) -> u64 {
+        crate::game_link::numeric_point_key(
+            crate::data::KineticSetConsiderGroundFrictionCall::FUNC,
+            &[
+                if consider_ground_friction { 1.0 } else { 0.0 },
+                kinetic_energy_attribute as f32,
+            ],
+        )
+    }
+
+    fn kinetic_set_consider_ground_friction_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+        shown: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire, LuaArgWire};
+        let n = pristine.len();
+        let m = shown.len();
+        let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if pristine[i].frame == shown[j].frame {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let mut matched_old = vec![false; n];
+        let mut matched_new = vec![false; m];
+        let mut matched_pairs = Vec::new();
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < n && j < m {
+            if pristine[i].frame == shown[j].frame {
+                matched_old[i] = true;
+                matched_new[j] = true;
+                matched_pairs.push((i, j));
+                i += 1;
+                j += 1;
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        let func = crate::data::KineticSetConsiderGroundFrictionCall::FUNC;
+
+        for (index, event) in pristine.iter().enumerate() {
+            if matched_old[index] {
+                continue;
+            }
+            let Some(donor) = Self::kinetic_set_consider_ground_friction_capture_for(
+                captures, pristine, index, event,
+            ) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(consider) = donor.args.first().and_then(|arg| match arg {
+                LuaArgWire::Bool(value) => Some(*value),
+                _ => None,
+            }) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(attribute) = donor.args.get(1).and_then(|arg| arg.as_i64()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let (frame_start, frame_end) = Self::rule_frame_window(event.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+                hitbox_id: Some(Self::kinetic_set_consider_ground_friction_key(
+                    consider, attribute,
+                )),
+                suppress: true,
+                frame_start,
+                frame_end,
+                overrides: None,
+                inject: None,
+                func: Some(func.into()),
+            });
+        }
+
+        for (old_index, new_index) in matched_pairs {
+            let was = &pristine[old_index];
+            let now = &shown[new_index];
+            if was == now {
+                continue;
+            }
+            let Some(donor) = Self::kinetic_set_consider_ground_friction_capture_for(
+                captures, pristine, old_index, was,
+            ) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(consider) = donor.args.first().and_then(|arg| match arg {
+                LuaArgWire::Bool(value) => Some(*value),
+                _ => None,
+            }) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(attribute) = donor.args.get(1).and_then(|arg| arg.as_i64()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(replacement_attribute) =
+                now.call.kinetic_energy_attribute.trim().parse::<i64>().ok()
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+                hitbox_id: Some(Self::kinetic_set_consider_ground_friction_key(
+                    consider, attribute,
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    kinetic_ground_friction: (was.call.consider_ground_friction
+                        != now.call.consider_ground_friction)
+                        .then_some(now.call.consider_ground_friction),
+                    kinetic_ground_friction_energy: (attribute != replacement_attribute)
+                        .then_some(replacement_attribute),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(func.into()),
+            });
+        }
+
+        for (index, event) in shown.iter().enumerate() {
+            if matched_new[index] {
+                continue;
+            }
+            let Some(attribute) = event
+                .call
+                .kinetic_energy_attribute
+                .trim()
+                .parse::<i64>()
+                .ok()
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(crate::game_link::InjectRuleWire {
+                    frame: Self::script_to_motion_frame(event.frame),
+                    args: vec![
+                        LuaArgWire::Bool(event.call.consider_ground_friction),
+                        LuaArgWire::Int(attribute),
+                    ],
+                    command: Some(func.into()),
+                }),
+                func: Some(func.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    /// Send sparse direct ground-friction overrides and structural rules to the plugin.
+    fn push_kinetic_set_consider_ground_friction_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::kinetic_set_consider_ground_friction_rules_for(
+            motion,
+            &captures,
+            &self.state.kinetic_set_consider_ground_friction_pristine,
+            &self
+                .state
+                .script
+                .to_kinetic_set_consider_ground_friction_events(),
+        );
+        let key = format!("{mv_key}#kinetic_set_consider_ground_friction");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "set_consider_ground_friction edit staged, but {unrepresentable} point(s) need a numeric live capture/attribute for live rules"
+            );
+        }
+    }
+
     /// Send the post-hoc hitbox modifiers the editor has changed to the running game.
     ///
     /// Diffed by site against `attack_mods_pristine`, on the same terms as the hurtbox rules, and
@@ -13811,6 +14340,8 @@ impl VisionaryApp {
             clr_speed_kinetic_kind: None,
             change_kinetic_type: None,
             kinetic_energy_id: None,
+            kinetic_ground_friction: None,
+            kinetic_ground_friction_energy: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -17370,6 +17901,10 @@ impl VisionaryApp {
                 &self.state.script.to_kinetic_energy_events(),
                 &self.state.script.to_kinetic_add_speed_events(),
                 &self.state.script.to_kinetic_clear_speed_all_events(),
+                &self
+                    .state
+                    .script
+                    .to_kinetic_set_consider_ground_friction_events(),
             ));
         if total == 0 {
             return;
@@ -17417,6 +17952,10 @@ impl VisionaryApp {
         let kinetic_energy = self.state.script.to_kinetic_energy_events();
         let kinetic_add_speed = self.state.script.to_kinetic_add_speed_events();
         let kinetic_clear_speed_all = self.state.script.to_kinetic_clear_speed_all_events();
+        let kinetic_set_consider_ground_friction = self
+            .state
+            .script
+            .to_kinetic_set_consider_ground_friction_events();
         let timeline_height = timeline_content_height_with_change_kinetic(
             self.state.hitboxes.len(),
             n_fx,
@@ -17435,6 +17974,7 @@ impl VisionaryApp {
             kinetic_energy.len(),
             kinetic_add_speed.len(),
             kinetic_clear_speed_all.len(),
+            kinetic_set_consider_ground_friction.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
@@ -18068,6 +18608,41 @@ impl VisionaryApp {
                         egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
                         egui::Align2::LEFT_CENTER,
                         "KineticModule::clear_speed_all",
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let kinetic_set_consider_ground_friction_band_top = kinetic_clear_speed_all_band_top
+                + if kinetic_clear_speed_all.is_empty() {
+                    0.0
+                } else {
+                    kinetic_clear_speed_all.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in kinetic_set_consider_ground_friction.iter().enumerate() {
+                let y_top =
+                    kinetic_set_consider_ground_friction_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(235, 205, 120);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!(
+                            "set_consider_ground_friction {} {}",
+                            event.call.consider_ground_friction,
+                            event.call.kinetic_energy_attribute
+                        ),
                         egui::FontId::monospace(8.0),
                         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
                     );
@@ -19745,6 +20320,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::KineticEnergy(_)
                 | ExcuteStmt::KineticAddSpeed(_)
                 | ExcuteStmt::KineticClearSpeedAll
+                | ExcuteStmt::KineticSetConsiderGroundFriction(_)
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -20326,6 +20902,7 @@ fn nothing_to_load_with_kinetics(
     kinetic_energy: usize,
     kinetic_add_speed: usize,
     kinetic_clear_speed_all: usize,
+    kinetic_set_consider_ground_friction: usize,
 ) -> Option<String> {
     if hitboxes == 0
         && effects == 0
@@ -20345,11 +20922,12 @@ fn nothing_to_load_with_kinetics(
         && kinetic_energy == 0
         && kinetic_add_speed == 0
         && kinetic_clear_speed_all == 0
+        && kinetic_set_consider_ground_friction == 0
     {
         return Some(
             "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
              direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
-             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector or clear-speed-all lines for this move yet."
+             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, clear-speed-all or ground-friction lines for this move yet."
                 .into(),
         );
     }
@@ -20388,6 +20966,7 @@ fn nothing_to_load(
         correct,
         ft_catch_stop,
         ft_start_adjust_motion_frame,
+        0,
         0,
         0,
         0,
@@ -23836,6 +24415,190 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_ground_friction_becomes_an_editable_point_and_live_override() {
+        let motion = hash40::hash40("escape_air").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 3.0,
+            func: "KineticModule::set_consider_ground_friction".into(),
+            args: vec![A::Bool(false), A::Int(7)],
+            run: 1,
+        }];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        let baseline = script.to_kinetic_set_consider_ground_friction_events();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].frame, 4);
+        assert!(!baseline[0].call.consider_ground_friction);
+        assert_eq!(baseline[0].call.kinetic_energy_attribute, "7");
+
+        let mut edited = baseline.clone();
+        edited[0].call.consider_ground_friction = true;
+        edited[0].call.kinetic_energy_attribute = "9".into();
+        let (rules, unrepresentable) = VisionaryApp::kinetic_set_consider_ground_friction_rules_for(
+            motion, &captures, &baseline, &edited,
+        );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].category,
+            crate::game_link::CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION
+        );
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                crate::data::KineticSetConsiderGroundFrictionCall::FUNC,
+                &[0.0, 7.0]
+            ))
+        );
+        let overrides = rules[0].overrides.as_ref().unwrap();
+        assert_eq!(overrides.kinetic_ground_friction, Some(true));
+        assert_eq!(overrides.kinetic_ground_friction_energy, Some(9));
+    }
+
+    #[test]
+    fn ground_friction_live_rules_suppress_removed_and_inject_added_points() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "KineticModule::set_consider_ground_friction".into(),
+                args: vec![A::Bool(false), A::Int(7)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 7.0,
+                func: "KineticModule::set_consider_ground_friction".into(),
+                args: vec![A::Bool(true), A::Int(7)],
+                run: 1,
+            },
+        ];
+        let pristine = vec![
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 4,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: false,
+                    kinetic_energy_attribute: "7".into(),
+                },
+                site: 0,
+            },
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 8,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: true,
+                    kinetic_energy_attribute: "7".into(),
+                },
+                site: 1,
+            },
+        ];
+        let shown = vec![crate::data::KineticSetConsiderGroundFrictionEvent {
+            frame: 6,
+            call: crate::data::KineticSetConsiderGroundFrictionCall {
+                consider_ground_friction: true,
+                kinetic_energy_attribute: "9".into(),
+            },
+            site: 0,
+        }];
+        let (rules, unrepresentable) = VisionaryApp::kinetic_set_consider_ground_friction_rules_for(
+            motion, &captures, &pristine, &shown,
+        );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 3);
+        assert!(rules[0].suppress);
+        assert!(rules[1].suppress);
+        let inject = rules[2].inject.as_ref().expect("retimed point injection");
+        assert_eq!(
+            inject.command.as_deref(),
+            Some("KineticModule::set_consider_ground_friction")
+        );
+        assert_eq!(inject.frame, 5.0);
+        assert_eq!(inject.args, vec![A::Bool(true), A::Int(9)]);
+    }
+
+    #[test]
+    fn ground_friction_live_rules_pair_value_edits_across_structural_additions() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 3.0,
+                func: "KineticModule::set_consider_ground_friction".into(),
+                args: vec![A::Bool(false), A::Int(7)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 7.0,
+                func: "KineticModule::set_consider_ground_friction".into(),
+                args: vec![A::Bool(true), A::Int(7)],
+                run: 1,
+            },
+        ];
+        let pristine = vec![
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 4,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: false,
+                    kinetic_energy_attribute: "7".into(),
+                },
+                site: 0,
+            },
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 8,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: true,
+                    kinetic_energy_attribute: "7".into(),
+                },
+                site: 1,
+            },
+        ];
+        let shown = vec![
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 4,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: true,
+                    kinetic_energy_attribute: "9".into(),
+                },
+                site: 0,
+            },
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 6,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: false,
+                    kinetic_energy_attribute: "5".into(),
+                },
+                site: 1,
+            },
+            pristine[1].clone(),
+        ];
+        let (rules, unrepresentable) = VisionaryApp::kinetic_set_consider_ground_friction_rules_for(
+            motion, &captures, &pristine, &shown,
+        );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 2);
+        let override_rule = &rules[0];
+        assert_eq!(
+            override_rule.hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                crate::data::KineticSetConsiderGroundFrictionCall::FUNC,
+                &[0.0, 7.0]
+            ))
+        );
+        let overrides = override_rule.overrides.as_ref().unwrap();
+        assert_eq!(overrides.kinetic_ground_friction, Some(true));
+        assert_eq!(overrides.kinetic_ground_friction_energy, Some(9));
+        let inject = rules[1].inject.as_ref().unwrap();
+        assert_eq!(inject.frame, 5.0);
+        assert_eq!(inject.args, vec![A::Bool(false), A::Int(5)]);
+    }
+
+    #[test]
     fn set_speed_ex_live_rules_key_numeric_kinetic_kind_and_reject_ambiguous_fallback() {
         let captures = vec![CaptureLine {
             kind: 6,
@@ -25557,7 +26320,7 @@ mod live_effect_capture_tests {
             );
         }
         let direct_kinetic = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0,
         );
         assert!((direct_kinetic - none - band).abs() < 0.01);
         // And they stack rather than sharing space.
@@ -25875,6 +26638,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &change_kinetic,
+                &[],
                 &[],
                 &[],
                 &[],

@@ -402,6 +402,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_kinetic_set_consider_ground_friction_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_change_kinetic_call(line) {
             stmts.push(stmt);
             continue;
@@ -2017,6 +2021,38 @@ fn parse_kinetic_clear_speed_all_call(line: &str) -> Option<ExcuteStmt> {
         .then_some(ExcuteStmt::KineticClearSpeedAll)
 }
 
+/// Parse the measured direct `KineticModule::set_consider_ground_friction` shapes:
+/// `KineticModule::set_consider_ground_friction(agent.module_accessor, bool, attribute)` and
+/// the HDR `boma` receiver form. The bool is decoded because it is a real authored toggle; the
+/// reserve attribute remains source text so named lua constants survive a round trip.
+fn parse_kinetic_set_consider_ground_friction_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "KineticModule::set_consider_ground_friction(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [module_accessor, consider_ground_friction, kinetic_energy_attribute] = tokens.as_slice()
+    else {
+        return None;
+    };
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let consider_ground_friction = match consider_ground_friction.trim() {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    if kinetic_energy_attribute.trim().is_empty() {
+        return None;
+    }
+    Some(ExcuteStmt::KineticSetConsiderGroundFriction(
+        crate::data::KineticSetConsiderGroundFrictionCall {
+            consider_ground_friction,
+            kinetic_energy_attribute: kinetic_energy_attribute.trim().to_string(),
+        },
+    ))
+}
+
 /// Parse the measured direct lua-bind shapes:
 /// `KineticModule::change_kinetic(agent.module_accessor, kinetic_type)` and the HDR dump form
 /// `KineticModule::change_kinetic(boma, kinetic_type)`, where the surrounding function declares
@@ -2685,6 +2721,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                     "{indent}KineticModule::clear_speed_all(agent.module_accessor);"
                 )
             }
+            crate::data::ExcuteStmt::KineticSetConsiderGroundFriction(call) => format!(
+                "{indent}KineticModule::set_consider_ground_friction(agent.module_accessor, {}, {});",
+                call.consider_ground_friction,
+                call.kinetic_energy_attribute
+            ),
             crate::data::ExcuteStmt::ChangeKinetic(call) => format!(
                 "{indent}KineticModule::change_kinetic(agent.module_accessor, {});",
                 call.kinetic_type
@@ -9407,6 +9448,61 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("KineticModule::clear_speed_all(agent.module_accessor, 0);"));
         assert!(emitted.contains("KineticModule::clear_speed_all(other);"));
         assert!(emitted.contains("KineticModule::clear_speed_all(agent.module_accessor);"));
+    }
+
+    #[test]
+    fn kinetic_set_consider_ground_friction_parses_standard_and_hdr_and_round_trips() {
+        let source = r#"unsafe extern "C" fn game_specialhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        KineticModule::set_consider_ground_friction(agent.module_accessor, true, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_set_consider_ground_friction_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame, 6);
+        assert!(events[0].call.consider_ground_friction);
+        assert_eq!(
+            events[0].call.kinetic_energy_attribute,
+            "*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN"
+        );
+        let emitted = preview_game_fn(&script, "special_hi");
+        assert!(emitted.contains(
+            "KineticModule::set_consider_ground_friction(agent.module_accessor, true, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_kinetic_set_consider_ground_friction_events(),
+            events
+        );
+
+        let hdr = source.replace("agent.module_accessor", "boma");
+        assert_eq!(
+            parse_acmd_script(&hdr).to_kinetic_set_consider_ground_friction_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_kinetic_set_consider_ground_friction_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::set_consider_ground_friction(agent.module_accessor, 1, 0);
+        KineticModule::set_consider_ground_friction(agent.module_accessor, true);
+        KineticModule::set_consider_ground_friction(other, false, 0);
+        KineticModule::set_consider_ground_friction(agent.module_accessor, false, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_kinetic_set_consider_ground_friction_events();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].call.consider_ground_friction);
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted
+            .contains("KineticModule::set_consider_ground_friction(agent.module_accessor, 1, 0);"));
+        assert!(emitted.contains("KineticModule::set_consider_ground_friction(other, false, 0);"));
     }
 
     #[test]

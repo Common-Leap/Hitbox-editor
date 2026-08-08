@@ -407,6 +407,7 @@ section of the editor:
   the authored energy-ID token.
 - `KineticModule::add_speed` edits the x/y components of the supported zero-z velocity vector.
 - `KineticModule::clear_speed_all` places, moves, or removes the measured argument-less speed-clear point.
+- `KineticModule::set_consider_ground_friction` edits the ground-friction toggle and authored reserve-attribute token.
 
 Value controls edit their point values while keeping their source frame. Placement
 controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.
@@ -420,6 +421,9 @@ generated export applies them freely, while linked-source sync edits only a
 verified flat call layout and reports branches, loops, or ambiguous sites.
 `KineticModule::clear_speed_all` is also a structural presence/frame edit; source sync preserves
 the verified standard or HDR receiver and reports unsupported layouts.
+`KineticModule::set_consider_ground_friction` preserves its named reserve token in exported and
+linked source, while live value edits require a numeric capture of the original toggle and
+attribute. Its presence and frame are structural edits with the same flat-source sync boundary.
 The direct `KineticModule` controls preserve named source tokens for export and
 source sync; their live replacements require a numeric capture of the original
 energy or kinetic value. The supported `add_speed` shape keeps `z` at `0.0` and

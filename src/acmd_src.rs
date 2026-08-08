@@ -4417,6 +4417,313 @@ pub fn sync_kinetic_add_speed(
     })
 }
 
+/// The measured direct `KineticModule::set_consider_ground_friction` calls in source order.
+pub(crate) fn kinetic_set_consider_ground_friction_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(
+        text,
+        crate::data::KineticSetConsiderGroundFrictionCall::FUNC,
+        0..text.len(),
+    )
+    .into_iter()
+    .filter(|site| {
+        site.args.len() == 3
+            && site
+                .arg(text, 0)
+                .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+            && site
+                .arg(text, 1)
+                .is_some_and(|value| matches!(value.trim(), "true" | "false"))
+            && site
+                .arg(text, 2)
+                .is_some_and(|value| !value.trim().is_empty())
+    })
+    .collect()
+}
+
+fn remove_kinetic_set_consider_ground_friction_line(text: &str, site: &MacroSite) -> Replacement {
+    let ranges = source_line_ranges(text);
+    let Some(line) = ranges
+        .iter()
+        .find(|range| range.start <= site.span.start && site.span.start < range.end)
+    else {
+        return Replacement {
+            span: site.span.clone(),
+            value: String::new(),
+        };
+    };
+    let trimmed = text[line.clone()].trim();
+    if trimmed == "KineticModule::set_consider_ground_friction(agent.module_accessor, true, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+        || trimmed == "KineticModule::set_consider_ground_friction(agent.module_accessor, false, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+        || trimmed == "KineticModule::set_consider_ground_friction(boma, true, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+        || trimmed == "KineticModule::set_consider_ground_friction(boma, false, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);"
+    {
+        Replacement {
+            span: line.clone(),
+            value: String::new(),
+        }
+    } else {
+        let mut end = site.span.end;
+        if text[end..].starts_with(';') {
+            end += 1;
+        }
+        Replacement {
+            span: site.span.start..end,
+            value: String::new(),
+        }
+    }
+}
+
+fn insert_kinetic_set_consider_ground_friction_line(
+    text: &mut String,
+    frame: u32,
+    call: &crate::data::KineticSetConsiderGroundFrictionCall,
+) -> bool {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let receiver = if text.contains("let boma = agent.boma()") {
+        "boma"
+    } else {
+        "agent.module_accessor"
+    };
+    let call = format!(
+        "KineticModule::set_consider_ground_friction({receiver}, {}, {});",
+        call.consider_ground_friction, call.kinetic_energy_attribute
+    );
+    let ranges = source_line_ranges(text);
+    let frame_index = ranges.iter().position(|range| {
+        frame_literal(&text[range.clone()])
+            .is_some_and(|value| value.round().max(1.0) as u32 == frame)
+    });
+
+    if let Some(frame_index) = frame_index {
+        let frame_range = ranges[frame_index].clone();
+        for range in ranges.iter().skip(frame_index + 1) {
+            if frame_literal(&text[range.clone()]).is_some() {
+                break;
+            }
+            let line = &text[range.clone()];
+            if line.contains("if macros::is_excute") && line.contains('{') {
+                let open = range.start + line.find('{').unwrap();
+                if let Some(close) = matching_brace(text, open) {
+                    let body_indent = ranges
+                        .iter()
+                        .skip(frame_index + 1)
+                        .find(|body| {
+                            body.start > open && body.start < close && {
+                                let body_text = &text[body.start..body.end];
+                                !body_text.trim().is_empty() && !body_text.trim().starts_with('}')
+                            }
+                        })
+                        .map(|body| line_indent(text, body).to_string())
+                        .unwrap_or_else(|| format!("{}    ", line_indent(text, range)));
+                    text.insert_str(close, &format!("{body_indent}{call}{newline}"));
+                    return true;
+                }
+            }
+        }
+
+        let indent = line_indent(text, &frame_range);
+        let block = format!(
+            "{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+        );
+        text.insert_str(frame_range.end, &block);
+        return true;
+    }
+
+    let insert_at = ranges
+        .iter()
+        .find(|range| {
+            frame_literal(&text[range.start..range.end]).is_some_and(|value| value > frame as f32)
+        })
+        .map(|range| range.start)
+        .or_else(|| text.rfind('}'))
+        .unwrap_or(text.len());
+    let indent = ranges
+        .iter()
+        .find(|range| frame_literal(&text[range.start..range.end]).is_some())
+        .map(|range| line_indent(text, range).to_string())
+        .unwrap_or_else(|| "    ".into());
+    let block = format!(
+        "{indent}frame(agent.lua_state_agent, {frame}.0);{newline}{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+    );
+    text.insert_str(insert_at, &block);
+    true
+}
+
+/// Rewrite direct ground-friction points in a flat `game_` function. Existing values are edited
+/// in place; flat additions/removals/retimes use the same frame-ordered structural policy as
+/// the argument-less direct kinetic point. Branches, loops, and source-site mismatches are
+/// reported instead of guessed into an execution context.
+pub fn rewrite_kinetic_set_consider_ground_friction(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+    edited: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = kinetic_set_consider_ground_friction_sites(text);
+    let parsed = crate::acmd::parse_acmd_script(text);
+    fn contains_loop(stmts: &[crate::data::AcmdStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            crate::data::AcmdStmt::Loop { .. } => true,
+            crate::data::AcmdStmt::RawBlock { body, .. } => contains_loop(body),
+            _ => false,
+        })
+    }
+    let mut report = SyncReport::default();
+    let flat_sites = pristine.len() == sites.len()
+        && pristine
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.site == index);
+    let flat_edited = edited
+        .iter()
+        .enumerate()
+        .all(|(index, event)| event.site == index);
+    if parsed.branch_count() > 0 || contains_loop(&parsed.stmts) || !flat_sites || !flat_edited {
+        if pristine != edited {
+            report.skipped.push(format!(
+                "{label}: set_consider_ground_friction placement changed inside a loop/branch or after a source-site mismatch — source syncing only edits flat point calls"
+            ));
+        }
+        return Ok((text.to_string(), report));
+    }
+
+    let old: Vec<u32> = pristine.iter().map(|event| event.frame).collect();
+    let new: Vec<u32> = edited.iter().map(|event| event.frame).collect();
+    let n = old.len();
+    let m = new.len();
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if old[i] == new[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut matched_old = vec![false; n];
+    let mut matched_new = vec![false; m];
+    let mut matched_pairs = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if old[i] == new[j] {
+            matched_old[i] = true;
+            matched_new[j] = true;
+            matched_pairs.push((i, j));
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    let mut edits = Vec::new();
+    for (old_index, new_index) in &matched_pairs {
+        let before = &pristine[*old_index];
+        let now = &edited[*new_index];
+        if before == now {
+            continue;
+        }
+        let Some(site) = sites.get(*old_index) else {
+            continue;
+        };
+        if site.name != crate::data::KineticSetConsiderGroundFrictionCall::FUNC
+            || site.args.len() != 3
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !matches!(value.trim(), "agent.module_accessor" | "boma"))
+        {
+            report.skipped.push(format!(
+                "{label}: set_consider_ground_friction site {} no longer has its verified receiver/arity shape",
+                before.site
+            ));
+            continue;
+        }
+        if before.call.consider_ground_friction != now.call.consider_ground_friction {
+            if let Some(span) = site.args.get(1) {
+                if let Some(edit) = text_edit(
+                    text,
+                    span,
+                    if now.call.consider_ground_friction {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ) {
+                    edits.push(edit);
+                }
+            }
+        }
+        if before.call.kinetic_energy_attribute != now.call.kinetic_energy_attribute {
+            if now.call.kinetic_energy_attribute.trim().is_empty() {
+                report.skipped.push(format!(
+                    "{label}: set_consider_ground_friction site {} has an empty reserve attribute — source syncing leaves the authored token intact",
+                    before.site
+                ));
+            } else if let Some(span) = site.args.get(2) {
+                if let Some(edit) = text_edit(text, span, now.call.kinetic_energy_attribute.trim())
+                {
+                    edits.push(edit);
+                }
+            }
+        }
+    }
+    if matched_old.iter().all(|matched| *matched) && matched_new.iter().all(|matched| *matched) {
+        report.changed = edits.len();
+        return Ok((apply(text, edits), report));
+    }
+
+    let removals: Vec<Replacement> = sites
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_old[*index])
+        .map(|(_, site)| remove_kinetic_set_consider_ground_friction_line(text, site))
+        .collect();
+    edits.extend(removals);
+    let mut updated = apply(text, edits);
+    report.changed += matched_old.iter().filter(|matched| !**matched).count();
+    report.changed += matched_pairs
+        .iter()
+        .filter(|(old_index, new_index)| pristine[*old_index] != edited[*new_index])
+        .count();
+    for (index, event) in edited
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_new[*index])
+    {
+        if insert_kinetic_set_consider_ground_friction_line(&mut updated, event.frame, &event.call)
+        {
+            report.changed += 1;
+        } else {
+            report.skipped.push(format!(
+                "{label}: could not insert set_consider_ground_friction point {} at frame {}",
+                index, event.frame
+            ));
+        }
+    }
+    Ok((updated, report))
+}
+
+/// Sync edited direct ground-friction points into the project's `game_` function.
+pub fn sync_kinetic_set_consider_ground_friction(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+    edited: &[crate::data::KineticSetConsiderGroundFrictionEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_kinetic_set_consider_ground_friction(
+            body,
+            &format!("{fighter}/{move_name}"),
+            pristine,
+            edited,
+        )
+    })
+}
+
 /// The buildable argument-less `SET_AIR` calls and generated helper calls in source order.
 pub(crate) fn set_air_sites(text: &str) -> Vec<MacroSite> {
     let mut sites = scan_macro_sites(text, 0..text.len());
@@ -8638,6 +8945,122 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             .is_empty());
         assert!(kinetic_clear_speed_all_sites(text).is_empty());
         let (after, report) = rewrite_kinetic_clear_speed_all(text, "mario/x", &[], &[]).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn kinetic_set_consider_ground_friction_source_sync_retimes_standard_and_hdr_points() {
+        let standard = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        KineticModule::set_consider_ground_friction(agent.module_accessor, false, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(standard)
+            .to_kinetic_set_consider_ground_friction_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 6;
+        edited[0].call.consider_ground_friction = true;
+        edited[0].call.kinetic_energy_attribute = "7".into();
+        let (after, report) = rewrite_kinetic_set_consider_ground_friction(
+            standard,
+            "mario/escape_air",
+            &pristine,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("frame(agent.lua_state_agent, 6.0);"));
+        assert!(after.contains(
+            "KineticModule::set_consider_ground_friction(agent.module_accessor, true, 7);"
+        ));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_kinetic_set_consider_ground_friction_events(),
+            edited
+        );
+
+        let hdr = standard.replace("agent.module_accessor", "boma");
+        let pristine =
+            crate::acmd::parse_acmd_script(&hdr).to_kinetic_set_consider_ground_friction_events();
+        let mut edited = pristine.clone();
+        edited[0].call.consider_ground_friction = true;
+        let (after, report) = rewrite_kinetic_set_consider_ground_friction(
+            &hdr,
+            "mario/escape_air_hdr",
+            &pristine,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(after.contains("KineticModule::set_consider_ground_friction(boma, true"));
+        assert!(after.contains("let boma = agent.boma();") || !after.contains("agent.boma"));
+
+        let mixed = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        KineticModule::set_consider_ground_friction(agent.module_accessor, false, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        KineticModule::set_consider_ground_friction(agent.module_accessor, true, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN);
+    }
+}
+"#;
+        let pristine =
+            crate::acmd::parse_acmd_script(mixed).to_kinetic_set_consider_ground_friction_events();
+        let mut edited = vec![pristine[0].clone(), pristine[1].clone()];
+        edited[1].call.kinetic_energy_attribute = "9".into();
+        edited.insert(
+            1,
+            crate::data::KineticSetConsiderGroundFrictionEvent {
+                frame: 6,
+                call: crate::data::KineticSetConsiderGroundFrictionCall {
+                    consider_ground_friction: false,
+                    kinetic_energy_attribute: "5".into(),
+                },
+                site: 1,
+            },
+        );
+        edited[2].site = 2;
+        let (after, report) = rewrite_kinetic_set_consider_ground_friction(
+            mixed,
+            "mario/escape_air",
+            &pristine,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(
+            "KineticModule::set_consider_ground_friction(agent.module_accessor, false, 5);"
+        ));
+        assert!(after.contains(
+            "KineticModule::set_consider_ground_friction(agent.module_accessor, true, 9);"
+        ));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_kinetic_set_consider_ground_friction_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn malformed_kinetic_set_consider_ground_friction_source_shapes_are_source_only() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::set_consider_ground_friction(agent.module_accessor, 1, 0);
+        KineticModule::set_consider_ground_friction(other, false, 0);
+    }
+}
+"#;
+        assert!(crate::acmd::parse_acmd_script(text)
+            .to_kinetic_set_consider_ground_friction_events()
+            .is_empty());
+        assert!(kinetic_set_consider_ground_friction_sites(text).is_empty());
+        let (after, report) =
+            rewrite_kinetic_set_consider_ground_friction(text, "mario/x", &[], &[]).unwrap();
         assert_eq!(after, text);
         assert!(report.skipped.is_empty(), "{report:?}");
     }

@@ -483,6 +483,9 @@ pub const CAT_KINETIC_UNABLE_ENERGY: u8 = 26;
 /// Wire category for direct `KineticModule::clear_speed_all` points.
 pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = 27;
 
+/// Wire category for direct `KineticModule::set_consider_ground_friction` points.
+pub const CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION: u8 = 28;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -644,6 +647,12 @@ pub struct HbOverridesWire {
     /// Replacement numeric energy ID for direct suspend/resume kinetic calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kinetic_energy_id: Option<i64>,
+    /// Replacement bool for `KineticModule::set_consider_ground_friction`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinetic_ground_friction: Option<bool>,
+    /// Replacement resolved reserve attribute for `set_consider_ground_friction`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinetic_ground_friction_energy: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2841,9 +2850,14 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = {CAT_KINETIC_CLEAR_SPEED_ALL};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION: u8 = {CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
+        assert!(module.contains("pub kinetic_ground_friction: Option<bool>"));
+        assert!(module.contains("pub kinetic_ground_friction_energy: Option<i64>"));
         assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::change_kinetic"));
@@ -2875,6 +2889,10 @@ mod tests {
             (CAT_KINETIC_ENABLE_ENERGY, CAT_KINETIC_RESUME_ENERGY),
             (CAT_KINETIC_UNABLE_ENERGY, CAT_KINETIC_ENABLE_ENERGY),
             (CAT_KINETIC_CLEAR_SPEED_ALL, CAT_KINETIC_UNABLE_ENERGY),
+            (
+                CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+                CAT_KINETIC_CLEAR_SPEED_ALL,
+            ),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -3138,6 +3156,71 @@ mod tests {
             Some("KineticModule::clear_speed_all")
         );
         assert!(rules[1]["inject"]["args"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn outbound_ground_friction_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let key = numeric_point_key("KineticModule::set_consider_ground_friction", &[0.0, 7.0]);
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+                hitbox_id: Some(key),
+                suppress: false,
+                frame_start: Some(4.0),
+                frame_end: Some(4.0),
+                overrides: Some(HbOverridesWire {
+                    kinetic_ground_friction: Some(true),
+                    kinetic_ground_friction_energy: Some(9),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("KineticModule::set_consider_ground_friction".into()),
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(InjectRuleWire {
+                    frame: 6.0,
+                    args: vec![LuaArgWire::Bool(false), LuaArgWire::Int(5)],
+                    command: Some("KineticModule::set_consider_ground_friction".into()),
+                }),
+                func: Some("KineticModule::set_consider_ground_friction".into()),
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0]["category"].as_u64(),
+            Some(CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION as u64)
+        );
+        assert_eq!(rules[0]["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(
+            rules[0]["func"].as_str(),
+            Some("KineticModule::set_consider_ground_friction")
+        );
+        assert_eq!(
+            rules[0]["overrides"]["kinetic_ground_friction"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            rules[0]["overrides"]["kinetic_ground_friction_energy"].as_i64(),
+            Some(9)
+        );
+        assert_eq!(rules[1]["inject"]["frame"].as_f64(), Some(6.0));
+        assert_eq!(
+            rules[1]["inject"]["command"].as_str(),
+            Some("KineticModule::set_consider_ground_friction")
+        );
+        assert_eq!(rules[1]["inject"]["args"].as_array().unwrap().len(), 2);
     }
 
     #[test]

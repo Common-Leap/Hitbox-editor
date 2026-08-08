@@ -256,6 +256,10 @@ pub const CAT_KINETIC_UNABLE_ENERGY: u8 = 26;
 /// `KineticModule::clear_speed_all` — an argument-less direct kinetic point. Must equal the editor's wire category.
 pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = 27;
 
+/// `KineticModule::set_consider_ground_friction` — a direct bool/attribute kinetic point.
+/// Must equal the editor's wire category.
+pub const CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION: u8 = 28;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -935,6 +939,10 @@ pub struct HbOverrides {
     pub change_kinetic_type: Option<i64>,
     /// Replacement numeric energy ID for direct suspend/resume kinetic calls.
     pub kinetic_energy_id: Option<i64>,
+    /// Replacement bool for `KineticModule::set_consider_ground_friction`.
+    pub kinetic_ground_friction: Option<bool>,
+    /// Replacement resolved reserve attribute for `set_consider_ground_friction`.
+    pub kinetic_ground_friction_energy: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -1048,6 +1056,9 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_KINETIC_ENABLE_ENERGY => "kinetic_enable_energy",
                     CAT_KINETIC_UNABLE_ENERGY => "kinetic_unable_energy",
                     CAT_KINETIC_CLEAR_SPEED_ALL => "kinetic_clear_speed_all",
+                    CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION => {
+                        "kinetic_set_consider_ground_friction"
+                    }
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1308,6 +1319,67 @@ unsafe fn hook_kinetic_clear_speed_all(
         }
     }
     original!()(boma)
+}
+
+/// Capture and sparsely override the verified direct ground-friction toggle. The authored
+/// reserve attribute is usually a named lua constant, so the live rule keys its resolved
+/// integer value while source/export keep the original token.
+#[skyline::hook(replace = smash::app::lua_bind::KineticModule::set_consider_ground_friction)]
+unsafe fn hook_kinetic_set_consider_ground_friction(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    consider_ground_friction: bool,
+    kinetic_energy_attribute: i32,
+) {
+    let args = [
+        LuaArg::Bool(consider_ground_friction),
+        LuaArg::Int(kinetic_energy_attribute as i64),
+    ];
+    record_for_boma(
+        boma,
+        "KineticModule::set_consider_ground_friction",
+        &args,
+    );
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = numeric_point_key(
+            "KineticModule::set_consider_ground_friction",
+            &[
+                if consider_ground_friction { 1.0 } else { 0.0 },
+                kinetic_energy_attribute as f32,
+            ],
+        );
+        if let Some((suppress, overrides)) = action_for(
+            CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
+            motion,
+            key,
+            frame,
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(overrides) = overrides {
+                let replacement_friction = overrides
+                    .kinetic_ground_friction
+                    .unwrap_or(consider_ground_friction);
+                let replacement_attribute = overrides
+                    .kinetic_ground_friction_energy
+                    .map(|value| value as i32)
+                    .unwrap_or(kinetic_energy_attribute);
+                if replacement_friction != consider_ground_friction
+                    || replacement_attribute != kinetic_energy_attribute
+                {
+                    original!()(
+                        boma,
+                        replacement_friction,
+                        replacement_attribute,
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, consider_ground_friction, kinetic_energy_attribute)
 }
 
 /// Capture and sparsely override the verified direct kinetic-type change.
@@ -2749,6 +2821,16 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 );
                 continue;
             }
+            if category == CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION
+                && (args.len() != 2
+                    || inj.command.as_deref()
+                        != Some("KineticModule::set_consider_ground_friction"))
+            {
+                crate::slight::diag::note(
+                    "rejected set_consider_ground_friction injection with wrong command or args",
+                );
+                continue;
+            }
             if category == CAT_CHANGE_KINETIC
                 && (args.len() != 1
                     || inj.command.as_deref() != Some("KineticModule::change_kinetic"))
@@ -2817,6 +2899,33 @@ pub unsafe fn inject_tick(lua_state: u64) {
                     CAT_SET_AIR => smash::app::sv_animcmd::SET_AIR(agent.lua_state_agent),
                     CAT_KINETIC_CLEAR_SPEED_ALL => {
                         smash::app::lua_bind::KineticModule::clear_speed_all(boma);
+                    }
+                    CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION => {
+                        let consider_ground_friction = match args.first() {
+                            Some(LuaArg::Bool(value)) => *value,
+                            Some(LuaArg::Int(value)) => *value != 0,
+                            _ => {
+                                crate::slight::diag::note(
+                                    "rejected set_consider_ground_friction injection with a non-bool toggle",
+                                );
+                                continue;
+                            }
+                        };
+                        let Some(kinetic_energy_attribute) = args
+                            .get(1)
+                            .and_then(numeric_arg_f32)
+                            .map(|value| value as i32)
+                        else {
+                            crate::slight::diag::note(
+                                "rejected set_consider_ground_friction injection with a non-numeric attribute",
+                            );
+                            continue;
+                        };
+                        smash::app::lua_bind::KineticModule::set_consider_ground_friction(
+                            boma,
+                            consider_ground_friction,
+                            kinetic_energy_attribute,
+                        );
                     }
                     CAT_CHANGE_KINETIC => {
                         let kinetic_type = match args.first() {
@@ -2933,6 +3042,7 @@ pub fn install() {
         hook_clr_speed,
         hook_set_air,
         hook_kinetic_clear_speed_all,
+        hook_kinetic_set_consider_ground_friction,
         hook_change_kinetic,
         hook_kinetic_suspend_energy,
         hook_kinetic_resume_energy,
