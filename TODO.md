@@ -1726,6 +1726,12 @@ functions.** It suppresses a sound effect, not an effect spawn. It belongs to D1
 counted there. That leaves this entry with `EFFECT_DETACH_KIND` 0, `EFFECT_DETACH_KIND_WORK` 0,
 `ENABLE_AREA` 0 and `UNABLE_AREA` 0 — nothing to test a round trip against.
 
+**Preservation boundary added 2026-08-08, without claiming C4 complete.** The four known wrapper
+forms now take the effect parser's opaque/residue path even when written bare, so a source line is
+kept at its frame and remains visible in generated effect text and source write-back. A measured
+effect end frame, detach-vs-spawn lifetime rule, panel field, live wire/plugin hook, and semantic
+export are still absent; no local corpus call justifies inventing any of them.
+
 The earlier "measured after A3" line counted `SET_PLAY_INHIVIT` without reading its signature,
 which is the trap two entries above this one warns about, applied to an entry's *own* evidence.
 A count says a macro is used; only the signature says what it is.

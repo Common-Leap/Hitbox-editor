@@ -4422,6 +4422,46 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// C4's opaque lifetime controls are not source-editable fields yet. Retuning the spawn they
+    /// follow must still leave each command in place, so a source sync cannot turn a preserved
+    /// action into a deleted one.
+    #[test]
+    fn syncing_a_spawn_does_not_delete_opaque_c4_lifetime_lines() {
+        let source = r#"unsafe extern "C" fn effect_c4(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::EFFECT_DETACH_KIND(agent, Hash40::new("sys_smoke"), 0);
+        macros::EFFECT_DETACH_KIND_WORK(agent, *WORK_INT, 0);
+        macros::ENABLE_AREA(agent, 2);
+        macros::UNABLE_AREA(agent, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].scale = 1.5;
+
+        let (after, report) = rewrite_effect_calls(source, "test/c4", &pristine, &edited).unwrap();
+        assert_eq!(
+            report.changed, 1,
+            "only the spawn scale changed: {report:?}"
+        );
+        assert!(report.skipped.is_empty(), "{report:?}");
+        for line in [
+            "macros::EFFECT_DETACH_KIND(agent, Hash40::new(\"sys_smoke\"), 0);",
+            "macros::EFFECT_DETACH_KIND_WORK(agent, *WORK_INT, 0);",
+            "macros::ENABLE_AREA(agent, 2);",
+            "macros::UNABLE_AREA(agent, 2);",
+        ] {
+            assert_eq!(
+                after.matches(line).count(),
+                1,
+                "source syncing must retain {line}:\n{after}"
+            );
+        }
+        assert!(after.contains(", 1.5, true);"), "{after}");
+    }
+
     /// The source editor and the editor panels drive each other, so a value written into the
     /// text has to parse back to exactly what was written. Any drift — a rounding difference,
     /// a reformat — reads as a fresh edit on the next frame and the two ping-pong forever.

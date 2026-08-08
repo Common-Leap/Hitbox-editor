@@ -841,6 +841,14 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
             || line.contains("macros::LAST_EFFECT_SET_SCALE_W(")
             || line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(")
+            // C4's detach/area controls are also intentionally opaque. Their names and wrapper
+            // arities are known, but the local corpus has no calls to establish how they should
+            // bind to a follow effect or an editable area lifetime. Preserve bare forms through
+            // the same residue path until that semantic contract has evidence.
+            || line.contains("macros::EFFECT_DETACH_KIND(")
+            || line.contains("macros::EFFECT_DETACH_KIND_WORK(")
+            || line.contains("macros::ENABLE_AREA(")
+            || line.contains("macros::UNABLE_AREA(")
             || color_macro_layout(line).is_some();
         if is_effect_macro {
             let effect_macros = parse_excute_block_effects(&[line]);
@@ -5520,6 +5528,101 @@ unsafe extern "C" fn effect_downattackd(agent: &mut L2CAgentBase) {
                 .blockers()
                 .any(|finding| finding.message.contains("zero-argument")),
             "the wrapper mismatch must be explicit: {report:?}"
+        );
+    }
+
+    /// C4's remaining members have no local corpus calls, so they are not typed into an effect
+    /// lifetime model. Their wrapper names are nevertheless known. Keep a synthetic, signature-
+    /// checked shape opaque: a detach or area toggle must not disappear merely because it cannot
+    /// yet be assigned an editable end-frame or area state.
+    #[test]
+    fn opaque_c4_lifetime_lines_survive_effect_export_and_keep_their_frames() {
+        let src = r#"unsafe extern "C" fn effect_c4(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::EFFECT_DETACH_KIND(agent, Hash40::new("sys_smoke"), 0);
+        macros::EFFECT_DETACH_KIND_WORK(agent, *WORK_INT, 0);
+        macros::ENABLE_AREA(agent, 2);
+        macros::UNABLE_AREA(agent, 2);
+    }
+    frame(agent.lua_state_agent, 13.0);
+    macros::ENABLE_AREA(agent, 2);
+}
+"#;
+        let source = parse_effect_script(src);
+        let (calls, residue) = source.to_effect_calls_and_residue();
+        assert_eq!(calls.len(), 1);
+        for name in [
+            "EFFECT_DETACH_KIND",
+            "EFFECT_DETACH_KIND_WORK",
+            "ENABLE_AREA",
+            "UNABLE_AREA",
+        ] {
+            assert!(
+                calls[0].trailing.iter().any(|line| line.contains(name)),
+                "{name} must stay after the spawn it followed: {:?}",
+                calls[0].trailing
+            );
+        }
+        assert!(
+            residue
+                .get(&13)
+                .into_iter()
+                .flatten()
+                .any(|line| line.contains("macros::ENABLE_AREA(agent, 2);")),
+            "the bare area toggle must stay on frame 13: {residue:?}"
+        );
+        let lost = unexportable_effect_lines(&source);
+        assert!(
+            !lost.iter().any(|line| {
+                [
+                    "EFFECT_DETACH_KIND",
+                    "EFFECT_DETACH_KIND_WORK",
+                    "ENABLE_AREA",
+                    "UNABLE_AREA",
+                ]
+                .iter()
+                .any(|name| line.contains(name))
+            }),
+            "opaque C4 lines must not be reported as deleted: {lost:?}"
+        );
+
+        let emitted = preview_effect_fn(&calls, "c4", &[], &residue);
+        assert_eq!(
+            emitted.matches("EFFECT_DETACH_KIND(agent,").count(),
+            1,
+            "detach-by-kind must be emitted once:\n{emitted}"
+        );
+        assert_eq!(
+            emitted.matches("EFFECT_DETACH_KIND_WORK(agent,").count(),
+            1,
+            "detach-by-work must be emitted once:\n{emitted}"
+        );
+        assert_eq!(
+            emitted.matches("ENABLE_AREA(agent, 2);").count(),
+            2,
+            "both area toggles must keep their separate frames:\n{emitted}"
+        );
+        assert_eq!(
+            emitted.matches("UNABLE_AREA(agent, 2);").count(),
+            1,
+            "the disable must be emitted once:\n{emitted}"
+        );
+
+        let mut report = crate::acmd_verify::Report::default();
+        crate::acmd_verify::verify_effect_move(
+            "test / c4",
+            &calls,
+            &emitted,
+            &[],
+            Some(&lost),
+            &residue,
+            &mut report,
+        );
+        assert!(
+            !report.has_blockers(),
+            "opaque C4 lines are not blockers: {report:?}"
         );
     }
 
