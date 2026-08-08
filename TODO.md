@@ -2381,6 +2381,13 @@ and the same 190 calls in its HDR tree; the two representations use `agent.modul
 `boma` respectively. Those direct forms are covered by E1h and E1i below, while the broader
 status-module and `sv_kinetic_energy` families remain open.
 
+The remaining direct name in the retained corpus is `KineticModule::get_sum_speed_y`: 162 exact
+calls in each standard and HDR tree, all using `*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN`. Its
+linked binding returns an `f32`, and the calls feed conditional/status expressions rather than
+performing a standalone mutation point. They therefore remain preserved until expression and
+status-module editing has a measured contract; they are not treated as another guessed E1 point
+family.
+
 `REVERSE_LR` is the local-cache exception that started this slice: **7 real calls**, all
 `macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,
 `ItemLightThrowAirB`, `ItemLightThrowAirB4`, `ItemHeavyThrowB`, `ItemHeavyThrowB4`, `EscapeF`).
