@@ -66,7 +66,7 @@ fn timeline_thin_row() -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)] // Keep the timeline's explicit lane counts at this UI boundary.
-fn timeline_content_height(
+fn timeline_content_height_with_change_kinetic(
     hitboxes: usize,
     effects: usize,
     hurtboxes: usize,
@@ -80,6 +80,7 @@ fn timeline_content_height(
     ft_start_adjust_motion_frame: usize,
     clr_speed: usize,
     set_air: usize,
+    change_kinetic: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
     let thin = timeline_thin_row();
@@ -103,8 +104,45 @@ fn timeline_content_height(
         + band(ft_catch_stop)
         + band(ft_start_adjust_motion_frame)
         + band(clr_speed)
-        + band(set_air))
+        + band(set_air)
+        + band(change_kinetic))
     .max(24.0)
+}
+
+/// Compatibility form for layout tests and callers that predate the direct kinetic lane.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn timeline_content_height(
+    hitboxes: usize,
+    effects: usize,
+    hurtboxes: usize,
+    sounds: usize,
+    reverse_lr: usize,
+    speed_ex: usize,
+    speed: usize,
+    add_speed_no_limit: usize,
+    correct: usize,
+    ft_catch_stop: usize,
+    ft_start_adjust_motion_frame: usize,
+    clr_speed: usize,
+    set_air: usize,
+) -> f32 {
+    timeline_content_height_with_change_kinetic(
+        hitboxes,
+        effects,
+        hurtboxes,
+        sounds,
+        reverse_lr,
+        speed_ex,
+        speed,
+        add_speed_no_limit,
+        correct,
+        ft_catch_stop,
+        ft_start_adjust_motion_frame,
+        clr_speed,
+        set_air,
+        0,
+    )
 }
 
 /// Merge a finished mirror fetch with the project scripts that were waiting on it, and say
@@ -271,7 +309,7 @@ fn live_capture_branch_warning(fighter: &str, move_name: &str, body: &str) -> Op
 }
 
 #[allow(clippy::too_many_arguments)] // Keep every timeline source explicit at this UI boundary.
-fn timeline_frame_extent(
+fn timeline_frame_extent_with_change_kinetic(
     hitboxes: &[crate::data::Hitbox],
     effects: &[crate::data::EffectCall],
     sounds: &[crate::data::SoundEvent],
@@ -285,6 +323,7 @@ fn timeline_frame_extent(
     ft_start_adjust_motion_frame: &[crate::data::FtStartAdjustMotionFrameEvent],
     clr_speed: &[crate::data::ClrSpeedEvent],
     set_air: &[crate::data::SetAirEvent],
+    change_kinetic: &[crate::data::ChangeKineticEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
         [
@@ -317,6 +356,7 @@ fn timeline_frame_extent(
         ft_start_adjust_motion_frame.iter().map(|event| event.frame);
     let clr_speed_frames = clr_speed.iter().map(|event| event.frame);
     let set_air_frames = set_air.iter().map(|event| event.frame);
+    let change_kinetic_frames = change_kinetic.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
         .chain(sound_frames)
@@ -330,8 +370,45 @@ fn timeline_frame_extent(
         .chain(ft_start_adjust_motion_frame_frames)
         .chain(clr_speed_frames)
         .chain(set_air_frames)
+        .chain(change_kinetic_frames)
         .max()
         .unwrap_or(0)
+}
+
+/// Compatibility form for callers that do not provide the direct kinetic lane.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn timeline_frame_extent(
+    hitboxes: &[crate::data::Hitbox],
+    effects: &[crate::data::EffectCall],
+    sounds: &[crate::data::SoundEvent],
+    expressions: &[crate::data::ExpressionEvent],
+    reverse_lr: &[crate::data::ReverseLrEvent],
+    speed_ex: &[crate::data::SetSpeedExEvent],
+    speed: &[crate::data::SetSpeedEvent],
+    add_speed_no_limit: &[crate::data::AddSpeedNoLimitEvent],
+    correct: &[crate::data::CorrectEvent],
+    ft_catch_stop: &[crate::data::FtCatchStopEvent],
+    ft_start_adjust_motion_frame: &[crate::data::FtStartAdjustMotionFrameEvent],
+    clr_speed: &[crate::data::ClrSpeedEvent],
+    set_air: &[crate::data::SetAirEvent],
+) -> u32 {
+    timeline_frame_extent_with_change_kinetic(
+        hitboxes,
+        effects,
+        sounds,
+        expressions,
+        reverse_lr,
+        speed_ex,
+        speed,
+        add_speed_no_limit,
+        correct,
+        ft_catch_stop,
+        ft_start_adjust_motion_frame,
+        clr_speed,
+        set_air,
+        &[],
+    )
 }
 
 fn timeline_scroll_area(viewport_height: f32) -> egui::ScrollArea {
@@ -1047,6 +1124,7 @@ type SourceMirror = (
     Vec<crate::data::FtStartAdjustMotionFrameEvent>,
     Vec<crate::data::ClrSpeedEvent>,
     Vec<crate::data::SetAirEvent>,
+    Vec<crate::data::ChangeKineticEvent>,
 );
 
 /// One ACMD function checked out of the linked project for editing.
@@ -2457,6 +2535,7 @@ impl VisionaryApp {
                 ft_start_adjust_motion_frame,
                 clr_speed,
                 set_air,
+                change_kinetic,
             )) => {
                 if *hitboxes == self.state.hitboxes
                     && *effects == self.state.effects
@@ -2472,6 +2551,7 @@ impl VisionaryApp {
                         == self.state.script.to_ft_start_adjust_motion_frame_events()
                     && *clr_speed == self.state.script.to_clr_speed_events()
                     && *set_air == self.state.script.to_set_air_events()
+                    && *change_kinetic == self.state.script.to_change_kinetic_events()
                 {
                     return;
                 }
@@ -2493,6 +2573,7 @@ impl VisionaryApp {
             self.state.script.to_ft_start_adjust_motion_frame_events(),
             self.state.script.to_clr_speed_events(),
             self.state.script.to_set_air_events(),
+            self.state.script.to_change_kinetic_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
         // text already matches the panels — there is nothing to write, only a mark to set.
@@ -2558,21 +2639,25 @@ impl VisionaryApp {
             Some("This source buffer is not a displayed ACMD category")
         };
 
-        self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
-            &self.state.hitboxes,
-            &self.state.effects,
-            &self.state.sounds,
-            &self.state.expressions,
-            &self.state.script.to_reverse_lr_events(),
-            &self.state.script.to_speed_ex_events(),
-            &self.state.script.to_speed_events(),
-            &self.state.script.to_add_speed_no_limit_events(),
-            &self.state.script.to_correct_events(),
-            &self.state.script.to_ft_catch_stop_events(),
-            &self.state.script.to_ft_start_adjust_motion_frame_events(),
-            &self.state.script.to_clr_speed_events(),
-            &self.state.script.to_set_air_events(),
-        ));
+        self.state.total_frames =
+            self.state
+                .total_frames
+                .max(timeline_frame_extent_with_change_kinetic(
+                    &self.state.hitboxes,
+                    &self.state.effects,
+                    &self.state.sounds,
+                    &self.state.expressions,
+                    &self.state.script.to_reverse_lr_events(),
+                    &self.state.script.to_speed_ex_events(),
+                    &self.state.script.to_speed_events(),
+                    &self.state.script.to_add_speed_no_limit_events(),
+                    &self.state.script.to_correct_events(),
+                    &self.state.script.to_ft_catch_stop_events(),
+                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                    &self.state.script.to_clr_speed_events(),
+                    &self.state.script.to_set_air_events(),
+                    &self.state.script.to_change_kinetic_events(),
+                ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
             buffer.synced = buffer.text.clone();
             buffer.note = note.map(str::to_string);
@@ -2730,7 +2815,20 @@ impl VisionaryApp {
                                                         report
                                                             .skipped
                                                             .extend(set_air_report.skipped);
-                                                        Ok((updated, report))
+                                                        match crate::acmd_src::rewrite_change_kinetic(
+                                                            &updated,
+                                                            &label,
+                                                            &self.state.change_kinetic_pristine,
+                                                            &self.state.script.to_change_kinetic_events(),
+                                                        ) {
+                                                            Ok((updated, change_kinetic_report)) => {
+                                                                report.changed += change_kinetic_report.changed;
+                                                                report.files.extend(change_kinetic_report.files);
+                                                                report.skipped.extend(change_kinetic_report.skipped);
+                                                                Ok((updated, report))
+                                                            }
+                                                            Err(error) => Err(error),
+                                                        }
                                                     }
                                                     Err(error) => Err(error),
                                                 }
@@ -3028,6 +3126,21 @@ impl VisionaryApp {
                 }
                 Err(e) => notes.push(e.to_string()),
             }
+            refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_change_kinetic(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.change_kinetic_pristine,
+                &self.state.script.to_change_kinetic_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
         }
         // Sounds get a pass of their own, and unlike the three above it writes a *different
         // function*: `sound_`, not `game_`. It sat inside the `game_` guard until D1e, which is
@@ -3129,6 +3242,7 @@ impl VisionaryApp {
                 != state.ft_start_adjust_motion_frame_pristine
             || state.script.to_clr_speed_events() != state.clr_speed_pristine
             || state.script.to_set_air_events() != state.set_air_pristine
+            || state.script.to_change_kinetic_events() != state.change_kinetic_pristine
         {
             edited.push("game_");
         }
@@ -3422,22 +3536,27 @@ impl VisionaryApp {
                     self.push_ft_start_adjust_motion_frame_rules();
                     self.push_clr_speed_rules();
                     self.push_set_air_rules();
+                    self.push_change_kinetic_rules();
 
-                    self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
-                        &self.state.hitboxes,
-                        &self.state.effects,
-                        &self.state.sounds,
-                        &self.state.expressions,
-                        &self.state.script.to_reverse_lr_events(),
-                        &self.state.script.to_speed_ex_events(),
-                        &self.state.script.to_speed_events(),
-                        &self.state.script.to_add_speed_no_limit_events(),
-                        &self.state.script.to_correct_events(),
-                        &self.state.script.to_ft_catch_stop_events(),
-                        &self.state.script.to_ft_start_adjust_motion_frame_events(),
-                        &self.state.script.to_clr_speed_events(),
-                        &self.state.script.to_set_air_events(),
-                    ));
+                    self.state.total_frames =
+                        self.state
+                            .total_frames
+                            .max(timeline_frame_extent_with_change_kinetic(
+                                &self.state.hitboxes,
+                                &self.state.effects,
+                                &self.state.sounds,
+                                &self.state.expressions,
+                                &self.state.script.to_reverse_lr_events(),
+                                &self.state.script.to_speed_ex_events(),
+                                &self.state.script.to_speed_events(),
+                                &self.state.script.to_add_speed_no_limit_events(),
+                                &self.state.script.to_correct_events(),
+                                &self.state.script.to_ft_catch_stop_events(),
+                                &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                                &self.state.script.to_clr_speed_events(),
+                                &self.state.script.to_set_air_events(),
+                                &self.state.script.to_change_kinetic_events(),
+                            ));
 
                     self.jump_to_earliest_active_frame();
                 }
@@ -3478,6 +3597,7 @@ impl VisionaryApp {
                 self.state.ft_start_adjust_motion_frame_pristine = Vec::new();
                 self.state.clr_speed_pristine = Vec::new();
                 self.state.set_air_pristine = Vec::new();
+                self.state.change_kinetic_pristine = Vec::new();
                 self.state.loaded_body = String::new();
             }
         }
@@ -4355,7 +4475,8 @@ impl VisionaryApp {
             || self.state.script.to_ft_start_adjust_motion_frame_events()
                 != self.state.ft_start_adjust_motion_frame_pristine
             || self.state.script.to_clr_speed_events() != self.state.clr_speed_pristine
-            || self.state.script.to_set_air_events() != self.state.set_air_pristine;
+            || self.state.script.to_set_air_events() != self.state.set_air_pristine
+            || self.state.script.to_change_kinetic_events() != self.state.change_kinetic_pristine;
         if self.state.hitboxes == self.state.hitboxes_pristine
             && !script_points_edited
             && !already_logged
@@ -4869,7 +4990,7 @@ impl VisionaryApp {
                 let max_frame = self
                     .state
                     .total_frames
-                    .max(timeline_frame_extent(
+                    .max(timeline_frame_extent_with_change_kinetic(
                         &self.state.hitboxes,
                         &self.state.effects,
                         &self.state.sounds,
@@ -4883,6 +5004,7 @@ impl VisionaryApp {
                         &self.state.script.to_ft_start_adjust_motion_frame_events(),
                         &self.state.script.to_clr_speed_events(),
                         &self.state.script.to_set_air_events(),
+                        &self.state.script.to_change_kinetic_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
                 if let Some(hb) = self.state.hitboxes.get_mut(idx) {
@@ -5258,6 +5380,7 @@ impl VisionaryApp {
             self.draw_ft_catch_stop_section(ui);
             self.draw_ft_start_adjust_motion_frame_section(ui);
             self.draw_clr_speed_section(ui);
+            self.draw_change_kinetic_section(ui);
             self.draw_set_air_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
@@ -5943,21 +6066,25 @@ impl VisionaryApp {
                 self.state.script.remove_reverse_lr(site)
             };
             if changed {
-                self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
-                    &self.state.hitboxes,
-                    &self.state.effects,
-                    &self.state.sounds,
-                    &self.state.expressions,
-                    &self.state.script.to_reverse_lr_events(),
-                    &self.state.script.to_speed_ex_events(),
-                    &self.state.script.to_speed_events(),
-                    &self.state.script.to_add_speed_no_limit_events(),
-                    &self.state.script.to_correct_events(),
-                    &self.state.script.to_ft_catch_stop_events(),
-                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
-                    &self.state.script.to_clr_speed_events(),
-                    &self.state.script.to_set_air_events(),
-                ));
+                self.state.total_frames =
+                    self.state
+                        .total_frames
+                        .max(timeline_frame_extent_with_change_kinetic(
+                            &self.state.hitboxes,
+                            &self.state.effects,
+                            &self.state.sounds,
+                            &self.state.expressions,
+                            &self.state.script.to_reverse_lr_events(),
+                            &self.state.script.to_speed_ex_events(),
+                            &self.state.script.to_speed_events(),
+                            &self.state.script.to_add_speed_no_limit_events(),
+                            &self.state.script.to_correct_events(),
+                            &self.state.script.to_ft_catch_stop_events(),
+                            &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                            &self.state.script.to_clr_speed_events(),
+                            &self.state.script.to_set_air_events(),
+                            &self.state.script.to_change_kinetic_events(),
+                        ));
                 self.state.status = if destination.is_some() {
                     "REVERSE_LR edit staged — export or sync it into the linked source project."
                 } else {
@@ -6387,6 +6514,66 @@ impl VisionaryApp {
         }
     }
 
+    /// Editable authored kinetic-type tokens from the measured direct lua-bind call.
+    ///
+    /// The source token remains text because the game-facing live hook only proves its resolved
+    /// integer. Numeric replacements can still be previewed when a capture supplies that proof;
+    /// source/export preserves the named constant the project author chose.
+    fn draw_change_kinetic_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_change_kinetic_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement");
+            ui.colored_label(egui::Color32::from_rgb(255, 190, 120), "change_kinetic");
+        })
+        .response
+        .on_hover_text(
+            "KineticModule::change_kinetic changes the fighter's current kinetic type. The authored token stays as source text; numeric live overrides require a matching capture.",
+        );
+
+        let mut edit: Option<(usize, String)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut kinetic_type = event.call.kinetic_type.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(255, 190, 120)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("f{}", event.frame));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut kinetic_type)
+                            .desired_width(280.0)
+                            .hint_text("*FIGHTER_KINETIC_TYPE_…"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed && !kinetic_type.trim().is_empty() {
+                edit = Some((event.site, kinetic_type));
+            }
+        }
+
+        if let Some((site, kinetic_type)) = edit {
+            if let Some(call) = self.state.script.change_kinetic_stmt_mut(site) {
+                call.kinetic_type = kinetic_type;
+                self.state.status =
+                    "change_kinetic edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_change_kinetic_rules();
+            }
+        }
+    }
+
     /// Structural `SET_AIR` point editing, with the same flat source/live contract as
     /// `REVERSE_LR`. The desktop viewport does not simulate the kinetic-state transition.
     fn draw_set_air_section(&mut self, ui: &mut Ui) {
@@ -6457,21 +6644,25 @@ impl VisionaryApp {
                 self.state.script.remove_set_air(site)
             };
             if changed {
-                self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
-                    &self.state.hitboxes,
-                    &self.state.effects,
-                    &self.state.sounds,
-                    &self.state.expressions,
-                    &self.state.script.to_reverse_lr_events(),
-                    &self.state.script.to_speed_ex_events(),
-                    &self.state.script.to_speed_events(),
-                    &self.state.script.to_add_speed_no_limit_events(),
-                    &self.state.script.to_correct_events(),
-                    &self.state.script.to_ft_catch_stop_events(),
-                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
-                    &self.state.script.to_clr_speed_events(),
-                    &self.state.script.to_set_air_events(),
-                ));
+                self.state.total_frames =
+                    self.state
+                        .total_frames
+                        .max(timeline_frame_extent_with_change_kinetic(
+                            &self.state.hitboxes,
+                            &self.state.effects,
+                            &self.state.sounds,
+                            &self.state.expressions,
+                            &self.state.script.to_reverse_lr_events(),
+                            &self.state.script.to_speed_ex_events(),
+                            &self.state.script.to_speed_events(),
+                            &self.state.script.to_add_speed_no_limit_events(),
+                            &self.state.script.to_correct_events(),
+                            &self.state.script.to_ft_catch_stop_events(),
+                            &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                            &self.state.script.to_clr_speed_events(),
+                            &self.state.script.to_set_air_events(),
+                            &self.state.script.to_change_kinetic_events(),
+                        ));
                 self.state.status = if destination.is_some() {
                     "SET_AIR edit staged — export or sync it into the linked source project."
                 } else {
@@ -8302,6 +8493,7 @@ impl VisionaryApp {
             self.state.script.to_ft_start_adjust_motion_frame_events();
         let source_clr_speed = self.state.script.to_clr_speed_events();
         let source_set_air = self.state.script.to_set_air_events();
+        let source_change_kinetic = self.state.script.to_change_kinetic_events();
         let had_source_script = !self.state.script.stmts.is_empty();
         self.state.set_script(record.script);
         // A saved record is the edited script, not the live/source baseline. Preserve the
@@ -8317,6 +8509,7 @@ impl VisionaryApp {
             self.state.ft_start_adjust_motion_frame_pristine = source_ft_start_adjust_motion_frame;
             self.state.clr_speed_pristine = source_clr_speed;
             self.state.set_air_pristine = source_set_air;
+            self.state.change_kinetic_pristine = source_change_kinetic;
         }
         self.state.hitboxes = record.hitboxes;
         true
@@ -8859,6 +9052,7 @@ impl VisionaryApp {
         self.push_ft_start_adjust_motion_frame_rules();
         self.push_clr_speed_rules();
         self.push_set_air_rules();
+        self.push_change_kinetic_rules();
         let pending_hitbox_live = self.push_all_saved_hitbox_rules();
         self.push_effect_rules();
         self.push_effect_aliases();
@@ -9481,6 +9675,7 @@ impl VisionaryApp {
         let n_ft_start_adjust_motion_frame = hurt.to_ft_start_adjust_motion_frame_events().len();
         let n_clr_speed = hurt.to_clr_speed_events().len();
         let n_set_air = hurt.to_set_air_events().len();
+        let n_change_kinetic = hurt.to_change_kinetic_events().len();
 
         if let Some(message) = nothing_to_load_with_kinetics(
             hitboxes.len(),
@@ -9497,6 +9692,7 @@ impl VisionaryApp {
             n_ft_start_adjust_motion_frame,
             n_clr_speed,
             n_set_air,
+            n_change_kinetic,
         ) {
             self.state.status = message;
             return;
@@ -9549,21 +9745,26 @@ impl VisionaryApp {
         self.push_ft_start_adjust_motion_frame_rules();
         self.push_clr_speed_rules();
         self.push_set_air_rules();
-        self.state.total_frames = self.state.total_frames.max(timeline_frame_extent(
-            &self.state.hitboxes,
-            &self.state.effects,
-            &self.state.sounds,
-            &self.state.expressions,
-            &self.state.script.to_reverse_lr_events(),
-            &self.state.script.to_speed_ex_events(),
-            &self.state.script.to_speed_events(),
-            &self.state.script.to_add_speed_no_limit_events(),
-            &self.state.script.to_correct_events(),
-            &self.state.script.to_ft_catch_stop_events(),
-            &self.state.script.to_ft_start_adjust_motion_frame_events(),
-            &self.state.script.to_clr_speed_events(),
-            &self.state.script.to_set_air_events(),
-        ));
+        self.push_change_kinetic_rules();
+        self.state.total_frames =
+            self.state
+                .total_frames
+                .max(timeline_frame_extent_with_change_kinetic(
+                    &self.state.hitboxes,
+                    &self.state.effects,
+                    &self.state.sounds,
+                    &self.state.expressions,
+                    &self.state.script.to_reverse_lr_events(),
+                    &self.state.script.to_speed_ex_events(),
+                    &self.state.script.to_speed_events(),
+                    &self.state.script.to_add_speed_no_limit_events(),
+                    &self.state.script.to_correct_events(),
+                    &self.state.script.to_ft_catch_stop_events(),
+                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                    &self.state.script.to_clr_speed_events(),
+                    &self.state.script.to_set_air_events(),
+                    &self.state.script.to_change_kinetic_events(),
+                ));
         self.jump_to_earliest_active_frame();
         let capture_warning = self.capture_branch_warning();
         if let Some(key) = self.current_move_key() {
@@ -9597,7 +9798,7 @@ impl VisionaryApp {
              + {n_ft_catch_stop} catch-stop point(s) \
              + {n_ft_start_adjust_motion_frame} motion-frame adjustment point(s) \
              + {n_clr_speed} CLR_SPEED point(s) + {n_set_air} SET_AIR point(s) \
-             from live game capture"
+             + {n_change_kinetic} change_kinetic point(s) from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
@@ -9613,7 +9814,8 @@ impl VisionaryApp {
                 + n_ft_catch_stop
                 + n_ft_start_adjust_motion_frame
                 + n_clr_speed
-                + n_set_air)
+                + n_set_air
+                + n_change_kinetic)
                 > 0
         {
             status.push_str(
@@ -10574,6 +10776,11 @@ impl VisionaryApp {
                 "CLR_SPEED" if line.args.len() == 1 => {
                     Some(ExcuteStmt::ClrSpeed(crate::data::ClrSpeedCall {
                         kinetic_kind: line.args.first()?.to_source_arg()?,
+                    }))
+                }
+                "KineticModule::change_kinetic" if line.args.len() == 1 => {
+                    Some(ExcuteStmt::ChangeKinetic(crate::data::ChangeKineticCall {
+                        kinetic_type: line.args.first()?.to_source_arg()?,
                     }))
                 }
                 "SET_AIR" if line.args.is_empty() => Some(ExcuteStmt::SetAir),
@@ -12195,6 +12402,132 @@ impl VisionaryApp {
         }
     }
 
+    fn change_kinetic_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::ChangeKineticEvent],
+        index: usize,
+        event: &crate::data::ChangeKineticEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::ChangeKineticCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 1)
+            .nth(occurrence)
+    }
+
+    fn change_kinetic_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::ChangeKineticEvent],
+        shown: &[crate::data::ChangeKineticEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::change_kinetic_capture_for(captures, pristine, index, was)
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(value) = donor.args.first().and_then(|arg| arg.as_f32()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(replacement) = now.call.kinetic_type.trim().parse::<i64>().ok() else {
+                // Named source constants remain source/export-owned until a capture or a known
+                // label table can prove their runtime integer.
+                unrepresentable += 1;
+                continue;
+            };
+            let duplicate_key = pristine
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index
+                        && other.frame == was.frame
+                        && other.call.kinetic_type.trim().parse::<i64>().ok() == Some(value as i64)
+                })
+                .count();
+            if duplicate_key != 0 {
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_CHANGE_KINETIC,
+                hitbox_id: Some(crate::game_link::numeric_point_key(
+                    crate::data::ChangeKineticCall::FUNC,
+                    &[value],
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    change_kinetic_type: Some(replacement),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::ChangeKineticCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    /// Send numeric `KineticModule::change_kinetic` replacements to the plugin. Named tokens
+    /// remain an explicit source/export-only edit because capture is the proof of the live ID.
+    fn push_change_kinetic_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::change_kinetic_rules_for(
+            motion,
+            &captures,
+            &self.state.change_kinetic_pristine,
+            &self.state.script.to_change_kinetic_events(),
+        );
+        let key = format!("{mv_key}#change_kinetic");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "change_kinetic edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique frame/key"
+            );
+        }
+    }
+
     fn set_air_rules_for(
         motion: u64,
         pristine: &[crate::data::SetAirEvent],
@@ -12636,6 +12969,7 @@ impl VisionaryApp {
             ft_catch_stop_arg2: None,
             ft_start_adjust_motion_frame_value: None,
             clr_speed_kinetic_kind: None,
+            change_kinetic_type: None,
             // Expression primitives use their own category and replacement vector.
             expression_args: None,
         }
@@ -16174,21 +16508,25 @@ impl VisionaryApp {
     }
 
     fn draw_scrubber(&mut self, ui: &mut Ui) {
-        let total = self.state.total_frames.max(timeline_frame_extent(
-            &self.state.hitboxes,
-            &self.state.effects,
-            &self.state.sounds,
-            &self.state.expressions,
-            &self.state.script.to_reverse_lr_events(),
-            &self.state.script.to_speed_ex_events(),
-            &self.state.script.to_speed_events(),
-            &self.state.script.to_add_speed_no_limit_events(),
-            &self.state.script.to_correct_events(),
-            &self.state.script.to_ft_catch_stop_events(),
-            &self.state.script.to_ft_start_adjust_motion_frame_events(),
-            &self.state.script.to_clr_speed_events(),
-            &self.state.script.to_set_air_events(),
-        ));
+        let total = self
+            .state
+            .total_frames
+            .max(timeline_frame_extent_with_change_kinetic(
+                &self.state.hitboxes,
+                &self.state.effects,
+                &self.state.sounds,
+                &self.state.expressions,
+                &self.state.script.to_reverse_lr_events(),
+                &self.state.script.to_speed_ex_events(),
+                &self.state.script.to_speed_events(),
+                &self.state.script.to_add_speed_no_limit_events(),
+                &self.state.script.to_correct_events(),
+                &self.state.script.to_ft_catch_stop_events(),
+                &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                &self.state.script.to_clr_speed_events(),
+                &self.state.script.to_set_air_events(),
+                &self.state.script.to_change_kinetic_events(),
+            ));
         if total == 0 {
             return;
         }
@@ -16231,7 +16569,8 @@ impl VisionaryApp {
             self.state.script.to_ft_start_adjust_motion_frame_events();
         let clr_speed = self.state.script.to_clr_speed_events();
         let set_air = self.state.script.to_set_air_events();
-        let timeline_height = timeline_content_height(
+        let change_kinetic = self.state.script.to_change_kinetic_events();
+        let timeline_height = timeline_content_height_with_change_kinetic(
             self.state.hitboxes.len(),
             n_fx,
             hurt_states.len(),
@@ -16245,6 +16584,7 @@ impl VisionaryApp {
             ft_start_adjust_motion_frame.len(),
             clr_speed.len(),
             set_air.len(),
+            change_kinetic.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
         let viewport_height = ui.available_height().max(1.0);
@@ -16755,6 +17095,36 @@ impl VisionaryApp {
                         egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
                         egui::Align2::LEFT_CENTER,
                         "SET_AIR",
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let change_kinetic_band_top = set_air_band_top
+                + if set_air.is_empty() {
+                    0.0
+                } else {
+                    set_air.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in change_kinetic.iter().enumerate() {
+                let y_top = change_kinetic_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(255, 190, 120);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!("change_kinetic {}", event.call.kinetic_type),
                         egui::FontId::monospace(8.0),
                         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
                     );
@@ -18428,6 +18798,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::FtStartAdjustMotionFrame(_)
                 | ExcuteStmt::ClrSpeed(_)
                 | ExcuteStmt::SetAir
+                | ExcuteStmt::ChangeKinetic(_)
                 | ExcuteStmt::Raw(_) => true,
             })
             .cloned()
@@ -19005,6 +19376,7 @@ fn nothing_to_load_with_kinetics(
     ft_start_adjust_motion_frame: usize,
     clr_speed: usize,
     set_air: usize,
+    change_kinetic: usize,
 ) -> Option<String> {
     if hitboxes == 0
         && effects == 0
@@ -19020,11 +19392,12 @@ fn nothing_to_load_with_kinetics(
         && ft_start_adjust_motion_frame == 0
         && clr_speed == 0
         && set_air == 0
+        && change_kinetic == 0
     {
         return Some(
             "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
              direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
-             CLR_SPEED or SET_AIR lines for this move yet."
+             CLR_SPEED, SET_AIR or change_kinetic lines for this move yet."
                 .into(),
         );
     }
@@ -19063,6 +19436,7 @@ fn nothing_to_load(
         correct,
         ft_catch_stop,
         ft_start_adjust_motion_frame,
+        0,
         0,
         0,
     )
@@ -22085,6 +22459,80 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_change_kinetic_becomes_an_editable_game_statement() {
+        let motion = hash40::hash40("escape_air").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 18.0,
+            func: "KineticModule::change_kinetic".into(),
+            args: vec![A::Int(4)],
+            run: 1,
+        }];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        assert_eq!(
+            script.to_change_kinetic_events(),
+            vec![crate::data::ChangeKineticEvent {
+                frame: 19,
+                call: crate::data::ChangeKineticCall {
+                    kinetic_type: "4".into(),
+                },
+                site: 0,
+            }]
+        );
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "escape_air");
+        assert!(exported.contains("KineticModule::change_kinetic(agent.module_accessor, 4);"));
+    }
+
+    #[test]
+    fn change_kinetic_live_rules_key_the_pristine_numeric_type() {
+        let motion = hash40::hash40("escape_air").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 18.0,
+            func: "KineticModule::change_kinetic".into(),
+            args: vec![A::Int(4)],
+            run: 1,
+        }];
+        let pristine = crate::acmd::parse_acmd_script(
+            r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 19.0);
+    if macros::is_excute(agent) {
+        KineticModule::change_kinetic(agent.module_accessor, 4);
+    }
+}
+"#,
+        )
+        .to_change_kinetic_events();
+        let baseline = pristine.clone();
+        let mut edited = pristine.clone();
+        edited[0].call.kinetic_type = "5".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::change_kinetic_rules_for(motion, &captures, &baseline, &edited);
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].category, crate::game_link::CAT_CHANGE_KINETIC);
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                crate::data::ChangeKineticCall::FUNC,
+                &[4.0]
+            ))
+        );
+        assert_eq!(
+            rules[0].overrides.as_ref().unwrap().change_kinetic_type,
+            Some(5)
+        );
+        let mut named = baseline.clone();
+        named[0].call.kinetic_type = "*FIGHTER_KINETIC_TYPE_GROUND".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::change_kinetic_rules_for(motion, &captures, &baseline, &named);
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
     fn set_air_live_rules_suppress_removed_and_inject_added_points() {
         let motion = hash40::hash40("attack_air_n").0;
         let pristine = vec![
@@ -23827,6 +24275,9 @@ mod live_effect_capture_tests {
                 "the {label} band must grow the timeline by {band}: {none} vs {height}"
             );
         }
+        let direct_kinetic =
+            timeline_content_height_with_change_kinetic(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3);
+        assert!((direct_kinetic - none - band).abs() < 0.01);
         // And they stack rather than sharing space.
         let all = timeline_content_height(2, 3, 3, 3, 3, 0, 0, 0, 0, 3, 3, 3, 3);
         assert!((all - none - 8.0 * band).abs() < 0.01, "{all} vs {none}");
@@ -24118,6 +24569,32 @@ mod live_effect_capture_tests {
                 &set_air,
             ),
             113
+        );
+        let change_kinetic = [crate::data::ChangeKineticEvent {
+            frame: 127,
+            call: crate::data::ChangeKineticCall {
+                kinetic_type: "4".into(),
+            },
+            site: 0,
+        }];
+        assert_eq!(
+            timeline_frame_extent_with_change_kinetic(
+                &hitbox,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &change_kinetic,
+            ),
+            127
         );
     }
 

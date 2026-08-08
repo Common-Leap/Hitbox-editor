@@ -235,6 +235,9 @@ pub const CAT_CLR_SPEED: u8 = 19;
 /// `SET_AIR` — an argument-less kinetic-state point. Must equal the editor's wire category.
 pub const CAT_SET_AIR: u8 = 20;
 
+/// `KineticModule::change_kinetic` — a direct kinetic-type point. Must equal the editor's wire category.
+pub const CAT_CHANGE_KINETIC: u8 = 21;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -907,6 +910,8 @@ pub struct HbOverrides {
     pub ft_start_adjust_motion_frame_value: Option<f32>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     pub clr_speed_kinetic_kind: Option<i64>,
+    /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
+    pub change_kinetic_type: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -1013,6 +1018,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_FT_START_ADJUST_MOTION_FRAME => "ft_start_adjust_motion_frame",
                     CAT_CLR_SPEED => "clr_speed",
                     CAT_SET_AIR => "set_air",
+                    CAT_CHANGE_KINETIC => "change_kinetic",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1242,6 +1248,42 @@ unsafe fn hook_set_air(lua_state: u64) {
         }
     }
     original!()(lua_state)
+}
+
+/// Capture and sparsely override the verified direct kinetic-type change.
+///
+/// Unlike the `sv_animcmd` kinetic points above, this primitive receives the module accessor
+/// directly. The authored source token is not available at runtime, so the editor keys the
+/// rule by the resolved numeric type and only sends a numeric replacement when capture proves it.
+#[skyline::hook(replace = smash::app::lua_bind::KineticModule::change_kinetic)]
+unsafe fn hook_change_kinetic(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    kinetic_type: i32,
+) -> i32 {
+    record_for_boma(
+        boma,
+        "KineticModule::change_kinetic",
+        &[LuaArg::Int(kinetic_type as i64)],
+    );
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = numeric_point_key(
+            "KineticModule::change_kinetic",
+            &[kinetic_type as f32],
+        );
+        if let Some((suppress, overrides)) = action_for(CAT_CHANGE_KINETIC, motion, key, frame) {
+            if suppress {
+                // The call's return value is ignored by the measured ACMD source. Zero is the
+                // neutral success-like result used for a suppressed primitive in this hook.
+                return 0;
+            }
+            if let Some(replacement) = overrides.and_then(|item| item.change_kinetic_type) {
+                return original!()(boma, replacement as i32);
+            }
+        }
+    }
+    original!()(boma, kinetic_type)
 }
 
 /// Capture and sparsely override the verified `SET_SPEED_EX` shape.
@@ -2522,6 +2564,15 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 crate::slight::diag::note("rejected SET_AIR injection with wrong command or args");
                 continue;
             }
+            if category == CAT_CHANGE_KINETIC
+                && (args.len() != 1
+                    || inj.command.as_deref() != Some("KineticModule::change_kinetic"))
+            {
+                crate::slight::diag::note(
+                    "rejected change_kinetic injection with wrong command or args",
+                );
+                continue;
+            }
             if category == CAT_GRAB && args.len() == 9 {
                 args.push(LuaArg::Int(
                     *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
@@ -2570,6 +2621,22 @@ pub unsafe fn inject_tick(lua_state: u64) {
                         smash::app::sv_animcmd::REVERSE_LR(agent.lua_state_agent)
                     }
                     CAT_SET_AIR => smash::app::sv_animcmd::SET_AIR(agent.lua_state_agent),
+                    CAT_CHANGE_KINETIC => {
+                        let kinetic_type = match args.first() {
+                            Some(LuaArg::Int(value)) => *value as i32,
+                            Some(LuaArg::Num(value)) => *value as i32,
+                            _ => {
+                                crate::slight::diag::note(
+                                    "rejected change_kinetic injection with a non-numeric type",
+                                );
+                                continue;
+                            }
+                        };
+                        smash::app::lua_bind::KineticModule::change_kinetic(
+                            boma,
+                            kinetic_type,
+                        );
+                    }
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
                     CAT_ATTACK_FP => {
@@ -2649,7 +2716,8 @@ pub fn install() {
         hook_ft_catch_stop,
         hook_ft_start_adjust_motion_frame,
         hook_clr_speed,
-        hook_set_air
+        hook_set_air,
+        hook_change_kinetic
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

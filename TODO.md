@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**564 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**569 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2352,9 +2352,10 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 ## Gameplay
 
-### [ ] E1 — Movement and kinetics (the measured ACMD point slices are complete; status-module sources remain)
+### [ ] E1 — Movement and kinetics (the measured ACMD point slices are complete; broader status-module sources remain)
 
-`sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today.
+Unmeasured `sv_kinetic_energy` and status-module kinetic calls remain preserved verbatim today; the exact
+direct `KineticModule::change_kinetic` call measured in the local `game_` corpus is covered by E1h below.
 `SET_SPEED`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, and `SET_SPEED_EX` now have measured, value-editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
@@ -2362,8 +2363,8 @@ already knows the frame each call lands on.
 
 **Measured 2026-08-08, and this is the Rule 5 correction:** the local cache has no calls for
 `sv_kinetic_energy`, `ADD_SPEED_NO_LIMIT`, or `CORRECT`; the single `KineticModule`
-hit in the whole cache is `KineticModule::change_kinetic` in Kirby `EscapeAir`, a raw status-module
-call rather than an ACMD macro. A read-only public dumped-script corpus has 144 textual
+hit in the whole cache is `KineticModule::change_kinetic` in Kirby `EscapeAir`, a direct `game_`
+lua-bind call rather than an ACMD macro; that exact shape is covered by E1h. A read-only public dumped-script corpus has 144 textual
 `SET_SPEED_EX` calls: 122 match the vendored three-argument wrapper shape, while 22 are malformed
 dump artifacts (17 short and 5 with one extra argument). The same corpus has 3 exact
 `ADD_SPEED_NO_LIMIT(agent, x, y)` calls and 31 exact `CORRECT(agent, kind)` calls, both covered
@@ -2387,7 +2388,7 @@ the speed macros.
 - **Scope decision.** `REVERSE_LR`, the verified `SET_SPEED` and three-argument `SET_SPEED_EX`
   shapes, and the exact `ADD_SPEED_NO_LIMIT`/`CORRECT` wrapper shapes are handled as their own
   slices below. The remaining zero-count speed/kinetic names, malformed `SET_SPEED_EX` shapes,
-  and status-module sources remain parked, so the full E1 entry remains open.
+  and broader status-module sources remain parked, so the full E1 entry remains open.
 - **Trap:** these change where the fighter *is*, so previewing them means moving the model,
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
@@ -2503,13 +2504,36 @@ matching Skyline hooks, generated ACMD export, and source write-back. `CLR_SPEED
 authored kinetic-ID token and supports numeric live-keyed value replacement; `SET_AIR` supports
 flat structural remove, add, and retime operations through the source writer. The source writer
 refuses branches, loops, and site mismatches rather than guessing placement, while malformed
-shapes remain raw. The 190 external `KineticModule::change_kinetic` calls remain raw
-status-module statements and are not part of this ACMD macro slice.
+shapes remain raw. The broader 190 external `KineticModule::change_kinetic` calls remain outside
+this locally measured input boundary and are not claimed by the ACMD macro slice; the one exact
+local direct `game_` call is handled by E1h below.
 
-Offline validation passed: focused and full desktop tests (564 tests, 1 ignored), strict Clippy,
+Offline validation passed: focused and full desktop tests (569 tests, 1 ignored), strict Clippy,
 format/diff checks, the debug build-check wrapper, the locked release build, and the Skyline
 plugin release build. No emulator, game, or UI automation was run, so live in-game behavior
 remains unverified.
+
+#### [x] E1h — direct `KineticModule::change_kinetic` game-script points (completed 2026-08-08; live runtime unverified)
+
+The local cache has one exact measured input: Kirby `game_escapeair` calls
+`KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_FALL)` on a one-based
+game frame. The linked binding exposes the matching `(BattleObjectModuleAccessor, i32) -> i32`
+primitive. This is a direct lua-bind statement, not an ACMD macro, so it receives its own typed
+point family instead of being folded into `CLR_SPEED` or `SET_AIR`.
+
+The completed slice carries the authored kinetic-type token through parser/IR, the editor panel
+and timeline, live capture reconstruction, portable project serialization, category-21 wire
+rules, the matching Skyline hook and direct injection path, generated ACMD export, and value-only
+source write-back. Named source constants remain source/export-owned; numeric live replacement is
+sent only when a matching capture proves the pristine runtime type. Malformed arity, receiver, and
+non-game status-module calls remain raw, and source syncing refuses structural or retime edits
+rather than guessing placement.
+
+Offline validation passed: focused and full desktop tests (569 tests, 1 ignored + 6 integration),
+strict Clippy, format/diff checks, the debug build-check wrapper, the locked release build, and
+the Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
+behavior remains unverified. The E1 parent stays open for the broader external status-module
+corpus and other unmeasured kinetics.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

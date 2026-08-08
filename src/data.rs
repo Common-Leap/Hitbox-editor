@@ -1295,6 +1295,12 @@ pub enum ExcuteStmt {
     /// This is an argument-less point command. Structural placement is the editable payload;
     /// the source writer and live rule path keep it separate from `REVERSE_LR`.
     SetAir,
+    /// `KineticModule::change_kinetic` — change the fighter's current kinetic type.
+    ///
+    /// This direct lua-bind call is present in the measured `game_` source shape. The authored
+    /// kinetic type stays as source text because the live capture only proves its resolved
+    /// integer value.
+    ChangeKinetic(ChangeKineticCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1435,6 +1441,17 @@ impl ClrSpeedCall {
     pub const FUNC: &'static str = "CLR_SPEED";
 }
 
+/// A parsed `KineticModule::change_kinetic(agent.module_accessor, kinetic_type)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChangeKineticCall {
+    /// Authored kinetic-type token, usually a dereferenced lua constant.
+    pub kinetic_type: String,
+}
+
+impl ChangeKineticCall {
+    pub const FUNC: &'static str = "KineticModule::change_kinetic";
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1521,6 +1538,15 @@ pub struct ClrSpeedEvent {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SetAirEvent {
     pub frame: u32,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `KineticModule::change_kinetic` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChangeKineticEvent {
+    pub frame: u32,
+    pub call: ChangeKineticCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -1889,6 +1915,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.set_airs
+    }
+
+    /// Flatten direct kinetic-type changes into authored-token point events.
+    pub fn to_change_kinetic_events(&self) -> Vec<ChangeKineticEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.change_kinetics
     }
 }
 
@@ -2336,6 +2370,47 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The direct `KineticModule::change_kinetic` call an event site's ordinal refers to.
+    pub fn change_kinetic_stmt_mut(&mut self, site: usize) -> Option<&mut ChangeKineticCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut ChangeKineticCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::ChangeKinetic(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::ChangeKinetic(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove a `SET_AIR` source statement at its source ordinal.
     pub fn remove_set_air(&mut self, site: usize) -> bool {
         fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
@@ -2513,6 +2588,7 @@ struct WalkAccum {
     ft_start_adjust_motion_frames: Vec<FtStartAdjustMotionFrameEvent>,
     clr_speeds: Vec<ClrSpeedEvent>,
     set_airs: Vec<SetAirEvent>,
+    change_kinetics: Vec<ChangeKineticEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -2544,6 +2620,9 @@ struct WalkAccum {
     next_clr_speed_site: usize,
     /// Site for the next `SET_AIR`, independent of every other point event family.
     next_set_air_site: usize,
+    /// Site for the next direct `KineticModule::change_kinetic`, independent of every other point
+    /// event family.
+    next_change_kinetic_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -2811,6 +2890,26 @@ fn count_set_air_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// Direct kinetic-type changes in a subtree, counted in source order for loop/site resolution.
+fn count_change_kinetic_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::ChangeKinetic(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::ChangeKinetic(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_change_kinetic_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -2956,6 +3055,12 @@ impl WalkAccum {
     fn take_set_air_site(&mut self) -> usize {
         let site = self.next_set_air_site;
         self.next_set_air_site += 1;
+        site
+    }
+
+    fn take_change_kinetic_site(&mut self) -> usize {
+        let site = self.next_change_kinetic_site;
+        self.next_change_kinetic_site += 1;
         site
     }
 
@@ -3217,6 +3322,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::ChangeKinetic(call) => {
+            let site = hurt.take_change_kinetic_site();
+            hurt.change_kinetics.push(ChangeKineticEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -3263,6 +3376,7 @@ fn eval_stmts(
                     hurt.next_ft_start_adjust_motion_frame_site;
                 let clr_speed_site_at_entry = hurt.next_clr_speed_site;
                 let set_air_site_at_entry = hurt.next_set_air_site;
+                let change_kinetic_site_at_entry = hurt.next_change_kinetic_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -3278,6 +3392,7 @@ fn eval_stmts(
                         ft_start_adjust_motion_frame_site_at_entry;
                     hurt.next_clr_speed_site = clr_speed_site_at_entry;
                     hurt.next_set_air_site = set_air_site_at_entry;
+                    hurt.next_change_kinetic_site = change_kinetic_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -3297,6 +3412,8 @@ fn eval_stmts(
                         + count_ft_start_adjust_motion_frame_stmts(body);
                 hurt.next_clr_speed_site = clr_speed_site_at_entry + count_clr_speed_stmts(body);
                 hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
+                hurt.next_change_kinetic_site =
+                    change_kinetic_site_at_entry + count_change_kinetic_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -3516,6 +3633,8 @@ pub struct AppState {
     pub clr_speed_pristine: Vec<ClrSpeedEvent>,
     /// `SET_AIR` point events as loaded, for sparse live kinetic rules and source syncing.
     pub set_air_pristine: Vec<SetAirEvent>,
+    /// Direct kinetic-type point events as loaded, for sparse live rules and source syncing.
+    pub change_kinetic_pristine: Vec<ChangeKineticEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -3613,6 +3732,7 @@ impl Default for AppState {
             ft_start_adjust_motion_frame_pristine: Vec::new(),
             clr_speed_pristine: Vec::new(),
             set_air_pristine: Vec::new(),
+            change_kinetic_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -3648,6 +3768,7 @@ impl AppState {
             script.to_ft_start_adjust_motion_frame_events();
         self.clr_speed_pristine = script.to_clr_speed_events();
         self.set_air_pristine = script.to_set_air_events();
+        self.change_kinetic_pristine = script.to_change_kinetic_events();
         self.script = script;
     }
 }

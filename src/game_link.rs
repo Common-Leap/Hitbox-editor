@@ -459,6 +459,9 @@ pub const CAT_CLR_SPEED: u8 = 19;
 /// Wire category for the measured argument-less `SET_AIR` kinetic point.
 pub const CAT_SET_AIR: u8 = 20;
 
+/// Wire category for the direct `KineticModule::change_kinetic` kinetic point.
+pub const CAT_CHANGE_KINETIC: u8 = 21;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -614,6 +617,9 @@ pub struct HbOverridesWire {
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_speed_kinetic_kind: Option<i64>,
+    /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_kinetic_type: Option<i64>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2790,14 +2796,21 @@ mod tests {
         let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
         assert!(module.contains(&format!("pub const CAT_CLR_SPEED: u8 = {CAT_CLR_SPEED};")));
         assert!(module.contains(&format!("pub const CAT_SET_AIR: u8 = {CAT_SET_AIR};")));
+        assert!(module.contains(&format!(
+            "pub const CAT_CHANGE_KINETIC: u8 = {CAT_CHANGE_KINETIC};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
+        assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
+        assert!(module.contains("replace = smash::app::lua_bind::KineticModule::change_kinetic"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
             (CAT_SET_AIR, CAT_SPEED),
             (CAT_SET_AIR, CAT_REVERSE_LR),
+            (CAT_CHANGE_KINETIC, CAT_SET_AIR),
+            (CAT_CHANGE_KINETIC, CAT_CLR_SPEED),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -2831,6 +2844,20 @@ mod tests {
                 inject: None,
                 func: Some("SET_AIR".into()),
             },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_CHANGE_KINETIC,
+                hitbox_id: Some(numeric_point_key("KineticModule::change_kinetic", &[4.0])),
+                suppress: false,
+                frame_start: Some(9.5),
+                frame_end: Some(10.5),
+                overrides: Some(HbOverridesWire {
+                    change_kinetic_type: Some(5),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("KineticModule::change_kinetic".into()),
+            },
         ]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
@@ -2846,6 +2873,18 @@ mod tests {
         assert_eq!(rules[1]["category"].as_u64(), Some(CAT_SET_AIR as u64));
         assert_eq!(rules[1]["hitbox_id"].as_u64(), Some(KINETIC_KEY_SET_AIR));
         assert_eq!(rules[1]["func"].as_str(), Some("SET_AIR"));
+        assert_eq!(
+            rules[2]["category"].as_u64(),
+            Some(CAT_CHANGE_KINETIC as u64)
+        );
+        assert_eq!(
+            rules[2]["overrides"]["change_kinetic_type"].as_i64(),
+            Some(5)
+        );
+        assert_eq!(
+            rules[2]["func"].as_str(),
+            Some("KineticModule::change_kinetic")
+        );
     }
 
     #[test]

@@ -4033,6 +4033,111 @@ pub fn sync_clr_speed(
     })
 }
 
+/// The verified direct `KineticModule::change_kinetic` calls in source order.
+pub(crate) fn change_kinetic_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(text, crate::data::ChangeKineticCall::FUNC, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            site.args.len() == 2
+                && site
+                    .arg(text, 0)
+                    .is_some_and(|value| value.trim() == "agent.module_accessor")
+                && site
+                    .arg(text, 1)
+                    .is_some_and(|value| !value.trim().is_empty())
+        })
+        .collect()
+}
+
+/// Rewrite only the authored kinetic-type token of an existing direct call.
+pub fn rewrite_change_kinetic(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::ChangeKineticEvent],
+    edited: &[crate::data::ChangeKineticEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = change_kinetic_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `KineticModule::change_kinetic` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::change_kinetic` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::change_kinetic` site {} was retimed from frame {} to {} — source syncing only retunes its authored kinetic token",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::ChangeKineticCall::FUNC || site.args.len() != 2 {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::change_kinetic` site {} no longer has its verified two-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        if site
+            .arg(text, 0)
+            .is_none_or(|value| value.trim() != "agent.module_accessor")
+        {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::change_kinetic` site {} no longer targets `agent.module_accessor`",
+                before.site
+            ));
+            continue;
+        }
+        if now.call.kinetic_type.trim().is_empty() {
+            report.skipped.push(format!(
+                "{label}: `KineticModule::change_kinetic` site {} has an empty kinetic type — source syncing leaves the authored token intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.kinetic_type.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited kinetic-type tokens into the project's `game_` function.
+pub fn sync_change_kinetic(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::ChangeKineticEvent],
+    edited: &[crate::data::ChangeKineticEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_change_kinetic(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// The buildable argument-less `SET_AIR` calls and generated helper calls in source order.
 pub(crate) fn set_air_sites(text: &str) -> Vec<MacroSite> {
     let mut sites = scan_macro_sites(text, 0..text.len());
@@ -7847,6 +7952,32 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(after.contains("frame(agent.lua_state_agent, 4.0);"));
         assert_eq!(
             crate::acmd::parse_acmd_script(&after).to_clr_speed_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn change_kinetic_source_sync_rewrites_only_the_authored_type_token() {
+        let text = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 19.0);
+    if macros::is_excute(agent) {
+        KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_FALL);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_change_kinetic_events();
+        let mut edited = pristine.clone();
+        edited[0].call.kinetic_type = "*FIGHTER_KINETIC_TYPE_GROUND".into();
+        let (after, report) =
+            rewrite_change_kinetic(text, "kirby/escape_air", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(
+            "KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_GROUND);"
+        ));
+        assert!(after.contains("frame(agent.lua_state_agent, 19.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_change_kinetic_events(),
             edited
         );
     }

@@ -398,6 +398,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_change_kinetic_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_correct_call(line) {
             stmts.push(stmt);
             continue;
@@ -1985,6 +1989,26 @@ fn parse_set_air_call(line: &str) -> Option<ExcuteStmt> {
     (tokens.as_slice() == ["agent"]).then_some(ExcuteStmt::SetAir)
 }
 
+/// Parse the measured direct lua-bind shape:
+/// `KineticModule::change_kinetic(agent.module_accessor, kinetic_type)`.
+/// Qualified generated forms are accepted by the same suffix match; other receivers and arities
+/// remain raw because they may belong to status code rather than this ACMD input boundary.
+fn parse_change_kinetic_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "KineticModule::change_kinetic(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [module_accessor, kinetic_type] = tokens.as_slice() else {
+        return None;
+    };
+    if module_accessor.trim() != "agent.module_accessor" || kinetic_type.trim().is_empty() {
+        return None;
+    }
+    Some(ExcuteStmt::ChangeKinetic(crate::data::ChangeKineticCall {
+        kinetic_type: kinetic_type.trim().to_string(),
+    }))
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2505,6 +2529,10 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::SetAir => {
                 format!("{indent}visionary_set_air(agent);")
             }
+            crate::data::ExcuteStmt::ChangeKinetic(call) => format!(
+                "{indent}KineticModule::change_kinetic(agent.module_accessor, {});",
+                call.kinetic_type
+            ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -9072,6 +9100,50 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("macros::CLR_SPEED(agent, 0, 1);"));
         assert!(emitted.contains("macros::SET_AIR(agent, 0);"));
         assert!(emitted.contains("macros::SET_AIR(other);"));
+    }
+
+    #[test]
+    fn direct_change_kinetic_parses_and_exports_the_measured_game_shape() {
+        let source = r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 19.0);
+    if macros::is_excute(agent) {
+        KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_FALL);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_change_kinetic_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame, 19);
+        assert_eq!(events[0].site, 0);
+        assert_eq!(events[0].call.kinetic_type, "*FIGHTER_KINETIC_TYPE_FALL");
+
+        let emitted = preview_game_fn(&script, "escape_air");
+        assert!(emitted.contains(
+            "KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_FALL);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_change_kinetic_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_change_kinetic_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        KineticModule::change_kinetic(agent.module_accessor);
+        KineticModule::change_kinetic(agent.module_accessor, 0, 1);
+        KineticModule::change_kinetic(other.module_accessor, 0);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_change_kinetic_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("KineticModule::change_kinetic(agent.module_accessor);"));
+        assert!(emitted.contains("KineticModule::change_kinetic(agent.module_accessor, 0, 1);"));
+        assert!(emitted.contains("KineticModule::change_kinetic(other.module_accessor, 0);"));
     }
 
     #[test]
