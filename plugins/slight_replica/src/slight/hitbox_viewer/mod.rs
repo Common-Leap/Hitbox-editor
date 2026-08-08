@@ -260,6 +260,9 @@ pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = 27;
 /// Must equal the editor's wire category.
 pub const CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION: u8 = 28;
 
+/// Direct `MotionModule::set_rate` point. Must equal the editor's wire category.
+pub const CAT_MOTION_MODULE_SET_RATE: u8 = 29;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -933,6 +936,9 @@ pub struct HbOverrides {
     pub ft_catch_stop_arg2: Option<f32>,
     /// Replacement `FT_START_ADJUST_MOTION_FRAME_arg1` numeric value.
     pub ft_start_adjust_motion_frame_value: Option<f32>,
+    /// Replacement direct `MotionModule::set_rate` value. Kept separate from the
+    /// `FT_MOTION_RATE` field because the two hooks have different call semantics.
+    pub motion_module_rate: Option<f32>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     pub clr_speed_kinetic_kind: Option<i64>,
     /// Replacement numeric kinetic type for `KineticModule::change_kinetic`.
@@ -1059,6 +1065,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION => {
                         "kinetic_set_consider_ground_friction"
                     }
+                    CAT_MOTION_MODULE_SET_RATE => "motion_module_set_rate",
                     _ => "unknown",
                 };
                 format!("{name}={count}")

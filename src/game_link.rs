@@ -486,6 +486,9 @@ pub const CAT_KINETIC_CLEAR_SPEED_ALL: u8 = 27;
 /// Wire category for direct `KineticModule::set_consider_ground_friction` points.
 pub const CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION: u8 = 28;
 
+/// Wire category for direct `MotionModule::set_rate` point overrides.
+pub const CAT_MOTION_MODULE_SET_RATE: u8 = 29;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -638,6 +641,10 @@ pub struct HbOverridesWire {
     /// Replacement `FT_START_ADJUST_MOTION_FRAME_arg1` numeric value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ft_start_adjust_motion_frame_value: Option<f32>,
+    /// Replacement direct `MotionModule::set_rate` value. This is separate from
+    /// `motion_rate`, which belongs to the `FT_MOTION_RATE` ACMD primitive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_module_rate: Option<f32>,
     /// Replacement numeric kinetic-energy kind for `CLR_SPEED`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_speed_kinetic_kind: Option<i64>,
@@ -2827,6 +2834,8 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/slight_replica/src/slight/hitbox_viewer");
         let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        let rate_hooks =
+            std::fs::read_to_string(root.join("rate_hooks.rs")).expect("read rate hooks");
         assert!(module.contains(&format!("pub const CAT_CLR_SPEED: u8 = {CAT_CLR_SPEED};")));
         assert!(module.contains(&format!("pub const CAT_SET_AIR: u8 = {CAT_SET_AIR};")));
         assert!(module.contains(&format!(
@@ -2853,11 +2862,15 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION: u8 = {CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_MOTION_MODULE_SET_RATE: u8 = {CAT_MOTION_MODULE_SET_RATE};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
         assert!(module.contains("pub kinetic_ground_friction: Option<bool>"));
         assert!(module.contains("pub kinetic_ground_friction_energy: Option<i64>"));
+        assert!(module.contains("pub motion_module_rate: Option<f32>"));
         assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::change_kinetic"));
@@ -2873,6 +2886,8 @@ mod tests {
         assert!(module.contains("KineticModule::unable_energy,"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::clear_speed_all"));
         assert!(module.contains("hook_kinetic_clear_speed_all"));
+        assert!(rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_rate"));
+        assert!(rate_hooks.contains("hook_motion_module_set_rate"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
@@ -2892,6 +2907,10 @@ mod tests {
             (
                 CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
                 CAT_KINETIC_CLEAR_SPEED_ALL,
+            ),
+            (
+                CAT_MOTION_MODULE_SET_RATE,
+                CAT_KINETIC_SET_CONSIDER_GROUND_FRICTION,
             ),
         ] {
             assert_ne!(category, other, "kinetic category collision");
@@ -2993,6 +3012,38 @@ mod tests {
         assert_eq!(rules[3]["func"].as_str(), Some("KineticModule::add_speed"));
         assert_eq!(rules[3]["overrides"]["speed_x"].as_f64(), Some(1.5));
         assert_eq!(rules[3]["overrides"]["speed_y"].as_f64(), Some(2.25));
+    }
+
+    #[test]
+    fn outbound_motion_module_set_rate_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let pristine_rate = 0.8;
+        let key = numeric_point_key("MotionModule::set_rate", &[pristine_rate]);
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_MOTION_MODULE_SET_RATE,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(12.5),
+            frame_end: Some(12.5),
+            overrides: Some(HbOverridesWire {
+                motion_module_rate: Some(1.25),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("MotionModule::set_rate".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(
+            rule["category"].as_u64(),
+            Some(CAT_MOTION_MODULE_SET_RATE as u64)
+        );
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(rule["func"].as_str(), Some("MotionModule::set_rate"));
+        assert_eq!(rule["overrides"]["motion_module_rate"].as_f64(), Some(1.25));
     }
 
     #[test]

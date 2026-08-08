@@ -1284,6 +1284,12 @@ pub enum ExcuteStmt {
     /// The linked wrapper exposes the payload as an `f32`; the editor keeps that numeric shape
     /// without assigning a more specific game meaning to it.
     FtStartAdjustMotionFrame(FtStartAdjustMotionFrameCall),
+    /// `MotionModule::set_rate` — set the current animation's playback rate at this point.
+    ///
+    /// This is a direct module call rather than the `FT_MOTION_RATE` ACMD primitive. It keeps
+    /// its own family so a conditional setter inside `is_excute` is not mistaken for a
+    /// top-level rate window.
+    MotionModuleSetRate(MotionModuleSetRateCall),
     /// `CLR_SPEED` — clear one named kinetic-energy reserve.
     ///
     /// The checked-in macro layer has no safe `CLR_SPEED` wrapper, so the authored kinetic ID is
@@ -1450,6 +1456,16 @@ impl FtStartAdjustMotionFrameCall {
     pub const FUNC: &'static str = "FT_START_ADJUST_MOTION_FRAME_arg1";
 }
 
+/// A parsed direct `MotionModule::set_rate(receiver, rate)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MotionModuleSetRateCall {
+    pub rate: f32,
+}
+
+impl MotionModuleSetRateCall {
+    pub const FUNC: &'static str = "MotionModule::set_rate";
+}
+
 /// A parsed `macros::CLR_SPEED(agent, kinetic_id)` call.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClrSpeedCall {
@@ -1612,6 +1628,15 @@ pub struct FtCatchStopEvent {
 pub struct FtStartAdjustMotionFrameEvent {
     pub frame: u32,
     pub call: FtStartAdjustMotionFrameCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct `MotionModule::set_rate` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MotionModuleSetRateEvent {
+    pub frame: u32,
+    pub call: MotionModuleSetRateCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -2025,6 +2050,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.ft_start_adjust_motion_frames
+    }
+
+    /// Flatten direct `MotionModule::set_rate` calls into editable numeric point events.
+    pub fn to_motion_module_set_rate_events(&self) -> Vec<MotionModuleSetRateEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.motion_module_set_rates
     }
 
     /// Flatten `CLR_SPEED` calls into source-token kinetic point events.
@@ -2470,6 +2503,50 @@ impl AcmdScript {
                     }
                     AcmdStmt::Bare(inner) => {
                         if let ExcuteStmt::FtStartAdjustMotionFrame(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// The direct `MotionModule::set_rate` call an event site's ordinal refers to.
+    pub fn motion_module_set_rate_stmt_mut(
+        &mut self,
+        site: usize,
+    ) -> Option<&mut MotionModuleSetRateCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut MotionModuleSetRateCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::MotionModuleSetRate(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::MotionModuleSetRate(call) = inner.as_mut() {
                             if *seen == site {
                                 return Some(call);
                             }
@@ -3041,6 +3118,7 @@ struct WalkAccum {
     corrects: Vec<CorrectEvent>,
     ft_catch_stops: Vec<FtCatchStopEvent>,
     ft_start_adjust_motion_frames: Vec<FtStartAdjustMotionFrameEvent>,
+    motion_module_set_rates: Vec<MotionModuleSetRateEvent>,
     clr_speeds: Vec<ClrSpeedEvent>,
     set_airs: Vec<SetAirEvent>,
     kinetic_clear_speed_alls: Vec<KineticClearSpeedAllEvent>,
@@ -3075,6 +3153,9 @@ struct WalkAccum {
     /// Site for the next `FT_START_ADJUST_MOTION_FRAME_arg1`, independent of every other point
     /// event family.
     next_ft_start_adjust_motion_frame_site: usize,
+    /// Site for the next direct `MotionModule::set_rate`, independent of every other point
+    /// event family.
+    next_motion_module_set_rate_site: usize,
     /// Site for the next `CLR_SPEED`, independent of every other point event family.
     next_clr_speed_site: usize,
     /// Site for the next `SET_AIR`, independent of every other point event family.
@@ -3319,6 +3400,27 @@ fn count_ft_start_adjust_motion_frame_stmts(stmts: &[AcmdStmt]) -> usize {
             )),
             AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
                 count_ft_start_adjust_motion_frame_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Direct `MotionModule::set_rate` calls in a subtree, counted in source order for loop/site
+/// resolution.
+fn count_motion_module_set_rate_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::MotionModuleSetRate(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::MotionModuleSetRate(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_motion_module_set_rate_stmts(body)
             }
             _ => 0,
         })
@@ -3599,6 +3701,12 @@ impl WalkAccum {
     fn take_ft_start_adjust_motion_frame_site(&mut self) -> usize {
         let site = self.next_ft_start_adjust_motion_frame_site;
         self.next_ft_start_adjust_motion_frame_site += 1;
+        site
+    }
+
+    fn take_motion_module_set_rate_site(&mut self) -> usize {
+        let site = self.next_motion_module_set_rate_site;
+        self.next_motion_module_set_rate_site += 1;
         site
     }
 
@@ -3887,6 +3995,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                     site,
                 });
         }
+        ExcuteStmt::MotionModuleSetRate(call) => {
+            let site = hurt.take_motion_module_set_rate_site();
+            hurt.motion_module_set_rates.push(MotionModuleSetRateEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::ClrSpeed(call) => {
             let site = hurt.take_clr_speed_site();
             hurt.clr_speeds.push(ClrSpeedEvent {
@@ -3988,6 +4104,7 @@ fn eval_stmts(
                 let ft_catch_stop_site_at_entry = hurt.next_ft_catch_stop_site;
                 let ft_start_adjust_motion_frame_site_at_entry =
                     hurt.next_ft_start_adjust_motion_frame_site;
+                let motion_module_set_rate_site_at_entry = hurt.next_motion_module_set_rate_site;
                 let clr_speed_site_at_entry = hurt.next_clr_speed_site;
                 let set_air_site_at_entry = hurt.next_set_air_site;
                 let kinetic_clear_speed_all_site_at_entry = hurt.next_kinetic_clear_speed_all_site;
@@ -4009,6 +4126,7 @@ fn eval_stmts(
                     hurt.next_ft_catch_stop_site = ft_catch_stop_site_at_entry;
                     hurt.next_ft_start_adjust_motion_frame_site =
                         ft_start_adjust_motion_frame_site_at_entry;
+                    hurt.next_motion_module_set_rate_site = motion_module_set_rate_site_at_entry;
                     hurt.next_clr_speed_site = clr_speed_site_at_entry;
                     hurt.next_set_air_site = set_air_site_at_entry;
                     hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry;
@@ -4034,6 +4152,8 @@ fn eval_stmts(
                 hurt.next_ft_start_adjust_motion_frame_site =
                     ft_start_adjust_motion_frame_site_at_entry
                         + count_ft_start_adjust_motion_frame_stmts(body);
+                hurt.next_motion_module_set_rate_site =
+                    motion_module_set_rate_site_at_entry + count_motion_module_set_rate_stmts(body);
                 hurt.next_clr_speed_site = clr_speed_site_at_entry + count_clr_speed_stmts(body);
                 hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
                 hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry
@@ -4262,6 +4382,9 @@ pub struct AppState {
     /// `FT_START_ADJUST_MOTION_FRAME_arg1` point events as loaded, for sparse live value rules
     /// and source syncing.
     pub ft_start_adjust_motion_frame_pristine: Vec<FtStartAdjustMotionFrameEvent>,
+    /// Direct `MotionModule::set_rate` point events as loaded, for sparse live rules and source
+    /// syncing.
+    pub motion_module_set_rate_pristine: Vec<MotionModuleSetRateEvent>,
     /// `CLR_SPEED` point events as loaded, for sparse live kinetic rules and source syncing.
     pub clr_speed_pristine: Vec<ClrSpeedEvent>,
     /// `SET_AIR` point events as loaded, for sparse live kinetic rules and source syncing.
@@ -4373,6 +4496,7 @@ impl Default for AppState {
             correct_pristine: Vec::new(),
             ft_catch_stop_pristine: Vec::new(),
             ft_start_adjust_motion_frame_pristine: Vec::new(),
+            motion_module_set_rate_pristine: Vec::new(),
             clr_speed_pristine: Vec::new(),
             set_air_pristine: Vec::new(),
             kinetic_clear_speed_all_pristine: Vec::new(),
@@ -4413,6 +4537,7 @@ impl AppState {
         self.ft_catch_stop_pristine = script.to_ft_catch_stop_events();
         self.ft_start_adjust_motion_frame_pristine =
             script.to_ft_start_adjust_motion_frame_events();
+        self.motion_module_set_rate_pristine = script.to_motion_module_set_rate_events();
         self.clr_speed_pristine = script.to_clr_speed_events();
         self.set_air_pristine = script.to_set_air_events();
         self.kinetic_clear_speed_all_pristine = script.to_kinetic_clear_speed_all_events();

@@ -3934,6 +3934,111 @@ pub fn sync_ft_start_adjust_motion_frame(
     })
 }
 
+/// The verified direct `MotionModule::set_rate` calls in source order.
+pub(crate) fn motion_module_set_rate_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(
+        text,
+        crate::data::MotionModuleSetRateCall::FUNC,
+        0..text.len(),
+    )
+    .into_iter()
+    .filter(|site| {
+        site.args.len() == 2
+            && site
+                .arg(text, 0)
+                .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+            && site
+                .arg(text, 1)
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+    })
+    .collect()
+}
+
+/// Rewrite only the numeric payload of existing direct `MotionModule::set_rate` calls.
+pub fn rewrite_motion_module_set_rate(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::MotionModuleSetRateEvent],
+    edited: &[crate::data::MotionModuleSetRateEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = motion_module_set_rate_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `MotionModule::set_rate` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_rate` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_rate` site {} was retimed from frame {} to {} — source syncing only retunes its numeric rate",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::MotionModuleSetRateCall::FUNC
+            || site.args.len() != 2
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !matches!(value.trim(), "agent.module_accessor" | "boma"))
+        {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_rate` site {} no longer has its verified receiver/arity shape",
+                before.site
+            ));
+            continue;
+        }
+        if !(now.call.rate.is_finite() && now.call.rate >= 0.0) {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_rate` site {} has a non-finite or negative rate — source syncing leaves the call intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.rate) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited direct `MotionModule::set_rate` values into the project's `game_` function.
+pub fn sync_motion_module_set_rate(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::MotionModuleSetRateEvent],
+    edited: &[crate::data::MotionModuleSetRateEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_motion_module_set_rate(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 // ── Kinetic point write-back ────────────────────────────────────────────────
 
 /// The buildable `CLR_SPEED` calls and generated helper calls in source order.
@@ -9214,5 +9319,48 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert!(pristine.to_correct_events().is_empty());
         assert_eq!(add_speed_no_limit_sites(text).len(), 0);
         assert_eq!(correct_sites(text).len(), 0);
+    }
+
+    #[test]
+    fn motion_module_set_rate_source_sync_changes_only_numeric_values() {
+        let text = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_rate(agent.module_accessor, 0.8);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_motion_module_set_rate_events();
+        let mut edited = pristine.clone();
+        edited[0].call.rate = 1.25;
+        let (after, report) =
+            rewrite_motion_module_set_rate(text, "mario/attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("MotionModule::set_rate(agent.module_accessor, 1.25);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_motion_module_set_rate_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn motion_module_set_rate_source_sync_refuses_retime_and_malformed_sites() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        MotionModule::set_rate(agent.module_accessor, 0.8);
+        MotionModule::set_rate(agent.module_accessor, -378992935);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_motion_module_set_rate_events();
+        assert_eq!(pristine.len(), 1);
+        let mut edited = pristine.clone();
+        edited[0].frame = 4;
+        let (after, report) =
+            rewrite_motion_module_set_rate(text, "mario/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert!(report.skipped.iter().any(|note| note.contains("retimed")));
+        assert_eq!(motion_module_set_rate_sites(text).len(), 1);
     }
 }

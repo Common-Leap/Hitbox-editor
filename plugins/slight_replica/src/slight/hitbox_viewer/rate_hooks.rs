@@ -16,7 +16,10 @@
 //! structural edit that belongs to the export — the same boundary the sound and hurtbox
 //! sections draw.
 
-use super::{any_rules, read_args_exact, record, HbOverrides, LuaArg, CAT_MOTION_RATE};
+use super::{
+    any_rules, read_args_exact, record, record_for_boma, HbOverrides, LuaArg, CAT_MOTION_RATE,
+    CAT_MOTION_MODULE_SET_RATE,
+};
 
 /// Reports per rule set, not per boot.
 ///
@@ -172,6 +175,42 @@ unsafe fn hook_ft_motion_rate(lua_state: u64) {
     original!()(lua_state)
 }
 
+/// Capture and sparsely override the direct `MotionModule::set_rate` setter.
+///
+/// This is deliberately separate from [`hook_ft_motion_rate`]: `FT_MOTION_RATE` is an
+/// sv_animcmd Lua-stack primitive that establishes a rate window, while this direct lua-bind
+/// call is a conditional point setter. The rule is keyed by the pristine numeric argument and
+/// the motion/frame, so one setter cannot accidentally retune another call on the same move.
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::set_rate)]
+unsafe fn hook_motion_module_set_rate(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    rate: f32,
+) {
+    let args = [LuaArg::Num(rate)];
+    record_for_boma(boma, "MotionModule::set_rate", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = super::numeric_point_key("MotionModule::set_rate", &[rate]);
+        if let Some((suppress, overrides)) =
+            super::action_for(CAT_MOTION_MODULE_SET_RATE, motion, key, frame)
+        {
+            if suppress {
+                return;
+            }
+            if let Some(replacement) = overrides.and_then(|item| item.motion_module_rate) {
+                // A zero or negative rate stops the animation, so ignore unsafe live values;
+                // source/export still carry the measured numeric shape exactly.
+                if replacement.is_finite() && replacement > 0.0 && replacement != rate {
+                    original!()(boma, replacement);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, rate)
+}
+
 /// Set once the hook is in. Read by `write_capture_diag`.
 static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -180,12 +219,14 @@ pub(super) fn installed() -> bool {
 }
 
 pub fn install() {
-    skyline::install_hooks!(hook_ft_motion_rate);
+    skyline::install_hooks!(hook_ft_motion_rate, hook_motion_module_set_rate);
     INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
     // `diag::note`, not `skyline::println!` — the two go to different places and only one of
     // them is a file anybody reads afterwards. Telling someone to grep diag.txt for a banner
     // that was never written there cost a game boot once already.
-    crate::slight::diag::note("ACMD RATE hook installed (FT_MOTION_RATE)");
+    crate::slight::diag::note(
+        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate)",
+    );
 }
 
 // No `#[cfg(test)]` module: this crate is not in the workspace, so `cargo test` never builds it

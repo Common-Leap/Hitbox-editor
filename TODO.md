@@ -2677,6 +2677,29 @@ the Skyline plugin release build. No emulator, game, or UI automation was run, s
 behavior remains unverified. The E1 parent remains open for broader status-module calls and the
 absent `sv_kinetic_energy` corpus family.
 
+#### [x] E1o — direct `MotionModule::set_rate` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 867 direct textual
+`MotionModule::set_rate(receiver, f32)` calls in each of the standard and HDR trees, across 480
+files. The measured receiver is `agent.module_accessor` in standard scripts and `boma` in HDR;
+the linked binding takes a `BattleObjectModuleAccessor` and one `f32`. Six calls per tree carry
+the same malformed negative decompiler/stack artifact (`-378992935`) and remain raw, leaving 861
+verified non-negative value points for the typed slice.
+
+The completed slice carries those verified calls through typed parse/IR events, the Movement
+panel and timeline, capture reconstruction, category-29 wire rules and the matching Skyline
+direct hook, generated ACMD export, and flat-source numeric write-back. Source and export accept
+zero because it is present in the measured corpus; the live replacement boundary requires a
+finite positive value. Same-frame duplicate pristine numeric rates, structural add/remove/retime
+edits, malformed calls, and status/getter expression shapes remain source/export-only rather than
+being assigned a guessed runtime identity.
+
+Offline validation passed: the complete desktop suite, strict Clippy, format/diff checks, the
+locked release build, the debug build-check wrapper, and the Skyline plugin release build. No
+emulator, game, or UI automation was run, so live in-game behavior remains unverified. The E1
+parent remains open for broader status-module calls and the absent `sv_kinetic_energy` corpus
+family.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their

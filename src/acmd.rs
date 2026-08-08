@@ -390,6 +390,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_motion_module_set_rate_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_clr_speed_call(line) {
             stmts.push(stmt);
             continue;
@@ -1965,6 +1969,28 @@ fn parse_ft_start_adjust_motion_frame_call(line: &str) -> Option<ExcuteStmt> {
     ))
 }
 
+/// Parse the measured direct `MotionModule::set_rate` shapes:
+/// `MotionModule::set_rate(agent.module_accessor, rate)` and the HDR `boma` form.
+/// The public corpus contains non-negative numeric rates; negative values in a few dump lines
+/// are Lua-stack/decompiler artifacts and remain raw rather than being presented as editable
+/// playback rates.
+fn parse_motion_module_set_rate_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "MotionModule::set_rate(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [module_accessor, rate] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let rate = rate.trim().parse::<f32>().ok()?;
+    (rate.is_finite() && rate >= 0.0).then_some(ExcuteStmt::MotionModuleSetRate(
+        crate::data::MotionModuleSetRateCall { rate },
+    ))
+}
+
 /// Parse the exact measured `CLR_SPEED(agent, kinetic_id)` shape or its generated helper call.
 /// The vendored crate exposes only the generic kinetic primitive macro, so generated source uses
 /// the helper while editable source retains the corpus's `macros::CLR_SPEED` spelling.
@@ -2709,6 +2735,10 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::FtStartAdjustMotionFrame(call) => format!(
                 "{indent}macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, {});",
                 num(call.value)
+            ),
+            crate::data::ExcuteStmt::MotionModuleSetRate(call) => format!(
+                "{indent}MotionModule::set_rate(agent.module_accessor, {});",
+                num(call.rate)
             ),
             crate::data::ExcuteStmt::ClrSpeed(call) => {
                 format!("{indent}visionary_clr_speed(agent, {});", call.kinetic_kind)
@@ -9646,6 +9676,56 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(emitted.contains("macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent);"));
         assert!(emitted.contains("macros::FT_START_ADJUST_MOTION_FRAME_arg1(agent, 1, 2);"));
         assert!(emitted.contains("FT_START_ADJUST_MOTION_FRAME_REVISED_arg1(1.0);"));
+    }
+
+    #[test]
+    fn motion_module_set_rate_parse_export_round_trips_standard_and_hdr_shapes() {
+        let source = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_rate(agent.module_accessor, 0.8);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if is_excute(agent) {
+        MotionModule::set_rate(boma, 1);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_motion_module_set_rate_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 6);
+        assert_eq!(events[0].call.rate, 0.8);
+        assert_eq!(events[1].frame, 12);
+        assert_eq!(events[1].call.rate, 1.0);
+
+        let emitted = preview_game_fn(&script, "attack_air_n");
+        assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor, 0.8);"));
+        assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor, 1.0);"));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_motion_module_set_rate_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_motion_module_set_rate_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        MotionModule::set_rate(agent.module_accessor);
+        MotionModule::set_rate(agent.module_accessor, 0.8, 1.0);
+        MotionModule::set_rate(other.module_accessor, 0.8);
+        MotionModule::set_rate(agent.module_accessor, -378992935);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_motion_module_set_rate_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor);"));
+        assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor, 0.8, 1.0);"));
+        assert!(emitted.contains("MotionModule::set_rate(other.module_accessor, 0.8);"));
+        assert!(emitted.contains("MotionModule::set_rate(agent.module_accessor, -378992935);"));
     }
 
     #[test]
