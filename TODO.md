@@ -345,8 +345,9 @@ paraphrase it from memory.
       `build=` line** — it names the build actually installed, which is the thing that decides
       whether a live claim can be tested at all. It was 66 commits stale when this was written.
       What genuinely is not available here: a **physical Switch** (R3 — Eden's JIT is the
-      blocker, so an Eden boot cannot settle it), a **Windows host** (R2 half 1), and a
-      **game dump** (R1 — no `exefs/main` on this machine).
+      blocker, so an Eden boot cannot settle it) and a **Windows host** (R2 half 1). The local
+      base/update NSPs now provide a merged 13.0.4 `exefs/main` for static offset work; they are
+      never copied into the repository.
 - [ ] [README.md](README.md) updated if user-visible behaviour changed. House style: plain
       imperative button labels, no ellipsis.
 
@@ -3075,7 +3076,7 @@ task from this one.
 
 Not ACMD coverage. Real, already-diagnosed, and each blocked on something specific.
 
-### [!] R1 — Instant carrier retire (blocked: needs `ITEM_MANAGER_OFFSET`)
+### [x] R1 — Instant carrier retire (done 2026-08-08; live timing still unverified)
 
 Carrier swaps cost ~300 frames (5s) about half the time. Not a hang — the game's deferred
 destruction of a dead item. `remove_auto_carrier`
@@ -3084,22 +3085,19 @@ paths: a held item is removed outright and is instant; a *loose* item only gets
 `retire_auto_carrier_id` (clear IMMORTAL, lifetime 0, offstage, force `ITEM_STATUS_KIND_DEAD`)
 and then waits. It goes loose because the holder got hit.
 
-The fix is `ItemManager::remove_item_from_id(manager, id)` — it exists in the skyline-smash
-bindings and takes a battle-object id, exactly the shape a loose item needs. Wire it into the
-`else` branch, guarded by `carrier_boma_for_id`, falling back to today's DEAD path when the
-manager pointer is null, so worst case is current behaviour.
+The fix is now `ItemManager::remove_item_from_id(manager, id)`, wired into the loose-item branch
+and guarded by `carrier_boma_for_id`. A null manager, a recycled id, or an item that is no longer
+valid takes the existing guarded DEAD/lifetime fallback, so the new dereference is not required
+for boot or for cleanup safety.
 
-**Blocker:** it needs an `*mut ItemManager` singleton and the plugin has no
-`ITEM_MANAGER_OFFSET`. Every manager here is a hardcoded build-specific text offset.
-**Do not guess one — a wrong deref is a boot crash.**
-
-To unblock: set `SSBU_DUMP_DIR` to a dump containing `exefs/main`, `pip install lz4`, then
-`research/decomp/ssbu-re/nso_syms.py` parses the NSO dynsym (which still carries the mangled
-`_ZN3app...` names, unlike the stripped Ghidra projects here). Resolve
-`_ZN3app12item_manager22get_num_of_active_itemENS_8ItemKindE`, disassemble its prologue with
-capstone using the ADRP+ADD/LDR technique `xref_scan.py` already uses, and read the global it
-loads. **Validate the method by re-deriving the known `EFFECT_MANAGER_OFFSET = 0x5333920`
-first — if it does not reproduce that number, do not trust the new one.**
+The 13.0.4 merged NSO supplied the evidence that was previously missing. Its dynsym identifies
+`lib::Singleton<app::ItemManager>::instance_` at `0x52c3070` and retains the known
+`lib::Singleton<EffectManager>::instance_` at `0x5333920`. Capstone disassembly of
+`_ZN3app12item_manager22get_num_of_active_itemENS_8ItemKindE` at `0x15ca910` begins with
+`ADRP x8, #0x52c3000` followed by `LDR x8, [x8, #0x70]`, reproducing the ItemManager global
+`0x52c3070`; the same dynsym pass reproduces the known EffectManager offset before accepting the
+new one. The plugin build passed. Live carrier timing remains unverified because no physical
+Switch/runtime automation is authorized here.
 
 ### [x] R2 — Windows path and frame-path audit (done 2026-08-05)
 

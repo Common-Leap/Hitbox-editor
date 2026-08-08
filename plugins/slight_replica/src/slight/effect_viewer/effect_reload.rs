@@ -13,6 +13,9 @@ use parking_lot::Mutex;
 
 // Offsets from HDR-Development/smashline 13.0.4 support.
 const EFFECT_MANAGER_OFFSET: usize = 0x5333920;
+// 13.0.4 `lib::Singleton<app::ItemManager>::instance_`, confirmed from the merged NSO
+// dynsym and `item_manager::get_num_of_active_item`'s ADRP/LDR prologue.
+const ITEM_MANAGER_OFFSET: usize = 0x52c3070;
 const LOAD_EFFECTS_OFFSET: usize = 0x355f8f0;
 const UNLOAD_EFFECTS_OFFSET: usize = 0x3563720;
 
@@ -961,6 +964,17 @@ fn effect_manager() -> *mut u64 {
         }
         *holder
     }
+}
+
+/// Resolve the game's ItemManager singleton without inventing a build-specific pointer.
+///
+/// Unlike the EffectManager path above, the 13.0.4 singleton symbol is the manager pointer
+/// itself: `get_num_of_active_item` first loads `[Text + 0x52c3070]`, then reads a field from the
+/// resulting manager. A null slot is valid during early boot and is deliberately handled by the
+/// caller as the old DEAD/lifetime retirement path.
+fn item_manager() -> *mut smash::app::ItemManager {
+    let text = unsafe { skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as *mut u8 };
+    unsafe { *text.add(ITEM_MANAGER_OFFSET).cast::<*mut smash::app::ItemManager>() }
 }
 
 fn path_hash_from_search_index(search_index: u32) -> Option<u64> {
@@ -2324,6 +2338,30 @@ unsafe fn retire_auto_carrier_id(held_id: u64, item_kind: i32) {
     );
 }
 
+/// Remove a loose carrier through the game's ItemManager. The battle-object guard prevents a
+/// recycled id from being handed to the manager; a missing singleton deliberately returns false
+/// so the caller can preserve the known-safe DEAD/lifetime fallback.
+unsafe fn remove_loose_auto_carrier(held_id: u64, item_kind: i32) -> bool {
+    if carrier_boma_for_id(held_id, item_kind).is_none() {
+        return false;
+    }
+    let manager = item_manager();
+    if manager.is_null() {
+        dlog(&format!(
+            "AUTO_CARRIER_REMOVE_MANAGER_UNAVAILABLE id={held_id:#x}"
+        ));
+        return false;
+    }
+    let result = smash::app::lua_bind::ItemManager::remove_item_from_id(
+        manager,
+        held_id as u32,
+    );
+    dlog(&format!(
+        "AUTO_CARRIER_REMOVE_MANAGER id={held_id:#x} result={result:#x}"
+    ));
+    true
+}
+
 /// Drain every live carrier-owned effect, wait for deferred effect/GPU cleanup to advance, then
 /// retire the item. Returns true once retirement has been submitted (or no carrier remains).
 unsafe fn remove_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccessor) -> bool {
@@ -2384,14 +2422,16 @@ unsafe fn remove_auto_carrier(boma: *mut smash::app::BattleObjectModuleAccessor)
         dlog(&format!(
             "AUTO_CARRIER_REMOVE id={held_id:#x} result={result:#x}"
         ));
-    } else {
+        // Keep the existing post-removal cleanup for the held-slot path.
+        retire_auto_carrier_id(expected, retiring_kind as i32);
+    } else if !remove_loose_auto_carrier(expected, retiring_kind as i32) {
         dlog(&format!(
-            "AUTO_CARRIER_RETIRE detached_id={expected:#x} current_held={held_id:#x}"
+            "AUTO_CARRIER_RETIRE detached_id={expected:#x} current_held={held_id:#x} fallback=dead"
         ));
+        // The manager may not exist during early boot, or the id may no longer resolve to the
+        // expected item. Preserve today's guarded DEAD path in both cases.
+        retire_auto_carrier_id(expected, retiring_kind as i32);
     }
-    // Still retire whatever survives: a carrier that was already lost before the swap is not in
-    // any slot, and DEAD plus an offstage position is all that is left to apply to it.
-    retire_auto_carrier_id(expected, retiring_kind as i32);
     true
 }
 
