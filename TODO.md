@@ -2459,6 +2459,20 @@ panel/timeline/capture conversion, live-rule keying, wire/plugin parity, export 
 write-back, and the release plugin build. No emulator, game, or UI automation was run, so live
 in-game behavior remains unverified.
 
+#### [x] E1e — measured `FT_CATCH_STOP` point events (completed 2026-08-08; live runtime unverified)
+
+The exact two-argument wrapper shape — `FT_CATCH_STOP(agent, arg1, arg2)` — now has a typed
+statement/event walk, one-based timeline points, editable Movement-panel arguments,
+capture-reconstruction support, category-17 live rules with a matching Skyline hook, generated
+ACMD export, and numeric value-only source write-back. The source corpus gate measured 40 calls in
+38 files, all with two numeric arguments; the local cache has no calls, so this measurement comes
+from the read-only public dump used for the coverage decision.
+
+Structural placement and add/remove changes remain export/source operations, and malformed or
+non-numeric shapes remain raw. Live in-game behavior is unverified because no emulator, game, or UI
+automation was run. The parent E1 entry remains open for `CLR_SPEED`, `SET_AIR`, status-module
+kinetics, and other unmeasured or unsupported sources.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their

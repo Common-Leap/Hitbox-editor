@@ -304,6 +304,25 @@ pub fn expression_key(func: &str, args: &[LuaArgWire]) -> u64 {
     hash
 }
 
+/// Stable key for a point call whose payload is a fixed list of numeric `ToF32` arguments.
+///
+/// The plugin derives the same key from the Lua stack before applying an override. Keeping the
+/// function name in the hash prevents two numeric point families from sharing a rule by accident.
+pub fn numeric_point_key(func: &str, args: &[f32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in func.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for arg in args {
+        for byte in arg.to_bits().to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
+}
+
 /// One captured ACMD call, as streamed by the plugin (`AcmdCapture`).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct CaptureLine {
@@ -421,6 +440,9 @@ pub const CAT_ADD_SPEED_NO_LIMIT: u8 = 14;
 
 /// Wire category for the verified `CORRECT` ground-correction point.
 pub const CAT_CORRECT: u8 = 15;
+
+/// Wire category for the measured two-argument `FT_CATCH_STOP` point.
+pub const CAT_FT_CATCH_STOP: u8 = 17;
 
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
@@ -566,6 +588,11 @@ pub struct HbOverridesWire {
     /// live capture cannot prove their numeric value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correct_kind: Option<i64>,
+    /// Replacement `FT_CATCH_STOP` numeric `ToF32` arguments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ft_catch_stop_arg1: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ft_catch_stop_arg2: Option<f32>,
     /// Complete replacement argument vector for a measured expression primitive. The plugin
     /// preserves the captured Lua types while swapping these values into the call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2662,6 +2689,13 @@ mod tests {
         assert!(module.contains(&format!("pub const CAT_SPEED: u8 = {CAT_SPEED};")));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_SPEED"));
         assert!(module.contains("hook_set_speed"));
+        assert!(module.contains(&format!(
+            "pub const CAT_FT_CATCH_STOP: u8 = {CAT_FT_CATCH_STOP};"
+        )));
+        assert!(module.contains("replace = smash::app::sv_animcmd::FT_CATCH_STOP"));
+        assert!(module.contains("hook_ft_catch_stop"));
+        assert!(module.contains("pub ft_catch_stop_arg1: Option<f32>"));
+        assert!(module.contains("pub ft_catch_stop_arg2: Option<f32>"));
         for (category, other) in [
             (CAT_ADD_SPEED_NO_LIMIT, CAT_SPEED_EX),
             (CAT_CORRECT, CAT_SPEED_EX),
@@ -2669,9 +2703,43 @@ mod tests {
             (CAT_ADD_SPEED_NO_LIMIT, CAT_CORRECT),
             (CAT_SPEED, CAT_ADD_SPEED_NO_LIMIT),
             (CAT_SPEED, CAT_CORRECT),
+            (CAT_FT_CATCH_STOP, CAT_SPEED_EX),
+            (CAT_FT_CATCH_STOP, CAT_SPEED),
+            (CAT_FT_CATCH_STOP, CAT_ADD_SPEED_NO_LIMIT),
+            (CAT_FT_CATCH_STOP, CAT_CORRECT),
         ] {
             assert_ne!(category, other, "new point categories must not collide");
         }
+    }
+
+    #[test]
+    fn outbound_ft_catch_stop_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let key = numeric_point_key("FT_CATCH_STOP", &[6.0, 1.0]);
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_FT_CATCH_STOP,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(6.0),
+            frame_end: Some(6.0),
+            overrides: Some(HbOverridesWire {
+                ft_catch_stop_arg1: Some(7.5),
+                ft_catch_stop_arg2: Some(0.25),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("FT_CATCH_STOP".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_FT_CATCH_STOP as u64));
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(rule["func"].as_str(), Some("FT_CATCH_STOP"));
+        assert_eq!(rule["overrides"]["ft_catch_stop_arg1"].as_f64(), Some(7.5));
+        assert_eq!(rule["overrides"]["ft_catch_stop_arg2"].as_f64(), Some(0.25));
     }
 
     #[test]

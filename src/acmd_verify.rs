@@ -1174,6 +1174,10 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
         ExcuteStmt::Correct(call) if call.kind.trim().is_empty() => {
             report.blocker(subject, "CORRECT has an empty correction kind");
         }
+        ExcuteStmt::FtCatchStop(call) => {
+            check_finite(subject, "FT_CATCH_STOP argument 1", call.arg1, report);
+            check_finite(subject, "FT_CATCH_STOP argument 2", call.arg2, report);
+        }
         _ => {}
     }
 }

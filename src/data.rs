@@ -1273,6 +1273,12 @@ pub enum ExcuteStmt {
     AddSpeedNoLimit(AddSpeedNoLimitCall),
     /// `CORRECT` — change the fighter's ground-correction mode at this point in the move.
     Correct(CorrectCall),
+    /// `FT_CATCH_STOP` — a measured two-argument catch-stop point.
+    ///
+    /// The wrapper exposes both arguments only as `ToF32`; their game meaning is intentionally
+    /// not guessed here. Keeping the pair typed still gives the editor, capture path, live rule
+    /// key, and source writer one exact call shape to share.
+    FtCatchStop(FtCatchStopCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1381,6 +1387,17 @@ impl CorrectCall {
     pub const FUNC: &'static str = "CORRECT";
 }
 
+/// A parsed `macros::FT_CATCH_STOP(agent, arg1, arg2)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FtCatchStopCall {
+    pub arg1: f32,
+    pub arg2: f32,
+}
+
+impl FtCatchStopCall {
+    pub const FUNC: &'static str = "FT_CATCH_STOP";
+}
+
 /// A resolved expression call at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpressionEvent {
@@ -1432,6 +1449,15 @@ pub struct AddSpeedNoLimitEvent {
 pub struct CorrectEvent {
     pub frame: u32,
     pub call: CorrectCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `FT_CATCH_STOP` point event at the one-based game frame it fires on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FtCatchStopEvent {
+    pub frame: u32,
+    pub call: FtCatchStopCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -1769,6 +1795,14 @@ impl AcmdScript {
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.corrects
     }
+
+    /// Flatten `FT_CATCH_STOP` calls into editable point events at their one-based game frames.
+    pub fn to_ft_catch_stop_events(&self) -> Vec<FtCatchStopEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.ft_catch_stops
+    }
 }
 
 impl AcmdScript {
@@ -2089,6 +2123,47 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The `FT_CATCH_STOP` call an event site's ordinal refers to, in source order.
+    pub fn ft_catch_stop_stmt_mut(&mut self, site: usize) -> Option<&mut FtCatchStopCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut FtCatchStopCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::FtCatchStop(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::FtCatchStop(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// Remove the `REVERSE_LR` source statement at an ordinal from
     /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
     ///
@@ -2190,6 +2265,7 @@ struct WalkAccum {
     speeds: Vec<SetSpeedEvent>,
     add_speed_no_limits: Vec<AddSpeedNoLimitEvent>,
     corrects: Vec<CorrectEvent>,
+    ft_catch_stops: Vec<FtCatchStopEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -2212,6 +2288,8 @@ struct WalkAccum {
     next_add_speed_no_limit_site: usize,
     /// Site for the next `CORRECT`, independent of every other point-event family.
     next_correct_site: usize,
+    /// Site for the next `FT_CATCH_STOP`, independent of every other point-event family.
+    next_ft_catch_stop_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -2401,6 +2479,26 @@ fn count_correct_stmts(stmts: &[AcmdStmt]) -> usize {
         .sum()
 }
 
+/// `FT_CATCH_STOP` calls in a subtree, counted in source order for loop/site resolution.
+fn count_ft_catch_stop_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::FtCatchStop(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::FtCatchStop(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_ft_catch_stop_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Attack-modifier statements in a subtree, counted in source order.
 ///
 /// The [`count_hurt_stmts`] argument applies unchanged, including its `RawBlock` arm and the
@@ -2522,6 +2620,12 @@ impl WalkAccum {
     fn take_correct_site(&mut self) -> usize {
         let site = self.next_correct_site;
         self.next_correct_site += 1;
+        site
+    }
+
+    fn take_ft_catch_stop_site(&mut self) -> usize {
+        let site = self.next_ft_catch_stop_site;
+        self.next_ft_catch_stop_site += 1;
         site
     }
 
@@ -2751,6 +2855,14 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::FtCatchStop(call) => {
+            let site = hurt.take_ft_catch_stop_site();
+            hurt.ft_catch_stops.push(FtCatchStopEvent {
+                frame: script_frame(frame),
+                call: call.clone(),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -2792,6 +2904,7 @@ fn eval_stmts(
                 let speed_site_at_entry = hurt.next_speed_site;
                 let add_speed_no_limit_site_at_entry = hurt.next_add_speed_no_limit_site;
                 let correct_site_at_entry = hurt.next_correct_site;
+                let ft_catch_stop_site_at_entry = hurt.next_ft_catch_stop_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
@@ -2802,6 +2915,7 @@ fn eval_stmts(
                     hurt.next_speed_site = speed_site_at_entry;
                     hurt.next_add_speed_no_limit_site = add_speed_no_limit_site_at_entry;
                     hurt.next_correct_site = correct_site_at_entry;
+                    hurt.next_ft_catch_stop_site = ft_catch_stop_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
@@ -2814,6 +2928,8 @@ fn eval_stmts(
                 hurt.next_add_speed_no_limit_site =
                     add_speed_no_limit_site_at_entry + count_add_speed_no_limit_stmts(body);
                 hurt.next_correct_site = correct_site_at_entry + count_correct_stmts(body);
+                hurt.next_ft_catch_stop_site =
+                    ft_catch_stop_site_at_entry + count_ft_catch_stop_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -3024,6 +3140,8 @@ pub struct AppState {
     pub add_speed_no_limit_pristine: Vec<AddSpeedNoLimitEvent>,
     /// `CORRECT` point events as loaded, for sparse live correction rules and source syncing.
     pub correct_pristine: Vec<CorrectEvent>,
+    /// `FT_CATCH_STOP` point events as loaded, for sparse live argument rules and source syncing.
+    pub ft_catch_stop_pristine: Vec<FtCatchStopEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -3117,6 +3235,7 @@ impl Default for AppState {
             speed_pristine: Vec::new(),
             add_speed_no_limit_pristine: Vec::new(),
             correct_pristine: Vec::new(),
+            ft_catch_stop_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -3147,6 +3266,7 @@ impl AppState {
         self.speed_pristine = script.to_speed_events();
         self.add_speed_no_limit_pristine = script.to_add_speed_no_limit_events();
         self.correct_pristine = script.to_correct_events();
+        self.ft_catch_stop_pristine = script.to_ft_catch_stop_events();
         self.script = script;
     }
 }

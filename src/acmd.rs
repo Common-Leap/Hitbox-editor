@@ -369,6 +369,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_ft_catch_stop_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_correct_call(line) {
             stmts.push(stmt);
             continue;
@@ -1873,6 +1877,27 @@ fn parse_correct_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
+/// Parse the measured `FT_CATCH_STOP(agent, arg1, arg2)` shape.
+///
+/// Both payload slots are `ToF32` in the linked wrapper. The exact arity is required so a
+/// malformed or newer dump line remains `Raw` and is not regenerated with missing arguments.
+fn parse_ft_catch_stop_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "macros::FT_CATCH_STOP(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [agent, arg1, arg2] = tokens.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent" {
+        return None;
+    }
+    Some(ExcuteStmt::FtCatchStop(crate::data::FtCatchStopCall {
+        arg1: arg1.trim().parse::<f32>().ok()?,
+        arg2: arg2.trim().parse::<f32>().ok()?,
+    }))
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2378,6 +2403,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::Correct(call) => {
                 format!("{indent}macros::CORRECT(agent, {});", call.kind)
             }
+            crate::data::ExcuteStmt::FtCatchStop(call) => format!(
+                "{indent}macros::FT_CATCH_STOP(agent, {}, {});",
+                num(call.arg1),
+                num(call.arg2)
+            ),
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -8730,6 +8760,54 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let round_trip = parse_acmd_script(&emitted);
         assert_eq!(round_trip.to_add_speed_no_limit_events(), speed);
         assert_eq!(round_trip.to_correct_events(), correct);
+    }
+
+    #[test]
+    fn ft_catch_stop_parse_export_as_typed_point() {
+        let source = r#"unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::FT_CATCH_STOP(agent, 6, 1);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_ft_catch_stop_events();
+        assert_eq!(
+            events,
+            vec![crate::data::FtCatchStopEvent {
+                frame: 6,
+                call: crate::data::FtCatchStopCall {
+                    arg1: 6.0,
+                    arg2: 1.0,
+                },
+                site: 0,
+            }]
+        );
+        let emitted = preview_game_fn(&script, "throw_f");
+        assert!(emitted.contains("macros::FT_CATCH_STOP(agent, 6.0, 1.0);"));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_ft_catch_stop_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_ft_catch_stop_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::FT_CATCH_STOP(agent, 6);
+        macros::FT_CATCH_STOP(agent, 6, 1, 2);
+        macros::FT_CATCH_STOP(other, 6, 1);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_ft_catch_stop_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("macros::FT_CATCH_STOP(agent, 6);"));
+        assert!(emitted.contains("macros::FT_CATCH_STOP(agent, 6, 1, 2);"));
+        assert!(emitted.contains("macros::FT_CATCH_STOP(other, 6, 1);"));
     }
 
     #[test]

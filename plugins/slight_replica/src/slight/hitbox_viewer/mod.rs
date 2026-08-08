@@ -223,6 +223,9 @@ pub const CAT_ADD_SPEED_NO_LIMIT: u8 = 14;
 /// `CORRECT` — a verified numeric ground-correction point.
 pub const CAT_CORRECT: u8 = 15;
 
+/// `FT_CATCH_STOP` — a verified two-argument numeric point.
+pub const CAT_FT_CATCH_STOP: u8 = 17;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -885,6 +888,9 @@ pub struct HbOverrides {
     pub speed_y: Option<f32>,
     /// Replacement numeric `CORRECT` kind.
     pub correct_kind: Option<i64>,
+    /// Replacement `FT_CATCH_STOP` numeric `ToF32` arguments.
+    pub ft_catch_stop_arg1: Option<f32>,
+    pub ft_catch_stop_arg2: Option<f32>,
     /// Complete replacement argument vector for a measured expression primitive.
     pub expression_args: Option<Vec<LuaArg>>,
 }
@@ -987,6 +993,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_SPEED => "speed",
                     CAT_ADD_SPEED_NO_LIMIT => "add_speed_no_limit",
                     CAT_CORRECT => "correct",
+                    CAT_FT_CATCH_STOP => "ft_catch_stop",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1034,6 +1041,24 @@ fn expression_key(func: &str, args: &[LuaArg]) -> u64 {
     for arg in args {
         let value = arg.dedupe_bits();
         for byte in value.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// Stable key for a fixed list of numeric `ToF32` arguments. Keep this in lockstep with
+/// `game_link::numeric_point_key`: the editor keys a rule from the pristine capture and this
+/// side keys it from the Lua stack immediately before the primitive runs.
+fn numeric_point_key(func: &str, args: &[f32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in func.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for arg in args {
+        for byte in arg.to_bits().to_le_bytes() {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(0x1000_0000_01b3);
         }
@@ -1286,6 +1311,56 @@ unsafe fn hook_correct(lua_state: u64) {
                             if values != args {
                                 rewrite_args(lua_state, &values);
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
+
+/// Capture and sparsely override the verified two-argument `FT_CATCH_STOP` shape.
+///
+/// The arguments are both `ToF32`, so the pristine numeric pair is the live rule key. This keeps
+/// two catch-stop calls on one frame independent without assigning an unverified semantic name to
+/// either slot.
+#[skyline::hook(replace = smash::app::sv_animcmd::FT_CATCH_STOP)]
+unsafe fn hook_ft_catch_stop(lua_state: u64) {
+    let args = read_args_exact(lua_state, 2);
+    record(lua_state, "FT_CATCH_STOP", &args);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            let numeric = args
+                .iter()
+                .map(|arg| match arg {
+                    LuaArg::Int(value) => Some(*value as f32),
+                    LuaArg::Num(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(numeric) = numeric {
+                let key = numeric_point_key("FT_CATCH_STOP", &numeric);
+                if let Some((suppress, overrides)) =
+                    action_for(CAT_FT_CATCH_STOP, motion, key, frame)
+                {
+                    if suppress {
+                        return;
+                    }
+                    if let Some(overrides) = overrides {
+                        let mut values = args.clone();
+                        if let Some(value) = overrides.ft_catch_stop_arg1 {
+                            values[0] = LuaArg::Num(value);
+                        }
+                        if let Some(value) = overrides.ft_catch_stop_arg2 {
+                            values[1] = LuaArg::Num(value);
+                        }
+                        if values != args {
+                            rewrite_args(lua_state, &values);
                         }
                     }
                 }
@@ -2292,6 +2367,12 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 crate::slight::diag::note("rejected reverse_lr injection without REVERSE_LR command");
                 continue;
             }
+            if category == CAT_FT_CATCH_STOP {
+                crate::slight::diag::note(
+                    "rejected FT_CATCH_STOP injection: this slice supports value overrides only",
+                );
+                continue;
+            }
             if category == CAT_GRAB && args.len() == 9 {
                 args.push(LuaArg::Int(
                     *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
@@ -2414,7 +2495,8 @@ pub fn install() {
         hook_set_speed_ex,
         hook_set_speed,
         hook_add_speed_no_limit,
-        hook_correct
+        hook_correct,
+        hook_ft_catch_stop
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

@@ -3764,6 +3764,91 @@ pub fn sync_correct(
     })
 }
 
+/// The buildable `FT_CATCH_STOP` calls in source order.
+pub(crate) fn ft_catch_stop_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "FT_CATCH_STOP" && site.args.len() == 3)
+        .collect()
+}
+
+/// Rewrite only the two numeric arguments of existing `FT_CATCH_STOP` calls.
+pub fn rewrite_ft_catch_stop(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::FtCatchStopEvent],
+    edited: &[crate::data::FtCatchStopEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = ft_catch_stop_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `FT_CATCH_STOP` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `FT_CATCH_STOP` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `FT_CATCH_STOP` site {} was retimed from frame {} to {} — source syncing only retunes its two numeric arguments",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::FtCatchStopCall::FUNC || site.args.len() != 3 {
+            report.skipped.push(format!(
+                "{label}: `FT_CATCH_STOP` site {} no longer has its verified three-argument shape",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.arg1) {
+                edits.push(edit);
+            }
+        }
+        if let Some(span) = site.args.get(2) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.arg2) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited `FT_CATCH_STOP` values into the project's `game_` function.
+pub fn sync_ft_catch_stop(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::FtCatchStopEvent],
+    edited: &[crate::data::FtCatchStopEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_ft_catch_stop(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 // ── Facing-direction point write-back ───────────────────────────────────────
 
 /// The exact argument-less `REVERSE_LR` calls in a source function.
@@ -7252,6 +7337,52 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(
             crate::acmd::parse_acmd_script(&after).to_correct_events(),
             correct_after
+        );
+    }
+
+    #[test]
+    fn ft_catch_stop_write_back_changes_only_numeric_values() {
+        let text = r#"unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::FT_CATCH_STOP(agent, 6, 1);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_ft_catch_stop_events();
+        let mut edited = pristine.clone();
+        edited[0].call.arg1 = 7.5;
+        edited[0].call.arg2 = 0.25;
+
+        let (after, report) =
+            rewrite_ft_catch_stop(text, "mario/throw_f", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("macros::FT_CATCH_STOP(agent, 7.5, 0.25);"));
+        assert!(after.contains("frame(agent.lua_state_agent, 6.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_ft_catch_stop_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn malformed_ft_catch_stop_shapes_block_positional_source_sync() {
+        let text = r#"unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::FT_CATCH_STOP(agent, 6);
+        macros::FT_CATCH_STOP(agent, 6, 1, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_ft_catch_stop_events();
+        assert!(pristine.is_empty());
+        assert!(ft_catch_stop_sites(text).is_empty());
+        let (after, report) = rewrite_ft_catch_stop(text, "mario/throw_f", &[], &[]).unwrap();
+        assert_eq!(after, text);
+        assert!(
+            report.skipped.is_empty(),
+            "unchanged opaque calls need no warning"
         );
     }
 
