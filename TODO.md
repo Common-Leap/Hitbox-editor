@@ -991,7 +991,7 @@ repeat this exactly.
   matching each macro's own spelling is what keeps a re-exported vanilla script textually
   identical to its source.
 
-### [!] C7 — The last four `LAST_EFFECT_SET_*` members (one evidence-blocked member and one runtime boundary remain)
+### [!] C7 — The last four `LAST_EFFECT_SET_*` members (one wrapper-shape boundary and one runtime boundary remain)
 
 What C1 left. Local cache counts and wrapper status, verified against the full `macros.rs`
 declaration list. A separate public dumped-script corpus was checked read-only for shape and
@@ -1001,12 +1001,14 @@ coverage; its files are not part of this repository:
 |---|---|---|---|---|
 | `LAST_PARTICLE_SET_COLOR` | 3 (`ToF32`) | 1 | 685 / 254 files | yes |
 | `LAST_EFFECT_SET_WORK_INT` | — | 1 | 105 / 70 files | **NO** |
-| `LAST_EFFECT_SET_SCALE_W` | 3 (`ToF32`) | 0 | 1 / 1 file* | yes |
+| `LAST_EFFECT_SET_SCALE_W` | 1–3 native stack values (3 `ToF32` in wrapper) | 0 | 1 / 1 file* | yes |
 | `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` | 1 (`ToF32`) | 0 | 204 / 121 files | yes |
 
 The external `LAST_EFFECT_SET_SCALE_W` hit has one argument rather than the three-argument
-wrapper shape, so it is not safe evidence for a typed editor field. The offset member is the one
-slice taken from that oracle so far.
+`smash-script` wrapper shape. Static inspection of the version-matched 13.0.4 primitive shows
+that the game itself reads one through three stack values and supplies zeroes for missing values,
+so the line is a valid native dynamic-arity form, not proof of a three-value typed editor field.
+The offset member is the one slice taken from that oracle so far.
 
 **Boundary added 2026-08-08, without claiming C7 complete.** Remaining evidence-bounded C7 lines
 inside an `is_excute` block were already carried by C6; bare forms now take that same frame-residue
@@ -1019,9 +1021,10 @@ portable symbolic-to-runtime mapping is verified. The valid three-value
 `LAST_PARTICLE_SET_COLOR` shape is typed below, but the local `SetInkColor` call still uses the
 dump's zero-argument spelling after three preceding `WorkModule::get_float` stack inputs; that
 malformed form remains explicitly carried and the export verifier reports its wrapper mismatch.
-`LAST_EFFECT_SET_SCALE_W` still has only a malformed one-argument external hit, so C7 remains
-open for evidence and runtime-boundary work; that shape is now reported as an export blocker too,
-without inventing the three scale values.
+`LAST_EFFECT_SET_SCALE_W` still has only one native dynamic-arity external hit, while the vendored
+Rust wrapper emits only its three-value form. C7 therefore remains open for a local stack helper,
+typed arity-preserving editor field, and runtime capture contract; the current exporter reports
+the wrapper mismatch without inventing the missing scale values.
 
 #### [x] C7a — `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` (completed 2026-08-08; live runtime unverified)
 
@@ -1037,8 +1040,9 @@ game, or UI automation was run, so live in-game behavior remains unverified.
 
 The remaining member stays separately bounded:
 
-- `LAST_EFFECT_SET_SCALE_W` has only the malformed one-argument external hit, not the measured
-  three-argument wrapper shape.
+- `LAST_EFFECT_SET_SCALE_W` has one native one-value hit, but the vendored wrapper only accepts
+  the measured three-value shape; the native primitive's dynamic arity is not yet represented by
+  the editor or live capture.
 
 #### [x] C7b — `LAST_PARTICLE_SET_COLOR` (completed 2026-08-08; live runtime unverified)
 
