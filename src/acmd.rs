@@ -398,6 +398,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_motion_module_set_rate_partial_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_clr_speed_call(line) {
             stmts.push(stmt);
             continue;
@@ -2020,6 +2024,43 @@ fn parse_motion_module_set_helper_calculation_call(line: &str) -> Option<ExcuteS
     ))
 }
 
+/// Accept the measured authored part-kind spellings: a dereferenced lua constant or a numeric
+/// value from a captured/generated script. Arbitrary expressions remain raw until their runtime
+/// identity is measured.
+fn parse_motion_module_part_kind(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.parse::<i64>().is_ok() {
+        return Some(token.to_string());
+    }
+    let name = token.strip_prefix('*')?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'))
+    .then_some(token.to_string())
+}
+
+/// Parse the measured direct `MotionModule::set_rate_partial` shapes:
+/// `MotionModule::set_rate_partial(agent.module_accessor, part_kind, rate)` and the HDR `boma`
+/// form. The part kind stays as its authored token; only the numeric rate is a value edit.
+fn parse_motion_module_set_rate_partial_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "MotionModule::set_rate_partial(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [module_accessor, part_kind, rate] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let part_kind = parse_motion_module_part_kind(part_kind)?;
+    let rate = rate.trim().parse::<f32>().ok()?;
+    (rate.is_finite() && rate >= 0.0).then_some(ExcuteStmt::MotionModuleSetRatePartial(
+        crate::data::MotionModuleSetRatePartialCall { part_kind, rate },
+    ))
+}
+
 /// Parse the exact measured `CLR_SPEED(agent, kinetic_id)` shape or its generated helper call.
 /// The vendored crate exposes only the generic kinetic primitive macro, so generated source uses
 /// the helper while editable source retains the corpus's `macros::CLR_SPEED` spelling.
@@ -2772,6 +2813,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::MotionModuleSetHelperCalculation(call) => format!(
                 "{indent}MotionModule::set_helper_calculation(agent.module_accessor, {});",
                 call.enabled
+            ),
+            crate::data::ExcuteStmt::MotionModuleSetRatePartial(call) => format!(
+                "{indent}MotionModule::set_rate_partial(agent.module_accessor, {}, {});",
+                call.part_kind,
+                num(call.rate)
             ),
             crate::data::ExcuteStmt::ClrSpeed(call) => {
                 format!("{indent}visionary_clr_speed(agent, {});", call.kinetic_kind)
@@ -9825,6 +9871,85 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                     "MotionModule::set_helper_calculation(agent.module_accessor, false, true);"
                 )
         );
+    }
+
+    #[test]
+    fn motion_module_set_rate_partial_parse_export_round_trips_standard_and_hdr_shapes() {
+        let source = r#"unsafe extern "C" fn game_specialairhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, 1.25);
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if is_excute(agent) {
+        MotionModule::set_rate_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_motion_module_set_rate_partial_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 3);
+        assert_eq!(
+            events[0].call.part_kind,
+            "*FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY"
+        );
+        assert_eq!(events[0].call.rate, 1.25);
+        assert_eq!(events[1].frame, 6);
+        assert_eq!(
+            events[1].call.part_kind,
+            "*FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL"
+        );
+        assert_eq!(events[1].call.rate, 0.0);
+
+        let emitted = preview_game_fn(&script, "special_air_hi");
+        assert!(emitted.contains(
+            "MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, 1.25);"
+        ));
+        assert!(emitted.contains(
+            "MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0.0);"
+        ));
+        let reparsed = parse_acmd_script(&emitted).to_motion_module_set_rate_partial_events();
+        assert_eq!(reparsed.len(), events.len());
+        assert_eq!(reparsed[0].call, events[0].call);
+        assert_eq!(reparsed[1].call.rate, events[1].call.rate);
+        assert_eq!(
+            reparsed[1].call.part_kind,
+            "*FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL"
+        );
+    }
+
+    #[test]
+    fn malformed_motion_module_set_rate_partial_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        MotionModule::set_rate_partial(agent.module_accessor, 2);
+        MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY);
+        MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, -1);
+        MotionModule::set_rate_partial(other.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, 1);
+        MotionModule::set_rate_partial(agent.module_accessor, part_kind, 1);
+        MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, rate);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script.to_motion_module_set_rate_partial_events().is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        assert!(emitted.contains("MotionModule::set_rate_partial(agent.module_accessor, 2);"));
+        assert!(emitted.contains(
+            "MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY);"
+        ));
+        assert!(emitted.contains(
+            "MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, -1);"
+        ));
+        assert!(emitted.contains(
+            "MotionModule::set_rate_partial(other.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, 1);"
+        ));
+        assert!(emitted
+            .contains("MotionModule::set_rate_partial(agent.module_accessor, part_kind, 1);"));
+        assert!(emitted.contains(
+            "MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY, rate);"
+        ));
     }
 
     #[test]

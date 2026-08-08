@@ -1296,6 +1296,11 @@ pub enum ExcuteStmt {
     /// This is a direct boolean module setter with its own runtime identity, separate from the
     /// numeric playback-rate family above.
     MotionModuleSetHelperCalculation(MotionModuleSetHelperCalculationCall),
+    /// `MotionModule::set_rate_partial` — set one partial animation's playback rate.
+    ///
+    /// The authored part token remains source-owned because the public corpus uses fighter- and
+    /// weapon-specific constants. The live surface keys it by the captured numeric part kind.
+    MotionModuleSetRatePartial(MotionModuleSetRatePartialCall),
     /// `CLR_SPEED` — clear one named kinetic-energy reserve.
     ///
     /// The checked-in macro layer has no safe `CLR_SPEED` wrapper, so the authored kinetic ID is
@@ -1470,6 +1475,18 @@ pub struct MotionModuleSetRateCall {
 
 impl MotionModuleSetRateCall {
     pub const FUNC: &'static str = "MotionModule::set_rate";
+}
+
+/// A parsed direct `MotionModule::set_rate_partial(receiver, part_kind, rate)` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MotionModuleSetRatePartialCall {
+    /// Authored partial-motion kind, usually a dereferenced fighter or weapon constant.
+    pub part_kind: String,
+    pub rate: f32,
+}
+
+impl MotionModuleSetRatePartialCall {
+    pub const FUNC: &'static str = "MotionModule::set_rate_partial";
 }
 
 /// A parsed direct `MotionModule::set_helper_calculation(receiver, bool)` call.
@@ -1662,6 +1679,15 @@ pub struct MotionModuleSetRateEvent {
 pub struct MotionModuleSetHelperCalculationEvent {
     pub frame: u32,
     pub call: MotionModuleSetHelperCalculationCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct `MotionModule::set_rate_partial` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MotionModuleSetRatePartialEvent {
+    pub frame: u32,
+    pub call: MotionModuleSetRatePartialCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -2093,6 +2119,14 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.motion_module_set_helper_calculations
+    }
+
+    /// Flatten direct `MotionModule::set_rate_partial` calls into editable numeric point events.
+    pub fn to_motion_module_set_rate_partial_events(&self) -> Vec<MotionModuleSetRatePartialEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.motion_module_set_rate_partials
     }
 
     /// Flatten `CLR_SPEED` calls into source-token kinetic point events.
@@ -2626,6 +2660,50 @@ impl AcmdScript {
                     }
                     AcmdStmt::Bare(inner) => {
                         if let ExcuteStmt::MotionModuleSetHelperCalculation(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// The direct `MotionModule::set_rate_partial` call an event site's ordinal refers to.
+    pub fn motion_module_set_rate_partial_stmt_mut(
+        &mut self,
+        site: usize,
+    ) -> Option<&mut MotionModuleSetRatePartialCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut MotionModuleSetRatePartialCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::MotionModuleSetRatePartial(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::MotionModuleSetRatePartial(call) = inner.as_mut() {
                             if *seen == site {
                                 return Some(call);
                             }
@@ -3199,6 +3277,7 @@ struct WalkAccum {
     ft_start_adjust_motion_frames: Vec<FtStartAdjustMotionFrameEvent>,
     motion_module_set_rates: Vec<MotionModuleSetRateEvent>,
     motion_module_set_helper_calculations: Vec<MotionModuleSetHelperCalculationEvent>,
+    motion_module_set_rate_partials: Vec<MotionModuleSetRatePartialEvent>,
     clr_speeds: Vec<ClrSpeedEvent>,
     set_airs: Vec<SetAirEvent>,
     kinetic_clear_speed_alls: Vec<KineticClearSpeedAllEvent>,
@@ -3239,6 +3318,9 @@ struct WalkAccum {
     /// Site for the next direct `MotionModule::set_helper_calculation`, independent of every
     /// other point event family.
     next_motion_module_set_helper_calculation_site: usize,
+    /// Site for the next direct `MotionModule::set_rate_partial`, independent of every other
+    /// point event family.
+    next_motion_module_set_rate_partial_site: usize,
     /// Site for the next `CLR_SPEED`, independent of every other point event family.
     next_clr_speed_site: usize,
     /// Site for the next `SET_AIR`, independent of every other point event family.
@@ -3532,6 +3614,28 @@ fn count_motion_module_set_helper_calculation_stmts(stmts: &[AcmdStmt]) -> usize
         .sum()
 }
 
+/// Direct `MotionModule::set_rate_partial` calls in a subtree, counted in source order for
+/// loop/site resolution.
+fn count_motion_module_set_rate_partial_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::MotionModuleSetRatePartial(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(
+                inner.as_ref(),
+                ExcuteStmt::MotionModuleSetRatePartial(_)
+            )),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_motion_module_set_rate_partial_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// `CLR_SPEED` calls in a subtree, counted in source order for loop/site resolution.
 fn count_clr_speed_stmts(stmts: &[AcmdStmt]) -> usize {
     stmts
@@ -3818,6 +3922,12 @@ impl WalkAccum {
     fn take_motion_module_set_helper_calculation_site(&mut self) -> usize {
         let site = self.next_motion_module_set_helper_calculation_site;
         self.next_motion_module_set_helper_calculation_site += 1;
+        site
+    }
+
+    fn take_motion_module_set_rate_partial_site(&mut self) -> usize {
+        let site = self.next_motion_module_set_rate_partial_site;
+        self.next_motion_module_set_rate_partial_site += 1;
         site
     }
 
@@ -4124,6 +4234,15 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 },
             );
         }
+        ExcuteStmt::MotionModuleSetRatePartial(call) => {
+            let site = hurt.take_motion_module_set_rate_partial_site();
+            hurt.motion_module_set_rate_partials
+                .push(MotionModuleSetRatePartialEvent {
+                    frame: script_frame(frame),
+                    call: call.clone(),
+                    site,
+                });
+        }
         ExcuteStmt::ClrSpeed(call) => {
             let site = hurt.take_clr_speed_site();
             hurt.clr_speeds.push(ClrSpeedEvent {
@@ -4228,6 +4347,8 @@ fn eval_stmts(
                 let motion_module_set_rate_site_at_entry = hurt.next_motion_module_set_rate_site;
                 let motion_module_set_helper_calculation_site_at_entry =
                     hurt.next_motion_module_set_helper_calculation_site;
+                let motion_module_set_rate_partial_site_at_entry =
+                    hurt.next_motion_module_set_rate_partial_site;
                 let clr_speed_site_at_entry = hurt.next_clr_speed_site;
                 let set_air_site_at_entry = hurt.next_set_air_site;
                 let kinetic_clear_speed_all_site_at_entry = hurt.next_kinetic_clear_speed_all_site;
@@ -4252,6 +4373,8 @@ fn eval_stmts(
                     hurt.next_motion_module_set_rate_site = motion_module_set_rate_site_at_entry;
                     hurt.next_motion_module_set_helper_calculation_site =
                         motion_module_set_helper_calculation_site_at_entry;
+                    hurt.next_motion_module_set_rate_partial_site =
+                        motion_module_set_rate_partial_site_at_entry;
                     hurt.next_clr_speed_site = clr_speed_site_at_entry;
                     hurt.next_set_air_site = set_air_site_at_entry;
                     hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry;
@@ -4282,6 +4405,9 @@ fn eval_stmts(
                 hurt.next_motion_module_set_helper_calculation_site =
                     motion_module_set_helper_calculation_site_at_entry
                         + count_motion_module_set_helper_calculation_stmts(body);
+                hurt.next_motion_module_set_rate_partial_site =
+                    motion_module_set_rate_partial_site_at_entry
+                        + count_motion_module_set_rate_partial_stmts(body);
                 hurt.next_clr_speed_site = clr_speed_site_at_entry + count_clr_speed_stmts(body);
                 hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
                 hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry
@@ -4516,6 +4642,9 @@ pub struct AppState {
     /// Direct `MotionModule::set_helper_calculation` point events as loaded, for sparse live
     /// rules and source syncing.
     pub motion_module_set_helper_calculation_pristine: Vec<MotionModuleSetHelperCalculationEvent>,
+    /// Direct `MotionModule::set_rate_partial` point events as loaded, for sparse live rules and
+    /// source syncing.
+    pub motion_module_set_rate_partial_pristine: Vec<MotionModuleSetRatePartialEvent>,
     /// `CLR_SPEED` point events as loaded, for sparse live kinetic rules and source syncing.
     pub clr_speed_pristine: Vec<ClrSpeedEvent>,
     /// `SET_AIR` point events as loaded, for sparse live kinetic rules and source syncing.
@@ -4629,6 +4758,7 @@ impl Default for AppState {
             ft_start_adjust_motion_frame_pristine: Vec::new(),
             motion_module_set_rate_pristine: Vec::new(),
             motion_module_set_helper_calculation_pristine: Vec::new(),
+            motion_module_set_rate_partial_pristine: Vec::new(),
             clr_speed_pristine: Vec::new(),
             set_air_pristine: Vec::new(),
             kinetic_clear_speed_all_pristine: Vec::new(),
@@ -4672,6 +4802,8 @@ impl AppState {
         self.motion_module_set_rate_pristine = script.to_motion_module_set_rate_events();
         self.motion_module_set_helper_calculation_pristine =
             script.to_motion_module_set_helper_calculation_events();
+        self.motion_module_set_rate_partial_pristine =
+            script.to_motion_module_set_rate_partial_events();
         self.clr_speed_pristine = script.to_clr_speed_events();
         self.set_air_pristine = script.to_set_air_events();
         self.kinetic_clear_speed_all_pristine = script.to_kinetic_clear_speed_all_events();

@@ -2724,6 +2724,29 @@ desktop suite passed 619 tests plus 1 existing ignored benchmark, the six deploy
 and the Skyline plugin release build passed. No live game runtime was used, so hook behavior on
 hardware remains explicitly unverified.
 
+#### [x] E1q — direct `MotionModule::set_rate_partial` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 44 exact direct
+`MotionModule::set_rate_partial(receiver, part_kind, rate)` calls in each of the standard and
+HDR trees. Every standard call uses `agent.module_accessor`, every HDR call uses `boma`, and the
+measured part tokens are the fighter upper-body part plus Pac-Man and Big Pac-Man material parts.
+The linked binding is the direct `(BattleObjectModuleAccessor, i32, f32) -> ()` primitive.
+
+The five surfaces are covered: the typed parser/IR preserves the authored part token and numeric
+rate; the movement panel and timeline expose the point; export reproduces the direct call; source
+write-back retunes only an existing numeric rate; and the live editor/plugin wire uses category 31,
+the captured numeric part kind plus pristine rate, and a positive finite replacement. Part-kind
+changes, add/remove, retiming, malformed calls, and zero live replacements remain source/export-only
+or explicitly reported as unrepresentable. `set_frame_partial` remains separate because its frame
+and sync-boolean payloads are not interchangeable with this rate-only shape.
+
+Offline validation passed: 626 desktop tests, 1 existing ignored renderer benchmark, all 6
+deployment tests, strict Clippy, format/diff checks, the locked release build, and the Skyline
+plugin release build. No emulator, game, or UI automation was run, so live hook behavior remains
+explicitly unverified. The E1 parent remains open for broader status-module calls, the absent
+`sv_kinetic_energy` corpus family, and the separately measured `get_sum_speed_y`/`set_frame_partial`
+shapes.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their

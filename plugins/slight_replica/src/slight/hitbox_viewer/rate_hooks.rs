@@ -19,6 +19,7 @@
 use super::{
     any_rules, read_args_exact, record, record_for_boma, HbOverrides, LuaArg, CAT_MOTION_RATE,
     CAT_MOTION_MODULE_SET_HELPER_CALCULATION, CAT_MOTION_MODULE_SET_RATE,
+    CAT_MOTION_MODULE_SET_RATE_PARTIAL,
 };
 
 /// Reports per rule set, not per boot.
@@ -248,6 +249,43 @@ unsafe fn hook_motion_module_set_helper_calculation(
     original!()(boma, enabled)
 }
 
+/// Capture and sparsely override the direct partial-animation rate setter.
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::set_rate_partial)]
+unsafe fn hook_motion_module_set_rate_partial(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    part_kind: i32,
+    rate: f32,
+) {
+    let args = [LuaArg::Int(part_kind as i64), LuaArg::Num(rate)];
+    record_for_boma(boma, "MotionModule::set_rate_partial", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = super::numeric_point_key(
+            "MotionModule::set_rate_partial",
+            &[part_kind as f32, rate],
+        );
+        if let Some((suppress, overrides)) = super::action_for(
+            CAT_MOTION_MODULE_SET_RATE_PARTIAL,
+            motion,
+            key,
+            frame,
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(replacement) = overrides.and_then(|item| item.motion_module_rate_partial)
+            {
+                if replacement.is_finite() && replacement > 0.0 && replacement != rate {
+                    original!()(boma, part_kind, replacement);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, part_kind, rate)
+}
+
 /// Set once the hook is in. Read by `write_capture_diag`.
 static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -259,14 +297,15 @@ pub fn install() {
     skyline::install_hooks!(
         hook_ft_motion_rate,
         hook_motion_module_set_rate,
-        hook_motion_module_set_helper_calculation
+        hook_motion_module_set_helper_calculation,
+        hook_motion_module_set_rate_partial
     );
     INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
     // `diag::note`, not `skyline::println!` — the two go to different places and only one of
     // them is a file anybody reads afterwards. Telling someone to grep diag.txt for a banner
     // that was never written there cost a game boot once already.
     crate::slight::diag::note(
-        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate, MotionModule::set_helper_calculation)",
+        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate, MotionModule::set_helper_calculation, MotionModule::set_rate_partial)",
     );
 }
 
