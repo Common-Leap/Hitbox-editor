@@ -338,6 +338,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_reverse_lr_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_expression_call(line) {
             stmts.push(stmt);
             continue;
@@ -1583,6 +1587,15 @@ fn parse_expression_call(line: &str) -> Option<ExcuteStmt> {
     None
 }
 
+/// Parse the argument-less `macros::REVERSE_LR(agent)` facing-direction command.
+fn parse_reverse_lr_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "macros::REVERSE_LR(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    (tokens.as_slice() == ["agent"]).then_some(ExcuteStmt::ReverseLr)
+}
+
 fn emit_sound(call: &crate::data::SoundCall, indent: &str) -> String {
     let args = call
         .sounds
@@ -2048,6 +2061,9 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             ),
             crate::data::ExcuteStmt::Sound(call) => emit_sound(call, indent),
             crate::data::ExcuteStmt::Expression(call) => emit_expression(call, indent),
+            crate::data::ExcuteStmt::ReverseLr => {
+                format!("{indent}macros::REVERSE_LR(agent);")
+            }
             crate::data::ExcuteStmt::Raw(line) => format!("{indent}{line}"),
         })
         .collect()
@@ -3333,6 +3349,44 @@ pub(crate) mod tests {
         );
     }
 
+    /// `REVERSE_LR` is a point statement: it has no editable payload, but it must still be
+    /// typed so the frame walk, live rule path, and source writer can all see the same event.
+    #[test]
+    fn a_reverse_lr_call_parses_to_a_typed_point_and_round_trips() {
+        let source = r#"unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::REVERSE_LR(agent);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert_eq!(
+            script.to_reverse_lr_events(),
+            vec![crate::data::ReverseLrEvent { frame: 4, site: 0 }]
+        );
+        assert!(
+            script.stmts.iter().any(|stmt| matches!(
+                stmt,
+                crate::data::AcmdStmt::Excute(inner)
+                    if matches!(inner.as_slice(), [crate::data::ExcuteStmt::ReverseLr])
+            )),
+            "the call must be typed inside its execute block: {:?}",
+            script.stmts
+        );
+
+        assert!(
+            parse_reverse_lr_call("macros::REVERSE_LR(agent, true);").is_none(),
+            "a different arity must remain raw until its own measured signature exists"
+        );
+        let emitted = preview_game_fn(&script, "throw_f");
+        assert!(emitted.contains("macros::REVERSE_LR(agent);"));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_reverse_lr_events(),
+            script.to_reverse_lr_events()
+        );
+    }
+
     /// `FT_MOTION_RATE_RANGE` begins with `FT_MOTION_RATE`'s entire name and takes a different
     /// argument list, so a prefix or `contains` match reads one as the other and writes back a
     /// call the game does not have. This codebase has paid for that shape once already with
@@ -3416,6 +3470,46 @@ pub(crate) mod tests {
             seen >= 17,
             "expected at least the 17 known corpus rate calls, saw {seen}"
         );
+    }
+
+    /// The seven measured corpus calls are all the exact zero-argument macro form. This keeps a
+    /// family-prefix or wrong-arity parser from appearing to work on a synthetic fixture while
+    /// silently leaving a real call as `Raw`.
+    #[test]
+    fn every_corpus_reverse_lr_call_is_typed_and_exported() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+        let mut written = 0usize;
+        let mut typed = 0usize;
+        for (path, body) in &bodies {
+            if extract_function(body, "game_").is_none() {
+                continue;
+            }
+            let all = body.matches("macros::REVERSE_LR(").count();
+            let exact = body.matches("macros::REVERSE_LR(agent);").count();
+            assert_eq!(
+                all, exact,
+                "{path} contains a REVERSE_LR shape outside the measured signature"
+            );
+            if exact == 0 {
+                continue;
+            }
+            written += exact;
+            let script = parse_acmd_script(body);
+            let events = script.to_reverse_lr_events();
+            typed += events.len();
+            assert_eq!(events.len(), exact, "{path} lost a typed REVERSE_LR event");
+            let emitted = preview_game_fn(&script, "reverse_lr_audit");
+            assert_eq!(
+                parse_acmd_script(&emitted).to_reverse_lr_events(),
+                events,
+                "{path} changed its REVERSE_LR points on export"
+            );
+        }
+        assert_eq!(written, 7, "the measured E1 corpus count changed");
+        assert_eq!(typed, written, "every measured call must be typed");
     }
 
     /// Three files in a long-lived script cache are the literal bytes `404: Not Found`, because

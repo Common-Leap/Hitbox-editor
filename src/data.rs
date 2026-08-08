@@ -1001,6 +1001,12 @@ pub enum ExcuteStmt {
     /// compilable and round-trippable while the later live rule surface can operate on their
     /// typed wire representation.
     Expression(ExpressionCall),
+    /// `REVERSE_LR` — flip the fighter's facing direction at this point in the move.
+    ///
+    /// This is deliberately a point statement rather than a state with an editable value:
+    /// the macro takes no arguments after `agent`, so the meaningful edits are whether it is
+    /// present and which frame it runs on.
+    ReverseLr,
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
 }
@@ -1064,6 +1070,15 @@ pub struct ExpressionEvent {
     pub frame: u32,
     pub call: ExpressionCall,
     /// Source ordinal among expression calls, independent of hitbox/sound sites.
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved `REVERSE_LR` point event at the one-based game frame it fires on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReverseLrEvent {
+    pub frame: u32,
+    /// Source ordinal among reverse-facing calls, independent of every other family.
     #[serde(default)]
     pub site: usize,
 }
@@ -1360,6 +1375,14 @@ impl AcmdScript {
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.expressions
     }
+
+    /// Flatten `REVERSE_LR` calls into point events at their one-based game frames.
+    pub fn to_reverse_lr_events(&self) -> Vec<ReverseLrEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.reverse_lrs
+    }
 }
 
 impl AcmdScript {
@@ -1515,6 +1538,89 @@ impl AcmdScript {
         }
         walk(&mut self.stmts, site, &mut 0)
     }
+
+    /// Remove the `REVERSE_LR` source statement at an ordinal from
+    /// [`to_reverse_lr_events`](Self::to_reverse_lr_events).
+    ///
+    /// The ordinal is source-based, not an execution count: a call inside a loop is one source
+    /// statement even when it produces several point events. Removing a looped call therefore
+    /// removes the source line rather than only one unrolled occurrence.
+    pub fn remove_reverse_lr(&mut self, site: usize) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        let mut inner_index = 0;
+                        while inner_index < inner.len() {
+                            if matches!(inner[inner_index], ExcuteStmt::ReverseLr) {
+                                if *seen == site {
+                                    inner.remove(inner_index);
+                                    if inner.is_empty() {
+                                        stmts.remove(index);
+                                    }
+                                    return true;
+                                }
+                                *seen += 1;
+                            }
+                            inner_index += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if matches!(inner.as_ref(), ExcuteStmt::ReverseLr) => {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Add a `REVERSE_LR` call on a top-level frame, preserving an existing execute block when
+    /// one already names that frame. If no such block exists, a new absolute frame/block pair is
+    /// inserted before the next later top-level frame.
+    ///
+    /// The first editor pass intentionally does not invent a call inside a runtime branch or a
+    /// loop. Those structures are retained for export, but their execution context is not a safe
+    /// place for a new unconditional point event.
+    pub fn insert_reverse_lr_at_frame(&mut self, frame: u32) -> bool {
+        let target = frame.max(1) as f32;
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(ExcuteStmt::ReverseLr);
+                return true;
+            }
+            self.stmts
+                .insert(index + 1, AcmdStmt::Excute(vec![ExcuteStmt::ReverseLr]));
+            return true;
+        }
+
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target));
+        self.stmts
+            .insert(insert_at + 1, AcmdStmt::Excute(vec![ExcuteStmt::ReverseLr]));
+        true
+    }
 }
 
 /// Everything but hitboxes that one walk of a script resolves.
@@ -1529,6 +1635,7 @@ struct WalkAccum {
     mods: Vec<AttackModState>,
     sounds: Vec<SoundEvent>,
     expressions: Vec<ExpressionEvent>,
+    reverse_lrs: Vec<ReverseLrEvent>,
     /// Site to hand to the next hurtbox statement encountered.
     ///
     /// A *source* ordinal, not an execution counter: [`eval_stmts`] unrolls `for` bodies, and
@@ -1541,6 +1648,8 @@ struct WalkAccum {
     next_sound_site: usize,
     /// Site for the next expression call, independent of every other family.
     next_expression_site: usize,
+    /// Site for the next `REVERSE_LR`, independent of every other point-event family.
+    next_reverse_lr_site: usize,
 }
 
 /// Hurtbox statements in a subtree, counted in source order.
@@ -1630,6 +1739,24 @@ fn count_expression_stmts(stmts: &[AcmdStmt]) -> usize {
             AcmdStmt::Bare(inner) => usize::from(is_expression_stmt(inner)),
             AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
                 count_expression_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `REVERSE_LR` calls in a subtree, counted in source order for loop/site resolution.
+fn count_reverse_lr_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::ReverseLr))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(inner.as_ref(), ExcuteStmt::ReverseLr)),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_reverse_lr_stmts(body)
             }
             _ => 0,
         })
@@ -1727,6 +1854,12 @@ impl WalkAccum {
     fn take_expression_site(&mut self) -> usize {
         let site = self.next_expression_site;
         self.next_expression_site += 1;
+        site
+    }
+
+    fn take_reverse_lr_site(&mut self) -> usize {
+        let site = self.next_reverse_lr_site;
+        self.next_reverse_lr_site += 1;
         site
     }
 
@@ -1901,6 +2034,13 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
+        ExcuteStmt::ReverseLr => {
+            let site = hurt.take_reverse_lr_site();
+            hurt.reverse_lrs.push(ReverseLrEvent {
+                frame: script_frame(frame),
+                site,
+            });
+        }
         ExcuteStmt::Raw(_) => {}
     }
 }
@@ -1937,17 +2077,20 @@ fn eval_stmts(
                 let mod_site_at_entry = hurt.next_mod_site;
                 let sound_site_at_entry = hurt.next_sound_site;
                 let expression_site_at_entry = hurt.next_expression_site;
+                let reverse_lr_site_at_entry = hurt.next_reverse_lr_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
                     hurt.next_sound_site = sound_site_at_entry;
                     hurt.next_expression_site = expression_site_at_entry;
+                    hurt.next_reverse_lr_site = reverse_lr_site_at_entry;
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
                 hurt.next_mod_site = mod_site_at_entry + count_attack_mod_stmts(body);
                 hurt.next_sound_site = sound_site_at_entry + count_sound_stmts(body);
                 hurt.next_expression_site = expression_site_at_entry + count_expression_stmts(body);
+                hurt.next_reverse_lr_site = reverse_lr_site_at_entry + count_reverse_lr_stmts(body);
             }
             // Walked as though the branch always runs, which is what happened before it was a
             // block at all: its lines used to be parsed as siblings of the branch, so a hitbox
@@ -2147,6 +2290,8 @@ pub struct AppState {
     /// Post-hoc hitbox modifiers as loaded, on the same terms as `hurtboxes_pristine`: the
     /// script is the edited model, so the current list is always `script.to_attack_mods()`.
     pub attack_mods_pristine: Vec<AttackModState>,
+    /// `REVERSE_LR` point events as loaded, for sparse live suppression/injection rules.
+    pub reverse_lr_pristine: Vec<ReverseLrEvent>,
     /// Provenance of the current move's ACMD data ("", "GitHub", "Live capture").
     pub acmd_source: String,
     /// "fighter/move" → the warning captured when a live performance observed only one arm of
@@ -2235,6 +2380,7 @@ impl Default for AppState {
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),
+            reverse_lr_pristine: Vec::new(),
             acmd_source: String::new(),
             capture_branch_warnings: HashMap::new(),
             loaded_body: String::new(),
@@ -2260,6 +2406,7 @@ impl AppState {
     pub fn set_script(&mut self, script: AcmdScript) {
         self.hurtboxes_pristine = script.to_hurtboxes();
         self.attack_mods_pristine = script.to_attack_mods();
+        self.reverse_lr_pristine = script.to_reverse_lr_events();
         self.script = script;
     }
 }
@@ -3603,6 +3750,39 @@ mod tests {
             "0.25 must reach motion frame 4 in fewer game frames than 1.0, got {} vs {}",
             slow_looking.game_frame(4.0),
             plain.game_frame(4.0),
+        );
+    }
+
+    #[test]
+    fn reverse_lr_points_keep_their_sites_while_being_removed_and_inserted() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::ReverseLr]),
+                AcmdStmt::Frame(8.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::ReverseLr]),
+            ],
+        };
+        assert_eq!(
+            script.to_reverse_lr_events(),
+            vec![
+                ReverseLrEvent { frame: 3, site: 0 },
+                ReverseLrEvent { frame: 8, site: 1 },
+            ]
+        );
+
+        assert!(script.remove_reverse_lr(0));
+        assert_eq!(
+            script.to_reverse_lr_events(),
+            vec![ReverseLrEvent { frame: 8, site: 0 }]
+        );
+        assert!(script.insert_reverse_lr_at_frame(5));
+        assert_eq!(
+            script.to_reverse_lr_events(),
+            vec![
+                ReverseLrEvent { frame: 5, site: 0 },
+                ReverseLrEvent { frame: 8, site: 1 },
+            ]
         );
     }
 

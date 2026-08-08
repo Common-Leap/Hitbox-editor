@@ -2914,6 +2914,269 @@ pub fn sync_motion_rates(
     })
 }
 
+// ── Facing-direction point write-back ───────────────────────────────────────
+
+/// The exact argument-less `REVERSE_LR` calls in a source function.
+pub(crate) fn reverse_lr_sites(text: &str) -> Vec<MacroSite> {
+    scan_macro_sites(text, 0..text.len())
+        .into_iter()
+        .filter(|site| site.name == "REVERSE_LR" && site.args.len() == 1)
+        .collect()
+}
+
+fn source_line_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for chunk in text.split_inclusive('\n') {
+        ranges.push(start..start + chunk.len());
+        start += chunk.len();
+    }
+    if start < text.len() {
+        ranges.push(start..text.len());
+    }
+    ranges
+}
+
+fn line_indent<'a>(text: &'a str, range: &Range<usize>) -> &'a str {
+    let line = &text[range.clone()];
+    &line[..line.len() - line.trim_start().len()]
+}
+
+fn frame_literal(line: &str) -> Option<f32> {
+    let start = line.find("frame(")? + "frame(".len();
+    let comma = line[start..].find(',')? + start;
+    let end = line[comma + 1..].find(')')? + comma + 1;
+    line[comma + 1..end].trim().parse().ok()
+}
+
+fn matching_brace(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in text.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn remove_reverse_line(text: &str, site: &MacroSite) -> Replacement {
+    let ranges = source_line_ranges(text);
+    let Some(line) = ranges
+        .iter()
+        .find(|range| range.start <= site.span.start && site.span.start < range.end)
+    else {
+        return Replacement {
+            span: site.span.clone(),
+            value: String::new(),
+        };
+    };
+    let trimmed = text[line.clone()].trim();
+    if trimmed == "macros::REVERSE_LR(agent);" {
+        Replacement {
+            span: line.clone(),
+            value: String::new(),
+        }
+    } else {
+        let mut end = site.span.end;
+        if text[end..].starts_with(';') {
+            end += 1;
+        }
+        Replacement {
+            span: site.span.start..end,
+            value: String::new(),
+        }
+    }
+}
+
+fn insert_reverse_line(text: &mut String, frame: u32) -> bool {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let ranges = source_line_ranges(text);
+    let frame_index = ranges.iter().position(|range| {
+        frame_literal(&text[range.clone()])
+            .is_some_and(|value| value.round().max(1.0) as u32 == frame)
+    });
+
+    // Prefer the existing frame's execute block. This keeps the source's frame ordering and
+    // indentation and adds only the one call the user requested.
+    if let Some(frame_index) = frame_index {
+        let frame_range = ranges[frame_index].clone();
+        for range in ranges.iter().skip(frame_index + 1) {
+            if frame_literal(&text[range.clone()]).is_some() {
+                break;
+            }
+            let line = &text[range.clone()];
+            if line.contains("if macros::is_excute") && line.contains('{') {
+                let open = range.start + line.find('{').unwrap();
+                if let Some(close) = matching_brace(text, open) {
+                    let body_indent = ranges
+                        .iter()
+                        .skip(frame_index + 1)
+                        .find(|body| {
+                            body.start > open && body.start < close && {
+                                let body_text = &text[body.start..body.end];
+                                !body_text.trim().is_empty() && !body_text.trim().starts_with('}')
+                            }
+                        })
+                        .map(|body| line_indent(text, body).to_string())
+                        .unwrap_or_else(|| format!("{}    ", line_indent(text, range)));
+                    text.insert_str(
+                        close,
+                        &format!("{body_indent}macros::REVERSE_LR(agent);{newline}"),
+                    );
+                    return true;
+                }
+            }
+        }
+
+        // The frame exists but has no execute block. Put a new one directly after the frame
+        // line, before another top-level statement or the next frame.
+        let indent = line_indent(text, &frame_range);
+        let block = format!(
+            "{indent}if macros::is_excute(agent) {{{newline}{indent}    macros::REVERSE_LR(agent);{newline}{indent}}}{newline}"
+        );
+        text.insert_str(frame_range.end, &block);
+        return true;
+    }
+
+    // No exact frame exists. Insert a new frame/block before the first later frame, or just
+    // before the function's final brace when this is the last point in the move.
+    let insert_at = ranges
+        .iter()
+        .find(|range| {
+            frame_literal(&text[range.start..range.end]).is_some_and(|value| value > frame as f32)
+        })
+        .map(|range| range.start)
+        .or_else(|| text.rfind('}'))
+        .unwrap_or(text.len());
+    let indent = ranges
+        .iter()
+        .find(|range| frame_literal(&text[range.start..range.end]).is_some())
+        .map(|range| line_indent(text, range).to_string())
+        .unwrap_or_else(|| "    ".into());
+    let block = format!(
+        "{indent}frame(agent.lua_state_agent, {frame}.0);{newline}{indent}if macros::is_excute(agent) {{{newline}{indent}    macros::REVERSE_LR(agent);{newline}{indent}}}{newline}"
+    );
+    text.insert_str(insert_at, &block);
+    true
+}
+
+/// Rewrite `REVERSE_LR` presence and frame placement in a user's own `game_` source.
+///
+/// This is the one structural source rewrite in the first E1 slice. It is deliberately limited
+/// to flat, one-call-per-source-site functions: inserting into a runtime branch or a loop would
+/// require choosing an execution context the editor does not know. Such a change is reported
+/// without touching the user's text. An LCS over the one-based frame sequence makes a retime a
+/// safe remove-plus-insert and keeps later calls from being shifted by an earlier removal.
+pub fn rewrite_reverse_lr(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::ReverseLrEvent],
+    edited: &[crate::data::ReverseLrEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = reverse_lr_sites(text);
+    let parsed = crate::acmd::parse_acmd_script(text);
+    fn contains_loop(stmts: &[crate::data::AcmdStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            crate::data::AcmdStmt::Loop { .. } => true,
+            crate::data::AcmdStmt::RawBlock { body, .. } => contains_loop(body),
+            _ => false,
+        })
+    }
+    let mut report = SyncReport::default();
+    let flat_sites = pristine.len() == sites.len()
+        && pristine
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.site == index);
+    let flat_edited = edited
+        .iter()
+        .enumerate()
+        .all(|(index, event)| event.site == index);
+    let old: Vec<u32> = pristine.iter().map(|event| event.frame).collect();
+    let new: Vec<u32> = edited.iter().map(|event| event.frame).collect();
+    let has_unsupported_structure =
+        parsed.branch_count() > 0 || contains_loop(&parsed.stmts) || !flat_sites || !flat_edited;
+    if has_unsupported_structure {
+        if pristine != edited {
+            report.skipped.push(format!(
+                "{label}: REVERSE_LR placement changed inside a loop/branch or after a source-site mismatch — source syncing only edits flat point calls"
+            ));
+        }
+        return Ok((text.to_string(), report));
+    }
+
+    let n = old.len();
+    let m = new.len();
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if old[i] == new[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut matched_old = vec![false; n];
+    let mut matched_new = vec![false; m];
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if old[i] == new[j] {
+            matched_old[i] = true;
+            matched_new[j] = true;
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    if matched_old.iter().all(|matched| *matched) && matched_new.iter().all(|matched| *matched) {
+        return Ok((text.to_string(), report));
+    }
+
+    let removals: Vec<Replacement> = sites
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_old[*index])
+        .map(|(_, site)| remove_reverse_line(text, site))
+        .collect();
+    let mut updated = apply(text, removals);
+    for (_, event) in edited
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_new[*index])
+    {
+        if insert_reverse_line(&mut updated, event.frame) {
+            report.changed += 1;
+        }
+    }
+    report.changed += matched_old.iter().filter(|matched| !**matched).count();
+    Ok((updated, report))
+}
+
+/// Sync edited `REVERSE_LR` points into the project's `game_` function.
+pub fn sync_reverse_lr(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::ReverseLrEvent],
+    edited: &[crate::data::ReverseLrEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_reverse_lr(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 // ── Expression write-back ───────────────────────────────────────────────────
 
 /// The measured expression calls in source order, with the leading `agent` included in the
@@ -3316,6 +3579,116 @@ mod tests {
         assert_eq!(out, source);
         assert_eq!(report.changed, 0);
         assert!(report.skipped.iter().any(|note| note.contains("moved")));
+    }
+
+    const REVERSE_FLAT: &str = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        macros::REVERSE_LR(agent);
+    }
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        macros::REVERSE_LR(agent);
+    }
+}
+pub fn install(agent: &mut smashline::Agent) {
+    agent.acmd("game_attackairn", game_attackairn, smashline::Priority::Default);
+}
+"#;
+
+    #[test]
+    fn reverse_lr_source_write_back_retimes_without_reformatting_the_other_point() {
+        let script = crate::acmd::parse_acmd_script(REVERSE_FLAT);
+        let pristine = script.to_reverse_lr_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 4;
+
+        let (out, report) =
+            rewrite_reverse_lr(REVERSE_FLAT, "mario/attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(
+            report.changed, 2,
+            "one source call was removed and one added"
+        );
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&out).to_reverse_lr_events(),
+            edited,
+            "the source rewriter and parser must agree on the edited points"
+        );
+        assert_eq!(
+            out.matches("macros::REVERSE_LR(agent);").count(),
+            2,
+            "retiming must not duplicate the later point"
+        );
+        assert!(
+            out.contains("frame(agent.lua_state_agent, 8.0);"),
+            "the untouched frame must remain byte-for-byte present"
+        );
+    }
+
+    #[test]
+    fn reverse_lr_source_write_back_refuses_a_runtime_branch() {
+        let branched = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if WorkModule::is_flag(agent.module_accessor, 0) {
+        frame(agent.lua_state_agent, 3.0);
+        if macros::is_excute(agent) {
+            macros::REVERSE_LR(agent);
+        }
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(branched).to_reverse_lr_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 4;
+        let (out, report) =
+            rewrite_reverse_lr(branched, "mario/branch", &pristine, &edited).unwrap();
+        assert_eq!(out, branched, "a branch placement must not be guessed at");
+        assert!(
+            report.skipped.iter().any(|note| note.contains("branch")),
+            "the refusal must name the structural blocker: {:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn reverse_lr_source_site_mismatch_is_safe_when_another_family_changes() {
+        let mismatch = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    macros::REVERSE_LR(agent);
+}
+"#;
+        // The parser intentionally models only the measured execute-block form, while the
+        // source scanner still sees this line. A hitbox-only edit can therefore invoke this
+        // pass with equal empty baselines; it must be a no-op, not an ordinal-index panic.
+        let events = Vec::new();
+        let (out, report) = rewrite_reverse_lr(mismatch, "mario/mismatch", &events, &events)
+            .expect("a source-site mismatch is reportable, not fatal");
+        assert_eq!(out, mismatch);
+        assert!(report.changed == 0 && report.skipped.is_empty());
+    }
+
+    #[test]
+    fn syncing_reverse_lr_reindexes_the_projected_source_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "src/mario/acmd.rs", REVERSE_FLAT);
+        write(
+            tmp.path(),
+            "src/mario/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"mario\"); }",
+        );
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        let source = index.script_source("mario", "attack_air_n").unwrap().body;
+        let pristine = crate::acmd::parse_acmd_script(&source).to_reverse_lr_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 4;
+        let report = sync_reverse_lr(&index, "mario", "attack_air_n", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 2);
+        let after = SourceIndex::build(tmp.path()).unwrap();
+        let body = after.script_source("mario", "attack_air_n").unwrap().body;
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&body).to_reverse_lr_events(),
+            edited
+        );
     }
 
     /// `FT_MOTION_RATE_RANGE` must not be counted as a rate site.

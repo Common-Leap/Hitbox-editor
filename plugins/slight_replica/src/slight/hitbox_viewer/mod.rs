@@ -203,6 +203,9 @@ pub const CAT_MOTION_RATE: u8 = 9;
 /// rule because the three members have different argument shapes.
 pub const CAT_EXPRESSION: u8 = 10;
 
+/// `REVERSE_LR` — an argument-less facing-direction point in a `game_` script.
+pub const CAT_REVERSE_LR: u8 = 11;
+
 // ── Capture (live ACMD stream) ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -952,6 +955,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_SEARCH => "search",
                     CAT_SOUND => "sound",
                     CAT_EXPRESSION => "expression",
+                    CAT_REVERSE_LR => "reverse_lr",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1079,6 +1083,25 @@ expression_hook!(
     "RUMBLE_HIT",
     2
 );
+
+#[skyline::hook(replace = smash::app::sv_animcmd::REVERSE_LR)]
+unsafe fn hook_reverse_lr(lua_state: u64) {
+    record(lua_state, "REVERSE_LR", &[]);
+    if any_rules() {
+        let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+            as *mut smash::app::BattleObjectModuleAccessor;
+        if !boma.is_null() {
+            let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+            let frame = smash::app::lua_bind::MotionModule::frame(boma);
+            if let Some((suppress, _)) = action_for(CAT_REVERSE_LR, motion, 0, frame) {
+                if suppress {
+                    return;
+                }
+            }
+        }
+    }
+    original!()(lua_state)
+}
 expression_hook!(hook_quake, smash::app::sv_animcmd::QUAKE, "QUAKE", 1);
 expression_hook!(
     hook_ft_attack_abs_camera_quake,
@@ -1980,6 +2003,10 @@ pub unsafe fn inject_tick(lua_state: u64) {
             let mut agent = smash::lib::L2CAgent::new(lua_state);
             agent.clear_lua_stack();
             let mut args = inj.args.clone();
+            if category == CAT_REVERSE_LR && inj.command.as_deref() != Some("REVERSE_LR") {
+                crate::slight::diag::note("rejected reverse_lr injection without REVERSE_LR command");
+                continue;
+            }
             if category == CAT_GRAB && args.len() == 9 {
                 args.push(LuaArg::Int(
                     *smash::lib::lua_const::FIGHTER_STATUS_KIND_CAPTURE_PULLED as i64,
@@ -2014,6 +2041,9 @@ pub unsafe fn inject_tick(lua_state: u64) {
             {
                 let _g = InjectGuard::new();
                 match category {
+                    CAT_REVERSE_LR => {
+                        smash::app::sv_animcmd::REVERSE_LR(agent.lua_state_agent)
+                    }
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
                     CAT_WIND => match inj.command.as_deref() {
@@ -2080,7 +2110,8 @@ pub fn install() {
         hook_atk_set_shield_setoff_mul,
         hook_rumble_hit,
         hook_quake,
-        hook_ft_attack_abs_camera_quake
+        hook_ft_attack_abs_camera_quake,
+        hook_reverse_lr
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

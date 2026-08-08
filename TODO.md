@@ -2270,11 +2270,12 @@ behaviour remains unverified because no emulator or UI automation was run.
 
 ## Gameplay
 
-### [ ] E1 — Movement and kinetics
+### [ ] E1 — Movement and kinetics (the measured `REVERSE_LR` slice is complete)
 
-`sv_kinetic_energy`, `SET_SPEED_EX`, `ADD_SPEED_NO_LIMIT`, `CORRECT`, `REVERSE_LR`. Preserved
+`sv_kinetic_energy`, `SET_SPEED_EX`, `ADD_SPEED_NO_LIMIT`, and `CORRECT` remain preserved
 verbatim today. High mod value — this is how a move's momentum is authored — and the editor
-already knows the frame each call lands on.
+already knows the frame each call lands on. `REVERSE_LR` is now handled in the measured slice
+below.
 
 **Measured 2026-08-05, and this is the Rule 5 correction: four of the five named macros have
 zero corpus calls, and the reason is structural.** `sv_kinetic_energy` 0, `SET_SPEED_EX` 0,
@@ -2297,13 +2298,27 @@ the speed macros.
   `FIGHTER_DOLLY_STATUS_SPECIAL_HI_WORK_FLAG_REVERSE_LR` in `WorkModule::on_flag` — a flag name
   that ends in the macro name. Word-boundary the pattern and read the call site; see the
   `ACMD family prefix and const collisions` note.
-- **Before scheduling this, re-scope it.** Either split `REVERSE_LR` out as its own small entry
-  and leave the speed macros parked behind a re-measure, or fetch status-module sources and
-  decide whether they are in scope for this editor at all. Do not take the entry as written —
-  the round-trip bar cannot be met for four of its five members.
+- **Scope decision.** `REVERSE_LR` is handled as its own small slice below. The four zero-count
+  speed/kinetic names remain parked behind a re-measure; status-module sources are outside this
+  ACMD editor's current input boundary, so the full E1 entry remains open.
 - **Trap:** these change where the fighter *is*, so previewing them means moving the model,
   not drawing a box. Scope the first pass to editing values with no viewport preview, and say
   so in the entry when you take it.
+
+#### [x] E1a — `REVERSE_LR` point events (completed 2026-08-08; live runtime unverified)
+
+The measured seven-call family now has one typed ACMD statement/event walk with source ordinals,
+one-based frame conversion, timeline markers, a Movement panel for add/remove/move, capture
+adoption, project/edit-log persistence, generated ACMD export, and flat-source write-back. The
+live surface uses category 11: an observed call can be suppressed, and an edited point can be
+injected through the exact `sv_animcmd::REVERSE_LR` hook with an explicit zero-argument command.
+Branches and loops are retained but structural source placement changes in them are reported as
+unsupported rather than guessed into an execution arm.
+
+The desktop viewport does not simulate the fighter's facing change in this first slice, and no
+emulator, game, or UI automation was run. The plugin builds and the offline contract tests cover
+parse/IR, timeline/capture conversion, panel model edits, wire parity, export read-back, and
+source write-back; live in-game behavior remains unverified.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

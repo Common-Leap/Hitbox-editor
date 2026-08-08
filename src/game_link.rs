@@ -366,6 +366,9 @@ pub const CAT_MOTION_RATE: u8 = 9;
 /// travels on [`HitboxRuleWire::func`] because the three members have different argument shapes.
 pub const CAT_EXPRESSION: u8 = 10;
 
+/// Wire category for the argument-less `REVERSE_LR` facing-direction point.
+pub const CAT_REVERSE_LR: u8 = 11;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -526,7 +529,8 @@ fn is_zero_u8(v: &u8) -> bool {
 #[derive(Clone, Debug, Serialize)]
 pub struct HitboxRuleWire {
     pub motion: u64,
-    /// Collision family: 0 attack, 1 grab, 2 wind. Omitted when 0 so old plugins default it.
+    /// Rule family: 0 attack, 1 grab, 2 wind, and 11 `REVERSE_LR`. Omitted when 0 so old
+    /// plugins default to the attack family.
     #[serde(skip_serializing_if = "is_zero_u8")]
     pub category: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2402,6 +2406,82 @@ mod tests {
                 "CAT_EXPRESSION collides with another family"
             );
         }
+    }
+
+    /// The editor and plugin agree on the separate point-event category and its hook. Keeping it
+    /// out of the collision categories matters: a facing rule has no hitbox id or payload to
+    /// apply, and routing it through ATTACK would turn an orientation edit into a collision edit.
+    #[test]
+    fn the_reverse_lr_category_and_hook_match_the_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/hitbox_viewer");
+        let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
+        assert!(module.contains(&format!("pub const CAT_REVERSE_LR: u8 = {CAT_REVERSE_LR};")));
+        assert!(module.contains("replace = smash::app::sv_animcmd::REVERSE_LR"));
+        assert!(module.contains("hook_reverse_lr"));
+        assert!(module.contains("CAT_REVERSE_LR =>"));
+        for other in [
+            0,
+            CAT_ABS,
+            CAT_SEARCH,
+            CAT_ATK_POWER,
+            CAT_ATK_SETOFF_MUL,
+            CAT_SOUND,
+            CAT_MOTION_RATE,
+            CAT_EXPRESSION,
+        ] {
+            assert_ne!(
+                CAT_REVERSE_LR, other,
+                "CAT_REVERSE_LR collides with {other}"
+            );
+        }
+    }
+
+    /// Suppression and zero-argument injection use the same wire lane. The command discriminator
+    /// is explicit on injection so a future point-event category cannot accidentally fire the
+    /// wrong no-argument animcmd primitive.
+    #[test]
+    fn outbound_reverse_lr_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        link.send_hitbox_rules(&[
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_REVERSE_LR,
+                hitbox_id: Some(0),
+                suppress: true,
+                frame_start: Some(1.5),
+                frame_end: Some(2.5),
+                overrides: None,
+                inject: None,
+                func: None,
+            },
+            HitboxRuleWire {
+                motion: 0x99,
+                category: CAT_REVERSE_LR,
+                hitbox_id: None,
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(InjectRuleWire {
+                    frame: 3.0,
+                    args: Vec::new(),
+                    command: Some("REVERSE_LR".into()),
+                }),
+                func: None,
+            },
+        ]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rules = value["hitbox_rules"].as_array().unwrap();
+        assert_eq!(rules[0]["category"].as_u64(), Some(CAT_REVERSE_LR as u64));
+        assert_eq!(rules[0]["hitbox_id"].as_u64(), Some(0));
+        assert_eq!(rules[0]["suppress"].as_bool(), Some(true));
+        assert_eq!(rules[1]["category"].as_u64(), Some(CAT_REVERSE_LR as u64));
+        assert_eq!(rules[1]["inject"]["frame"].as_f64(), Some(3.0));
+        assert_eq!(rules[1]["inject"]["args"].as_array().unwrap().len(), 0);
+        assert_eq!(rules[1]["inject"]["command"].as_str(), Some("REVERSE_LR"));
     }
 
     /// A rule for any other family carries no `func`, and the field is omitted entirely.
