@@ -142,6 +142,36 @@ pub fn spawn_fetch() -> std::sync::mpsc::Receiver<Msg> {
 /// `(symbolic name, lua value)` pairs for one attribute slot, ordered by value.
 pub type ConstTable = &'static [(&'static str, i64)];
 
+/// Work slots used by the measured `EFFECT_DETACH_KIND_WORK` corpus.
+///
+/// This is intentionally a small, evidence-bounded table rather than a general WorkModule
+/// constant dump. The names and values are the five distinct tokens found in the retained public
+/// standard/HDR script corpus, transcribed from the pinned `skyline-smash` `lua_const.rs` table.
+/// Keeping the table narrow prevents an unverified game-version mapping from being presented as
+/// portable. Unknown Work IDs remain authored source text and are not sent as live replacements.
+pub const EFFECT_DETACH_KIND_WORK_SLOTS: ConstTable = &[
+    (
+        "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_AFTERBURNER_LINE",
+        0x100000D3,
+    ),
+    (
+        "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_ARC1",
+        0x100000CC,
+    ),
+    (
+        "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_ARC2",
+        0x100000CD,
+    ),
+    (
+        "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1",
+        0x100000CA,
+    ),
+    (
+        "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_WITCHTWIST_WIND",
+        0x100000D4,
+    ),
+];
+
 /// `ATTACK_SETOFF_KIND_*` — clank/setoff behaviour.
 pub const SETOFF_KIND: ConstTable = &[
     ("ATTACK_SETOFF_KIND_OFF", 0x0),
@@ -728,5 +758,42 @@ mod tests {
     fn empty_encodes_to_none() {
         assert_eq!(super::encode_const(super::SOUND_LEVEL, ""), None);
         assert_eq!(super::encode_collision_attr("  "), None);
+    }
+
+    #[test]
+    fn measured_work_detach_tokens_encode_with_the_pinned_slots() {
+        let expected = [
+            (
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_AFTERBURNER_LINE",
+                0x100000D3,
+            ),
+            (
+                "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_ARC1",
+                0x100000CC,
+            ),
+            (
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_ARC2",
+                0x100000CD,
+            ),
+            (
+                "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1",
+                0x100000CA,
+            ),
+            (
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_WITCHTWIST_WIND",
+                0x100000D4,
+            ),
+        ];
+        for (name, value) in expected {
+            assert_eq!(
+                super::const_value(super::EFFECT_DETACH_KIND_WORK_SLOTS, name),
+                Some(value),
+                "symbolic Work slot {name}"
+            );
+        }
+        assert_eq!(
+            super::const_value(super::EFFECT_DETACH_KIND_WORK_SLOTS, "OTHER_WORK"),
+            None
+        );
     }
 }

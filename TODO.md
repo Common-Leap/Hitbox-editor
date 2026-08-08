@@ -1812,12 +1812,15 @@ shape, not hardware evidence: no emulator, game, or UI automation was run.
 `EFFECT_DETACH_KIND_WORK` reaches its primitive after the smash-script wrapper resolves the
 authored `WorkModule` slot, so the plugin observes the runtime effect handle rather than the
 source Work ID. Unchanged Work IDs can therefore be captured, suppressed, and replayed, and
-frame/unknown-value edits can reuse that captured handle. Numeric edited Work IDs now have a
-bounded live path: the desktop sends the validated `i32` slot and the plugin resolves it with
-`WorkModule::get_int64` at injection time before dispatching the primitive. Symbolic edited Work
-IDs still cannot be converted without a verified runtime mapping; export and source write-back
-retain every authored token, and live preview reports that remaining limitation. This keeps the
-remaining C4 boundary explicit instead of guessing at WorkModule semantics.
+frame/unknown-value edits can reuse that captured handle. The retained public standard/HDR corpus
+has 15 calls in each tree but only five distinct symbolic Work tokens; their exact slots are
+present in the pinned `skyline-smash` constant table. Those five measured symbolic IDs, along
+with numeric slots, now have a bounded live path: the desktop sends a validated `i32` slot and the
+plugin resolves it with `WorkModule::get_int64` at injection time before dispatching the
+primitive. Symbolic IDs outside that measured table still cannot be converted safely; export and
+source write-back retain every authored token, and live preview reports that remaining
+limitation. This keeps the remaining C4 boundary explicit instead of guessing at WorkModule
+semantics. Live runtime behavior remains unverified without a reauthorized game run.
 
 The earlier "measured after A3" line counted `SET_PLAY_INHIVIT` without reading its signature,
 which is the trap two entries above this one warns about, applied to an entry's *own* evidence.

@@ -29,8 +29,8 @@ pub struct ControlRule {
     pub frame_start: Option<f32>,
     #[serde(default)]
     pub frame_end: Option<f32>,
-    /// Numeric WorkModule slot to resolve when injecting `EFFECT_DETACH_KIND_WORK`. The source
-    /// token is often symbolic; the desktop sends this only when the edited token is numeric.
+    /// WorkModule slot to resolve when injecting `EFFECT_DETACH_KIND_WORK`. The desktop sends this
+    /// only for numeric values or symbolic IDs covered by its measured constant table.
     #[serde(default)]
     pub work_slot: Option<i32>,
 }

@@ -5653,9 +5653,10 @@ pub enum EffectControl {
     DetachKind { effect_name: String, unk: i64 },
     /// Detach the effect handle held in a WorkModule slot without killing it.
     ///
-    /// The token is retained exactly as authored (`*FIGHTER_…` included). Numeric tokens can be
-    /// resolved for a bounded live injection; symbolic source constants remain source/export
-    /// data because the editor cannot safely resolve them offline.
+    /// The token is retained exactly as authored (`*FIGHTER_…` included). Numeric tokens and the
+    /// small measured table in `param_labels` can be resolved for a bounded live injection;
+    /// other symbolic source constants remain source/export data because the editor cannot safely
+    /// resolve them offline.
     DetachKindWork { work: String, unk: i64 },
     /// Enable an existing fighter area.
     EnableArea { kind: String },

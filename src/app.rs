@@ -19521,11 +19521,14 @@ impl VisionaryApp {
         token.parse().ok()
     }
 
-    /// A numeric `EFFECT_DETACH_KIND_WORK` token can be resolved at live-injection time. The
-    /// source may also contain symbolic Work IDs, but those need a game-specific constant map
-    /// that the editor intentionally does not invent.
+    /// Numeric `EFFECT_DETACH_KIND_WORK` tokens and the measured symbolic tokens in
+    /// [`crate::param_labels::EFFECT_DETACH_KIND_WORK_SLOTS`] can be resolved at live-injection
+    /// time. Other symbolic Work IDs remain source/export-only because the editor must not invent
+    /// a game-version-specific constant mapping.
     fn control_work_slot(work: &str) -> Option<i32> {
-        Self::control_integer(work).and_then(|value| i32::try_from(value).ok())
+        crate::param_labels::const_value(crate::param_labels::EFFECT_DETACH_KIND_WORK_SLOTS, work)
+            .or_else(|| crate::param_labels::parse_raw_value(work))
+            .and_then(|value| i32::try_from(value).ok())
     }
 
     fn control_hash_arg(
@@ -19553,8 +19556,8 @@ impl VisionaryApp {
     ///
     /// Detach-by-kind has a directly hashable source value. Area constants can be rebuilt only
     /// when the editor holds a numeric value; an unchanged symbolic area safely reuses the
-    /// captured runtime integer. Work-slot detach is deliberately narrower: unchanged or
-    /// symbolic calls reuse the captured handle, while a changed numeric token is sent as a
+    /// captured runtime integer. Work-slot detach is deliberately narrower: unchanged calls
+    /// reuse the captured handle, while a changed numeric or measured symbolic token is sent as a
     /// separately validated WorkModule slot for the plugin to resolve at injection time.
     fn effect_control_injection_args(
         was: &crate::data::EffectControl,
@@ -29944,7 +29947,7 @@ mod effect_control_rule_tests {
     }
 
     #[test]
-    fn work_detach_reuses_runtime_handle_and_accepts_numeric_work_slot_changes() {
+    fn work_detach_reuses_runtime_handle_and_accepts_measured_work_slot_changes() {
         let was = EffectControl::DetachKindWork {
             work: "WORK_INT".into(),
             unk: 0,
@@ -29959,6 +29962,11 @@ mod effect_control_rule_tests {
         };
         let changed_numeric_work = EffectControl::DetachKindWork {
             work: "17".into(),
+            unk: -1,
+        };
+        let changed_symbolic_work = EffectControl::DetachKindWork {
+            work: "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1"
+                .into(),
             unk: -1,
         };
         let donor = vec![A::Int(0x1234), A::Int(0)];
@@ -29976,12 +29984,22 @@ mod effect_control_rule_tests {
             Some(vec![A::Int(0x1234), A::Int(-1)])
         );
         assert_eq!(
+            VisionaryApp::effect_control_injection_args(&was, &changed_symbolic_work, &donor),
+            Some(vec![A::Int(0x1234), A::Int(-1)])
+        );
+        assert_eq!(
             VisionaryApp::control_work_slot("WORK_INT"),
             None,
-            "symbolic source tokens remain unresolved for live replacement"
+            "unmeasured symbolic source tokens remain unresolved for live replacement"
         );
         assert_eq!(VisionaryApp::control_work_slot("17"), Some(17));
         assert_eq!(VisionaryApp::control_work_slot("0x12"), Some(18));
+        assert_eq!(
+            VisionaryApp::control_work_slot(
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1"
+            ),
+            Some(0x100000CA)
+        );
     }
 
     #[test]

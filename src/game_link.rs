@@ -170,8 +170,9 @@ pub struct EffectControlRuleWire {
     pub frame_start: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_end: Option<f32>,
-    /// Numeric replacement WorkModule slot for `EFFECT_DETACH_KIND_WORK` injection. Symbolic
-    /// Work IDs remain source/export-only because the primitive receives the resolved handle.
+    /// Replacement WorkModule slot for `EFFECT_DETACH_KIND_WORK` injection. The desktop sends this
+    /// only for numeric values or symbolic IDs covered by its measured constant table; the
+    /// primitive itself receives the resolved effect handle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_slot: Option<i32>,
     /// Re-fire the captured point at a new motion frame after suppressing its pristine call.
