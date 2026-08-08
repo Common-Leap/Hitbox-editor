@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**569 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**571 unit tests, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2372,7 +2372,11 @@ by vendored `smash-script` wrappers. The same corpus has **2 exact textual
 `macros::SET_SPEED(agent, x, y)` calls**. `SET_SPEED` has a linked primitive but no safe Rust macro
 wrapper in the vendored crate, so the generated source uses a local Lua-stack helper over that
 primitive while editable source keeps the original macro spelling. Kinetics outside these
-verified ACMD shapes remain outside this editor's current input boundary.
+verified ACMD shapes remain outside this editor's current input boundary. The public dumped-script
+corpus has 190 exact direct `KineticModule::change_kinetic` calls in its verbose `smashline` tree
+and the same 190 calls in its HDR tree; the two representations use `agent.module_accessor` and
+`boma` respectively. Those direct forms are covered by E1h and E1i below, while the broader
+status-module and `sv_kinetic_energy` families remain open.
 
 `REVERSE_LR` is the local-cache exception that started this slice: **7 real calls**, all
 `macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,
@@ -2504,11 +2508,9 @@ matching Skyline hooks, generated ACMD export, and source write-back. `CLR_SPEED
 authored kinetic-ID token and supports numeric live-keyed value replacement; `SET_AIR` supports
 flat structural remove, add, and retime operations through the source writer. The source writer
 refuses branches, loops, and site mismatches rather than guessing placement, while malformed
-shapes remain raw. The broader 190 external `KineticModule::change_kinetic` calls remain outside
-this locally measured input boundary and are not claimed by the ACMD macro slice; the one exact
-local direct `game_` call is handled by E1h below.
+shapes remain raw.
 
-Offline validation passed: focused and full desktop tests (569 tests, 1 ignored), strict Clippy,
+Offline validation passed: focused and full desktop tests (571 tests, 1 ignored), strict Clippy,
 format/diff checks, the debug build-check wrapper, the locked release build, and the Skyline
 plugin release build. No emulator, game, or UI automation was run, so live in-game behavior
 remains unverified.
@@ -2525,15 +2527,30 @@ The completed slice carries the authored kinetic-type token through parser/IR, t
 and timeline, live capture reconstruction, portable project serialization, category-21 wire
 rules, the matching Skyline hook and direct injection path, generated ACMD export, and value-only
 source write-back. Named source constants remain source/export-owned; numeric live replacement is
-sent only when a matching capture proves the pristine runtime type. Malformed arity, receiver, and
-non-game status-module calls remain raw, and source syncing refuses structural or retime edits
-rather than guessing placement.
+sent only when a matching capture proves the pristine runtime type. Malformed arity, unmeasured
+receivers, and non-game status-module calls remain raw, and source syncing refuses structural or
+retime edits rather than guessing placement. The verbose `agent.module_accessor` source form is
+covered here; the HDR `boma` form is the separate E1i slice below.
 
-Offline validation passed: focused and full desktop tests (569 tests, 1 ignored + 6 integration),
+Offline validation passed: focused and full desktop tests (571 tests, 1 ignored + 6 integration),
 strict Clippy, format/diff checks, the debug build-check wrapper, the locked release build, and
 the Skyline plugin release build. No emulator, game, or UI automation was run, so live in-game
 behavior remains unverified. The E1 parent stays open for the broader external status-module
 corpus and other unmeasured kinetics.
+
+#### [x] E1i — HDR `boma` direct `KineticModule::change_kinetic` points (completed 2026-08-08; live runtime unverified)
+
+The public dumped-script corpus's HDR representation contains the same 190 exact direct kinetic
+points, written as `KineticModule::change_kinetic(boma, kinetic_type)`. Every caller declares
+`let boma = agent.boma()` in the surrounding game function, so this is a measured receiver alias,
+not a reason to accept arbitrary status-module pointers. The parser normalizes the call into the
+same typed `ChangeKineticCall`; generated ACMD uses the portable `agent.module_accessor` form,
+while source syncing edits only the authored kinetic token and retains `boma` in the source.
+
+Offline regression coverage checks parsing, generated-source round-trip, and value-only write-back
+for the HDR shape. Other receivers, malformed arities, and the broader status-module kinetic
+families remain raw. No emulator, game, or UI automation was run, so live in-game behavior
+remains unverified.
 
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 

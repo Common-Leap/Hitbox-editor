@@ -4033,15 +4033,20 @@ pub fn sync_clr_speed(
     })
 }
 
+/// Whether a direct `KineticModule::change_kinetic` receiver is one of the measured source forms.
+/// The HDR dump binds `boma` to `agent.boma()` at the top of the function; generated source uses
+/// `agent.module_accessor`, so this receiver is normalized only for parsing and source syncing.
+fn is_change_kinetic_receiver(value: &str) -> bool {
+    matches!(value.trim(), "agent.module_accessor" | "boma")
+}
+
 /// The verified direct `KineticModule::change_kinetic` calls in source order.
 pub(crate) fn change_kinetic_sites(text: &str) -> Vec<MacroSite> {
     scan_named_sites(text, crate::data::ChangeKineticCall::FUNC, 0..text.len())
         .into_iter()
         .filter(|site| {
             site.args.len() == 2
-                && site
-                    .arg(text, 0)
-                    .is_some_and(|value| value.trim() == "agent.module_accessor")
+                && site.arg(text, 0).is_some_and(is_change_kinetic_receiver)
                 && site
                     .arg(text, 1)
                     .is_some_and(|value| !value.trim().is_empty())
@@ -4099,10 +4104,10 @@ pub fn rewrite_change_kinetic(
         }
         if site
             .arg(text, 0)
-            .is_none_or(|value| value.trim() != "agent.module_accessor")
+            .is_none_or(|value| !is_change_kinetic_receiver(value))
         {
             report.skipped.push(format!(
-                "{label}: `KineticModule::change_kinetic` site {} no longer targets `agent.module_accessor`",
+                "{label}: `KineticModule::change_kinetic` site {} no longer targets a measured module receiver",
                 before.site
             ));
             continue;
@@ -7976,6 +7981,31 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             "KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_GROUND);"
         ));
         assert!(after.contains("frame(agent.lua_state_agent, 19.0);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_change_kinetic_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn change_kinetic_source_sync_rewrites_the_measured_boma_shape() {
+        let text = r#"unsafe extern "C" fn game_passiveceil(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 18.0);
+    if is_excute(agent) {
+        KineticModule::change_kinetic(boma, *FIGHTER_KINETIC_TYPE_PASSIVE_CEIL);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_change_kinetic_events();
+        let mut edited = pristine.clone();
+        edited[0].call.kinetic_type = "*FIGHTER_KINETIC_TYPE_FALL".into();
+        let (after, report) =
+            rewrite_change_kinetic(text, "bayonetta/passive_ceil", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("KineticModule::change_kinetic(boma, *FIGHTER_KINETIC_TYPE_FALL);"));
+        assert!(after.contains("let boma = agent.boma();"));
         assert_eq!(
             crate::acmd::parse_acmd_script(&after).to_change_kinetic_events(),
             edited

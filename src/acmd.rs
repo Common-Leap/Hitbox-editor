@@ -1989,8 +1989,10 @@ fn parse_set_air_call(line: &str) -> Option<ExcuteStmt> {
     (tokens.as_slice() == ["agent"]).then_some(ExcuteStmt::SetAir)
 }
 
-/// Parse the measured direct lua-bind shape:
-/// `KineticModule::change_kinetic(agent.module_accessor, kinetic_type)`.
+/// Parse the measured direct lua-bind shapes:
+/// `KineticModule::change_kinetic(agent.module_accessor, kinetic_type)` and the HDR dump form
+/// `KineticModule::change_kinetic(boma, kinetic_type)`, where the surrounding function declares
+/// `let boma = agent.boma()`.
 /// Qualified generated forms are accepted by the same suffix match; other receivers and arities
 /// remain raw because they may belong to status code rather than this ACMD input boundary.
 fn parse_change_kinetic_call(line: &str) -> Option<ExcuteStmt> {
@@ -2001,7 +2003,9 @@ fn parse_change_kinetic_call(line: &str) -> Option<ExcuteStmt> {
     let [module_accessor, kinetic_type] = tokens.as_slice() else {
         return None;
     };
-    if module_accessor.trim() != "agent.module_accessor" || kinetic_type.trim().is_empty() {
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma")
+        || kinetic_type.trim().is_empty()
+    {
         return None;
     }
     Some(ExcuteStmt::ChangeKinetic(crate::data::ChangeKineticCall {
@@ -9121,6 +9125,35 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         let emitted = preview_game_fn(&script, "escape_air");
         assert!(emitted.contains(
             "KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_FALL);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_change_kinetic_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn direct_change_kinetic_parses_the_measured_boma_shape() {
+        let source = r#"unsafe extern "C" fn game_passiveceil(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 18.0);
+    if is_excute(agent) {
+        KineticModule::change_kinetic(boma, *FIGHTER_KINETIC_TYPE_PASSIVE_CEIL);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_change_kinetic_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame, 18);
+        assert_eq!(
+            events[0].call.kinetic_type,
+            "*FIGHTER_KINETIC_TYPE_PASSIVE_CEIL"
+        );
+
+        let emitted = preview_game_fn(&script, "passive_ceil");
+        assert!(emitted.contains(
+            "KineticModule::change_kinetic(agent.module_accessor, *FIGHTER_KINETIC_TYPE_PASSIVE_CEIL);"
         ));
         assert_eq!(
             parse_acmd_script(&emitted).to_change_kinetic_events(),
