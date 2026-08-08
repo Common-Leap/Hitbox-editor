@@ -1713,6 +1713,16 @@ pub struct ExpressionEvent {
     pub site: usize,
 }
 
+/// A `MotionModule::set_frame_partial` call whose native boolean contract is not yet measured.
+///
+/// The source line is intentionally retained as text: it is safe to show and export, but not to
+/// turn into an editable live point until the missing argument has a version-matched meaning.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RawPartialFrameEvent {
+    pub frame: u32,
+    pub source: String,
+}
+
 /// A resolved `REVERSE_LR` point event at the one-based game frame it fires on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReverseLrEvent {
@@ -2182,6 +2192,18 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.expressions
+    }
+
+    /// Flatten source-preserved partial-frame calls into read-only frame events.
+    ///
+    /// These are deliberately separate from [`ExpressionEvent`]: the parser has no measured
+    /// boolean value for the native binding's fourth argument, so the editor may report the
+    /// authored line but must not offer a live or typed edit for it.
+    pub fn to_raw_partial_frame_events(&self) -> Vec<RawPartialFrameEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.raw_partial_frames
     }
 
     /// Flatten `REVERSE_LR` calls into point events at their one-based game frames.
@@ -3556,6 +3578,7 @@ struct WalkAccum {
     mods: Vec<AttackModState>,
     sounds: Vec<SoundEvent>,
     expressions: Vec<ExpressionEvent>,
+    raw_partial_frames: Vec<RawPartialFrameEvent>,
     reverse_lrs: Vec<ReverseLrEvent>,
     speed_exs: Vec<SetSpeedExEvent>,
     speeds: Vec<SetSpeedEvent>,
@@ -4364,6 +4387,17 @@ impl WalkAccum {
     }
 }
 
+fn record_raw_partial_frame(line: &str, frame: f32, hurt: &mut WalkAccum) {
+    // Keep the exact call family bounded. The `_sync_anim_cmd` variants do not match this
+    // spelling because their names continue with `_` rather than `(` after `partial`.
+    if line.contains("MotionModule::set_frame_partial(") {
+        hurt.raw_partial_frames.push(RawPartialFrameEvent {
+            frame: script_frame(frame),
+            source: line.to_string(),
+        });
+    }
+}
+
 /// Run one statement from inside an `is_excute` block, or one written bare beside it.
 ///
 /// Split out of [`eval_stmts`] when [`AcmdStmt::Bare`] arrived so both routes share one
@@ -4702,7 +4736,7 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                 site,
             });
         }
-        ExcuteStmt::Raw(_) => {}
+        ExcuteStmt::Raw(line) => record_raw_partial_frame(line, frame, hurt),
     }
 }
 
@@ -4722,7 +4756,8 @@ fn eval_stmts(
             // them. Rate converts motion frames to game frames, which is a separate mapping —
             // see [`game_frame_spans`] — and applying it here would move every hitbox to a
             // frame its own source does not mention.
-            AcmdStmt::WaitLoopClear | AcmdStmt::Raw(_) | AcmdStmt::MotionRate(_) => {}
+            AcmdStmt::WaitLoopClear | AcmdStmt::MotionRate(_) => {}
+            AcmdStmt::Raw(line) => record_raw_partial_frame(line, frame, hurt),
             AcmdStmt::Excute(stmts) => {
                 for s in stmts {
                     eval_excute_stmt(s, frame, hitboxes, hurt);
@@ -5022,6 +5057,9 @@ pub struct AppState {
     pub expressions: Vec<ExpressionEvent>,
     /// The same expression events as loaded, before edits.
     pub expressions_pristine: Vec<ExpressionEvent>,
+    /// Direct `MotionModule::set_rate_partial` points from the current `expression_` function,
+    /// kept separately because the live capture stream does not identify an ACMD category.
+    pub expression_motion_module_set_rate_partial_pristine: Vec<MotionModuleSetRatePartialEvent>,
     /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
     pub hitboxes_pristine: Vec<Hitbox>,
     /// Hurtbox spans as loaded, for source syncing to diff against.
@@ -5167,6 +5205,7 @@ impl Default for AppState {
             expression_script: AcmdScript::default(),
             expressions: Vec::new(),
             expressions_pristine: Vec::new(),
+            expression_motion_module_set_rate_partial_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             attack_mods_pristine: Vec::new(),

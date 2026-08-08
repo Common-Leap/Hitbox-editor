@@ -4384,6 +4384,26 @@ pub fn sync_motion_module_set_rate_partial(
     })
 }
 
+/// Sync edited direct `MotionModule::set_rate_partial` values into the project's `expression_`
+/// function. The rewrite is shared with the `game_` path; only the category anchor differs.
+pub fn sync_expression_motion_module_set_rate_partial(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::MotionModuleSetRatePartialEvent],
+    edited: &[crate::data::MotionModuleSetRatePartialEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("expression", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_motion_module_set_rate_partial(
+            body,
+            &format!("{fighter}/{move_name}"),
+            pristine,
+            edited,
+        )
+    })
+}
+
 // ── Kinetic point write-back ────────────────────────────────────────────────
 
 /// The buildable `CLR_SPEED` calls and generated helper calls in source order.
@@ -10298,6 +10318,33 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         ));
         assert_eq!(
             crate::acmd::parse_acmd_script(&after).to_motion_module_set_rate_partial_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn expression_motion_module_set_rate_partial_source_sync_uses_expression_category() {
+        let text = r#"unsafe extern "C" fn expression_appeallwl(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0.5);
+    }
+}
+"#;
+        let script = crate::acmd::parse_expression_script(text);
+        let pristine = script.to_motion_module_set_rate_partial_events();
+        let mut edited = pristine.clone();
+        edited[0].call.rate = 1.25;
+        let (after, report) =
+            rewrite_motion_module_set_rate_partial(text, "pacman/appeal_lw_l", &pristine, &edited)
+                .unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains(
+            "MotionModule::set_rate_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 1.25);"
+        ));
+        assert_eq!(
+            crate::acmd::parse_expression_script(&after).to_motion_module_set_rate_partial_events(),
             edited
         );
     }

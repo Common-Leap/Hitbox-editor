@@ -255,6 +255,9 @@ fn adopt_captured_expressions(
     state.expression_script = captured;
     state.expressions = state.expression_script.to_expression_events();
     state.expressions_pristine = state.expressions.clone();
+    state.expression_motion_module_set_rate_partial_pristine = state
+        .expression_script
+        .to_motion_module_set_rate_partial_events();
     true
 }
 
@@ -1207,6 +1210,7 @@ type SourceMirror = (
     Vec<crate::data::KineticSetConsiderGroundFrictionEvent>,
     Vec<crate::data::MotionModuleSetRateEvent>,
     Vec<crate::data::MotionModuleSetHelperCalculationEvent>,
+    Vec<crate::data::MotionModuleSetRatePartialEvent>,
     Vec<crate::data::MotionModuleSetRatePartialEvent>,
     Vec<crate::data::WorkFlagEvent>,
     Vec<crate::data::WorkTransitionTermEvent>,
@@ -2629,6 +2633,7 @@ impl VisionaryApp {
                 motion_module_set_rate,
                 motion_module_set_helper_calculation,
                 motion_module_set_rate_partial,
+                expression_motion_module_set_rate_partial,
                 work_flags,
                 work_transition_terms,
                 work_module_sets,
@@ -2666,6 +2671,11 @@ impl VisionaryApp {
                             .to_motion_module_set_helper_calculation_events()
                     && *motion_module_set_rate_partial
                         == self.state.script.to_motion_module_set_rate_partial_events()
+                    && *expression_motion_module_set_rate_partial
+                        == self
+                            .state
+                            .expression_script
+                            .to_motion_module_set_rate_partial_events()
                     && *work_flags == self.state.script.to_work_flag_events()
                     && *work_transition_terms == self.state.script.to_work_transition_term_events()
                     && *work_module_sets == self.state.script.to_work_module_set_events()
@@ -2702,6 +2712,9 @@ impl VisionaryApp {
                 .script
                 .to_motion_module_set_helper_calculation_events(),
             self.state.script.to_motion_module_set_rate_partial_events(),
+            self.state
+                .expression_script
+                .to_motion_module_set_rate_partial_events(),
             self.state.script.to_work_flag_events(),
             self.state.script.to_work_transition_term_events(),
             self.state.script.to_work_module_set_events(),
@@ -2764,6 +2777,9 @@ impl VisionaryApp {
             let expressions = expression_script.to_expression_events();
             self.state.expressions_pristine = expressions.clone();
             self.state.expressions = expressions;
+            self.state
+                .expression_motion_module_set_rate_partial_pristine =
+                expression_script.to_motion_module_set_rate_partial_events();
             self.state.expression_script = expression_script;
             None
         } else {
@@ -2907,6 +2923,34 @@ impl VisionaryApp {
             )
         } else {
             Ok((buffer.text.clone(), Default::default()))
+        };
+        let outcome = if buffer.is_expression_script() {
+            match outcome {
+                Ok((updated, mut report)) => {
+                    match crate::acmd_src::rewrite_motion_module_set_rate_partial(
+                        &updated,
+                        &label,
+                        &self
+                            .state
+                            .expression_motion_module_set_rate_partial_pristine,
+                        &self
+                            .state
+                            .expression_script
+                            .to_motion_module_set_rate_partial_events(),
+                    ) {
+                        Ok((updated, partial_rate_report)) => {
+                            report.changed += partial_rate_report.changed;
+                            report.files.extend(partial_rate_report.files);
+                            report.skipped.extend(partial_rate_report.skipped);
+                            Ok((updated, report))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            outcome
         };
         let outcome = if buffer.is_game_script() {
             match outcome {
@@ -3675,6 +3719,7 @@ impl VisionaryApp {
                     }
                     Err(e) => notes.push(e.to_string()),
                 }
+                refresh_acmd_index(&mut index, &mut notes);
             }
         }
         if index
@@ -3692,6 +3737,35 @@ impl VisionaryApp {
                     &move_name,
                     &self.state.expressions_pristine,
                     &self.state.expressions,
+                ) {
+                    Ok(report) => {
+                        changed += report.changed;
+                        files.extend(report.files);
+                        notes.extend(report.skipped);
+                    }
+                    Err(e) => notes.push(e.to_string()),
+                }
+                refresh_acmd_index(&mut index, &mut notes);
+            }
+            if self
+                .state
+                .expression_script
+                .to_motion_module_set_rate_partial_events()
+                != self
+                    .state
+                    .expression_motion_module_set_rate_partial_pristine
+            {
+                match crate::acmd_src::sync_expression_motion_module_set_rate_partial(
+                    &index,
+                    &fighter,
+                    &move_name,
+                    &self
+                        .state
+                        .expression_motion_module_set_rate_partial_pristine,
+                    &self
+                        .state
+                        .expression_script
+                        .to_motion_module_set_rate_partial_events(),
                 ) {
                     Ok(report) => {
                         changed += report.changed;
@@ -3777,7 +3851,12 @@ impl VisionaryApp {
         if state.sounds != state.sounds_pristine {
             edited.push("sound_");
         }
-        if state.expressions != state.expressions_pristine {
+        if state.expressions != state.expressions_pristine
+            || state
+                .expression_script
+                .to_motion_module_set_rate_partial_events()
+                != state.expression_motion_module_set_rate_partial_pristine
+        {
             edited.push("expression_");
         }
         edited
@@ -4140,6 +4219,8 @@ impl VisionaryApp {
                 self.state.expression_script = crate::data::AcmdScript::default();
                 self.state.expressions = Vec::new();
                 self.state.expressions_pristine = Vec::new();
+                self.state
+                    .expression_motion_module_set_rate_partial_pristine = Vec::new();
                 self.state.speed_ex_pristine = Vec::new();
                 self.state.speed_pristine = Vec::new();
                 self.state.add_speed_no_limit_pristine = Vec::new();
@@ -6527,7 +6608,15 @@ impl VisionaryApp {
     fn draw_expression_section(&mut self, ui: &mut Ui) {
         use crate::data::ExpressionCall;
 
-        if self.state.expressions.is_empty() {
+        let raw_partial_frames = self.state.expression_script.to_raw_partial_frame_events();
+        let partial_rate_events = self
+            .state
+            .expression_script
+            .to_motion_module_set_rate_partial_events();
+        if self.state.expressions.is_empty()
+            && partial_rate_events.is_empty()
+            && raw_partial_frames.is_empty()
+        {
             return;
         }
 
@@ -6539,8 +6628,92 @@ impl VisionaryApp {
         .response
         .on_hover_text(
             "Measured camera and rumble calls from the expression_ script. Unknown expression \
-             commands stay in the source and are not silently regenerated here.",
+             commands stay in the source and are not silently regenerated here; source-only \
+             partial-frame calls are shown below until their native boolean is measured.",
         );
+
+        let mut partial_rate_edit: Option<(usize, f32)> = None;
+        if !partial_rate_events.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(170, 220, 190),
+                "MotionModule::set_rate_partial (expression_)",
+            );
+            ui.label(
+                "The numeric rate is source-editable and exportable. Live replacement is held \
+                 back because capture lines do not identify whether this call came from game_ \
+                 or expression_.",
+            );
+            for event in &partial_rate_events {
+                let active = event.frame == self.state.current_frame;
+                let mut rate = event.call.rate;
+                let changed = ui
+                    .horizontal(|ui| {
+                        ui.colored_label(
+                            if active {
+                                egui::Color32::from_rgb(170, 220, 190)
+                            } else {
+                                egui::Color32::from_gray(140)
+                            },
+                            if active { "◆" } else { "◇" },
+                        );
+                        ui.label(format!("[{}] {}", event.frame, event.call.part_kind));
+                        ui.add(
+                            egui::DragValue::new(&mut rate)
+                                .speed(0.05)
+                                .range(0.0..=100.0)
+                                .prefix("rate "),
+                        )
+                        .changed()
+                    })
+                    .inner;
+                if changed {
+                    partial_rate_edit = Some((event.site, rate));
+                }
+            }
+        }
+
+        if !raw_partial_frames.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(235, 185, 100),
+                "Source-only MotionModule::set_frame_partial",
+            );
+            ui.label(
+                "These authored calls are preserved for export and source write-back. Their \
+                 native fourth boolean is not measured, so they are not live-editable.",
+            );
+            for event in raw_partial_frames {
+                let active = event.frame == self.state.current_frame;
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(235, 185, 100)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("[{}] {}", event.frame, event.source));
+                });
+            }
+        }
+
+        if let Some((site, rate)) = partial_rate_edit {
+            if let Some(call) = self
+                .state
+                .expression_script
+                .motion_module_set_rate_partial_stmt_mut(site)
+            {
+                call.rate = rate;
+                if let Some(key) = self.current_move_key() {
+                    self.state
+                        .expression_script_edits
+                        .insert(key, self.state.expression_script.clone());
+                }
+                self.state.status =
+                    "Expression MotionModule::set_rate_partial edit staged — export or sync it into the linked source project; live replacement is unavailable without the ACMD category in capture data."
+                        .into();
+            }
+        }
 
         let mut edit: Option<(usize, ExpressionCall)> = None;
         for event in &self.state.expressions {
@@ -9895,11 +10068,17 @@ impl VisionaryApp {
             .current_move_key()
             .and_then(|key| self.state.expression_script_edits.get(&key))
             .cloned();
+        let partial_baseline = self
+            .state
+            .expression_script
+            .to_motion_module_set_rate_partial_events();
         let (script, shown, baseline) =
             resolve_expression_state(&self.state.expression_script, saved);
         self.state.expression_script = script;
         self.state.expressions = shown;
         self.state.expressions_pristine = baseline;
+        self.state
+            .expression_motion_module_set_rate_partial_pristine = partial_baseline;
     }
 
     /// Rebuild `state.effects` from the pristine parse + this move's saved edits.
@@ -23043,6 +23222,9 @@ fn clear_move_state(state: &mut crate::data::AppState) {
     state.expression_script = crate::data::AcmdScript::default();
     state.expressions = Vec::new();
     state.expressions_pristine = Vec::new();
+    state
+        .expression_motion_module_set_rate_partial_pristine
+        .clear();
     state.acmd_source = String::new();
 }
 
@@ -25237,6 +25419,12 @@ mod live_effect_capture_tests {
         assert!(
             state.expressions_pristine.is_empty(),
             "expressions_pristine"
+        );
+        assert!(
+            state
+                .expression_motion_module_set_rate_partial_pristine
+                .is_empty(),
+            "expression_motion_module_set_rate_partial_pristine"
         );
         assert!(state.hurtboxes_pristine.0.is_empty(), "hurtboxes_pristine");
         assert!(

@@ -2745,7 +2745,7 @@ desktop suite passed 619 tests plus 1 existing ignored benchmark, the six deploy
 and the Skyline plugin release build passed. No live game runtime was used, so hook behavior on
 hardware remains explicitly unverified.
 
-#### [x] E1q — direct `MotionModule::set_rate_partial` points (completed 2026-08-08; live runtime unverified)
+#### [!] E1q — direct `MotionModule::set_rate_partial` points (game slice complete; expression live identity open)
 
 The retained public dumped-script corpus contains 44 exact direct
 `MotionModule::set_rate_partial(receiver, part_kind, rate)` calls in each of the standard and
@@ -2753,18 +2753,24 @@ HDR trees. Every standard call uses `agent.module_accessor`, every HDR call uses
 measured part tokens are the fighter upper-body part plus Pac-Man and Big Pac-Man material parts.
 The linked binding is the direct `(BattleObjectModuleAccessor, i32, f32) -> ()` primitive.
 
-The five surfaces are covered: the typed parser/IR preserves the authored part token and numeric
-rate; the movement panel and timeline expose the point; export reproduces the direct call; source
-write-back retunes only an existing numeric rate; and the live editor/plugin wire uses category 31,
-the captured numeric part kind plus pristine rate, and a positive finite replacement. Part-kind
-changes, add/remove, retiming, malformed calls, and zero live replacements remain source/export-only
-or explicitly reported as unrepresentable. `set_frame_partial` remains separate because its frame
-and sync-boolean payloads are not interchangeable with this rate-only shape.
+The 42 `game_` calls are covered on the five measured surfaces: the typed parser/IR preserves the
+authored part token and numeric rate; the movement panel and timeline expose the point; export
+reproduces the direct call; source write-back retunes only an existing numeric rate; and the live
+editor/plugin wire uses category 31, the captured numeric part kind plus pristine rate, and a
+positive finite replacement. Part-kind changes, add/remove, retiming, malformed calls, and zero
+live replacements remain source/export-only or explicitly reported as unrepresentable.
 
-Offline validation passed: `bash build_check.sh`; 626 desktop tests, 1 existing ignored renderer
-benchmark, all 6 deployment tests, the six named corpus-oracle filters, strict Clippy, format/diff
-checks, the locked release build, and the Skyline plugin release build. No emulator, game, or UI
-automation was run, so live hook behavior remains explicitly unverified. The E1 parent remains
+The two Pac-Man `expression_` calls now remain visible and editable in the expression panel,
+export with the expression script, and write back only their numeric rate. They do not enter the
+live rule path yet: `CaptureLine` carries the primitive and arguments but not the originating
+ACMD category, so a `game_` and `expression_` call at the same motion/frame cannot be separated
+without changing the capture contract. `set_frame_partial` remains separate because its frame and
+sync-boolean payloads are not interchangeable with this rate-only shape.
+
+Offline validation for this slice passed: 652 desktop tests, 1 existing ignored renderer
+benchmark, all 6 deployment tests, strict Clippy, format/diff checks, the locked Linux release
+build, the Skyline plugin release build, and the Windows MSVC cross-build. No emulator, game, or
+UI automation was run, so live hook behavior remains explicitly unverified. The E1 parent remains
 open for broader status-module calls, the absent `sv_kinetic_energy` corpus family, and the
 separately measured `get_sum_speed_y`/`set_frame_partial` shapes.
 
@@ -2789,6 +2795,8 @@ source-preserved and untyped.
 The parser/export regression test also keeps measured three-argument calls and a native-shaped
 four-argument call raw and round-trippable, including the corpus's `boma` receiver spelling. This
 guards the evidence boundary without pretending that the fourth boolean has been identified.
+The expression panel now surfaces those raw calls at their measured source frames as read-only
+source-only rows, so they remain visible without entering the typed/live rule path.
 
 #### [x] E1s — direct `WorkModule::on_flag` / `off_flag` points (completed 2026-08-08; live runtime unverified)
 
