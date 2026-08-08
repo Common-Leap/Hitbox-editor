@@ -132,7 +132,7 @@ fn scan_named_sites(text: &str, name: &str, range: Range<usize>) -> Vec<MacroSit
         if text[..i]
             .chars()
             .next_back()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':')
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.')
         {
             i += name.len();
             continue;
@@ -4794,6 +4794,21 @@ unsafe extern "C" fn my_custom_name(agent: &mut L2CAgentBase) {
         assert_eq!(sites.len(), 1, "found {sites:?}");
         assert_eq!(sites[0].name, "EFFECT");
         assert_eq!(sites[0].arg(text, 1), Some("4"));
+    }
+
+    #[test]
+    fn generated_helper_scanner_only_accepts_direct_calls() {
+        let text = r#"unsafe fn visionary_set_speed(agent: &mut L2CAgentBase, x: f32, y: f32) {}
+// visionary_set_speed(agent, 1, 2);
+let string = "visionary_set_speed(agent, 3, 4)";
+foo.visionary_set_speed(agent, 5, 6);
+macros::visionary_set_speed(agent, 7, 8);
+visionary_set_speed(agent, 9, 10);
+"#;
+        let sites = scan_named_sites(text, "visionary_set_speed", 0..text.len());
+        assert_eq!(sites.len(), 1, "found {sites:?}");
+        assert_eq!(sites[0].arg(text, 1), Some("9"));
+        assert_eq!(sites[0].arg(text, 2), Some("10"));
     }
 
     /// The scanners walk bytes, so anything multi-byte in the user's file used to be a
