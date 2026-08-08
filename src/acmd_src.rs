@@ -1339,6 +1339,16 @@ pub fn rewrite_effect_calls(
             &mut edits,
             &mut report,
         );
+        work_int_edits(
+            text,
+            label,
+            macro_site,
+            was.work_int.as_deref(),
+            target.work_int.as_deref(),
+            sites.and_then(|s| s.work_int.as_ref()),
+            &mut edits,
+            &mut report,
+        );
         modifier_edits(
             text,
             label,
@@ -1495,15 +1505,63 @@ fn modifier_edits(
     }
 }
 
+/// Rewrite the authored WorkModule slot of an existing `LAST_EFFECT_SET_WORK_INT` line.
+///
+/// Unlike the numeric last-effect modifiers, this value is a source token rather than a float:
+/// a named Work ID is meaningful only with its authored constant spelling. Adding or removing
+/// the line remains structural, so source syncing only changes an existing argument.
+#[allow(clippy::too_many_arguments)]
+fn work_int_edits(
+    text: &str,
+    label: &str,
+    macro_site: &MacroSite,
+    was: Option<&str>,
+    now: Option<&str>,
+    site: Option<&MacroSite>,
+    edits: &mut Vec<Replacement>,
+    report: &mut SyncReport,
+) {
+    if was == now {
+        return;
+    }
+    match (was, now, site) {
+        (Some(_), Some(value), Some(site)) => {
+            if let Some(edit) = site.args.get(1).and_then(|span| {
+                let replacement = crate::acmd::const_expr(value);
+                (text[span.clone()].trim() != replacement).then_some(Replacement {
+                    span: span.clone(),
+                    value: replacement,
+                })
+            }) {
+                edits.push(edit);
+            }
+        }
+        (None, Some(_), _) => report.skipped.push(format!(
+            "{label}: `{}` gained a Work ID — that is a new LAST_EFFECT_SET_WORK_INT line, which source syncing does not add",
+            macro_site.name
+        )),
+        (Some(_), None, _) => report.skipped.push(format!(
+            "{label}: `{}` lost its Work ID — source syncing does not delete the LAST_EFFECT_SET_WORK_INT line that sets it",
+            macro_site.name
+        )),
+        (Some(_), Some(_), None) => report.skipped.push(format!(
+            "{label}: `{}` has a Work ID in the editor but no LAST_EFFECT_SET_WORK_INT line directly beneath it in the source — reload the move from source",
+            macro_site.name
+        )),
+        (None, None, _) => {}
+    }
+}
+
 /// The `LAST_EFFECT_SET_*` / `LAST_PARTICLE_SET_COLOR` lines a spawn can carry, in the spelling
 /// `scan_macro_sites` reports.
 ///
-/// Only these five break nothing when they sit between a spawn and a later modifier of its
+/// Only these six break nothing when they sit between a spawn and a later modifier of its
 /// own; every other macro ends the run. Adding a member of the family to
 /// [`crate::data::EffectCall`] means adding it here too, or its line will end the run and the
 /// modifier after it will be reported as unfindable.
 const MODIFIER_COMMANDS: &[&str] = &[
     "LAST_EFFECT_SET_RATE",
+    "LAST_EFFECT_SET_WORK_INT",
     "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT",
     "LAST_EFFECT_SET_COLOR",
     "LAST_PARTICLE_SET_COLOR",
@@ -1514,6 +1572,7 @@ const MODIFIER_COMMANDS: &[&str] = &[
 #[derive(Default)]
 struct ModifierSites {
     rate: Option<MacroSite>,
+    work_int: Option<MacroSite>,
     camera_offset: Option<MacroSite>,
     tint: Option<MacroSite>,
     particle_tint: Option<MacroSite>,
@@ -1580,6 +1639,7 @@ fn spawn_and_modifier_sites(text: &str) -> (Vec<MacroSite>, Vec<ModifierSites>) 
         // A second line of the same kind overwrites the first, because in game the later call
         // wins and that is the value the parser will have read.
         let slot = match site.name.as_str() {
+            "LAST_EFFECT_SET_WORK_INT" => &mut entry.work_int,
             "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT" => &mut entry.camera_offset,
             "LAST_EFFECT_SET_COLOR" => &mut entry.tint,
             "LAST_PARTICLE_SET_COLOR" => &mut entry.particle_tint,
@@ -1637,6 +1697,7 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
         && a.rotation == b.rotation
         && a.scale == b.scale
         && a.rate == b.rate
+        && a.work_int == b.work_int
         && a.camera_offset == b.camera_offset
         && a.tint == b.tint
         && a.particle_tint == b.particle_tint
@@ -5000,12 +5061,10 @@ visionary_set_speed(agent, 9, 10);
         );
     }
 
-    /// A real opaque C7 line is not a modifier site, so retuning the spawn beside it must leave
-    /// the source call untouched. The generic macro scanner sees the line, but the effect
-    /// rewriter only owns the transform and the three established modifiers; this is the source
-    /// write-back half of keeping an unmodelled command present without inventing an edit field.
+    /// Retuning the spawn beside a Work ID line must leave that authored token untouched. The
+    /// Work ID is a separate source value, not part of the spawn transform.
     #[test]
-    fn syncing_a_spawn_does_not_delete_the_unwrapped_work_int_line_beside_it() {
+    fn syncing_a_spawn_does_not_delete_the_work_int_line_beside_it() {
         let source = r#"unsafe extern "C" fn effect_tornadostart(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
         macros::EFFECT_FOLLOW(agent, Hash40::new("metaknight_tornado"), Hash40::new("trans"), 0, 0, 0, 0, 0, 0, 1, false);
@@ -5026,7 +5085,7 @@ visionary_set_speed(agent, 9, 10);
         assert!(report.skipped.is_empty(), "{report:?}");
         assert!(
             after.contains("macros::LAST_EFFECT_SET_WORK_INT(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);"),
-            "source write-back must not delete an opaque C7 line:\n{after}"
+            "source write-back must not delete the typed C7 line:\n{after}"
         );
         assert_eq!(
             after
@@ -5038,6 +5097,35 @@ visionary_set_speed(agent, 9, 10);
         assert!(
             after.contains(", 2.5, 0, 0, 0, 0, 0, 1, false);"),
             "{after}"
+        );
+    }
+
+    #[test]
+    fn work_int_write_back_changes_only_the_existing_work_id_token() {
+        let source = r#"unsafe extern "C" fn effect_work(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_smoke"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_WORK_INT(agent, *WORK_INT);
+        macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.25);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine[0].work_int.as_deref(), Some("WORK_INT"));
+        let mut edited = pristine.clone();
+        edited[0].work_int = Some("WORK_INT_ALT".into());
+
+        let (after, report) =
+            rewrite_effect_calls(source, "test/work_int", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("LAST_EFFECT_SET_WORK_INT(agent, *WORK_INT_ALT);"));
+        assert!(after.contains("LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, 0.25);"));
+        assert_eq!(
+            crate::acmd::parse_effect_script(&after).to_effect_calls()[0]
+                .work_int
+                .as_deref(),
+            Some("WORK_INT_ALT")
         );
     }
 

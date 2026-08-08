@@ -1028,6 +1028,16 @@ unsafe fn hook_last_effect_set_rate(lua_state: u64) {
     original!()(lua_state);
 }
 
+/// `LAST_EFFECT_SET_WORK_INT` stores the last effect handle in an authored WorkModule slot.
+/// Capture the resolved runtime integer for reconstruction, but do not rewrite it: the source
+/// token and the runtime handle are different ID spaces and no portable mapping is known here.
+#[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_WORK_INT)]
+unsafe fn hook_last_effect_set_work_int(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(lua_state, "LAST_EFFECT_SET_WORK_INT", &typed);
+    original!()(lua_state);
+}
+
 /// `LAST_EFFECT_SET_COLOR` — recorded and overridden on the same terms as the rate above.
 #[skyline::hook(replace = smash::app::sv_animcmd::LAST_EFFECT_SET_COLOR)]
 unsafe fn hook_last_effect_set_color(lua_state: u64) {
@@ -1966,6 +1976,7 @@ pub fn install() {
         hook_enable_area,
         hook_unable_area,
         hook_last_effect_set_rate,
+        hook_last_effect_set_work_int,
         hook_last_effect_set_offset_to_camera_flat,
         hook_last_effect_set_color,
         hook_last_particle_set_color,

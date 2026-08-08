@@ -6372,6 +6372,7 @@ impl VisionaryApp {
                     trail_off: None,
                     trail_bone2: None,
                     rate: None,
+                    work_int: None,
                     camera_offset: None,
                     tint: None,
                     particle_tint: None,
@@ -6425,6 +6426,7 @@ impl VisionaryApp {
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
                     rate: None,
+                    work_int: None,
                     camera_offset: None,
                     tint: None,
                     particle_tint: None,
@@ -7082,6 +7084,54 @@ impl VisionaryApp {
                                 });
                                 match pristine.as_ref().map(|p| p.camera_offset) {
                                     Some(Some(offset)) => orig(ui, format!("orig {offset:.3}")),
+                                    Some(None) => orig(ui, "orig none".to_string()),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+
+                                // WorkModule slot — `LAST_EFFECT_SET_WORK_INT` stores this
+                                // spawn's runtime handle for later status code. The editor keeps
+                                // the authored token as text because named Work IDs cannot be
+                                // resolved into portable live values; the live path reports that
+                                // boundary when the token is changed or a retimed injection
+                                // would need to replay the line.
+                                ui.label("Work ID");
+                                ui.horizontal(|ui| {
+                                    let mut on = ec.work_int.is_some();
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(
+                                            "Store this effect handle in a WorkModule slot. The source/export value is editable; live preview cannot translate named Work IDs to runtime slots.",
+                                        )
+                                        .changed()
+                                    {
+                                        ec.work_int = on.then(|| "0".to_string());
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    if let Some(work) = ec.work_int.as_mut() {
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(work)
+                                                    .desired_width(180.0),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                            respawn_needed = true;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("(script default)")
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                });
+                                match pristine.as_ref().map(|p| p.work_int.as_deref()) {
+                                    Some(Some(work)) => orig(ui, format!("orig {work}")),
                                     Some(None) => orig(ui, "orig none".to_string()),
                                     None => {
                                         ui.label("");
@@ -9595,10 +9645,11 @@ impl VisionaryApp {
             raw_line: None,
             trail_off: None,
             trail_bone2: None,
-            // A spawn call carries none of the five modifiers of its own — each arrives as its
+            // A spawn call carries none of the six modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
             // `effect_calls_from_captures`.
             rate: None,
+            work_int: None,
             camera_offset: None,
             tint: None,
             particle_tint: None,
@@ -9666,6 +9717,7 @@ impl VisionaryApp {
             trail_off: None,
             trail_bone2: None,
             rate: None,
+            work_int: None,
             camera_offset: None,
             tint: None,
             particle_tint: None,
@@ -9732,6 +9784,7 @@ impl VisionaryApp {
             trail_off: None,
             trail_bone2: None,
             rate: None,
+            work_int: None,
             camera_offset: None,
             tint: None,
             particle_tint: None,
@@ -10261,8 +10314,19 @@ impl VisionaryApp {
             // spawned last, so each binds to the capture line above it exactly as the parser
             // binds it to the macro above it in a script. The sort is stable and the lines share
             // a frame, so the spawn is still the previous entry here. `anchor` survives all
-            // five, because a second modifier line targets the same spawn and the later one
+            // six, because a second modifier line targets the same spawn and the later one
             // wins — and a tint followed by a rate or camera offset is still one spawn's data.
+            if line.func == "LAST_EFFECT_SET_WORK_INT" {
+                if let (Some(work), Some(index)) =
+                    (line.args.first().and_then(|arg| arg.as_i64()), anchor)
+                {
+                    // A live primitive receives the resolved WorkModule integer, not the
+                    // authored `*FIGHTER_...` token. Keep the numeric observation explicit; the
+                    // live edit path refuses to reinterpret it as a source constant.
+                    effects[index].work_int = Some(work.to_string());
+                }
+                continue;
+            }
             if line.func == "LAST_EFFECT_SET_RATE" {
                 if let (Some(rate), Some(index)) =
                     (line.args.first().and_then(|arg| arg.as_f32()), anchor)
@@ -14526,10 +14590,17 @@ impl VisionaryApp {
         let pristines = self.state.effects_pristine.clone();
         let mut rules: Vec<crate::game_link::SpawnRuleWire> = Vec::new();
         let mut missing_capture = false;
+        let mut unsupported_work_int = false;
         for (i, ec) in effects.iter().enumerate() {
             let pristine = pristines.get(i);
             let spawn_frame = pristine.map(|p| p.active_start).unwrap_or(ec.active_start);
             let hash = effect_name_hash(&ec.effect_name);
+            if pristine
+                .map(|p| p.work_int != ec.work_int)
+                .unwrap_or(ec.work_int.is_some())
+            {
+                unsupported_work_int = true;
+            }
             // The effect the SCRIPT actually spawns (before edits) — what to suppress.
             let orig_hash = pristine
                 .map(|p| effect_name_hash(&p.effect_name))
@@ -14609,6 +14680,13 @@ impl VisionaryApp {
                         || p.spawn_func != ec.spawn_func
                 })
                 .unwrap_or(true);
+            if (retimed || swapped) && ec.work_int.is_some() {
+                // A retimed injection replays the spawn call, but not the separate WorkModule
+                // assignment that followed it in source. Without a verified runtime Work ID
+                // mapping, leaving this live path untouched is safer than storing the handle in
+                // the wrong slot.
+                unsupported_work_int = true;
+            }
             if retimed || swapped {
                 if let Some(inject) = self.build_effect_inject(ec, motion, orig_hash) {
                     rules.push(crate::game_link::SpawnRuleWire {
@@ -14663,7 +14741,7 @@ impl VisionaryApp {
             let moved = pristine
                 .map(|p| p.offset != ec.offset || p.rotation != ec.rotation || p.scale != ec.scale)
                 .unwrap_or(true);
-            // The five last-target modifiers ride along on the same rule, and each is
+            // The five live-rewritable last-target modifiers ride along on the same rule, and each is
             // sent on its own terms: a spawn whose rate changed but which has not been moved
             // still needs a rule, and one that moved but kept its rate must not claim to set
             // one. Sending a modifier unconditionally would override the script's own line
@@ -14747,6 +14825,11 @@ impl VisionaryApp {
             self.state.status =
                 "This effect control's symbolic/runtime value cannot be reconstructed safely \
                  for live preview; the authored export still contains the edit."
+                    .into();
+        } else if unsupported_work_int {
+            self.state.status =
+                "LAST_EFFECT_SET_WORK_INT keeps its authored Work ID in export/source; live \
+                 preview cannot translate symbolic Work IDs or replay them safely after a retime."
                     .into();
         }
     }
@@ -20847,6 +20930,26 @@ mod live_effect_capture_tests {
             Some(1.5),
             "the orphaned 0.25 must not have overwritten this"
         );
+    }
+
+    #[test]
+    fn a_captured_work_id_binds_as_a_runtime_value_to_the_spawn_above_it() {
+        let smoke = hash40::hash40("sys_atk_smoke").0;
+        let work = CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame: 5.0,
+            func: "LAST_EFFECT_SET_WORK_INT".into(),
+            args: vec![A::Int(0x1234)],
+            run: 1,
+        };
+        let captures = vec![spawn("EFFECT", 5.0, smoke), work];
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
+        let effects = HashMap::from([(smoke, "sys_atk_smoke".into())]);
+
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].work_int.as_deref(), Some("4660"));
     }
 
     #[test]

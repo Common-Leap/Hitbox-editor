@@ -3633,6 +3633,13 @@ pub enum EffectMacro {
     EffectOffKind { effect_name: String },
     /// LAST_EFFECT_SET_RATE — modifies the rate of the last spawned effect.
     LastEffectSetRate { rate: f32 },
+    /// LAST_EFFECT_SET_WORK_INT — stores the last effect handle in a WorkModule slot.
+    ///
+    /// The source token names the slot, not the runtime handle. It is retained without a
+    /// leading `*` so the same representation can hold both the dumped `*CONST` spelling and
+    /// a numeric or live-captured value; the exporter restores the compile-time constant form
+    /// where needed.
+    LastEffectSetWorkInt { work: String },
     /// LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT — offsets the last spawned effect along the
     /// camera-flat axis. The wrapper takes one numeric value after `agent`.
     LastEffectSetOffsetToCameraFlat { offset: f32 },
@@ -3882,6 +3889,13 @@ pub struct EffectCall {
     /// rate along instead of leaving the line behind to land on someone else's effect.
     #[serde(default)]
     pub rate: Option<f32>,
+    /// WorkModule slot token from a `LAST_EFFECT_SET_WORK_INT` line following this spawn.
+    ///
+    /// Source projects normally hold a named Work ID. A live capture can only observe the
+    /// resolved runtime integer, so a captured value is retained as a numeric token and cannot
+    /// be safely mapped back to a different authored Work ID without game-specific evidence.
+    #[serde(default)]
+    pub work_int: Option<String>,
     /// Camera-flat offset from a `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` line following this
     /// spawn. It is kept separate from [`offset`](Self::offset): the latter is the spawn's
     /// three-dimensional bone-relative position, while this macro adjusts the rendered effect
@@ -4218,6 +4232,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
+                                work_int: None,
                                 camera_offset: None,
                                 tint: None,
                                 particle_tint: None,
@@ -4264,6 +4279,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: bone_name2.clone(),
                                 rate: None,
+                                work_int: None,
                                 camera_offset: None,
                                 tint: None,
                                 particle_tint: None,
@@ -4338,6 +4354,16 @@ fn eval_effect_stmts(
                                 ),
                             }
                         }
+                        EffectMacro::LastEffectSetWorkInt { work } => match anchor {
+                            Some(index) => calls[index].work_int = Some(work.clone()),
+                            None => walk.residue(
+                                &format!(
+                                    "macros::LAST_EFFECT_SET_WORK_INT(agent, {});",
+                                    crate::acmd::const_expr(work)
+                                ),
+                                calls,
+                            ),
+                        },
                         EffectMacro::LastEffectSetOffsetToCameraFlat { offset } => match anchor {
                             Some(index) => calls[index].camera_offset = Some(*offset),
                             None => walk.residue(
@@ -4399,6 +4425,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
+                                work_int: None,
                                 camera_offset: None,
                                 tint: None,
                                 particle_tint: None,
@@ -4434,6 +4461,7 @@ fn eval_effect_stmts(
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
+                                work_int: None,
                                 camera_offset: None,
                                 tint: None,
                                 particle_tint: None,

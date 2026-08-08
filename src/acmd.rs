@@ -746,6 +746,27 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             }
         }
 
+        // `smash-script` has no wrapper for this linked primitive. The generated effect export
+        // uses a local helper with the same Lua-stack contract as the crate's wrappers, so the
+        // helper's own definition must not become an effect-timeline conditional on read-back.
+        if line.contains("macros::LAST_EFFECT_SET_WORK_INT(")
+            || line.contains("visionary_last_effect_set_work_int(")
+        {
+            let prefix = if line.contains("macros::LAST_EFFECT_SET_WORK_INT(") {
+                "macros::LAST_EFFECT_SET_WORK_INT("
+            } else {
+                "visionary_last_effect_set_work_int("
+            };
+            if let Some(t) = try_extract(prefix) {
+                if t.len() == 2 && t[0].trim() == "agent" && !t[1].trim().is_empty() {
+                    macros.push(EffectMacro::LastEffectSetWorkInt {
+                        work: strip_deref(&t[1]),
+                    });
+                    continue;
+                }
+            }
+        }
+
         // The camera-flat offset has one numeric argument after `agent`, just like the rate.
         // Keep malformed or non-numeric calls raw rather than inventing a default that would
         // move an effect the source never moved.
@@ -896,6 +917,15 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             continue;
         }
 
+        // Generated effect exports may contain the linked-primitive helper immediately inside
+        // the function. It is emitter scaffolding, not a runtime ACMD branch, so skip its whole
+        // nested definition before the generic block parser can turn it into a conditional.
+        if line.contains("fn visionary_last_effect_set_work_int(") && line.ends_with('{') {
+            let (body_end, _) = find_block_end(lines, pos);
+            pos = body_end + 1;
+            continue;
+        }
+
         if line.contains("is_excute") {
             let body_start = pos + 1;
             let (body_end, _) = find_block_end(lines, pos);
@@ -952,7 +982,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             || line.contains("macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(")
             || line.contains("macros::LAST_EFFECT_SET_COLOR(")
             || line.contains("macros::LAST_EFFECT_SET_ALPHA(")
-            // The remaining opaque C7 members, plus the typed particle modifier when it has no
+            // The remaining evidence-bounded C7 members, plus the typed modifiers when they have no
             // spawn to bind to, belong to the effect timeline when written bare. Route them
             // through the same residue path as an unknown line inside `is_excute` instead of
             // dropping the whole statement.
@@ -2830,6 +2860,15 @@ fn emit_effect_move_fn(
     out.push_str(&format!(
         "unsafe extern \"C\" fn {fn_name}(agent: &mut L2CAgentBase) {{\n"
     ));
+    if calls
+        .iter()
+        .any(|call| !call.disabled && call.work_int.is_some())
+    {
+        for line in emit_last_effect_set_work_int_helper("    ") {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     for (frame, (stops, starts)) in events {
         out.push_str(&format!("    frame(agent.lua_state_agent, {frame}.0);\n"));
 
@@ -2937,6 +2976,12 @@ fn emit_effect_move_fn(
                 if call.color.is_some() || call.control.is_some() {
                     continue;
                 }
+                if let Some(work) = &call.work_int {
+                    out.push_str(&format!(
+                        "{body}visionary_last_effect_set_work_int(agent, {});\n",
+                        const_expr(work)
+                    ));
+                }
                 if let Some(offset) = call.camera_offset {
                     out.push_str(&format!(
                         "{body}macros::LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT(agent, {offset});\n"
@@ -3023,6 +3068,26 @@ fn emit_effect_move_fn(
     }
     out.push_str("}\n");
     (fn_name, out)
+}
+
+/// `smash-script` declares the linked `LAST_EFFECT_SET_WORK_INT` primitive but has no Rust
+/// wrapper for it. Generated effect projects therefore use the same Lua-stack setup as the
+/// crate's wrappers, retaining the authored Work ID token at the call site.
+fn emit_last_effect_set_work_int_helper(indent: &str) -> Vec<String> {
+    vec![
+        format!("{indent}#[inline]"),
+        format!("{indent}#[allow(dead_code)]"),
+        format!(
+            "{indent}unsafe fn visionary_last_effect_set_work_int(agent: &mut L2CAgentBase, work: i32) {{"
+        ),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}    lua_args!(agent, work);"),
+        format!(
+            "{indent}    smash::app::sv_animcmd::LAST_EFFECT_SET_WORK_INT(agent.lua_state_agent);"
+        ),
+        format!("{indent}    agent.clear_lua_stack();"),
+        format!("{indent}}}"),
+    ]
 }
 
 /// One piece of a frame block, before consecutive spawns are merged into shared `is_excute`s.
@@ -5273,6 +5338,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 trail_off: None,
                 trail_bone2: None,
                 rate: None,
+                work_int: None,
                 camera_offset: None,
                 tint: None,
                 particle_tint: None,
@@ -5300,6 +5366,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
                 trail_off: None,
                 trail_bone2: None,
                 rate: None,
+                work_int: None,
                 camera_offset: None,
                 tint: None,
                 particle_tint: None,
@@ -5774,12 +5841,11 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(residue.is_empty());
     }
 
-    /// Kirby's real `TornadoStart` call is the one corpus use of `LAST_EFFECT_SET_WORK_INT`.
-    /// The line is not an editable effect field: `sv_animcmd` exposes the primitive, but
-    /// `smash-script` has no wrapper. It must nevertheless remain in the generated source so the
-    /// verifier can refuse the missing-wrapper export for the line the user actually wrote.
+    /// Kirby's real `TornadoStart` call is the measured `LAST_EFFECT_SET_WORK_INT` shape.
+    /// `smash-script` has no wrapper, so the exporter uses a local helper over the linked
+    /// primitive while the editor keeps the authored Work ID token editable.
     #[test]
-    fn the_unwrapped_work_int_effect_line_is_carried_and_refused_loudly() {
+    fn the_work_int_effect_line_is_typed_and_exported_through_a_local_helper() {
         let src = r#"unsafe extern "C" fn effect_tornadostart(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
         macros::EFFECT_FOLLOW(agent, Hash40::new("metaknight_tornado"), Hash40::new("trans"), 0, 0, 0, 0, 0, 0, 1, false);
@@ -5794,27 +5860,29 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             residue.is_empty(),
             "the line shares the spawn's frame: {residue:?}"
         );
+        assert!(calls[0].trailing.is_empty());
         assert_eq!(
-            calls[0].trailing,
-            vec![
-                "if macros::is_excute(agent) {",
-                "macros::LAST_EFFECT_SET_WORK_INT(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);",
-                "}",
-            ]
+            calls[0].work_int.as_deref(),
+            Some("FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE")
         );
 
         let emitted = preview_effect_fn(&calls, "tornadostart", &[], &residue);
         assert_eq!(
             emitted
-                .matches("macros::LAST_EFFECT_SET_WORK_INT(agent,")
+                .matches("visionary_last_effect_set_work_int(agent,")
                 .count(),
             1,
-            "the opaque source line must reach generated text exactly once:\n{emitted}"
+            "the typed Work ID line must reach generated text exactly once:\n{emitted}"
         );
-        assert!(
-            unexportable_effect_lines(&source).is_empty(),
-            "a carried line is not a dropped line"
-        );
+        assert!(unexportable_effect_lines(&source).is_empty());
+        assert!(emitted.contains(
+            "unsafe fn visionary_last_effect_set_work_int(agent: &mut L2CAgentBase, work: i32)"
+        ));
+        assert!(emitted.contains(
+            "visionary_last_effect_set_work_int(agent, *FIGHTER_METAKNIGHT_STATUS_SPECIAL_N_SPIN_WORK_INT_EFFECT_HANDLE);"
+        ));
+        let reparsed = parse_effect_script(&emitted).to_effect_calls();
+        assert_eq!(reparsed[0].work_int, calls[0].work_int);
 
         let mut report = crate::acmd_verify::Report::default();
         crate::acmd_verify::verify_effect_move(
@@ -5826,13 +5894,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             &residue,
             &mut report,
         );
-        assert!(report.has_blockers());
-        assert!(
-            report
-                .blockers()
-                .any(|finding| finding.message.contains("no wrapper")),
-            "the missing wrapper must be an export blocker: {report:?}"
-        );
+        assert!(!report.has_blockers(), "{report:?}");
     }
 
     /// Bare C7 calls have no spawn to bind their modifier fields to, but they are still
@@ -5850,7 +5912,10 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 "#;
         let source = parse_effect_script(src);
         let (calls, residue) = source.to_effect_calls_and_residue();
-        assert!(calls.is_empty(), "opaque C7 lines are not effect spawns");
+        assert!(
+            calls.is_empty(),
+            "standalone C7 lines are not effect spawns"
+        );
         let lines = residue.get(&7).expect("bare calls keep their frame");
         for name in [
             "LAST_PARTICLE_SET_COLOR",
@@ -7335,6 +7400,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             trail_off: None,
             trail_bone2: None,
             rate: None,
+            work_int: None,
             camera_offset: None,
             tint: None,
             particle_tint: None,

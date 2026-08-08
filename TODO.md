@@ -198,8 +198,9 @@ Two export paths, different rules — do not conflate them:
   ```
 
   Confirmed missing so far: `AREA_WIND_2ND` (A1), `LAST_EFFECT_SET_WORK_INT` (found while
-  auditing C1), `FLASH_SET_DIRECTION` (C3 — 8 corpus uses, so corpus frequency is no guide to
-  whether a wrapper exists; check every member every time).
+  auditing C1; C7 now emits a local helper over the linked primitive), `FLASH_SET_DIRECTION`
+  (C3 — 8 corpus uses, so corpus frequency is no guide to whether a wrapper exists; check every
+  member every time).
 - **"Parsed into the IR" is not the same as "reaches the export."** The effect export is
   generated from `EffectCall`s, not from `EffectScript` statements, so a macro can have its own
   `EffectMacro` variant, parse perfectly, and still be dropped by `eval_effect_stmts` on the way
@@ -989,7 +990,7 @@ repeat this exactly.
   matching each macro's own spelling is what keeps a re-exported vanilla script textually
   identical to its source.
 
-### [!] C7 — The last four `LAST_EFFECT_SET_*` members (two evidence-blocked members remain)
+### [!] C7 — The last four `LAST_EFFECT_SET_*` members (one evidence-blocked member and one runtime boundary remain)
 
 What C1 left. Local cache counts and wrapper status, verified against the full `macros.rs`
 declaration list. A separate public dumped-script corpus was checked read-only for shape and
@@ -1006,16 +1007,18 @@ The external `LAST_EFFECT_SET_SCALE_W` hit has one argument rather than the thre
 wrapper shape, so it is not safe evidence for a typed editor field. The offset member is the one
 slice taken from that oracle so far.
 
-**Boundary added 2026-08-08, without claiming C7 complete.** Remaining opaque C7 lines inside an
-`is_excute` block were already carried by C6; bare forms now take that same frame-residue path
-instead of becoming statement-level losses. The real `TornadoStart` line survives the generated
-effect text and source write-back, while the verifier refuses the export because
-`LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper. The valid three-value
-`LAST_PARTICLE_SET_COLOR` shape is now typed below, but the local `SetInkColor` call still uses
-the dump's zero-argument spelling after three preceding `WorkModule::get_float` stack inputs;
-that malformed form remains explicitly carried. `LAST_EFFECT_SET_SCALE_W` still has only a
-malformed one-argument external hit, so the two remaining members keep this parent evidence
-boundary open.
+**Boundary added 2026-08-08, without claiming C7 complete.** Remaining evidence-bounded C7 lines
+inside an `is_excute` block were already carried by C6; bare forms now take that same frame-residue
+path instead of becoming statement-level losses. `LAST_EFFECT_SET_WORK_INT` is now typed through
+the parser/IR, editor, capture reconstruction, generated export, and source write-back: because
+`smash-script` has no wrapper, the exporter emits a local helper over the linked
+`sv_animcmd` primitive. The helper preserves authored Work ID tokens, while live capture records
+the resolved integer only and live retiming/swap overrides stay explicitly unsupported until a
+portable symbolic-to-runtime mapping is verified. The valid three-value
+`LAST_PARTICLE_SET_COLOR` shape is typed below, but the local `SetInkColor` call still uses the
+dump's zero-argument spelling after three preceding `WorkModule::get_float` stack inputs; that
+malformed form remains explicitly carried. `LAST_EFFECT_SET_SCALE_W` still has only a malformed
+one-argument external hit, so C7 remains open for evidence and runtime-boundary work.
 
 #### [x] C7a — `LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT` (completed 2026-08-08; live runtime unverified)
 
@@ -1029,10 +1032,8 @@ Offline regression coverage includes source parse/export read-back, source write
 capture reconstruction, wire-field parity, and a standalone plugin release build. No emulator,
 game, or UI automation was run, so live in-game behavior remains unverified.
 
-The remaining two members stay separately bounded:
+The remaining member stays separately bounded:
 
-- `LAST_EFFECT_SET_WORK_INT` has no `smash-script` wrapper and remains parse/carry-only with an
-  export blocker.
 - `LAST_EFFECT_SET_SCALE_W` has only the malformed one-argument external hit, not the measured
   three-argument wrapper shape.
 
@@ -1049,6 +1050,19 @@ with values from the preceding `WorkModule` stack operations. Offline regression
 typed parsing, malformed preservation, export read-back, source write-back, capture binding, and
 wire/plugin field parity. The plugin release build passes. No emulator, game, or UI automation was
 run, so live in-game behavior remains unverified.
+
+#### [x] C7c — `LAST_EFFECT_SET_WORK_INT` (completed 2026-08-08; symbolic live mapping bounded)
+
+The external corpus supplies a consistent two-argument source form, and the linked Skyline
+primitive supplies the missing runtime operation even though `smash-script` has no wrapper. The
+authored Work ID is now a typed `EffectCall::work_int`, shown in the effect panel, reconstructed
+from live capture, emitted through a generated local helper, and value-editable in existing source
+lines. The plugin records the runtime integer but does not reinterpret or override it; retiming or
+swapping a Work ID-bearing spawn reports the limitation instead of guessing a runtime slot.
+
+Offline tests cover source parse/export read-back, source write-back, capture binding, verifier
+fidelity, and the generated helper. No emulator, game, or UI automation was run, so the runtime
+symbolic mapping remains unverified.
 
 ### [x] C2 — Sword trails (done 2026-08-05)
 
