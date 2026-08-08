@@ -569,26 +569,22 @@ bugs rather than hypotheticals:**
 Verified: 302 tests, clippy clean, `build_check.sh`, plugin builds. Both corpus oracles cover
 all 32 calls. Live rules and hooks are built but not exercised against a running game.
 
-### [~] B2 — `ATTACK_FP` (fighter-position hitboxes; authoring path implemented 2026-08-08)
+### [x] B2 — `ATTACK_FP` (fighter-position hitboxes; done 2026-08-08)
 
-Blocked by: vanilla evidence, not implementation work.
+The 461 locally cached scripts still contain zero `ATTACK_FP` calls. A larger
+`SSBU-Dumped-Scripts` snapshot is the usable corpus oracle, however: its standard `smashline`
+tree contains exactly one dumped call,
+`lua2cpp_demon/demon/AttackStep2fHitShield.txt` (snapshot `59004685238a3f6f93bae905d3a4e079701c40b4`).
+The source call has all 41 arguments and uses the symbolic
+`*COLLISION_SITUATION_MASK_G` situation slot; the real-call round-trip test covers that case.
 
-**Measured after A3: `ATTACK_FP` appears ZERO times in the local corpus.** smash-script
-declares it, so it is emittable, but there is no vanilla call anywhere in the 461 cached
-scripts. That means the original definition of done — a round-trip test built from a **real**
-vanilla call — cannot be met from the available archive, and the corpus oracles cannot validate
-the slot table.
-
-**Chosen path: deliberate authoring convenience, not a vanilla-complete claim.** The complete
-41-slot payload is now retained as typed/raw data through parse and IR, project export, live
-capture and rule injection, and source write-back. The panel exposes only established shared
+The complete 41-slot payload is retained as typed/raw data through parse and IR, project export,
+live capture and rule injection, and source write-back. The panel exposes only established shared
 hit properties; fighter-position geometry and undocumented fields are preserved but not guessed
-or drawn as ordinary bone-local volumes. Export and source-sync use a separate `ATTACK_FP`
-slot table, and synthetic parse/export/write-back tests cover that path.
-
-This entry remains `[~]` because vanilla verification is still open: no local corpus oracle
-exists, and live hardware/game execution was not used to manufacture evidence. Re-measure a
-larger archive or validate a real mod call before promoting this to `[x]`.
+or drawn as ordinary bone-local volumes. Export and source-sync use a separate `ATTACK_FP` slot
+table, and the parser/export, live-capture/injection, source-sync, and real-dump tests cover the
+five surfaces. Live hardware/game execution remains unexercised, as with the other built live
+surfaces; it is not used as a substitute for source evidence.
 
 ### [x] B3 — Post-hoc hitbox tuning (done 2026-08-04)
 

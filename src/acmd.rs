@@ -4694,6 +4694,45 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
     }
 
     #[test]
+    fn the_real_dumped_attack_fp_call_keeps_its_situation_mask() {
+        // SSBU-Dumped-Scripts/main/smashline/lua2cpp_demon/demon/AttackStep2fHitShield.txt
+        // contains the standard-tree ATTACK_FP oracle. Its ground-air slot is a symbolic
+        // situation mask, which is the case a purely numeric synthetic fixture misses.
+        let src = r#"unsafe extern "C" fn game_attackstep2fhitshield(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::ATTACK_FP(agent, 6, 1, Hash40::new("top"), 0, 361, 100, 65, 0, 12, 0, 10, 10, Hash40::new("collision_attr_normal"), 0, 0, 0, false, false, 0, *ATTACK_SOUND_LEVEL_M, *COLLISION_SOUND_ATTR_NONE, *COLLISION_SITUATION_MASK_G, true, *ATTACK_REGION_NONE, *COLLISION_CATEGORY_MASK_FIGHTER, false, *COLLISION_PART_MASK_ALL, false, false, false, false, 0, false, false, *ATTACK_LR_CHECK_POS, false, false, true, true, false, *COLLISION_SHAPE_TYPE_SPHERE);
+    }
+}
+"#;
+        let script = parse_acmd_script(src);
+        let boxes = script.to_hitboxes();
+        assert_eq!(boxes.len(), 1, "{boxes:#?}");
+        let fp = &boxes[0];
+        assert_eq!(fp.category, crate::data::CAT_ATTACK_FP);
+        assert_eq!((fp.id, fp.part, fp.ground_or_air), (6, 1, 1));
+        assert_eq!(fp.attack_region, "ATTACK_REGION_NONE");
+        assert_eq!(
+            fp.fp.as_ref().unwrap().args[21].source(),
+            "*COLLISION_SITUATION_MASK_G"
+        );
+
+        let emitted = preview_game_fn(&script, "attackstep2fhitshield");
+        assert!(emitted.contains("*COLLISION_SITUATION_MASK_G"), "{emitted}");
+        let round_trip = parse_acmd_script(&emitted).to_hitboxes();
+        assert_eq!(round_trip.len(), 1, "{round_trip:#?}");
+        assert_eq!(round_trip[0].ground_or_air, 1);
+        assert_eq!(
+            round_trip[0].fp.as_ref().unwrap().args[21].source(),
+            "*COLLISION_SITUATION_MASK_G"
+        );
+        assert_eq!(round_trip[0].fp.as_ref().unwrap().args[22].source(), "true");
+        assert_eq!(
+            round_trip[0].fp.as_ref().unwrap().args[40].source(),
+            "*COLLISION_SHAPE_TYPE_SPHERE"
+        );
+    }
+
+    #[test]
     fn id_scoped_attack_clear_round_trips() {
         let source = r#"
 unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {

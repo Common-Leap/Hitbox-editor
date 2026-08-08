@@ -657,6 +657,17 @@ impl AttackFpCall {
             .unwrap_or(default)
     }
 
+    fn const_int(&self, slot: usize, table: crate::param_labels::ConstTable, default: i64) -> i64 {
+        self.arg(slot)
+            .and_then(|arg| {
+                arg.as_i64().or_else(|| match arg {
+                    AttackFpArg::Source(source) => crate::param_labels::encode_const(table, source),
+                    _ => None,
+                })
+            })
+            .unwrap_or(default)
+    }
+
     fn float(&self, slot: usize, default: f32) -> f32 {
         self.arg(slot)
             .and_then(AttackFpArg::as_f32)
@@ -708,7 +719,10 @@ impl AttackFpCall {
             hitlag_mult: self.float(14, 1.0),
             sdi_mult: self.float(15, 1.0),
             is_clang: self.flag(16, false),
-            ground_or_air: self.int(21, 0) as i32,
+            // The FP wrapper calls this `ground_air`, but the real source corpus writes a
+            // `COLLISION_SITUATION_MASK_*` constant here rather than a bare integer. Decode the
+            // known constants without discarding the original source token held in `fp`.
+            ground_or_air: self.const_int(21, crate::param_labels::SITUATION_MASK, 0) as i32,
             is_reflectable: self.flag(29, false),
             is_absorbable: self.flag(30, false),
             lr_check: self.text(34, "ATTACK_LR_CHECK_POS"),
@@ -750,7 +764,20 @@ impl Hitbox {
         args[16] = AttackFpArg::Bool(self.is_clang);
         args[19] = source(crate::acmd::const_expr(&self.sound_level));
         args[20] = source(crate::acmd::const_expr(&self.sound_attr));
-        args[21] = AttackFpArg::Int(self.ground_or_air as i64);
+        // Keep a symbolic situation mask exactly as authored while the editor value is
+        // unchanged. A source-backed `*COLLISION_SITUATION_MASK_G` is semantically `1`, and
+        // rewriting it to `0` merely because `AttackFpArg::as_i64` cannot parse identifiers
+        // changes the real call during a project export. A deliberate edit still writes the
+        // new numeric value, which is the same representation used by the live wire.
+        let original_ground_or_air = args[21].as_i64().or_else(|| match &args[21] {
+            AttackFpArg::Source(source) => {
+                crate::param_labels::encode_const(crate::param_labels::SITUATION_MASK, source)
+            }
+            _ => None,
+        });
+        if original_ground_or_air != Some(self.ground_or_air as i64) {
+            args[21] = AttackFpArg::Int(self.ground_or_air as i64);
+        }
         args[23] = source(crate::acmd::const_expr(&self.attack_region));
         args[29] = AttackFpArg::Bool(self.is_reflectable);
         args[30] = AttackFpArg::Bool(self.is_absorbable);
