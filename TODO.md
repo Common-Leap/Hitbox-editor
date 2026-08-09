@@ -2387,7 +2387,7 @@ direct `KineticModule::change_kinetic` call measured in the local `game_` corpus
 the measured `KineticModule::suspend_energy`, `resume_energy`, `enable_energy`, and
 `unable_energy` toggles, the argument-less `KineticModule::clear_speed_all` point, the direct
 `KineticModule::set_consider_ground_friction` point, and the direct WorkModule transition-term
-toggles and measured value setters now have editable slices
+toggles, measured `WorkModule::inc_int` points, and measured value setters now have editable slices
 below. High mod value — this is how a move's momentum and correction are authored — and the editor
 already knows the frame each call lands on.
 `REVERSE_LR` is handled in the separate measured slice below.
