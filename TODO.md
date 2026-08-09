@@ -2807,6 +2807,14 @@ source value, and no direct text callers were found for these exported symbols. 
 ABI shape without closing the source/runtime evidence gap, so the three-argument calls remain
 source-preserved and untyped.
 
+The disassembly pass is now pinned to the retained decompressed image rather than only to symbol
+metadata: the 20-byte wrappers at raw offsets `0x205d000` (`FUN_0173d400`), `0x205d020`
+(`LAB_0173d6b0`), and `0x205d320` (the revised wrapper) each end with the same
+`and w2, w2, #0x1` normalization followed by an indirect `br x3`. They dispatch through vtable
+slots `888`, `896`, and `1480` respectively. This makes the native-side normalization concrete,
+but these are ABI thunks, not Lua stack readers: the instructions still provide no source
+argument count or omitted-boolean default. The evidence boundary therefore remains unchanged.
+
 The version-matched Lua registration table also ties `set_frame_partial` and
 `set_frame_partial_sync_anim_cmd` to separate wrapper bodies (`FUN_0173d400` and
 `LAB_0173d6b0` respectively). That confirms the missing boolean is part of the native Lua wrapper
