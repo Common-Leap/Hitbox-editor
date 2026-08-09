@@ -55,6 +55,35 @@ fn script_cache_path(fighter: &str, move_name: &str) -> std::path::PathBuf {
         .join(format!("{}.txt", move_name_to_pascal(move_name)))
 }
 
+/// Remove Visionary's cached ACMD scripts for one fighter.
+///
+/// This only touches the app-owned `script-cache/<fighter>/` directory. The dumped game files,
+/// linked source project, and any exported mod remain untouched. An absent cache is a successful
+/// no-op so forgetting a fighter that was only indexed locally does not surface a false error.
+pub fn forget_fighter_cache(fighter: &str) -> std::io::Result<bool> {
+    forget_fighter_cache_at(&crate::scratch_dirs::app_storage_root(), fighter)
+}
+
+/// [`forget_fighter_cache`] against an explicit cache root, kept separate so the deletion scope
+/// can be tested without redirecting the process-wide user cache used by the corpus tests.
+pub(crate) fn forget_fighter_cache_at(
+    storage_root: &std::path::Path,
+    fighter: &str,
+) -> std::io::Result<bool> {
+    if fighter.is_empty() || fighter == "." || fighter == ".." || fighter.contains(['/', '\\']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "fighter name is not a single cache path component",
+        ));
+    }
+    let dir = storage_root.join("script-cache").join(fighter);
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(true)
+}
+
 /// A cached body that is really an HTTP error page rather than a script.
 ///
 /// Until 2026-08-06 the fetch below wrote whatever came back to the cache, and a 404 from
@@ -4938,6 +4967,32 @@ pub(crate) mod tests {
             Some(body),
             "a real cached script must come back byte for byte"
         );
+    }
+
+    #[test]
+    fn forgetting_a_fighter_cache_removes_only_that_fighter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mario = dir.path().join("script-cache/mario");
+        let kirby = dir.path().join("script-cache/kirby");
+        std::fs::create_dir_all(&mario).unwrap();
+        std::fs::create_dir_all(&kirby).unwrap();
+        std::fs::write(mario.join("Attack11.txt"), "mario").unwrap();
+        std::fs::write(kirby.join("Attack11.txt"), "kirby").unwrap();
+
+        assert!(forget_fighter_cache_at(dir.path(), "mario").unwrap());
+        assert!(
+            !mario.exists(),
+            "the forgotten fighter cache must be removed"
+        );
+        assert!(kirby.exists(), "another fighter's cache must remain");
+        assert!(!forget_fighter_cache_at(dir.path(), "mario").unwrap());
+    }
+
+    #[test]
+    fn forgetting_a_fighter_cache_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = forget_fighter_cache_at(dir.path(), "../outside").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     /// The regression this fix could easily have introduced, and the reason a miss normalises to

@@ -1025,6 +1025,9 @@ struct Shared {
     /// Exact completed runs. Unlike the compatibility counter above, this cannot be advanced by
     /// another instance or a later playback of the same motion.
     capture_completed_runs: BTreeSet<(i32, u64, u32)>,
+    /// Fighter kinds forgotten by the desktop roster. Their capture stream is ignored until the
+    /// user restores the fighter, so a later playback cannot silently repopulate its memory.
+    ignored_capture_kinds: BTreeSet<i32>,
     outbox: Vec<String>,
     last_error: Option<String>,
     frames_rx: u64,
@@ -1048,6 +1051,7 @@ impl Default for Shared {
             carrier_error: None,
             capture_ends: BTreeMap::new(),
             capture_completed_runs: BTreeSet::new(),
+            ignored_capture_kinds: BTreeSet::new(),
             outbox: Vec::new(),
             last_error: None,
             frames_rx: 0,
@@ -1299,6 +1303,33 @@ impl GameLink {
             s.outbox
                 .push("<TCP_MESSAGE>{\"command\":\"clear_acmd_captures\"}</TCP_MESSAGE>".into());
             s.edits_tx += 1;
+        }
+    }
+
+    /// Forget local capture lines and completion state for one fighter kind without clearing
+    /// another fighter's captures. The plugin's capture stream is global, so this intentionally
+    /// does not send the global `clear_acmd_captures` command.
+    pub fn forget_captures_for_kind(&self, kind: i32) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.ignored_capture_kinds.insert(kind);
+            for lines in s.captures.values_mut() {
+                lines.retain(|line| line.kind != kind);
+            }
+            s.captures.retain(|_, lines| !lines.is_empty());
+            s.capture_claimed_runs
+                .retain(|(capture_kind, _), _| *capture_kind != kind);
+            s.capture_ends
+                .retain(|(capture_kind, _), _| *capture_kind != kind);
+            s.capture_completed_runs
+                .retain(|(capture_kind, _, _)| *capture_kind != kind);
+            s.captures_seq += 1;
+        }
+    }
+
+    /// Allow capture collection for a fighter restored to the desktop roster.
+    pub fn restore_captures_for_kind(&self, kind: i32) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.ignored_capture_kinds.remove(&kind);
         }
     }
 
@@ -1617,6 +1648,9 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             let Ok(line) = serde_json::from_value::<CaptureLine>(c.clone()) else {
                 return;
             };
+            if s.ignored_capture_kinds.contains(&line.kind) {
+                return;
+            }
             let claim = s
                 .capture_claimed_runs
                 .entry((line.kind, line.motion))
@@ -1648,6 +1682,9 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
             ) else {
                 return;
             };
+            if s.ignored_capture_kinds.contains(&(kind as i32)) {
+                return;
+            }
             let run = e.get("run").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
             if s.capture_claimed_runs.get(&(kind as i32, motion)).copied() != Some(run) {
                 return;
@@ -1907,6 +1944,26 @@ mod tests {
             )],
         );
         assert!(link.latest_run_for(0x1234, Some(8)).is_empty());
+    }
+
+    #[test]
+    fn forgetting_one_capture_kind_does_not_clear_or_reaccept_other_kinds() {
+        let link = GameLink::default();
+        link.forget_captures_for_kind(8);
+        feed(
+            &link,
+            &[capture_frame(8, 0x1234, 3.0), capture_frame(9, 0x1234, 3.0)],
+        );
+        assert!(link.latest_run_for(0x1234, Some(8)).is_empty());
+        assert_eq!(link.latest_run_for(0x1234, Some(9)).len(), 1);
+        assert!(
+            link.shared.lock().unwrap().outbox.is_empty(),
+            "fighter-scoped forgetting must not issue a global capture clear"
+        );
+
+        link.restore_captures_for_kind(8);
+        feed(&link, &[capture_frame(8, 0x1234, 3.0)]);
+        assert_eq!(link.latest_run_for(0x1234, Some(8)).len(), 1);
     }
 
     /// A capture line for a fighter kind, in the plugin's exact emit form, with no `run`

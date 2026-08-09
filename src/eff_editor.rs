@@ -1797,6 +1797,71 @@ impl EffEditor {
         self.edit_sources = sources;
     }
 
+    /// Forget one fighter's editor-owned effect view without touching the source `.eff` files.
+    ///
+    /// The main app removes the fighter's project record and live deployment separately. This
+    /// side clears the corresponding overlay, edit-source row, and any loaded/queued view so a
+    /// forgotten fighter cannot remain visible in the standalone editor window.
+    pub fn forget_fighter(&mut self, fighter: &str) {
+        let belongs = |path: &Path| {
+            let path = path.to_string_lossy().replace('\\', "/").to_lowercase();
+            let prefix = format!("effect/fighter/{}/", fighter.to_lowercase());
+            path.starts_with(&prefix) || path.contains(&format!("/{prefix}"))
+        };
+        let loaded_belongs = self.loaded_path.as_deref().is_some_and(belongs);
+        let pending_belongs = self.pending_load.as_deref().is_some_and(belongs);
+
+        self.merged_overlays.retain(|base, _| !belongs(base));
+        self.edit_sources
+            .retain(|source| !source.fighter.eq_ignore_ascii_case(fighter));
+        if pending_belongs {
+            self.pending_load = None;
+        }
+        if loaded_belongs {
+            self.clear_loaded_view();
+        }
+    }
+
+    /// Clear the parsed effect view after its source has been forgotten. The window itself stays
+    /// open, but it now truthfully has no loaded effect instead of retaining stale entries.
+    fn clear_loaded_view(&mut self) {
+        self.pending_load = None;
+        self.pending_select = None;
+        self.pending_edits = None;
+        self.pending_structure = None;
+        self.pending_edits_push_live = false;
+        self.loaded_path = None;
+        self.loaded_is_merged = false;
+        self.load_error = None;
+        self.ptcl = None;
+        self.texture_pool = None;
+        self.pending_texture_imports.clear();
+        self.pending_texture_additions.clear();
+        self.pending_texture_removals.clear();
+        self.texture_imports.clear();
+        self.texture_note = None;
+        self.selected_texture = None;
+        self.texture_preview = None;
+        self.texture_form_note.clear();
+        self.pristine.clear();
+        self.entries.clear();
+        self.selected_entry = None;
+        self.selected_emitter = 0;
+        self.entry_info.clear();
+        self.entry_pristine.clear();
+        self.pending_transplants.clear();
+        self.pending_transplant_removals.clear();
+        self.eff_dirty_at = None;
+        self.live_deploy_request = false;
+        self.live_deploy_at = None;
+        self.sending = false;
+        self.awaiting_game = None;
+        self.last_carrier_result = None;
+        self.carrier_ok = false;
+        self.deploy_defer = false;
+        self.last_sent_note = None;
+    }
+
     /// Point `base` (a fighter's real eff path) at `merged` (its transplants-applied build).
     /// While set, ANY load of `base` — the file combo, fighter auto-follow, project load —
     /// parses the merged file instead. Pass None to drop the overlay. If `base` is the

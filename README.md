@@ -70,6 +70,12 @@ the executable for native window decorations on Windows and X11.
 Visionary reads the dumped data from its existing location and remembers the
 selected export root for future sessions.
 
+To hide a fighter from the sidebar, right-click its name and choose **Forget
+fighter**. Visionary removes that fighter's cached scripts, saved edits, and
+live effect previews while leaving the dumped and mod files unchanged. Use the
+**Restore** button beside the Fighters heading to show forgotten fighters
+again.
+
 ## Eden emulator setup
 
 Visionary's live preview workflow uses the latest [Eden Nightly

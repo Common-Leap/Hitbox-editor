@@ -2,7 +2,7 @@ use crate::data::{fighter_display_name, AppState, Hitbox, MoveEntry};
 use crate::renderer::{HitboxRenderState, ViewportCallback};
 use egui::{Color32, RichText, ScrollArea, Ui};
 /// Main egui application for Visionary.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Whether the game has reached the terminal state requested by a carrier send.
@@ -1054,6 +1054,24 @@ fn fighter_kind_id(name: &str) -> Option<i32> {
     })
 }
 
+/// True when a persisted per-move key belongs to one fighter. Rule-store keys append a family
+/// suffix after the move name, so matching only the first path component also covers those keys.
+fn fighter_key_matches(key: &str, fighter: &str) -> bool {
+    key.split_once('/')
+        .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(fighter))
+}
+
+/// True for an Arcropolis-style fighter effect path, accepting either an absolute dump path or
+/// the project-relative spelling used in `EffMod::source_rel` and live-eff manifests.
+fn path_is_fighter_eff(path: &Path, fighter: &str) -> bool {
+    let path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let prefix = format!("effect/fighter/{}/", fighter.to_ascii_lowercase());
+    path.starts_with(&prefix) || path.contains(&format!("/{prefix}"))
+}
+
 /// Spawn identity for matching effect calls across reloads: (kind hash, frame, bone).
 /// Case-insensitive via the lowercase hashes.
 fn call_sig(c: &crate::data::EffectCall) -> (u64, u64, u64, u32, u64) {
@@ -1361,6 +1379,9 @@ pub struct VisionaryApp {
     /// Extra roots holding modded content — added-character mods and slot-add packs. Each
     /// has the same `fighter/<name>/…` + `effect/fighter/<name>/…` layout as the data root.
     extra_roots: Vec<PathBuf>,
+    /// Fighters the user has forgotten from the sidebar. Their source files remain on disk;
+    /// this is the persisted roster filter used by the right-click "Forget fighter" action.
+    forgotten_fighters: BTreeSet<String>,
     /// The selected fighter's resolved ef_*.eff — re-queued when the Eff Editor opens.
     current_eff_path: Option<PathBuf>,
     /// Effs opened from outside the game data root (most-recent first), persisted.
@@ -1661,6 +1682,7 @@ impl VisionaryApp {
             show_edit_log: false,
             export_dir: saved_export_dir,
             extra_roots: saved_mod_roots,
+            forgotten_fighters: load_forgotten_fighters(),
             current_eff_path: None,
             recent_effs: load_recent_effs(),
             export_build: None,
@@ -1712,6 +1734,17 @@ impl VisionaryApp {
             transplant_geometry: None,
             perf: FrameProfiler::new(),
         };
+
+        // Keep capture memory consistent with the persisted roster filter even if the user
+        // forgot a fighter in an earlier session and then starts the game before restoring it.
+        let forgotten_kinds: Vec<i32> = app
+            .forgotten_fighters
+            .iter()
+            .filter_map(|name| fighter_kind_id(name))
+            .collect();
+        for kind in forgotten_kinds {
+            app.game_link.forget_captures_for_kind(kind);
+        }
 
         match saved_data_root {
             Some(root) if root.is_dir() => app.set_data_root(root),
@@ -1934,7 +1967,10 @@ impl VisionaryApp {
                     Some(n) => n.to_string(),
                     None => continue,
                 };
-                if skip.contains(&name.as_str()) || !seen.insert(name.clone()) {
+                if skip.contains(&name.as_str())
+                    || self.forgotten_fighters.contains(&name.to_ascii_lowercase())
+                    || !seen.insert(name.clone())
+                {
                     continue;
                 }
 
@@ -2023,6 +2059,211 @@ impl VisionaryApp {
         }
         status.push('.');
         self.state.status = status;
+    }
+
+    /// Restore every fighter hidden by the roster filter and rebuild the list from the current
+    /// roots. This does not restore any discarded edits; it only makes the source files visible
+    /// again so the fighter can be opened as a fresh entry.
+    fn restore_forgotten_fighters(&mut self) {
+        let count = self.forgotten_fighters.len();
+        if count == 0 {
+            return;
+        }
+        let restored_kinds: Vec<i32> = self
+            .forgotten_fighters
+            .iter()
+            .filter_map(|name| fighter_kind_id(name))
+            .collect();
+        self.forgotten_fighters.clear();
+        for kind in restored_kinds {
+            self.game_link.restore_captures_for_kind(kind);
+        }
+        save_forgotten_fighters(&self.forgotten_fighters);
+        self.reindex_fighters();
+        self.state.status = format!("Restored {count} forgotten fighter(s).");
+    }
+
+    /// Remove one fighter from Visionary's remembered roster and clear state owned by the app.
+    /// The data/mod roots are never modified: forgetting is a reversible roster action, not a
+    /// request to delete the user's dump or installed mod files.
+    fn forget_fighter(&mut self, requested: &str) {
+        let Some(index) = self
+            .state
+            .fighters
+            .iter()
+            .position(|fighter| fighter.name.eq_ignore_ascii_case(requested))
+        else {
+            return;
+        };
+        let fighter = self.state.fighters[index].name.clone();
+        let was_selected = self.state.selected_fighter == Some(index);
+
+        // Remove only app-owned merged previews and overlays. The source effect file remains the
+        // canonical file in the dump/mod root.
+        let source_rels: Vec<String> = self
+            .eff_mods
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(&fighter))
+            .map(|(_, eff)| eff.source_rel.clone())
+            .collect();
+        for source_rel in source_rels {
+            let base = self.resolve_eff_source(&source_rel);
+            self.eff_editor.set_merged_overlay(&base, None);
+            if let Some(dir) = base.parent() {
+                crate::scratch_dirs::remove_transplant_previews(dir);
+            }
+        }
+        let live_removed = self.remove_live_eff_for_fighter(&fighter);
+        if live_removed {
+            self.live_eff_probe_due = None;
+        }
+        self.eff_editor.forget_fighter(&fighter);
+        self.eff_mods
+            .retain(|name, _| !name.eq_ignore_ascii_case(&fighter));
+        self.merged_build_failed
+            .retain(|name| !name.eq_ignore_ascii_case(&fighter));
+        self.effect_pool = None;
+        self.use_scan = self
+            .use_scan
+            .take()
+            .filter(|scan| !scan.fighter.eq_ignore_ascii_case(&fighter));
+        if self.redirect_prompt.as_ref().is_some_and(|prompt| {
+            prompt
+                .uses
+                .iter()
+                .any(|u| fighter_key_matches(&u.move_key, &fighter))
+        }) {
+            self.redirect_prompt = None;
+        }
+        if self
+            .transplant_target
+            .as_deref()
+            .is_some_and(|target| target.eq_ignore_ascii_case(&fighter))
+        {
+            self.transplant_target = None;
+        }
+        if self
+            .transplant_sel
+            .as_ref()
+            .is_some_and(|(path, _)| path_is_fighter_eff(Path::new(path), &fighter))
+        {
+            self.transplant_sel = None;
+        }
+        self.transplant_replace = None;
+        self.transplant_replace_search.clear();
+        self.current_eff_path = self
+            .current_eff_path
+            .take()
+            .filter(|path| !path_is_fighter_eff(path, &fighter));
+        self.recent_effs
+            .retain(|path| !path_is_fighter_eff(path, &fighter));
+        save_recent_effs(&self.recent_effs);
+
+        // ACMD, effect-call, sound, expression, warning, and live-rule stores all use either a
+        // fighter key or a fighter-prefixed key. Remove only this fighter's entries so other
+        // projects and live previews remain intact.
+        self.state
+            .edit_log
+            .entries
+            .retain(|name, _| !name.eq_ignore_ascii_case(&fighter));
+        self.state
+            .effect_call_edits
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.state
+            .effect_call_full
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.state
+            .effect_dropped_lines
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.state
+            .effect_frame_residue
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.state
+            .sound_script_edits
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.state
+            .expression_script_edits
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.state
+            .capture_branch_warnings
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.hitbox_rules_store
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.effect_rules_store
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.effect_control_rules_store
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        if let Some(kind) = fighter_kind_id(&fighter) {
+            self.game_link.forget_captures_for_kind(kind);
+        }
+        let cache_result = crate::acmd::forget_fighter_cache(&fighter);
+
+        self.state.fighters.remove(index);
+        if was_selected {
+            self.state.selected_fighter = None;
+            self.state.selected_move = None;
+            clear_move_state(&mut self.state);
+            self.state.current_frame = FIRST_GAME_FRAME;
+            self.state.total_frames = 0;
+            self.state.playing = false;
+            self.move_list.clear();
+            self.move_list_receiver = None;
+            self.acmd_receiver = None;
+            self.pending_project_script = None;
+            self.pending_capture = None;
+            self.current_model_dir = None;
+            self.current_anim_path = None;
+            self.current_skel_path = None;
+            self.pending_model_load = None;
+            self.current_eff_path = None;
+            self.bone_names.clear();
+            self.selected_hitbox = None;
+            self.hitbox_watch = None;
+            self.hitbox_dirty_at = None;
+            self.acmd_error = None;
+            self.acmd_src_buffer = None;
+        } else if let Some(selected) = self.state.selected_fighter {
+            if selected > index {
+                self.state.selected_fighter = Some(selected - 1);
+            }
+        }
+
+        // Replace the plugin's full rule lists so the forgotten fighter's rules disappear while
+        // every other fighter's rules remain live. The alias/carrier publication is coalesced
+        // and flushed later in the normal update loop.
+        let spawn: Vec<crate::game_link::SpawnRuleWire> = self
+            .effect_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_spawn_rules(&spawn);
+        let controls: Vec<crate::game_link::EffectControlRuleWire> = self
+            .effect_control_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_effect_control_rules(&controls);
+        let hitboxes: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&hitboxes);
+        self.push_effect_aliases();
+
+        self.forgotten_fighters.insert(fighter.to_ascii_lowercase());
+        save_forgotten_fighters(&self.forgotten_fighters);
+        let cache_note = match cache_result {
+            Ok(true) => "cached scripts removed",
+            Ok(false) => "no cached scripts found",
+            Err(_) => "cached scripts could not be removed",
+        };
+        self.state.status = format!(
+            "Forgot {fighter} — {cache_note}; edits and live previews cleared. Source files were left untouched."
+        );
     }
 
     /// Re-scan costume slots for every indexed fighter — after a mod root is added/removed,
@@ -5232,7 +5473,19 @@ impl VisionaryApp {
         let available = ui.available_height();
         let half = (available - 80.0) / 2.0; // 80 accounts for headings + search bars + separator
 
-        ui.heading("Fighters");
+        let mut restore_forgotten = false;
+        let mut forget_fighter: Option<String> = None;
+        ui.horizontal(|ui| {
+            ui.heading("Fighters");
+            if !self.forgotten_fighters.is_empty()
+                && ui
+                    .small_button(format!("Restore ({})", self.forgotten_fighters.len()))
+                    .on_hover_text("Restore fighters hidden from the sidebar")
+                    .clicked()
+            {
+                restore_forgotten = true;
+            }
+        });
         ui.add(
             egui::TextEdit::singleline(&mut self.fighter_search)
                 .hint_text("Search fighters…")
@@ -5244,10 +5497,10 @@ impl VisionaryApp {
             .max_height(half)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // (index, label, modded, slot count, base slot) — modded fighters and
+                // (index, internal name, label, modded, slot count, base slot) — modded fighters and
                 // non-vanilla skin counts are called out so an added-character mod is
                 // visibly picked up rather than silently indistinguishable from vanilla.
-                let fighters: Vec<(usize, String, bool, usize, u8)> = self
+                let fighters: Vec<(usize, String, String, bool, usize, u8)> = self
                     .state
                     .fighters
                     .iter()
@@ -5260,6 +5513,7 @@ impl VisionaryApp {
                     .map(|(i, f)| {
                         (
                             i,
+                            f.name.clone(),
                             f.display_name.clone(),
                             f.is_modded(),
                             f.slots.len(),
@@ -5267,7 +5521,7 @@ impl VisionaryApp {
                         )
                     })
                     .collect();
-                for (i, name, modded, slot_count, base) in fighters {
+                for (i, fighter_name, name, modded, slot_count, base) in fighters {
                     let selected = self.state.selected_fighter == Some(i);
                     let mut label = name.clone();
                     if modded {
@@ -5280,16 +5534,32 @@ impl VisionaryApp {
                     if modded {
                         hover.push_str("\nModded character (not in the vanilla roster)");
                     }
-                    if ui
-                        .selectable_label(selected, &label)
-                        .on_hover_text(hover)
-                        .clicked()
-                        && !selected
-                    {
+                    let response = ui.selectable_label(selected, &label).on_hover_text(hover);
+                    let clicked = response.clicked();
+                    response.context_menu(|ui| {
+                        ui.label(egui::RichText::new("Fighter memory").strong());
+                        ui.label(
+                            egui::RichText::new(concat!(
+                                "Clears cached scripts, edits, and live effect previews. ",
+                                "Source files stay on disk."
+                            ))
+                            .small(),
+                        );
+                        if ui.button("Forget fighter").clicked() {
+                            forget_fighter = Some(fighter_name.clone());
+                            ui.close();
+                        }
+                    });
+                    if clicked && !selected {
                         self.select_fighter(i);
                     }
                 }
             });
+        if let Some(fighter) = forget_fighter {
+            self.forget_fighter(&fighter);
+        } else if restore_forgotten {
+            self.restore_forgotten_fighters();
+        }
 
         ui.separator();
         ui.heading("Moves");
@@ -11188,6 +11458,79 @@ impl VisionaryApp {
             // list is the documented "no pins" state.
             let _ = std::fs::write(&pins, "[]");
         }
+    }
+
+    /// Remove one fighter's app-owned live EFF manifest entry and merged payload. The source
+    /// dump/mod EFF is deliberately outside this path and is never touched here.
+    fn remove_live_eff_for_fighter(&mut self, fighter: &str) -> bool {
+        let mut changed = false;
+        self.live_eff_deployed.retain(|name| {
+            let keep = !name.eq_ignore_ascii_case(fighter);
+            if !keep {
+                changed = true;
+            }
+            keep
+        });
+
+        let Some(sd) = crate::scratch_dirs::emulator_sd_root() else {
+            if changed {
+                self.game_link.send_live_eff_reload();
+            }
+            return changed;
+        };
+        let dir = sd.join("effect_viewer").join("live_eff");
+        let manifest = dir.join("manifest.json");
+        if let Ok(raw) = std::fs::read_to_string(&manifest) {
+            if let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                let mut keep = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let path = entry.get("path").and_then(|value| value.as_str());
+                    if path.is_some_and(|path| path_is_fighter_eff(Path::new(path), fighter)) {
+                        changed = true;
+                        // Manifest file names are app-generated single path components. Do not
+                        // follow a malformed external path if an older manifest contains one.
+                        if let Some(file) = entry.get("file").and_then(|value| value.as_str()) {
+                            let file_path = Path::new(file);
+                            if file_path.components().count() == 1
+                                && file_path.file_name().is_some()
+                            {
+                                let _ = std::fs::remove_file(dir.join(file_path));
+                            }
+                        }
+                    } else {
+                        keep.push(entry);
+                    }
+                }
+                if keep.is_empty() {
+                    let _ = std::fs::remove_file(&manifest);
+                } else if let Ok(json) = serde_json::to_string_pretty(&keep) {
+                    let _ = std::fs::write(&manifest, json);
+                }
+            }
+        }
+
+        let merged = dir.join(format!("ef_{fighter}_merged.eff"));
+        if merged.is_file() && std::fs::remove_file(&merged).is_ok() {
+            changed = true;
+        }
+
+        // Older builds also staged a fallback Arcropolis mod. It is app-owned and safe to remove;
+        // the actual user mod/data roots are not under this directory.
+        let fallback = sd
+            .join("ultimate")
+            .join("mods")
+            .join("effect_viewer_live")
+            .join("effect")
+            .join("fighter")
+            .join(fighter);
+        if fallback.is_dir() && std::fs::remove_dir_all(&fallback).is_ok() {
+            changed = true;
+        }
+
+        if changed {
+            self.game_link.send_live_eff_reload();
+        }
+        changed
     }
 
     fn clear_all_game_edits(&mut self) {
@@ -24820,6 +25163,31 @@ fn load_mod_roots() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// Fighters hidden from the sidebar, one canonical lowercase fighter name per line.
+fn load_forgotten_fighters() -> BTreeSet<String> {
+    let Some(dest) = config_path("forgotten_fighters") else {
+        return BTreeSet::new();
+    };
+    let Ok(body) = std::fs::read_to_string(dest) else {
+        return BTreeSet::new();
+    };
+    body.lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn save_forgotten_fighters(fighters: &BTreeSet<String>) {
+    if let Some(dest) = config_path("forgotten_fighters") {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = fighters.iter().cloned().collect::<Vec<_>>().join("\n");
+        let _ = std::fs::write(dest, body);
+    }
+}
+
 fn load_config_path(key: &str) -> Option<std::path::PathBuf> {
     let dest = config_path(key)?;
     let dest = if dest.exists() {
@@ -24973,6 +25341,36 @@ mod motion_animation_tests {
             hash40::hash40("attack11").0,
         );
         assert_eq!(selected, Some(body));
+    }
+}
+
+#[cfg(test)]
+mod fighter_forget_key_tests {
+    use super::{fighter_key_matches, path_is_fighter_eff};
+    use std::path::Path;
+
+    #[test]
+    fn fighter_key_matching_does_not_remove_another_fighters_state() {
+        assert!(fighter_key_matches("mario/attack11", "MARIO"));
+        assert!(fighter_key_matches("mario/attack11#sound", "mario"));
+        assert!(!fighter_key_matches("mariod/attack11", "mario"));
+        assert!(!fighter_key_matches("mario", "mario"));
+    }
+
+    #[test]
+    fn fighter_effect_path_matching_handles_relative_and_absolute_paths() {
+        assert!(path_is_fighter_eff(
+            Path::new("effect/fighter/mario/ef_mario.eff"),
+            "MARIO"
+        ));
+        assert!(path_is_fighter_eff(
+            Path::new("/tmp/dump/effect/fighter/mario/ef_mario.eff"),
+            "mario"
+        ));
+        assert!(!path_is_fighter_eff(
+            Path::new("effect/fighter/mariod/ef_mariod.eff"),
+            "mario"
+        ));
     }
 }
 
