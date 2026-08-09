@@ -9,6 +9,8 @@ pub const GATEWAY_FILE: &str = "sd:/slight/user/gateway.txt";
 pub const CLIENT_ID_FILE: &str = "sd:/slight/user/client_id.txt";
 pub const DEBUG_ACTIVATE: &str = "sd:/slight/debug/activate.txt";
 pub const DEBUG_DEACTIVATE: &str = "sd:/slight/debug/deactivate.txt";
+/// One-shot opt-in for the otherwise-disabled inline collision trampoline test.
+pub const DEBUG_INLINE_COLLISION: &str = "sd:/slight/debug/inline_collision_hook.txt";
 /// Opt-in for the effect-loader research trace — see [`trace_enabled`].
 pub const DEBUG_TRACE: &str = "sd:/slight/debug/trace.txt";
 /// Whitespace/comma-separated subsystem names to leave uninstalled — see [`subsystem_disabled`].

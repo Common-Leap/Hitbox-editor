@@ -2484,6 +2484,9 @@ mod tests {
             "body pattern missing or ambiguous",
             "COLLISION_HOOK mode=wrapper-fallback coverage=partial",
             "COLLISION attacker=",
+            "const ENABLE_INLINE_COLLISION_HOOK: bool = false;",
+            "DEBUG_INLINE_COLLISION",
+            "consume_sd_trigger",
             "orig(",
         ] {
             assert!(
@@ -2497,7 +2500,7 @@ mod tests {
         );
 
         let disabled_start = source
-            .find("if !ENABLE_INLINE_COLLISION_HOOK")
+            .find("if !inline_requested")
             .expect("collision hook must keep an explicit inline-hook gate");
         let scan_start = source[disabled_start..]
             .find("\n    let offset = match scan_collision_pattern()")

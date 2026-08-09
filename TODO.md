@@ -3692,6 +3692,12 @@ body callers. The installer and debug-enabled hit path now emit `COLLISION_HOOK`
 lines into the bounded `sd:/slight/diag.txt` session, so a fresh boot can distinguish a loaded
 wrapper fallback and an observed collision without relying on the emulator console.
 
+The shipped constant remains `ENABLE_INLINE_COLLISION_HOOK = false`. For a controlled live test,
+creating `sd:/slight/debug/inline_collision_hook.txt` before boot requests the inline path once;
+the installer consumes that trigger before scanning, then reports `request=inline-one-shot` in
+the diagnostic session. This is a test affordance, not runtime proof: the trigger must still
+produce an `inline-body` install line and a collision line without a crash on the target.
+
 R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
 trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
 enable the inline hook based on static analysis alone.
