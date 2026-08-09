@@ -2833,6 +2833,13 @@ those calls are status functions rather than the three-argument ACMD source form
 `true` is a valid native value, not that the ACMD dump omitted a default of `true` (or any default
 at all), so they do not justify typing the retained calls.
 
+A fresh read-only audit of the upstream [dumped-script repository](https://github.com/WuBoytH/SSBU-Dumped-Scripts)
+at `59004685238a3f6f93bae905d3a4e079701c40b4` (2026-03-10) still finds exactly 66 of these
+three-argument calls — 33 in `smashline` and 33 in `smashline-hdr` — and no
+`set_frame_partial_sync_anim_cmd` calls. That confirms the source spelling and corpus count are
+current, but it remains corroboration of the source dump, not evidence for the missing native
+boolean's value; the upstream project also warns that its scripts still contain errors.
+
 The parser/export regression test also keeps measured three-argument calls and a native-shaped
 four-argument call raw and round-trippable, including the corpus's `boma` receiver spelling. This
 guards the evidence boundary without pretending that the fourth boolean has been identified.
