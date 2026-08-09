@@ -19831,8 +19831,13 @@ impl VisionaryApp {
     /// time. Other symbolic Work IDs remain source/export-only because the editor must not invent
     /// a game-version-specific constant mapping.
     fn control_work_slot(work: &str) -> Option<i32> {
-        crate::param_labels::const_value(crate::param_labels::EFFECT_DETACH_KIND_WORK_SLOTS, work)
-            .or_else(|| crate::param_labels::parse_raw_value(work))
+        let value = crate::param_labels::const_value(
+            crate::param_labels::EFFECT_DETACH_KIND_WORK_SLOTS,
+            work,
+        )
+        .or_else(|| Self::control_integer(work))?;
+        (value >= 0)
+            .then_some(value)
             .and_then(|value| i32::try_from(value).ok())
     }
 
@@ -30429,6 +30434,16 @@ mod effect_control_rule_tests {
         );
         assert_eq!(VisionaryApp::control_work_slot("17"), Some(17));
         assert_eq!(VisionaryApp::control_work_slot("0x12"), Some(18));
+        assert_eq!(
+            VisionaryApp::control_work_slot("-1"),
+            None,
+            "negative WorkModule slots are not a measured live address"
+        );
+        assert_eq!(
+            VisionaryApp::control_work_slot("17.0"),
+            None,
+            "decimal WorkModule slots must remain integer source text"
+        );
         assert_eq!(
             VisionaryApp::control_work_slot(
                 "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1"

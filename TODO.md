@@ -2795,6 +2795,13 @@ source value, and no direct text callers were found for these exported symbols. 
 ABI shape without closing the source/runtime evidence gap, so the three-argument calls remain
 source-preserved and untyped.
 
+A second read-only check of the available status decompilation corpus found four native status
+call sites: Ken and Ryu pass an explicitly converted `true`, and Pac-Man's trampoline Break and
+Shake statuses pass `true` directly. That corpus is an older 2023-08-22 public status dump, and
+those calls are status functions rather than the three-argument ACMD source form. They prove that
+`true` is a valid native value, not that the ACMD dump omitted a default of `true` (or any default
+at all), so they do not justify typing the retained calls.
+
 The parser/export regression test also keeps measured three-argument calls and a native-shaped
 four-argument call raw and round-trippable, including the corpus's `boma` receiver spelling. This
 guards the evidence boundary without pretending that the fourth boolean has been identified.
