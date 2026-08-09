@@ -1623,7 +1623,7 @@ mod tests {
                 .flatten()
                 .flatten()
             {
-                let Ok(whole) = std::fs::read_to_string(file.path()) else {
+                let Some(whole) = crate::acmd::cached_script_body_at(&file.path()) else {
                     continue;
                 };
                 // One cached file holds every ACMD function for a motion; an export writes one.

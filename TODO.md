@@ -3479,10 +3479,11 @@ already on disk are handled without anyone clearing their cache.
   read and export tests, returning `None` for a miss fails the scan test, and returning an empty
   body unconditionally fails only the *positive* half — which is exactly the hole a lone negative
   test would have left.
-- **Follow-up, small: the corpus test helpers still read the cache raw.** Five of them build
-  their own file lists rather than going through `cached_script_body`, so those three error pages
-  are still parsed as one-`Raw`-line scripts by the oracle. Harmless today — they round-trip —
-  but it inflates any count taken over the cache, which is how this was found in the first place.
+- **Follow-up closed 2026-08-08.** The five corpus readers now use the same cached-body
+  normalizer as the application, including the verification module, so legacy `404: Not Found`
+  files remain cached misses instead of entering the oracles as one-`Raw`-line scripts. The
+  positive real-body test remains beside the miss tests, so the readers cannot be made to pass by
+  silently dropping every cached file.
 
 ### [x] R10 — A live capture had no motion rate, and could not say what else it dropped (done 2026-08-06)
 

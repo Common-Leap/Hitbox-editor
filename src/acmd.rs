@@ -101,7 +101,7 @@ pub fn cached_script_body(fighter: &str, move_name: &str) -> Option<String> {
 /// [`cached_script_body`] against an explicit path, so a test can exercise the real read and
 /// normalise without redirecting the process-wide cache directory out from under the corpus
 /// tests (which would make them silently skip rather than fail).
-fn cached_script_body_at(path: &std::path::Path) -> Option<String> {
+pub(crate) fn cached_script_body_at(path: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
         .map(|raw| script_source_from_body(&raw))
@@ -8328,7 +8328,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .flatten()
                 .flatten()
             {
-                if let Ok(body) = std::fs::read_to_string(script.path()) {
+                if let Some(body) = cached_script_body_at(&script.path()) {
                     bodies.push((script.path().display().to_string(), body));
                 }
             }
@@ -9159,7 +9159,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .flatten()
                 .flatten()
             {
-                let Ok(body) = std::fs::read_to_string(script.path()) else {
+                let Some(body) = cached_script_body_at(&script.path()) else {
                     continue;
                 };
                 let ordinals = parse_effect_script(&body).call_macro_ordinals();
@@ -9210,7 +9210,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .flatten()
                 .flatten()
             {
-                if let Ok(body) = std::fs::read_to_string(script.path()) {
+                if let Some(body) = cached_script_body_at(&script.path()) {
                     bodies.push(body);
                 }
             }
@@ -9324,7 +9324,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .flatten()
                 .flatten()
             {
-                let Ok(body) = std::fs::read_to_string(entry.path()) else {
+                let Some(body) = cached_script_body_at(&entry.path()) else {
                     continue;
                 };
                 let script = parse_effect_script(&body);
