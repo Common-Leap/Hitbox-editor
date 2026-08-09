@@ -10,8 +10,9 @@ static INSTALLED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 static HITS: LazyLock<Mutex<VecDeque<HitRecord>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(32)));
 
-/// Whether to install the manual inline collision hook. Off: it null-jumps under Eden's JIT
-/// (the trampoline is bad) and only feeds the damage log. Re-enable for real hardware.
+/// Whether to install the manual inline collision hook. Off: use the ABI-verified binding
+/// wrapper fallback, which is partial because direct body callers bypass the exported wrapper.
+/// Re-enable the inline path only after its trampoline is proven on a compatible target.
 const ENABLE_INLINE_COLLISION_HOOK: bool = false;
 
 /// 40-byte ARM64 pattern scanned in game `.text` @ FUN_71000d1fb4.
@@ -76,7 +77,11 @@ pub fn install() {
     // null-jumped when a hit fired. Keep this disabled until the corrected path is proven on
     // hardware or with a compatible hook implementation.
     if !ENABLE_INLINE_COLLISION_HOOK {
-        skyline::println!("[SLight] Skyline Hook: inline collision hook disabled (Eden-unsafe)");
+        skyline::println!(
+            "[SLight] Skyline Hook: inline collision hook disabled (Eden-unsafe); installing wrapper fallback (partial coverage)"
+        );
+        skyline::install_hook!(fallback_collision_hit_hook);
+        *INSTALLED.lock() = true;
         return;
     }
 

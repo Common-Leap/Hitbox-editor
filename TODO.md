@@ -3635,6 +3635,11 @@ ambiguous repeated prologue instead of selecting the first match, then installs 
 wrapper fallback and labels it partial because those direct body callers remain outside its
 coverage.
 
+When the inline body hook is disabled, the installer now uses that ABI-verified wrapper fallback
+by default and marks the hook installed after registration. This makes the documented partial
+fallback reachable without repeatedly registering the callback; it still cannot cover the direct
+body callers.
+
 R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
 trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
 enable the inline hook based on static analysis alone.

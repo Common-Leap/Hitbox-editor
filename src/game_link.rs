@@ -2494,6 +2494,25 @@ mod tests {
             !source.contains("type CollisionHitHook =") && !source.contains("param_1: u32"),
             "the obsolete six-integer collision hook ABI is still present"
         );
+
+        let disabled_start = source
+            .find("if !ENABLE_INLINE_COLLISION_HOOK")
+            .expect("collision hook must keep an explicit inline-hook gate");
+        let scan_start = source[disabled_start..]
+            .find("\n    let offset = match scan_collision_pattern()")
+            .map(|offset| disabled_start + offset)
+            .expect("collision hook inline gate must precede pattern scanning");
+        let disabled_block = &source[disabled_start..scan_start];
+        for needle in [
+            "inline collision hook disabled (Eden-unsafe); installing wrapper fallback (partial coverage)",
+            "skyline::install_hook!(fallback_collision_hit_hook);",
+            "*INSTALLED.lock() = true;",
+        ] {
+            assert!(
+                disabled_block.contains(needle),
+                "disabled collision hook path is missing {needle:?}"
+            );
+        }
     }
 
     /// The rate category and override field the editor sends are the ones the plugin reads.
