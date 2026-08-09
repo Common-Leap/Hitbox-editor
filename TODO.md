@@ -2860,6 +2860,33 @@ remain explicitly source/export-only. No emulator, game, or UI automation was ru
 behavior remains explicitly unverified. Other WorkModule status calls, including getter-driven
 conditional logic, remain open under E1.
 
+#### [x] E1x — direct WorkModule transition-term group points (completed 2026-08-08; live runtime unverified)
+
+The pinned public `SSBU-Dumped-Scripts` corpus (`59004685238a3f6f93bae905d3a4e079701c40b4`)
+contains two exact `WorkModule::enable_transition_term_group(agent.module_accessor, term_group)`
+calls and fifteen exact `WorkModule::unable_transition_term_group_ex(agent.module_accessor,
+term_group)` calls. The pinned `skyline-smash` binding confirms both native operations as
+`(BattleObjectModuleAccessor, c_int) -> ()`. No `unable_transition_term_group` or `*_all` calls
+were measured, so those names remain raw.
+
+This slice reuses the existing transition-term panel, timeline, category-33 live rule identity,
+export, and value-only source write-back, but keeps the exact function name in the IR and live
+matcher so a group operation cannot be mistaken for its ordinary transition-term sibling.
+
+The five surfaces are covered for these exact group shapes: typed parser/IR and source-site walk,
+editable Movement / Status panel and timeline lane, capture reconstruction, category-33 sparse
+live rules and matching Skyline hooks, generated ACMD export, project persistence, and value-only
+source write-back. Group calls are intentionally typed only with `agent.module_accessor` because
+that is the only measured receiver; ordinary transition terms retain their measured `boma` form.
+Unsupported group receivers, expressions, arities, operation changes, retiming, duplicate
+same-frame identities, and symbolic-only live replacements remain explicitly source/export-only.
+
+Offline validation passed: the full locked desktop suite (662 passed, 1 ignored) and all six
+deployment tests, focused parser/capture/source-sync/wire tests, strict Clippy, format/diff
+checks, the debug build-check wrapper, the locked Linux release build, and the Skyline plugin
+release build. No emulator, game, or UI automation was run, so live hook behavior remains
+explicitly unverified. Other WorkModule status calls remain open under E1.
+
 #### [x] E1u — direct `WorkModule::set_int` / `set_float` points (completed 2026-08-08; live runtime unverified)
 
 The local 462-file script cache contains exactly five standard-shape `WorkModule::set_int` calls

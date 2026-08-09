@@ -529,8 +529,7 @@ pub const CAT_MOTION_MODULE_SET_RATE_PARTIAL: u8 = 31;
 /// Wire category for direct `WorkModule::on_flag` / `off_flag` point overrides.
 pub const CAT_WORK_FLAG: u8 = 32;
 
-/// Wire category for direct `WorkModule::enable_transition_term` /
-/// `unable_transition_term` point overrides.
+/// Wire category for direct WorkModule transition-term and transition-term-group point overrides.
 pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
 
 /// Wire category for direct `WorkModule::set_int` / `set_float` / `set_int64` point overrides.
@@ -3099,6 +3098,12 @@ mod tests {
         assert!(module.contains("smash::app::lua_bind::WorkModule::unable_transition_term,"));
         assert!(module.contains("hook_work_module_enable_transition_term"));
         assert!(module.contains("hook_work_module_unable_transition_term"));
+        assert!(module.contains("smash::app::lua_bind::WorkModule::enable_transition_term_group,"));
+        assert!(
+            module.contains("smash::app::lua_bind::WorkModule::unable_transition_term_group_ex,")
+        );
+        assert!(module.contains("hook_work_module_enable_transition_term_group"));
+        assert!(module.contains("hook_work_module_unable_transition_term_group_ex"));
         assert!(module.contains("replace = smash::app::lua_bind::WorkModule::inc_int"));
         assert!(module.contains("hook_work_module_inc_int"));
         assert!(module.contains("replace = smash::app::lua_bind::WorkModule::set_int)"));

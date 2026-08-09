@@ -1726,6 +1726,16 @@ work_transition_term_hook!(
     smash::app::lua_bind::WorkModule::unable_transition_term,
     "WorkModule::unable_transition_term"
 );
+work_transition_term_hook!(
+    hook_work_module_enable_transition_term_group,
+    smash::app::lua_bind::WorkModule::enable_transition_term_group,
+    "WorkModule::enable_transition_term_group"
+);
+work_transition_term_hook!(
+    hook_work_module_unable_transition_term_group_ex,
+    smash::app::lua_bind::WorkModule::unable_transition_term_group_ex,
+    "WorkModule::unable_transition_term_group_ex"
+);
 
 /// Capture and sparsely override the measured direct `WorkModule::inc_int` operation. The slot
 /// is the complete runtime identity because the operation has no value argument.
@@ -3413,6 +3423,8 @@ pub fn install() {
         hook_work_module_off_flag,
         hook_work_module_enable_transition_term,
         hook_work_module_unable_transition_term,
+        hook_work_module_enable_transition_term_group,
+        hook_work_module_unable_transition_term_group_ex,
         hook_work_module_inc_int,
         hook_work_module_set_int,
         hook_work_module_set_float,

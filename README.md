@@ -412,7 +412,7 @@ section of the editor:
 - `MotionModule::set_helper_calculation` edits the direct helper-calculation toggle.
 - `MotionModule::set_rate_partial` edits the playback rate of a named partial-animation part while preserving that part token.
 - `WorkModule::on_flag` and `WorkModule::off_flag` edit the authored flag token for the supported direct calls.
-- `WorkModule::enable_transition_term` and `WorkModule::unable_transition_term` edit the authored transition-term token for the supported direct calls.
+- `WorkModule::enable_transition_term`, `unable_transition_term`, `enable_transition_term_group`, and `unable_transition_term_group_ex` edit the authored transition-term or group token for the supported direct calls.
 - `WorkModule::set_int` and `WorkModule::set_float` edit the authored value and WorkModule slot tokens for the supported direct calls.
 
 Value controls edit their point values while keeping their source frame. Placement
@@ -443,9 +443,9 @@ kinetic calls that are not shown remain preserved in the source and are not rewr
 until their complete source and runtime signatures are verified. Direct `WorkModule` flag
 controls preserve numeric and dereferenced source tokens in export and source sync; live
 replacement requires a numeric capture of the original flag and a numeric replacement.
-Direct `WorkModule` transition-term controls preserve numeric and dereferenced source tokens in
-export and source sync; live replacement requires a numeric capture of the original term and a
-numeric replacement. Direct `WorkModule` value setters preserve numeric and dereferenced value
+Direct `WorkModule` transition-term and transition-term-group controls preserve numeric and
+dereferenced source tokens in export and source sync; live replacement requires a numeric capture
+of the original term or group token and a numeric replacement. Direct `WorkModule` value setters preserve numeric and dereferenced value
 and slot tokens in export and source sync; live replacement requires a numeric capture of the
 original value and slot and numeric replacements. The operation, frame, receiver, and call
 structure remain source/export-owned.

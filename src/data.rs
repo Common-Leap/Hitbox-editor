@@ -1642,11 +1642,14 @@ impl WorkFlagCall {
     }
 }
 
-/// Which direct WorkModule transition-term operation a source call performs.
+/// Which direct WorkModule transition-term or transition-term-group operation a source call
+/// performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorkTransitionTermAction {
     Enable,
     Unable,
+    EnableGroup,
+    UnableGroupEx,
 }
 
 impl WorkTransitionTermAction {
@@ -1654,15 +1657,19 @@ impl WorkTransitionTermAction {
         match self {
             Self::Enable => "WorkModule::enable_transition_term",
             Self::Unable => "WorkModule::unable_transition_term",
+            Self::EnableGroup => "WorkModule::enable_transition_term_group",
+            Self::UnableGroupEx => "WorkModule::unable_transition_term_group_ex",
         }
     }
 }
 
-/// A parsed direct `WorkModule::{enable,unable}_transition_term(receiver, transition_term)` call.
+/// A parsed direct WorkModule transition-term or transition-term-group call. The token field is
+/// intentionally shared because the measured native wrappers all take one integer after the
+/// receiver; the exact function name remains in [`WorkTransitionTermAction`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkTransitionTermCall {
     pub action: WorkTransitionTermAction,
-    /// Authored transition-term token, usually a dereferenced lua constant.
+    /// Authored transition-term or group token, usually a dereferenced lua constant.
     pub transition_term: String,
 }
 

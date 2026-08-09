@@ -2334,11 +2334,11 @@ fn parse_work_flag_call(line: &str) -> Option<ExcuteStmt> {
     None
 }
 
-/// Parse the measured direct `WorkModule::enable_transition_term` /
-/// `WorkModule::unable_transition_term` shapes:
-/// `WorkModule::{enable,unable}_transition_term(agent.module_accessor, transition_term)` and
-/// the HDR `boma` form. Only a numeric or dereferenced identifier token is typed; other
-/// expressions and arities remain raw until their source/runtime identity is measured.
+/// Parse the measured direct WorkModule transition-term and transition-term-group shapes. The
+/// ordinary term pair accepts the standard/HDR receiver forms; the group pair is currently
+/// measured only with `agent.module_accessor`. Only a numeric or dereferenced identifier token
+/// is typed; other expressions and arities remain raw until their source/runtime identity is
+/// measured.
 fn parse_work_transition_term_call(line: &str) -> Option<ExcuteStmt> {
     for (func, action) in [
         (
@@ -2348,6 +2348,14 @@ fn parse_work_transition_term_call(line: &str) -> Option<ExcuteStmt> {
         (
             "WorkModule::unable_transition_term",
             crate::data::WorkTransitionTermAction::Unable,
+        ),
+        (
+            "WorkModule::enable_transition_term_group",
+            crate::data::WorkTransitionTermAction::EnableGroup,
+        ),
+        (
+            "WorkModule::unable_transition_term_group_ex",
+            crate::data::WorkTransitionTermAction::UnableGroupEx,
         ),
     ] {
         let needle = format!("{func}(");
@@ -2359,7 +2367,18 @@ fn parse_work_transition_term_call(line: &str) -> Option<ExcuteStmt> {
         let [module_accessor, transition_term] = tokens.as_slice() else {
             continue;
         };
-        if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        let receiver = module_accessor.trim();
+        let receiver_is_measured = match action {
+            crate::data::WorkTransitionTermAction::Enable
+            | crate::data::WorkTransitionTermAction::Unable => {
+                matches!(receiver, "agent.module_accessor" | "boma")
+            }
+            crate::data::WorkTransitionTermAction::EnableGroup
+            | crate::data::WorkTransitionTermAction::UnableGroupEx => {
+                receiver == "agent.module_accessor"
+            }
+        };
+        if !receiver_is_measured {
             continue;
         }
         let transition_term = transition_term.trim();
@@ -9854,12 +9873,14 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
         WorkModule::enable_transition_term(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_TERM_ID_DASH_TO_RUN);
         WorkModule::unable_transition_term(agent.module_accessor, 17);
+        WorkModule::enable_transition_term_group(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_GROUP_CHK_AIR_LANDING);
+        WorkModule::unable_transition_term_group_ex(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_SPECIAL_HI);
     }
 }
 "#;
         let script = parse_acmd_script(source);
         let events = script.to_work_transition_term_events();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0].frame, 4);
         assert_eq!(events[0].site, 0);
         assert_eq!(
@@ -9875,18 +9896,48 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             crate::data::WorkTransitionTermAction::Unable
         );
         assert_eq!(events[1].call.transition_term, "17");
+        assert_eq!(
+            events[2].call.action,
+            crate::data::WorkTransitionTermAction::EnableGroup
+        );
+        assert_eq!(
+            events[2].call.transition_term,
+            "*FIGHTER_STATUS_TRANSITION_GROUP_CHK_AIR_LANDING"
+        );
+        assert_eq!(
+            events[3].call.action,
+            crate::data::WorkTransitionTermAction::UnableGroupEx
+        );
+        assert_eq!(
+            events[3].call.transition_term,
+            "*FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_SPECIAL_HI"
+        );
 
         let emitted = preview_game_fn(&script, "attack_air_n");
         assert!(emitted.contains(
             "WorkModule::enable_transition_term(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_TERM_ID_DASH_TO_RUN);"
         ));
         assert!(emitted.contains("WorkModule::unable_transition_term(agent.module_accessor, 17);"));
+        assert!(emitted.contains(
+            "WorkModule::enable_transition_term_group(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_GROUP_CHK_AIR_LANDING);"
+        ));
+        assert!(emitted.contains(
+            "WorkModule::unable_transition_term_group_ex(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_SPECIAL_HI);"
+        ));
         assert_eq!(
             parse_acmd_script(&emitted).to_work_transition_term_events(),
             events
         );
 
-        let hdr = source.replace("agent.module_accessor", "boma");
+        let hdr = source
+            .replace(
+                "WorkModule::enable_transition_term(agent.module_accessor",
+                "WorkModule::enable_transition_term(boma",
+            )
+            .replace(
+                "WorkModule::unable_transition_term(agent.module_accessor",
+                "WorkModule::unable_transition_term(boma",
+            );
         assert_eq!(
             parse_acmd_script(&hdr).to_work_transition_term_events(),
             events
@@ -9901,23 +9952,31 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         WorkModule::unable_transition_term(other, 2);
         WorkModule::unable_transition_term(agent.module_accessor, make_term());
         WorkModule::enable_transition_term(agent.module_accessor, 3);
+        WorkModule::enable_transition_term_group(boma, 4);
+        WorkModule::unable_transition_term_group_ex(agent.module_accessor, make_group());
+        WorkModule::unable_transition_term_group_ex(agent.module_accessor, 5);
     }
 }
 "#;
         let script = parse_acmd_script(source);
-        assert_eq!(script.to_work_transition_term_events().len(), 1);
+        let events = script.to_work_transition_term_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].call.transition_term, "3");
         assert_eq!(
-            script.to_work_transition_term_events()[0]
-                .call
-                .transition_term,
-            "3"
+            events[1].call.action,
+            crate::data::WorkTransitionTermAction::UnableGroupEx
         );
+        assert_eq!(events[1].call.transition_term, "5");
         let emitted = preview_game_fn(&script, "x");
         assert!(emitted
             .contains("WorkModule::enable_transition_term(agent.module_accessor, *TERM, 1);"));
         assert!(emitted.contains("WorkModule::unable_transition_term(other, 2);"));
         assert!(emitted
             .contains("WorkModule::unable_transition_term(agent.module_accessor, make_term());"));
+        assert!(emitted.contains("WorkModule::enable_transition_term_group(boma, 4);"));
+        assert!(emitted.contains(
+            "WorkModule::unable_transition_term_group_ex(agent.module_accessor, make_group());"
+        ));
     }
 
     #[test]

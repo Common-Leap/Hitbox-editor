@@ -4890,13 +4890,27 @@ pub fn sync_work_flags(
     })
 }
 
-/// The verified direct `WorkModule::enable_transition_term` /
-/// `unable_transition_term` calls in source order.
+/// Return whether a direct transition-term operation uses a measured receiver spelling.
+fn valid_work_transition_term_receiver(function: &str, receiver: &str) -> bool {
+    match function {
+        "WorkModule::enable_transition_term_group"
+        | "WorkModule::unable_transition_term_group_ex" => receiver == "agent.module_accessor",
+        "WorkModule::enable_transition_term" | "WorkModule::unable_transition_term" => {
+            matches!(receiver, "agent.module_accessor" | "boma")
+        }
+        _ => false,
+    }
+}
+
+/// The verified direct WorkModule transition-term and transition-term-group calls in source
+/// order.
 pub(crate) fn work_transition_term_sites(text: &str) -> Vec<MacroSite> {
     let mut sites = Vec::new();
     for action in [
         crate::data::WorkTransitionTermAction::Enable,
         crate::data::WorkTransitionTermAction::Unable,
+        crate::data::WorkTransitionTermAction::EnableGroup,
+        crate::data::WorkTransitionTermAction::UnableGroupEx,
     ] {
         sites.extend(scan_named_sites(text, action.func(), 0..text.len()));
     }
@@ -4905,15 +4919,15 @@ pub(crate) fn work_transition_term_sites(text: &str) -> Vec<MacroSite> {
         .into_iter()
         .filter(|site| {
             site.args.len() == 2
-                && site
-                    .arg(text, 0)
-                    .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+                && site.arg(text, 0).is_some_and(|value| {
+                    valid_work_transition_term_receiver(&site.name, value.trim())
+                })
                 && site.arg(text, 1).is_some_and(valid_work_flag_token)
         })
         .collect()
 }
 
-/// Rewrite only the authored transition-term token of existing direct WorkModule calls.
+/// Rewrite only the authored transition-term or group token of existing direct WorkModule calls.
 pub fn rewrite_work_transition_terms(
     text: &str,
     label: &str,
@@ -4965,7 +4979,7 @@ pub fn rewrite_work_transition_terms(
             || site.args.len() != 2
             || site
                 .arg(text, 0)
-                .is_none_or(|value| !matches!(value.trim(), "agent.module_accessor" | "boma"))
+                .is_none_or(|value| !valid_work_transition_term_receiver(&site.name, value.trim()))
             || site
                 .arg(text, 1)
                 .is_none_or(|value| value.trim() != before.call.transition_term.trim())
@@ -9966,6 +9980,8 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
     if macros::is_excute(agent) {
         WorkModule::enable_transition_term(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_TERM_ID_DASH_TO_RUN);
         WorkModule::unable_transition_term(boma, 17);
+        WorkModule::enable_transition_term_group(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_GROUP_CHK_AIR_LANDING);
+        WorkModule::unable_transition_term_group_ex(agent.module_accessor, 18);
     }
 }
 "#;
@@ -9973,14 +9989,23 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         let mut edited = pristine.clone();
         edited[0].call.transition_term = "23".into();
         edited[1].call.transition_term = "*FIGHTER_STATUS_TRANSITION_TERM_ID_ENABLE_COMBO".into();
+        edited[2].call.transition_term = "19".into();
+        edited[3].call.transition_term =
+            "*FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_SPECIAL_HI".into();
 
         let (after, report) =
             rewrite_work_transition_terms(text, "mario/attack_air_n", &pristine, &edited).unwrap();
-        assert_eq!(report.changed, 2, "{report:?}");
+        assert_eq!(report.changed, 4, "{report:?}");
         assert!(report.skipped.is_empty(), "{report:?}");
         assert!(after.contains("WorkModule::enable_transition_term(agent.module_accessor, 23);"));
         assert!(after.contains(
             "WorkModule::unable_transition_term(boma, *FIGHTER_STATUS_TRANSITION_TERM_ID_ENABLE_COMBO);"
+        ));
+        assert!(
+            after.contains("WorkModule::enable_transition_term_group(agent.module_accessor, 19);")
+        );
+        assert!(after.contains(
+            "WorkModule::unable_transition_term_group_ex(agent.module_accessor, *FIGHTER_STATUS_TRANSITION_TERM_ID_CONT_SPECIAL_HI);"
         ));
         assert!(after.contains("let boma = agent.boma();"));
         assert_eq!(

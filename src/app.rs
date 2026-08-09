@@ -8162,12 +8162,12 @@ impl VisionaryApp {
             ui.heading("Movement / Status");
             ui.colored_label(
                 egui::Color32::from_rgb(205, 170, 235),
-                "transition term",
+                "transition term / group",
             );
         })
         .response
         .on_hover_text(
-            "Enables or unables one status transition term. The measured direct WorkModule operation and authored term token are preserved; numeric live replacement requires a matching capture.",
+            "Enables or unables one status transition term or transition-term group. The measured direct WorkModule operation and authored token are preserved; numeric live replacement requires a matching capture.",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -12848,15 +12848,28 @@ impl VisionaryApp {
                         flag: line.args.first()?.to_source_arg()?,
                     }))
                 }
-                "WorkModule::enable_transition_term" | "WorkModule::unable_transition_term"
+                "WorkModule::enable_transition_term"
+                | "WorkModule::unable_transition_term"
+                | "WorkModule::enable_transition_term_group"
+                | "WorkModule::unable_transition_term_group_ex"
                     if line.args.len() == 1 =>
                 {
                     Some(ExcuteStmt::WorkTransitionTerm(
                         crate::data::WorkTransitionTermCall {
-                            action: if line.func == "WorkModule::enable_transition_term" {
-                                crate::data::WorkTransitionTermAction::Enable
-                            } else {
-                                crate::data::WorkTransitionTermAction::Unable
+                            action: match line.func.as_str() {
+                                "WorkModule::enable_transition_term" => {
+                                    crate::data::WorkTransitionTermAction::Enable
+                                }
+                                "WorkModule::unable_transition_term" => {
+                                    crate::data::WorkTransitionTermAction::Unable
+                                }
+                                "WorkModule::enable_transition_term_group" => {
+                                    crate::data::WorkTransitionTermAction::EnableGroup
+                                }
+                                "WorkModule::unable_transition_term_group_ex" => {
+                                    crate::data::WorkTransitionTermAction::UnableGroupEx
+                                }
+                                _ => return None,
                             },
                             transition_term: line.args.first()?.to_source_arg()?,
                         },
@@ -27865,6 +27878,22 @@ mod live_effect_capture_tests {
                 args: vec![A::Int(8)],
                 run: 1,
             },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 6.0,
+                func: "WorkModule::enable_transition_term_group".into(),
+                args: vec![A::Int(9)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 9.0,
+                func: "WorkModule::unable_transition_term_group_ex".into(),
+                args: vec![A::Int(10)],
+                run: 1,
+            },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -27886,11 +27915,31 @@ mod live_effect_capture_tests {
                     },
                     site: 1,
                 },
+                crate::data::WorkTransitionTermEvent {
+                    frame: 7,
+                    call: crate::data::WorkTransitionTermCall {
+                        action: crate::data::WorkTransitionTermAction::EnableGroup,
+                        transition_term: "9".into(),
+                    },
+                    site: 2,
+                },
+                crate::data::WorkTransitionTermEvent {
+                    frame: 10,
+                    call: crate::data::WorkTransitionTermCall {
+                        action: crate::data::WorkTransitionTermAction::UnableGroupEx,
+                        transition_term: "10".into(),
+                    },
+                    site: 3,
+                },
             ]
         );
         let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_air_n");
         assert!(exported.contains("WorkModule::enable_transition_term(agent.module_accessor, 7);"));
         assert!(exported.contains("WorkModule::unable_transition_term(agent.module_accessor, 8);"));
+        assert!(exported
+            .contains("WorkModule::enable_transition_term_group(agent.module_accessor, 9);"));
+        assert!(exported
+            .contains("WorkModule::unable_transition_term_group_ex(agent.module_accessor, 10);"));
     }
 
     #[test]
@@ -27944,6 +27993,53 @@ mod live_effect_capture_tests {
             VisionaryApp::work_transition_term_rules_for(motion, &captures, &baseline, &edited);
         assert!(rules.is_empty());
         assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
+    fn work_module_transition_term_group_live_rules_keep_exact_operation_identity() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 0.0,
+            func: "WorkModule::enable_transition_term_group".into(),
+            args: vec![A::Int(7)],
+            run: 1,
+        }];
+        let baseline = crate::acmd::parse_acmd_script(
+            r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        WorkModule::enable_transition_term_group(agent.module_accessor, 7);
+    }
+}
+"#,
+        )
+        .to_work_transition_term_events();
+        let mut edited = baseline.clone();
+        edited[0].call.transition_term = "9".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::work_transition_term_rules_for(motion, &captures, &baseline, &edited);
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one WorkModule transition-term group rule, got {rules:?}");
+        };
+        assert_eq!(rule.category, crate::game_link::CAT_WORK_TRANSITION_TERM);
+        assert_eq!(
+            rule.hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                "WorkModule::enable_transition_term_group",
+                &[7.0]
+            ))
+        );
+        assert_eq!(
+            rule.func.as_deref(),
+            Some("WorkModule::enable_transition_term_group")
+        );
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().work_transition_term,
+            Some(9)
+        );
     }
 
     #[test]
