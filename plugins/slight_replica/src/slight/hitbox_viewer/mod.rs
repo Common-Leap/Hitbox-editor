@@ -297,6 +297,8 @@ pub struct CaptureLine {
     pub frame: f32,
     /// The sv_animcmd function, e.g. "ATTACK", "EFFECT_FOLLOW".
     pub func: &'static str,
+    /// Direct lua-bind hooks do not retain the source ACMD category. The editor must therefore
+    /// reject ambiguous `game_`/`expression_` matches for shared binding primitives.
     pub args: Vec<LuaArg>,
     /// Which PLAYBACK of the motion produced this line. See [`next_run`].
     pub run: u32,

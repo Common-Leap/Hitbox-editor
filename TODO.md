@@ -2745,7 +2745,7 @@ desktop suite passed 619 tests plus 1 existing ignored benchmark, the six deploy
 and the Skyline plugin release build passed. No live game runtime was used, so hook behavior on
 hardware remains explicitly unverified.
 
-#### [!] E1q — direct `MotionModule::set_rate_partial` points (game slice complete; expression live identity open)
+#### [!] E1q — direct `MotionModule::set_rate_partial` points (game slice complete; expression identity bounded)
 
 The retained public dumped-script corpus contains 44 exact direct
 `MotionModule::set_rate_partial(receiver, part_kind, rate)` calls in each of the standard and
@@ -2760,14 +2760,17 @@ editor/plugin wire uses category 31, the captured numeric part kind plus pristin
 positive finite replacement. Part-kind changes, add/remove, retiming, malformed calls, and zero
 live replacements remain source/export-only or explicitly reported as unrepresentable.
 
-The two Pac-Man `expression_` calls now remain visible and editable in the expression panel,
-export with the expression script, and write back only their numeric rate. They do not enter the
-live rule path yet: `CaptureLine` carries the primitive and arguments but not the originating
-ACMD category, so a `game_` and `expression_` call at the same motion/frame cannot be separated
-without changing the capture contract. `set_frame_partial` remains separate because its frame and
-sync-boolean payloads are not interchangeable with this rate-only shape.
+The two Pac-Man `expression_` calls remain visible and editable in the expression panel, export
+with the expression script, and write back only their numeric rate. Their live path is now guarded
+by the strongest identity the current capture contract can prove: a changed expression point is
+sent only when exactly one direct partial-rate capture exists at that frame and the parsed `game_`
+script has no partial-rate call there. If the frame has multiple direct calls or an opposite
+category call, the edit remains source/export-only; `CaptureLine` still carries no originating
+ACMD category, so a same-frame pair cannot be separated without changing the capture contract.
+`set_frame_partial` remains separate because its frame and sync-boolean payloads are not
+interchangeable with this rate-only shape.
 
-Offline validation for this slice passed: 652 desktop tests, 1 existing ignored renderer
+Offline validation for this slice passed: 653 desktop tests, 1 existing ignored renderer
 benchmark, all 6 deployment tests, strict Clippy, format/diff checks, the locked Linux release
 build, the Skyline plugin release build, and the Windows MSVC cross-build. No emulator, game, or
 UI automation was run, so live hook behavior remains explicitly unverified. The E1 parent remains

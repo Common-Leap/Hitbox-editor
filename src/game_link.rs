@@ -343,6 +343,8 @@ pub struct CaptureLine {
     pub frame: f32,
     /// sv_animcmd function name ("ATTACK", "EFFECT_FOLLOW", …).
     pub func: String,
+    /// The primitive hook's source ACMD category is not available here. In particular, direct
+    /// MotionModule bindings can be called by either `game_` or `expression_` scripts.
     pub args: Vec<LuaArgWire>,
     /// Which single playback of the motion produced this line. Current plugins lock one run per
     /// fighter-kind + motion until captures are explicitly cleared. Defaults to 0 for older

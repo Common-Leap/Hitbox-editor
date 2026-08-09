@@ -4141,6 +4141,7 @@ impl VisionaryApp {
                     self.push_motion_module_set_rate_rules();
                     self.push_motion_module_set_helper_calculation_rules();
                     self.push_motion_module_set_rate_partial_rules();
+                    self.push_expression_rules();
                     self.push_clr_speed_rules();
                     self.push_set_air_rules();
                     self.push_change_kinetic_rules();
@@ -6585,6 +6586,28 @@ impl VisionaryApp {
         } else {
             self.hitbox_rules_store.insert(key, rules);
         }
+        let expression_partial_pristine = &self
+            .state
+            .expression_motion_module_set_rate_partial_pristine;
+        let expression_partial_shown = self
+            .state
+            .expression_script
+            .to_motion_module_set_rate_partial_events();
+        let (partial_rules, partial_unrepresentable) =
+            Self::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                &captures,
+                expression_partial_pristine,
+                &expression_partial_shown,
+                &self.state.motion_module_set_rate_partial_pristine,
+                true,
+            );
+        let partial_key = format!("{mv_key}#expression_motion_module_set_rate_partial");
+        if partial_rules.is_empty() {
+            self.hitbox_rules_store.remove(&partial_key);
+        } else {
+            self.hitbox_rules_store.insert(partial_key, partial_rules);
+        }
         let all: Vec<crate::game_link::HitboxRuleWire> = self
             .hitbox_rules_store
             .values()
@@ -6592,9 +6615,9 @@ impl VisionaryApp {
             .cloned()
             .collect();
         self.game_link.send_hitbox_rules(&all);
-        if unrepresentable > 0 {
+        if unrepresentable > 0 || partial_unrepresentable > 0 {
             self.state.status = format!(
-                "Expression edit staged, but {unrepresentable} call(s) need a live capture or a numeric/hash value before they can apply live"
+                "Expression edit staged, but {unrepresentable} camera/rumble and {partial_unrepresentable} partial-rate call(s) need a safe live identity or numeric/hash value"
             );
         }
     }
@@ -6639,9 +6662,9 @@ impl VisionaryApp {
                 "MotionModule::set_rate_partial (expression_)",
             );
             ui.label(
-                "The numeric rate is source-editable and exportable. Live replacement is held \
-                 back because capture lines do not identify whether this call came from game_ \
-                 or expression_.",
+                "The numeric rate is source-editable and exportable. Live replacement is sent \
+                 only when this frame has one direct capture and no game_ partial-rate call; \
+                 ambiguous category-free captures stay source-only.",
             );
             for event in &partial_rate_events {
                 let active = event.frame == self.state.current_frame;
@@ -6710,8 +6733,9 @@ impl VisionaryApp {
                         .insert(key, self.state.expression_script.clone());
                 }
                 self.state.status =
-                    "Expression MotionModule::set_rate_partial edit staged — export or sync it into the linked source project; live replacement is unavailable without the ACMD category in capture data."
+                    "Expression MotionModule::set_rate_partial edit staged — live replacement is sent only when its frame has one unambiguous direct capture and no game_ partial-rate call; otherwise export or sync it into the linked source project."
                         .into();
+                self.push_expression_motion_module_set_rate_partial_rules();
             }
         }
 
@@ -10807,6 +10831,7 @@ impl VisionaryApp {
         self.push_motion_module_set_rate_rules();
         self.push_motion_module_set_helper_calculation_rules();
         self.push_motion_module_set_rate_partial_rules();
+        self.push_expression_rules();
         self.push_clr_speed_rules();
         self.push_set_air_rules();
         self.push_change_kinetic_rules();
@@ -11534,6 +11559,7 @@ impl VisionaryApp {
         self.push_motion_module_set_rate_rules();
         self.push_motion_module_set_helper_calculation_rules();
         self.push_motion_module_set_rate_partial_rules();
+        self.push_expression_rules();
         self.push_clr_speed_rules();
         self.push_set_air_rules();
         self.push_change_kinetic_rules();
@@ -14508,6 +14534,23 @@ impl VisionaryApp {
             .nth(occurrence)
     }
 
+    /// Return the sole direct partial-rate capture at one script frame, if the hook stream makes
+    /// that call unambiguous. The binding hook does not know whether its caller was `game_` or
+    /// `expression_`; a unique frame is therefore the strongest category-free identity the
+    /// editor can safely use for an expression rule.
+    fn unique_motion_module_set_rate_partial_capture_for(
+        captures: &[crate::game_link::CaptureLine],
+        frame: u32,
+    ) -> Option<&crate::game_link::CaptureLine> {
+        let mut matches = captures.iter().filter(|line| {
+            line.func == crate::data::MotionModuleSetRatePartialCall::FUNC
+                && Self::motion_to_script_frame(line.frame) == frame
+                && line.args.len() == 2
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     fn motion_module_set_rate_partial_capture_part_kind(
         arg: &crate::game_link::LuaArgWire,
     ) -> Option<i64> {
@@ -14518,11 +14561,21 @@ impl VisionaryApp {
         }
     }
 
-    fn motion_module_set_rate_partial_rules_for(
+    /// Build direct partial-rate rules for one ACMD category.
+    ///
+    /// The native hook receives only `(boma, part_kind, rate)`, so it cannot distinguish a
+    /// `game_` call from an `expression_` call. For the game path, an expression call on the same
+    /// source frame is consequently a hard boundary: even a valid game rule could retune both
+    /// calls. For the expression path, require exactly one parsed call in that category and one
+    /// captured direct call at the frame. This admits the measured Pac-Man expression points
+    /// without pretending that a same-frame pair has a recoverable category identity.
+    fn motion_module_set_rate_partial_rules_for_category(
         motion: u64,
         captures: &[crate::game_link::CaptureLine],
         pristine: &[crate::data::MotionModuleSetRatePartialEvent],
         shown: &[crate::data::MotionModuleSetRatePartialEvent],
+        opposite_category: &[crate::data::MotionModuleSetRatePartialEvent],
+        require_unique_capture: bool,
     ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
         use crate::game_link::{HbOverridesWire, HitboxRuleWire};
         if pristine.len() != shown.len() {
@@ -14542,15 +14595,37 @@ impl VisionaryApp {
                 unrepresentable += 1;
                 continue;
             }
+            if opposite_category
+                .iter()
+                .any(|other| other.frame == was.frame)
+            {
+                // The direct binding hook has no ACMD category. A rule for this frame could
+                // therefore rewrite the other category's call as well.
+                unrepresentable += 1;
+                continue;
+            }
             if !now.call.rate.is_finite() || now.call.rate <= 0.0 {
                 // Source/export retain authored zero, but a zero live partial rate can freeze
                 // the partial animation and is not a safe replacement for the runtime hook.
                 unrepresentable += 1;
                 continue;
             }
-            let Some(donor) =
+            if require_unique_capture
+                && pristine
+                    .iter()
+                    .filter(|other| other.frame == was.frame)
+                    .count()
+                    != 1
+            {
+                unrepresentable += 1;
+                continue;
+            }
+            let donor = if require_unique_capture {
+                Self::unique_motion_module_set_rate_partial_capture_for(captures, was.frame)
+            } else {
                 Self::motion_module_set_rate_partial_capture_for(captures, pristine, index, was)
-            else {
+            };
+            let Some(donor) = donor else {
                 unrepresentable += 1;
                 continue;
             };
@@ -14628,11 +14703,17 @@ impl VisionaryApp {
             return;
         };
         let captures = self.captures_for_selected_fighter(motion);
-        let (rules, unrepresentable) = Self::motion_module_set_rate_partial_rules_for(
+        let expression_pristine = self
+            .state
+            .expression_script
+            .to_motion_module_set_rate_partial_events();
+        let (rules, unrepresentable) = Self::motion_module_set_rate_partial_rules_for_category(
             motion,
             &captures,
             &self.state.motion_module_set_rate_partial_pristine,
             &self.state.script.to_motion_module_set_rate_partial_events(),
+            &expression_pristine,
+            false,
         );
         let key = format!("{mv_key}#motion_module_set_rate_partial");
         if rules.is_empty() {
@@ -14650,6 +14731,51 @@ impl VisionaryApp {
         if unrepresentable > 0 {
             self.state.status = format!(
                 "MotionModule::set_rate_partial edit staged, but {unrepresentable} point(s) need a numeric part/rate live capture, a unique same-frame key, and a positive live replacement"
+            );
+        }
+    }
+
+    /// Send expression partial-rate edits only when the category-free native hook has a unique
+    /// identity for the point. Same-frame game/expression pairs stay source/export-only.
+    fn push_expression_motion_module_set_rate_partial_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let expression_pristine = &self
+            .state
+            .expression_motion_module_set_rate_partial_pristine;
+        let expression_shown = self
+            .state
+            .expression_script
+            .to_motion_module_set_rate_partial_events();
+        let (rules, unrepresentable) = Self::motion_module_set_rate_partial_rules_for_category(
+            motion,
+            &captures,
+            expression_pristine,
+            &expression_shown,
+            &self.state.motion_module_set_rate_partial_pristine,
+            true,
+        );
+        let key = format!("{mv_key}#expression_motion_module_set_rate_partial");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "Expression partial-rate edit staged, but {unrepresentable} point(s) need a unique direct capture at their frame with no game_ partial-rate call sharing it"
             );
         }
     }
@@ -26507,9 +26633,15 @@ mod live_effect_capture_tests {
         .to_motion_module_set_rate_partial_events();
         let mut edited = pristine.clone();
         edited[0].call.rate = 1.25;
-        let (rules, unrepresentable) = VisionaryApp::motion_module_set_rate_partial_rules_for(
-            motion, &captures, &pristine, &edited,
-        );
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                &captures,
+                &pristine,
+                &edited,
+                &[],
+                false,
+            );
         assert_eq!(unrepresentable, 0);
         assert_eq!(rules.len(), 1);
         assert_eq!(
@@ -26540,12 +26672,127 @@ mod live_effect_capture_tests {
             args: vec![A::Bool(true), A::Num(0.8)],
             ..captures[0].clone()
         }];
-        let (rules, unrepresentable) = VisionaryApp::motion_module_set_rate_partial_rules_for(
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                &malformed_capture,
+                &pristine,
+                &edited,
+                &[],
+                false,
+            );
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
+    fn expression_partial_rate_live_rules_require_a_unique_category_free_capture() {
+        let motion = hash40::hash40("appeal_lw_l").0;
+        let expression_pristine = vec![crate::data::MotionModuleSetRatePartialEvent {
+            frame: 8,
+            call: crate::data::MotionModuleSetRatePartialCall {
+                part_kind: "*FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL".into(),
+                rate: 0.0,
+            },
+            site: 0,
+        }];
+        let mut expression_shown = expression_pristine.clone();
+        expression_shown[0].call.rate = 0.5;
+        let capture = CaptureLine {
+            kind: 9,
             motion,
-            &malformed_capture,
-            &pristine,
-            &edited,
+            frame: 7.0,
+            func: "MotionModule::set_rate_partial".into(),
+            args: vec![A::Int(3), A::Num(0.0)],
+            run: 1,
+        };
+
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                std::slice::from_ref(&capture),
+                &expression_pristine,
+                &expression_shown,
+                &[],
+                true,
+            );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                crate::data::MotionModuleSetRatePartialCall::FUNC,
+                &[3.0, 0.0]
+            ))
         );
+        assert_eq!(
+            rules[0]
+                .overrides
+                .as_ref()
+                .unwrap()
+                .motion_module_rate_partial,
+            Some(0.5)
+        );
+
+        // A second direct call at the same frame destroys the only category-free identity.
+        let ambiguous = vec![
+            capture.clone(),
+            CaptureLine {
+                args: vec![A::Int(3), A::Num(0.25)],
+                ..capture.clone()
+            },
+        ];
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                &ambiguous,
+                &expression_pristine,
+                &expression_shown,
+                &[],
+                true,
+            );
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+
+        // Even one captured line is unsafe when the parsed game_ script has a point on the same
+        // frame: the binding hook would apply this rule to either caller.
+        let game_same_frame = vec![crate::data::MotionModuleSetRatePartialEvent {
+            frame: 8,
+            call: crate::data::MotionModuleSetRatePartialCall {
+                part_kind: "*FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY".into(),
+                rate: 0.8,
+            },
+            site: 0,
+        }];
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                std::slice::from_ref(&capture),
+                &expression_pristine,
+                &expression_shown,
+                &game_same_frame,
+                true,
+            );
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+
+        // The same cross-category guard protects a game edit from retuning an expression call.
+        let game_shown = vec![crate::data::MotionModuleSetRatePartialEvent {
+            call: crate::data::MotionModuleSetRatePartialCall {
+                part_kind: "*FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY".into(),
+                rate: 1.25,
+            },
+            ..game_same_frame[0].clone()
+        }];
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                std::slice::from_ref(&capture),
+                &game_same_frame,
+                &game_shown,
+                &expression_pristine,
+                false,
+            );
         assert!(rules.is_empty());
         assert_eq!(unrepresentable, 1);
     }
