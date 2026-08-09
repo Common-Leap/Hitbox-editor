@@ -3680,7 +3680,7 @@ copy of every spawn onto the timeline.
   why a change is safe is a claim to be measured like any other. This one was written confidently
   in a commit message and was wrong within the hour.
 
-### [!] R3 — Robust Skyline 13.0.4 hook (ABI corrected; runtime trampoline still unverified)
+### [x] R3 — Robust Skyline 13.0.4 hook (completed 2026-08-08; Eden runtime verified; physical Switch unverified)
 
 `plugins/slight_replica/src/slight/systems/skyline_hook.rs` carries the manual pattern hook used to
 keep the core effect viewer usable. Static 13.0.4 analysis (2026-08-08) found the scanned body at
@@ -3734,9 +3734,12 @@ plugin's unconditional counter was then exercised in a second inline session: `c
 from 0 to 10 across the `STATS` lines after the user's hits, with no failure or crash marker. That
 proves the corrected inline callback ran and returned through the trampoline ten times on Eden.
 
-R3 remains open only until one normal boot verifies that the newly shipped default selects the
-same inline path without the one-shot marker. Physical Switch runtime remains outside this
-machine's evidence boundary.
+The final normal Eden boot selected the same inline body path without the one-shot marker:
+`COLLISION_HOOK mode=inline-body offset=0x67a7b0` appeared at boot, and the unconditional
+`collisions=` counter rose from 0 to 11 after the user's hits while normal `STATS` activity
+continued without a failure marker. This closes the corrected default hook and callback/trampoline
+proof on Eden. The wrapper fallback remains available for a missing or ambiguous scan, and
+physical Switch runtime remains outside this machine's evidence boundary.
 
 ### [x] R4 — Guard against the double-plugin footgun (done 2026-08-05)
 
