@@ -2482,6 +2482,8 @@ mod tests {
             "let mut match_offset = None;",
             "if match_offset.is_some()",
             "body pattern missing or ambiguous",
+            "COLLISION_HOOK mode=wrapper-fallback coverage=partial",
+            "COLLISION attacker=",
             "orig(",
         ] {
             assert!(

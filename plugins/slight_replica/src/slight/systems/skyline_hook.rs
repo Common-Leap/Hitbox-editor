@@ -80,6 +80,7 @@ pub fn install() {
         skyline::println!(
             "[SLight] Skyline Hook: inline collision hook disabled (Eden-unsafe); installing wrapper fallback (partial coverage)"
         );
+        crate::slight::diag::note("COLLISION_HOOK mode=wrapper-fallback coverage=partial");
         skyline::install_hook!(fallback_collision_hit_hook);
         *INSTALLED.lock() = true;
         return;
@@ -90,6 +91,9 @@ pub fn install() {
         None => {
             skyline::println!(
                 "[SLight] Skyline Hook: body pattern missing or ambiguous; installing wrapper fallback (partial coverage)"
+            );
+            crate::slight::diag::note(
+                "COLLISION_HOOK mode=wrapper-fallback reason=pattern-missing-or-ambiguous",
             );
             skyline::install_hook!(fallback_collision_hit_hook);
             *INSTALLED.lock() = true;
@@ -108,12 +112,16 @@ pub fn install() {
         );
         if trampoline_ptr.is_null() {
             skyline::println!("[SLight] Skyline Hook: A64HookFunction returned null trampoline");
+            crate::slight::diag::note("COLLISION_HOOK mode=inline-body failure=null-trampoline");
             return;
         }
         TRAMPOLINE = Some(std::mem::transmute(trampoline_ptr));
     }
 
     *INSTALLED.lock() = true;
+    crate::slight::diag::note(format!(
+        "COLLISION_HOOK mode=inline-body offset=0x{offset:x}"
+    ));
     skyline::println!("[SLight] Skyline Hook installed @ text+0x{offset:x}");
 }
 
@@ -249,6 +257,10 @@ pub fn notify_log_event_collision_hit(ctx: &CollisionContext) {
     record_hit(ctx.attacker_boid, ctx.defender_boid, ctx.tick);
     crate::slight::systems::damage_manager::on_collision_hit(ctx);
     if crate::slight::smash_utils::debug_logging_enabled() {
+        crate::slight::diag::note(format!(
+            "COLLISION attacker={} defender={} damage={:.2} id={} flags={}",
+            ctx.attacker_boid, ctx.defender_boid, ctx.damage, ctx.collision_id, ctx.flags
+        ));
         skyline::println!(
             "[SLight] notify_log_event_collision_hit {} -> {} damage={:.2} id={} flags={}",
             ctx.attacker_boid,
