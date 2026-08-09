@@ -10890,17 +10890,22 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     if is_excute(agent) {
         MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);
     }
+    frame(agent.lua_state_agent, 23.0);
+    if is_excute(agent) {
+        MotionModule::set_frame_partial_sync_anim_cmd(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 4);
+    }
 }
 "#;
         let script = parse_expression_script(source);
         let raw = script.to_raw_partial_frame_events();
         assert_eq!(
             raw.iter().map(|event| event.frame).collect::<Vec<_>>(),
-            [8, 13, 18]
+            [8, 13, 18, 23]
         );
         assert_eq!(raw[0].source, "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);");
         assert_eq!(raw[1].source, "MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3);");
         assert_eq!(raw[2].source, "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);");
+        assert_eq!(raw[3].source, "MotionModule::set_frame_partial_sync_anim_cmd(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 4);");
         let emitted = preview_expression_fn(&script, "appeal_lw_l");
 
         // The public corpus supplies three arguments, while the pinned native binding requires
@@ -10912,6 +10917,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);",
             "MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3);",
             "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);",
+            "MotionModule::set_frame_partial_sync_anim_cmd(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 4);",
         ] {
             assert!(emitted.contains(line), "raw partial-frame call was lost: {line}");
             assert!(

@@ -6776,10 +6776,10 @@ impl VisionaryApp {
         if !raw_partial_frames.is_empty() {
             ui.colored_label(
                 egui::Color32::from_rgb(235, 185, 100),
-                "Source-only MotionModule::set_frame_partial",
+                "Source-only MotionModule partial-frame calls",
             );
             ui.label(
-                "These authored calls are preserved for export and source write-back. Their \
+                "These authored partial-frame calls are preserved for export and source write-back. Their \
                  native fourth boolean is not measured, so they are not live-editable.",
             );
             for event in raw_partial_frames {

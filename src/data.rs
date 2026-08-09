@@ -1785,7 +1785,7 @@ pub struct ExpressionEvent {
     pub site: usize,
 }
 
-/// A `MotionModule::set_frame_partial` call whose native boolean contract is not yet measured.
+/// A partial-frame `MotionModule` call whose native boolean contract is not yet measured.
 ///
 /// The source line is intentionally retained as text: it is safe to show and export, but not to
 /// turn into an editable live point until the missing argument has a version-matched meaning.
@@ -4552,9 +4552,11 @@ impl WalkAccum {
 }
 
 fn record_raw_partial_frame(line: &str, frame: f32, hurt: &mut WalkAccum) {
-    // Keep the exact call family bounded. The `_sync_anim_cmd` variants do not match this
-    // spelling because their names continue with `_` rather than `(` after `partial`.
-    if line.contains("MotionModule::set_frame_partial(") {
+    // Keep both native partial-frame wrapper spellings source-only. The exact `(` after each
+    // name keeps the shorter family from swallowing the `_sync_anim_cmd` variant.
+    if line.contains("MotionModule::set_frame_partial(")
+        || line.contains("MotionModule::set_frame_partial_sync_anim_cmd(")
+    {
         hurt.raw_partial_frames.push(RawPartialFrameEvent {
             frame: script_frame(frame),
             source: line.to_string(),

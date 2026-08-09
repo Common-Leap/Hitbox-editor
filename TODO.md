@@ -2843,8 +2843,10 @@ boolean's value; the upstream project also warns that its scripts still contain 
 The parser/export regression test also keeps measured three-argument calls and a native-shaped
 four-argument call raw and round-trippable, including the corpus's `boma` receiver spelling. This
 guards the evidence boundary without pretending that the fourth boolean has been identified.
-The expression panel now surfaces those raw calls at their measured source frames as read-only
-source-only rows, so they remain visible without entering the typed/live rule path.
+The expression panel now surfaces both partial-frame wrapper spellings at their measured source
+frames as read-only source-only rows, so they remain visible without entering the typed/live rule
+path. The current public corpus has no sync-wrapper calls, but a future script using one will not
+silently disappear from the panel.
 
 #### [x] E1s — direct `WorkModule::on_flag` / `off_flag` points (completed 2026-08-08; live runtime unverified)
 
