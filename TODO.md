@@ -2890,6 +2890,32 @@ same-frame identities, malformed calls, and symbolic-only live replacements rema
 source/export-only. No emulator, game, or UI automation was run, so live hook behavior remains
 explicitly unverified.
 
+#### [x] E1w — direct `WorkModule::inc_int` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 22 exact direct `WorkModule::inc_int` calls in
+the standard `smashline` tree and the corresponding 22 HDR calls. Every measured call has the
+two-argument shape `(receiver, slot)`, with `agent.module_accessor` in the standard tree and
+`boma` in HDR. The pinned `skyline-smash` binding verifies
+`inc_int(module_accessor: *mut BattleObjectModuleAccessor, int_const: libc::c_int) -> ()`.
+No direct `WorkModule::dec_int` call was present in the measured corpus, so it remains outside
+this slice.
+
+The five surfaces are covered for that measured shape: typed parser/IR and source-site walk,
+editable Movement / Status panel and timeline lane, capture reconstruction, category-35 sparse
+live rules and the matching Skyline hook, generated ACMD export, project persistence, and
+slot-token source write-back. Export uses the portable `agent.module_accessor` spelling; linked
+source write-back retains either measured receiver and edits only an existing authored slot
+token. Live replacement requires an exact numeric capture, a numeric `i32` replacement, and a
+unique same-frame slot identity. Operation/frame/receiver changes, duplicate identities,
+malformed calls, symbolic-only live replacements, and structural additions/removals remain
+source/export-only. No emulator, game, or UI automation was run, so live hook behavior remains
+explicitly unverified.
+
+Offline validation passed: the full locked desktop suite (660 passed, 1 ignored) and all six
+deployment tests, strict Clippy, format/diff checks, the debug build-check wrapper, the locked
+Linux release build, and the Skyline plugin release build. No emulator, game, or UI automation
+was run, so runtime hook behavior remains explicitly unverified.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their

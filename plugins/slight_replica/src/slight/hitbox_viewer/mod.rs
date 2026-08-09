@@ -280,6 +280,9 @@ pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
 /// category.
 pub const CAT_WORK_MODULE_SET: u8 = 34;
 
+/// Direct `WorkModule::inc_int` point. Must equal the editor's wire category.
+pub const CAT_WORK_MODULE_INC_INT: u8 = 35;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -970,6 +973,8 @@ pub struct HbOverrides {
     pub work_module_set_int_value: Option<i64>,
     /// Replacement exact 64-bit value for a direct `WorkModule::set_int64` call.
     pub work_module_set_int64_value: Option<i64>,
+    /// Replacement WorkModule slot for a direct `WorkModule::inc_int` call.
+    pub work_module_inc_int_slot: Option<i64>,
     /// Replacement float value for a direct `WorkModule::set_float` call.
     pub work_module_set_float_value: Option<f32>,
     /// Replacement WorkModule slot for either direct value setter.
@@ -1108,6 +1113,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                     CAT_WORK_FLAG => "work_flag",
                     CAT_WORK_TRANSITION_TERM => "work_transition_term",
                     CAT_WORK_MODULE_SET => "work_module_set",
+                    CAT_WORK_MODULE_INC_INT => "work_module_inc_int",
                     _ => "unknown",
                 };
                 format!("{name}={count}")
@@ -1720,6 +1726,42 @@ work_transition_term_hook!(
     smash::app::lua_bind::WorkModule::unable_transition_term,
     "WorkModule::unable_transition_term"
 );
+
+/// Capture and sparsely override the measured direct `WorkModule::inc_int` operation. The slot
+/// is the complete runtime identity because the operation has no value argument.
+#[skyline::hook(replace = smash::app::lua_bind::WorkModule::inc_int)]
+unsafe fn hook_work_module_inc_int(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    slot: i32,
+) {
+    record_for_boma(boma, "WorkModule::inc_int", &[LuaArg::Int(slot as i64)]);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = integer_point_key("WorkModule::inc_int", &[slot as i64]);
+        if let Some((suppress, overrides)) = action_for_func(
+            CAT_WORK_MODULE_INC_INT,
+            motion,
+            key,
+            frame,
+            "WorkModule::inc_int",
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(replacement) = overrides
+                .and_then(|item| item.work_module_inc_int_slot)
+                .and_then(|item| i32::try_from(item).ok())
+            {
+                if replacement != slot {
+                    original!()(boma, replacement);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, slot)
+}
 
 /// Capture and sparsely override the verified direct WorkModule value setters.
 ///
@@ -3371,6 +3413,7 @@ pub fn install() {
         hook_work_module_off_flag,
         hook_work_module_enable_transition_term,
         hook_work_module_unable_transition_term,
+        hook_work_module_inc_int,
         hook_work_module_set_int,
         hook_work_module_set_float,
         hook_work_module_set_int64

@@ -438,6 +438,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_work_module_inc_int_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_work_module_set_call(line) {
             stmts.push(stmt);
             continue;
@@ -2378,6 +2382,30 @@ fn parse_work_transition_term_call(line: &str) -> Option<ExcuteStmt> {
     None
 }
 
+/// Parse the measured direct `WorkModule::inc_int(agent.module_accessor, slot)` shape and its
+/// HDR `boma` equivalent. Only a numeric or dereferenced identifier slot is typed.
+fn parse_work_module_inc_int_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "WorkModule::inc_int(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let [receiver, slot] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(receiver.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let slot = slot.trim();
+    if !valid_work_module_legacy_token(slot) {
+        return None;
+    }
+    Some(ExcuteStmt::WorkModuleIncInt(
+        crate::data::WorkModuleIncIntCall {
+            slot: slot.to_string(),
+        },
+    ))
+}
+
 fn valid_work_module_identifier(value: &str) -> bool {
     let mut chars = value.trim().chars();
     chars.next().is_some_and(|character| {
@@ -3086,6 +3114,11 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 "{indent}{}(agent.module_accessor, {});",
                 call.func(),
                 call.transition_term
+            ),
+            crate::data::ExcuteStmt::WorkModuleIncInt(call) => format!(
+                "{indent}{}(agent.module_accessor, {});",
+                call.func(),
+                call.slot
             ),
             crate::data::ExcuteStmt::WorkModuleSet(call) => format!(
                 "{indent}{}({}, {}, {});",
@@ -9977,6 +10010,73 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "WorkModule::set_int64(other.module_accessor, hash40(\"fall_damage\") as i64, 2);",
             "WorkModule::set_int64(agent.module_accessor, make_value(), 2);",
             "WorkModule::set_int64(agent.module_accessor, hash40(\"fall_damage\") as i64, make_slot());",
+        ] {
+            assert!(emitted.contains(line), "raw line lost: {line}\n{emitted}");
+        }
+    }
+
+    #[test]
+    fn work_module_inc_int_parses_standard_and_hdr_calls_and_round_trips() {
+        let source = r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        WorkModule::inc_int(agent.module_accessor, *FIGHTER_STATUS_WORK_INT_NEXT_STEP);
+    }
+    frame(agent.lua_state_agent, 47.0);
+    if is_excute(agent) {
+        WorkModule::inc_int(boma, 17);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let events = script.to_work_module_inc_int_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].frame, 5);
+        assert_eq!(events[0].call.slot, "*FIGHTER_STATUS_WORK_INT_NEXT_STEP");
+        assert_eq!(events[1].frame, 47);
+        assert_eq!(events[1].call.slot, "17");
+
+        let emitted = preview_game_fn(&script, "attack_air_n");
+        assert!(emitted.contains(
+            "WorkModule::inc_int(agent.module_accessor, *FIGHTER_STATUS_WORK_INT_NEXT_STEP);"
+        ));
+        assert!(emitted.contains("WorkModule::inc_int(agent.module_accessor, 17);"));
+        assert_eq!(
+            parse_acmd_script(&emitted).to_work_module_inc_int_events(),
+            events
+        );
+
+        let hdr = source.replace("agent.module_accessor", "boma");
+        assert_eq!(
+            parse_acmd_script(&hdr).to_work_module_inc_int_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_work_module_inc_int_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        WorkModule::inc_int(agent.module_accessor, 1, 2);
+        WorkModule::inc_int(other.module_accessor, 3);
+        WorkModule::inc_int(agent.module_accessor, make_slot());
+        WorkModule::inc_int(agent.module_accessor, SLOT_NAME);
+        WorkModule::inc_int(agent.module_accessor, *VALID_SLOT);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert_eq!(script.to_work_module_inc_int_events().len(), 1);
+        assert_eq!(
+            script.to_work_module_inc_int_events()[0].call.slot,
+            "*VALID_SLOT"
+        );
+        let emitted = preview_game_fn(&script, "x");
+        for line in [
+            "WorkModule::inc_int(agent.module_accessor, 1, 2);",
+            "WorkModule::inc_int(other.module_accessor, 3);",
+            "WorkModule::inc_int(agent.module_accessor, make_slot());",
+            "WorkModule::inc_int(agent.module_accessor, SLOT_NAME);",
         ] {
             assert!(emitted.contains(line), "raw line lost: {line}\n{emitted}");
         }

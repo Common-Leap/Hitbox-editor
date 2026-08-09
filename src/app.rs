@@ -90,6 +90,7 @@ fn timeline_content_height_with_change_kinetic(
     motion_module_set_rate_partial: usize,
     work_flag: usize,
     work_transition_term: usize,
+    work_module_inc_int: usize,
     work_module_set: usize,
 ) -> f32 {
     let hitbox_band = hitboxes as f32 * TIMELINE_ROW_HEIGHT;
@@ -125,6 +126,7 @@ fn timeline_content_height_with_change_kinetic(
         + band(motion_module_set_rate_partial)
         + band(work_flag)
         + band(work_transition_term)
+        + band(work_module_inc_int)
         + band(work_module_set))
     .max(24.0)
 }
@@ -161,6 +163,7 @@ fn timeline_content_height(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        0,
         0,
         0,
         0,
@@ -366,6 +369,7 @@ fn timeline_frame_extent_with_change_kinetic(
     motion_module_set_rate_partial: &[crate::data::MotionModuleSetRatePartialEvent],
     work_flags: &[crate::data::WorkFlagEvent],
     work_transition_terms: &[crate::data::WorkTransitionTermEvent],
+    work_module_inc_ints: &[crate::data::WorkModuleIncIntEvent],
     work_module_sets: &[crate::data::WorkModuleSetEvent],
 ) -> u32 {
     let hitbox_frames = hitboxes.iter().flat_map(|hitbox| {
@@ -415,6 +419,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .map(|event| event.frame);
     let work_flag_frames = work_flags.iter().map(|event| event.frame);
     let work_transition_term_frames = work_transition_terms.iter().map(|event| event.frame);
+    let work_module_inc_int_frames = work_module_inc_ints.iter().map(|event| event.frame);
     let work_module_set_frames = work_module_sets.iter().map(|event| event.frame);
     hitbox_frames
         .chain(effect_frames)
@@ -440,6 +445,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .chain(work_flag_frames)
         .chain(work_transition_term_frames)
         .chain(work_module_set_frames)
+        .chain(work_module_inc_int_frames)
         .max()
         .unwrap_or(0)
 }
@@ -476,6 +482,7 @@ fn timeline_frame_extent(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        &[],
         &[],
         &[],
         &[],
@@ -1214,6 +1221,7 @@ type SourceMirror = (
     Vec<crate::data::MotionModuleSetRatePartialEvent>,
     Vec<crate::data::WorkFlagEvent>,
     Vec<crate::data::WorkTransitionTermEvent>,
+    Vec<crate::data::WorkModuleIncIntEvent>,
     Vec<crate::data::WorkModuleSetEvent>,
 );
 
@@ -2636,6 +2644,7 @@ impl VisionaryApp {
                 expression_motion_module_set_rate_partial,
                 work_flags,
                 work_transition_terms,
+                work_module_inc_ints,
                 work_module_sets,
             )) => {
                 if *hitboxes == self.state.hitboxes
@@ -2678,6 +2687,7 @@ impl VisionaryApp {
                             .to_motion_module_set_rate_partial_events()
                     && *work_flags == self.state.script.to_work_flag_events()
                     && *work_transition_terms == self.state.script.to_work_transition_term_events()
+                    && *work_module_inc_ints == self.state.script.to_work_module_inc_int_events()
                     && *work_module_sets == self.state.script.to_work_module_set_events()
                 {
                     return;
@@ -2717,6 +2727,7 @@ impl VisionaryApp {
                 .to_motion_module_set_rate_partial_events(),
             self.state.script.to_work_flag_events(),
             self.state.script.to_work_transition_term_events(),
+            self.state.script.to_work_module_inc_int_events(),
             self.state.script.to_work_module_set_events(),
         ));
         // With no baseline this is the first pass after a checkout or a move switch, and the
@@ -2819,6 +2830,7 @@ impl VisionaryApp {
                     &self.state.script.to_motion_module_set_rate_partial_events(),
                     &self.state.script.to_work_flag_events(),
                     &self.state.script.to_work_transition_term_events(),
+                    &self.state.script.to_work_module_inc_int_events(),
                     &self.state.script.to_work_module_set_events(),
                 ));
         if let Some(buffer) = self.acmd_src_buffer.as_mut() {
@@ -3210,6 +3222,29 @@ impl VisionaryApp {
                             report.changed += transition_term_report.changed;
                             report.files.extend(transition_term_report.files);
                             report.skipped.extend(transition_term_report.skipped);
+                            Ok((updated, report))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            outcome
+        };
+        let outcome = if buffer.is_game_script() {
+            match outcome {
+                Ok((updated, mut report)) => {
+                    match crate::acmd_src::rewrite_work_module_inc_int(
+                        &updated,
+                        &label,
+                        &self.state.work_module_inc_int_pristine,
+                        &self.state.script.to_work_module_inc_int_events(),
+                    ) {
+                        Ok((updated, inc_int_report)) => {
+                            report.changed += inc_int_report.changed;
+                            report.files.extend(inc_int_report.files);
+                            report.skipped.extend(inc_int_report.skipped);
                             Ok((updated, report))
                         }
                         Err(error) => Err(error),
@@ -3644,6 +3679,21 @@ impl VisionaryApp {
                 Err(e) => notes.push(e.to_string()),
             }
             refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_work_module_inc_int(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.work_module_inc_int_pristine,
+                &self.state.script.to_work_module_inc_int_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
             match crate::acmd_src::sync_work_module_sets(
                 &index,
                 &fighter,
@@ -3835,6 +3885,7 @@ impl VisionaryApp {
             || state.script.to_kinetic_add_speed_events() != state.kinetic_add_speed_pristine
             || state.script.to_work_flag_events() != state.work_flag_pristine
             || state.script.to_work_transition_term_events() != state.work_transition_term_pristine
+            || state.script.to_work_module_inc_int_events() != state.work_module_inc_int_pristine
             || state.script.to_work_module_set_events() != state.work_module_set_pristine
             || state.script.to_kinetic_clear_speed_all_events()
                 != state.kinetic_clear_speed_all_pristine
@@ -4149,6 +4200,7 @@ impl VisionaryApp {
                     self.push_kinetic_add_speed_rules();
                     self.push_work_flag_rules();
                     self.push_work_transition_term_rules();
+                    self.push_work_module_inc_int_rules();
                     self.push_work_module_set_rules();
                     self.push_kinetic_clear_speed_all_rules();
                     self.push_kinetic_set_consider_ground_friction_rules();
@@ -4186,6 +4238,7 @@ impl VisionaryApp {
                                 &self.state.script.to_motion_module_set_rate_partial_events(),
                                 &self.state.script.to_work_flag_events(),
                                 &self.state.script.to_work_transition_term_events(),
+                                &self.state.script.to_work_module_inc_int_events(),
                                 &self.state.script.to_work_module_set_events(),
                             ));
 
@@ -4237,6 +4290,7 @@ impl VisionaryApp {
                 self.state.kinetic_add_speed_pristine = Vec::new();
                 self.state.work_flag_pristine = Vec::new();
                 self.state.work_transition_term_pristine = Vec::new();
+                self.state.work_module_inc_int_pristine = Vec::new();
                 self.state.work_module_set_pristine = Vec::new();
                 self.state.kinetic_clear_speed_all_pristine = Vec::new();
                 self.state.kinetic_set_consider_ground_friction_pristine = Vec::new();
@@ -5133,6 +5187,8 @@ impl VisionaryApp {
             || self.state.script.to_work_flag_events() != self.state.work_flag_pristine
             || self.state.script.to_work_transition_term_events()
                 != self.state.work_transition_term_pristine
+            || self.state.script.to_work_module_inc_int_events()
+                != self.state.work_module_inc_int_pristine
             || self.state.script.to_work_module_set_events() != self.state.work_module_set_pristine
             || self.state.script.to_kinetic_clear_speed_all_events()
                 != self.state.kinetic_clear_speed_all_pristine
@@ -5684,6 +5740,7 @@ impl VisionaryApp {
                         &self.state.script.to_motion_module_set_rate_partial_events(),
                         &self.state.script.to_work_flag_events(),
                         &self.state.script.to_work_transition_term_events(),
+                        &self.state.script.to_work_module_inc_int_events(),
                         &self.state.script.to_work_module_set_events(),
                     ))
                     .max(FIRST_GAME_FRAME);
@@ -6071,6 +6128,7 @@ impl VisionaryApp {
             self.draw_set_air_section(ui);
             self.draw_work_flag_section(ui);
             self.draw_work_transition_term_section(ui);
+            self.draw_work_module_inc_int_section(ui);
             self.draw_work_module_set_section(ui);
             self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
@@ -6904,6 +6962,7 @@ impl VisionaryApp {
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
+                            &self.state.script.to_work_module_inc_int_events(),
                             &self.state.script.to_work_module_set_events(),
                         ));
                 self.state.status = if destination.is_some() {
@@ -7822,6 +7881,7 @@ impl VisionaryApp {
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
+                            &self.state.script.to_work_module_inc_int_events(),
                             &self.state.script.to_work_module_set_events(),
                         ));
                 self.state.status = if destination.is_some() {
@@ -8007,6 +8067,7 @@ impl VisionaryApp {
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
+                            &self.state.script.to_work_module_inc_int_events(),
                             &self.state.script.to_work_module_set_events(),
                         ));
                 self.state.status = if destination.is_some() {
@@ -8147,6 +8208,64 @@ impl VisionaryApp {
                 call.transition_term = transition_term;
                 self.state.status = "WorkModule transition-term edit staged — export or sync it into the linked source project.".into();
                 self.push_work_transition_term_rules();
+            }
+        }
+    }
+
+    /// Editable authored slot tokens from the measured direct `WorkModule::inc_int` family.
+    /// Named constants stay visible for export/source sync; numeric live replacement requires a
+    /// matching capture.
+    fn draw_work_module_inc_int_section(&mut self, ui: &mut Ui) {
+        let events = self.state.script.to_work_module_inc_int_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Movement / Status");
+            ui.colored_label(egui::Color32::from_rgb(220, 190, 140), "WorkModule increment");
+        })
+        .response
+        .on_hover_text(
+            "Increments one WorkModule integer slot. The measured direct receiver and authored slot token are preserved; numeric live replacement requires a matching capture.",
+        );
+
+        let mut edit: Option<(usize, String)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut slot = event.call.slot.clone();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(220, 190, 140)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("f{} inc_int", event.frame));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut slot)
+                            .desired_width(280.0)
+                            .hint_text("*FIGHTER_STATUS_WORK_INT_…"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed && !slot.trim().is_empty() {
+                edit = Some((event.site, slot));
+            }
+        }
+
+        if let Some((site, slot)) = edit {
+            if let Some(call) = self.state.script.work_module_inc_int_stmt_mut(site) {
+                call.slot = slot;
+                self.state.status =
+                    "WorkModule::inc_int edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_work_module_inc_int_rules();
             }
         }
     }
@@ -8333,6 +8452,7 @@ impl VisionaryApp {
                             &self.state.script.to_motion_module_set_rate_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
+                            &self.state.script.to_work_module_inc_int_events(),
                             &self.state.script.to_work_module_set_events(),
                         ));
                 self.state.status = if destination.is_some() {
@@ -10253,6 +10373,7 @@ impl VisionaryApp {
         let source_kinetic_add_speed = self.state.script.to_kinetic_add_speed_events();
         let source_work_flags = self.state.script.to_work_flag_events();
         let source_work_transition_terms = self.state.script.to_work_transition_term_events();
+        let source_work_module_inc_ints = self.state.script.to_work_module_inc_int_events();
         let source_work_module_sets = self.state.script.to_work_module_set_events();
         let source_kinetic_clear_speed_all = self.state.script.to_kinetic_clear_speed_all_events();
         let source_kinetic_set_consider_ground_friction = self
@@ -10284,6 +10405,7 @@ impl VisionaryApp {
             self.state.kinetic_add_speed_pristine = source_kinetic_add_speed;
             self.state.work_flag_pristine = source_work_flags;
             self.state.work_transition_term_pristine = source_work_transition_terms;
+            self.state.work_module_inc_int_pristine = source_work_module_inc_ints;
             self.state.work_module_set_pristine = source_work_module_sets;
             self.state.kinetic_clear_speed_all_pristine = source_kinetic_clear_speed_all;
             self.state.kinetic_set_consider_ground_friction_pristine =
@@ -10839,6 +10961,7 @@ impl VisionaryApp {
         self.push_kinetic_add_speed_rules();
         self.push_work_flag_rules();
         self.push_work_transition_term_rules();
+        self.push_work_module_inc_int_rules();
         self.push_work_module_set_rules();
         self.push_kinetic_clear_speed_all_rules();
         self.push_kinetic_set_consider_ground_friction_rules();
@@ -11469,6 +11592,7 @@ impl VisionaryApp {
         let n_kinetic_add_speed = hurt.to_kinetic_add_speed_events().len();
         let n_work_flag = hurt.to_work_flag_events().len();
         let n_work_transition_term = hurt.to_work_transition_term_events().len();
+        let n_work_module_inc_int = hurt.to_work_module_inc_int_events().len();
         let n_work_module_set = hurt.to_work_module_set_events().len();
         let n_kinetic_clear_speed_all = hurt.to_kinetic_clear_speed_all_events().len();
         let n_kinetic_set_consider_ground_friction =
@@ -11499,6 +11623,7 @@ impl VisionaryApp {
             n_kinetic_add_speed,
             n_work_flag,
             n_work_transition_term,
+            n_work_module_inc_int,
             n_work_module_set,
             n_kinetic_clear_speed_all,
             n_kinetic_set_consider_ground_friction,
@@ -11518,6 +11643,7 @@ impl VisionaryApp {
         let n_hurt = hurt.to_hurtboxes().0.len();
         let n_mod = hurt.to_attack_mods().len();
         let n_rate = hurt.motion_rate_sites().len();
+        let n_work_module_inc_int = hurt.to_work_module_inc_int_events().len();
         let n_work_module_set = hurt.to_work_module_set_events().len();
         if !hitboxes.is_empty() {
             self.state.hitboxes_pristine = hitboxes.clone();
@@ -11567,6 +11693,7 @@ impl VisionaryApp {
         self.push_kinetic_add_speed_rules();
         self.push_work_flag_rules();
         self.push_work_transition_term_rules();
+        self.push_work_module_inc_int_rules();
         self.push_work_module_set_rules();
         self.push_kinetic_clear_speed_all_rules();
         self.push_kinetic_set_consider_ground_friction_rules();
@@ -11603,6 +11730,7 @@ impl VisionaryApp {
                     &self.state.script.to_motion_module_set_rate_partial_events(),
                     &self.state.script.to_work_flag_events(),
                     &self.state.script.to_work_transition_term_events(),
+                    &self.state.script.to_work_module_inc_int_events(),
                     &self.state.script.to_work_module_set_events(),
                 ));
         self.jump_to_earliest_active_frame();
@@ -11645,7 +11773,7 @@ impl VisionaryApp {
              + {n_motion_module_set_rate} direct MotionModule::set_rate point(s) \
              + {n_motion_module_set_helper_calculation} direct MotionModule::set_helper_calculation point(s) \
              + {n_motion_module_set_rate_partial} direct MotionModule::set_rate_partial point(s) \
-             + {n_work_module_set} WorkModule value-set point(s) from live game capture"
+             + {n_work_module_inc_int} WorkModule increment point(s) + {n_work_module_set} WorkModule value-set point(s) from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
@@ -11670,6 +11798,7 @@ impl VisionaryApp {
                 + n_motion_module_set_rate
                 + n_motion_module_set_helper_calculation
                 + n_motion_module_set_rate_partial
+                + n_work_module_inc_int
                 + n_work_module_set)
                 > 0
         {
@@ -12734,6 +12863,11 @@ impl VisionaryApp {
                         },
                     ))
                 }
+                "WorkModule::inc_int" if line.args.len() == 1 => Some(
+                    ExcuteStmt::WorkModuleIncInt(crate::data::WorkModuleIncIntCall {
+                        slot: line.args.first()?.to_source_arg()?,
+                    }),
+                ),
                 "WorkModule::set_int" | "WorkModule::set_float" | "WorkModule::set_int64"
                     if line.args.len() == 2 =>
                 {
@@ -15312,6 +15446,138 @@ impl VisionaryApp {
         }
     }
 
+    fn work_module_inc_int_capture_for<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::WorkModuleIncIntEvent],
+        index: usize,
+        event: &crate::data::WorkModuleIncIntEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::WorkModuleIncIntCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 1)
+            .nth(occurrence)
+    }
+
+    fn work_module_inc_int_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::WorkModuleIncIntEvent],
+        shown: &[crate::data::WorkModuleIncIntEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(donor) = Self::work_module_inc_int_capture_for(captures, pristine, index, was)
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(captured_slot) = donor.args.first().and_then(|arg| arg.as_i64()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Ok(replacement_slot) = now.call.slot.trim().parse::<i64>() else {
+                unrepresentable += 1;
+                continue;
+            };
+            if i32::try_from(replacement_slot).is_err() {
+                unrepresentable += 1;
+                continue;
+            }
+            let duplicate_key = pristine
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| *other_index != index && other.frame == was.frame)
+                .filter_map(|(other_index, other)| {
+                    let donor = Self::work_module_inc_int_capture_for(
+                        captures,
+                        pristine,
+                        other_index,
+                        other,
+                    )?;
+                    donor.args.first()?.as_i64()
+                })
+                .filter(|slot| *slot == captured_slot)
+                .count();
+            if duplicate_key != 0 {
+                unrepresentable += 1;
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_WORK_MODULE_INC_INT,
+                hitbox_id: Some(crate::game_link::integer_point_key(
+                    crate::data::WorkModuleIncIntCall::FUNC,
+                    &[captured_slot],
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    work_module_inc_int_slot: Some(replacement_slot),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::WorkModuleIncIntCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    fn push_work_module_inc_int_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let (rules, unrepresentable) = Self::work_module_inc_int_rules_for(
+            motion,
+            &captures,
+            &self.state.work_module_inc_int_pristine,
+            &self.state.script.to_work_module_inc_int_events(),
+        );
+        let key = format!("{mv_key}#work_module_inc_int");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.state.status = format!(
+                "WorkModule::inc_int edit staged, but {unrepresentable} point(s) need a numeric slot capture, a numeric replacement, and a unique same-frame slot key"
+            );
+        }
+    }
+
     fn work_flag_capture_for<'a>(
         captures: &'a [crate::game_link::CaptureLine],
         pristine: &[crate::data::WorkFlagEvent],
@@ -16613,6 +16879,7 @@ impl VisionaryApp {
             kinetic_ground_friction_energy: None,
             work_flag: None,
             work_transition_term: None,
+            work_module_inc_int_slot: None,
             work_module_set_int_value: None,
             work_module_set_int64_value: None,
             work_module_set_float_value: None,
@@ -20230,6 +20497,7 @@ impl VisionaryApp {
                 &self.state.script.to_motion_module_set_rate_partial_events(),
                 &self.state.script.to_work_flag_events(),
                 &self.state.script.to_work_transition_term_events(),
+                &self.state.script.to_work_module_inc_int_events(),
                 &self.state.script.to_work_module_set_events(),
             ));
         if total == 0 {
@@ -20291,6 +20559,7 @@ impl VisionaryApp {
             self.state.script.to_motion_module_set_rate_partial_events();
         let work_flags = self.state.script.to_work_flag_events();
         let work_transition_terms = self.state.script.to_work_transition_term_events();
+        let work_module_inc_ints = self.state.script.to_work_module_inc_int_events();
         let work_module_sets = self.state.script.to_work_module_set_events();
         let timeline_height = timeline_content_height_with_change_kinetic(
             self.state.hitboxes.len(),
@@ -20316,6 +20585,7 @@ impl VisionaryApp {
             motion_module_set_rate_partial.len(),
             work_flags.len(),
             work_transition_terms.len(),
+            work_module_inc_ints.len(),
             work_module_sets.len(),
         );
         let timeline_width = ui.available_width().max(1.0);
@@ -21149,11 +21419,41 @@ impl VisionaryApp {
                 }
             }
 
-            let work_module_set_band_top = work_transition_term_band_top
+            let work_module_inc_int_band_top = work_transition_term_band_top
                 + if work_transition_terms.is_empty() {
                     0.0
                 } else {
                     work_transition_terms.len() as f32 * effect_height + 2.0
+                };
+            for (row, event) in work_module_inc_ints.iter().enumerate() {
+                let y_top = work_module_inc_int_band_top + row as f32 * effect_height;
+                let y_bot = y_top + (effect_height - 1.0).max(2.0);
+                let start_x = frame_start_to_x(event.frame.min(total));
+                let end_x = frame_end_to_x(event.frame.min(total))
+                    .max(start_x + 2.0)
+                    .min(rect.right());
+                let color = egui::Color32::from_rgb(220, 190, 140);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                );
+                if effect_height >= 4.0 {
+                    painter.text(
+                        egui::pos2(end_x + 3.0, (y_top + y_bot) * 0.5),
+                        egui::Align2::LEFT_CENTER,
+                        format!("WorkModule::inc_int {}", event.call.slot),
+                        egui::FontId::monospace(8.0),
+                        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 215),
+                    );
+                }
+            }
+
+            let work_module_set_band_top = work_module_inc_int_band_top
+                + if work_module_inc_ints.is_empty() {
+                    0.0
+                } else {
+                    work_module_inc_ints.len() as f32 * effect_height + 2.0
                 };
             for (row, event) in work_module_sets.iter().enumerate() {
                 let y_top = work_module_set_band_top + row as f32 * effect_height;
@@ -22859,6 +23159,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::KineticAddSpeed(_)
                 | ExcuteStmt::WorkFlag(_)
                 | ExcuteStmt::WorkTransitionTerm(_)
+                | ExcuteStmt::WorkModuleIncInt(_)
                 | ExcuteStmt::WorkModuleSet(_)
                 | ExcuteStmt::KineticClearSpeedAll
                 | ExcuteStmt::KineticSetConsiderGroundFriction(_)
@@ -23447,6 +23748,7 @@ fn nothing_to_load_with_kinetics(
     kinetic_add_speed: usize,
     work_flag: usize,
     work_transition_term: usize,
+    work_module_inc_int: usize,
     work_module_set: usize,
     kinetic_clear_speed_all: usize,
     kinetic_set_consider_ground_friction: usize,
@@ -23473,6 +23775,7 @@ fn nothing_to_load_with_kinetics(
         && kinetic_add_speed == 0
         && work_flag == 0
         && work_transition_term == 0
+        && work_module_inc_int == 0
         && work_module_set == 0
         && kinetic_clear_speed_all == 0
         && kinetic_set_consider_ground_friction == 0
@@ -23483,7 +23786,7 @@ fn nothing_to_load_with_kinetics(
         return Some(
             "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
              direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
-             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, WorkModule flag, WorkModule transition-term, WorkModule value-set, clear-speed-all, ground-friction, MotionModule::set_rate, MotionModule::set_helper_calculation or MotionModule::set_rate_partial lines for this move yet."
+             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, WorkModule flag, WorkModule transition-term, WorkModule increment, WorkModule value-set, clear-speed-all, ground-friction, MotionModule::set_rate, MotionModule::set_helper_calculation or MotionModule::set_rate_partial lines for this move yet."
                 .into(),
         );
     }
@@ -23522,6 +23825,7 @@ fn nothing_to_load(
         correct,
         ft_catch_stop,
         ft_start_adjust_motion_frame,
+        0,
         0,
         0,
         0,
@@ -27520,6 +27824,54 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn captured_work_module_inc_int_becomes_an_editable_game_statement_and_live_rule() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 0.0,
+            func: "WorkModule::inc_int".into(),
+            args: vec![A::Int(7)],
+            run: 1,
+        }];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        let baseline = script.to_work_module_inc_int_events();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].frame, 1);
+        assert_eq!(baseline[0].call.slot, "7");
+        let exported = crate::acmd::export_acmd_source(&script, "kirby", "attack_air_n");
+        assert!(exported.contains("WorkModule::inc_int(agent.module_accessor, 7);"));
+
+        let mut edited = baseline.clone();
+        edited[0].call.slot = "9".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::work_module_inc_int_rules_for(motion, &captures, &baseline, &edited);
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one WorkModule::inc_int rule, got {rules:?}");
+        };
+        assert_eq!(rule.category, crate::game_link::CAT_WORK_MODULE_INC_INT);
+        assert_eq!(
+            rule.hitbox_id,
+            Some(crate::game_link::integer_point_key(
+                "WorkModule::inc_int",
+                &[7],
+            ))
+        );
+        assert_eq!(rule.func.as_deref(), Some("WorkModule::inc_int"));
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().work_module_inc_int_slot,
+            Some(9)
+        );
+
+        edited[0].call.slot = "*FIGHTER_STATUS_WORK_INT_NEXT_STEP".into();
+        let (rules, unrepresentable) =
+            VisionaryApp::work_module_inc_int_rules_for(motion, &captures, &baseline, &edited);
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
     fn captured_work_module_value_setters_rebuild_and_live_override_int_and_float_values() {
         let motion = hash40::hash40("item_grass_pull").0;
         let captures = vec![
@@ -29597,31 +29949,35 @@ mod live_effect_capture_tests {
             );
         }
         let direct_kinetic = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         );
         assert!((direct_kinetic - none - band).abs() < 0.01);
         let motion_module_set_rate = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0,
         );
         assert!((motion_module_set_rate - none - band).abs() < 0.01);
         let motion_module_set_helper_calculation = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0,
         );
         assert!((motion_module_set_helper_calculation - none - band).abs() < 0.01);
         let motion_module_set_rate_partial = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0,
         );
         assert!((motion_module_set_rate_partial - none - band).abs() < 0.01);
         let work_flag = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
         );
         assert!((work_flag - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         let work_transition_term = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
         );
         assert!((work_transition_term - none - (4.0 + timeline_thin_row())).abs() < 0.01);
+        let work_module_inc_int = timeline_content_height_with_change_kinetic(
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+        );
+        assert!((work_module_inc_int - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         let work_module_set = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
         );
         assert!((work_module_set - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         // And they stack rather than sharing space.
@@ -29949,6 +30305,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &[],
+                &[],
             ),
             127
         );
@@ -29978,6 +30335,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &motion_module_set_rate,
+                &[],
                 &[],
                 &[],
                 &[],
@@ -30018,6 +30376,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &[],
+                &[],
             ),
             137
         );
@@ -30052,6 +30411,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &motion_module_set_rate_partial,
+                &[],
                 &[],
                 &[],
                 &[],

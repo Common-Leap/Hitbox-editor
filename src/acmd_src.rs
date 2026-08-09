@@ -5007,6 +5007,108 @@ pub fn sync_work_transition_terms(
     })
 }
 
+/// The verified direct `WorkModule::inc_int` calls in source order. Standard scripts use
+/// `agent.module_accessor`; HDR scripts use `boma`.
+pub(crate) fn work_module_inc_int_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(text, crate::data::WorkModuleIncIntCall::FUNC, 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            site.args.len() == 2
+                && site
+                    .arg(text, 0)
+                    .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+                && site.arg(text, 1).is_some_and(valid_work_flag_token)
+        })
+        .collect()
+}
+
+/// Rewrite only the authored slot token of existing direct `WorkModule::inc_int` calls.
+pub fn rewrite_work_module_inc_int(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::WorkModuleIncIntEvent],
+    edited: &[crate::data::WorkModuleIncIntEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = work_module_inc_int_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable direct WorkModule::inc_int call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: WorkModule::inc_int site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: WorkModule::inc_int site {} was retimed from frame {} to {} — source syncing only retunes its authored slot",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::WorkModuleIncIntCall::FUNC
+            || site.args.len() != 2
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !matches!(value.trim(), "agent.module_accessor" | "boma"))
+            || site
+                .arg(text, 1)
+                .is_none_or(|value| value.trim() != before.call.slot.trim())
+        {
+            report.skipped.push(format!(
+                "{label}: WorkModule::inc_int site {} no longer has its verified receiver/arity/slot shape",
+                before.site
+            ));
+            continue;
+        }
+        if !valid_work_flag_token(&now.call.slot) {
+            report.skipped.push(format!(
+                "{label}: WorkModule::inc_int site {} has an unsupported or empty slot token — source syncing leaves the authored call intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(1) {
+            if let Some(edit) = text_edit(text, span, now.call.slot.trim()) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited direct `WorkModule::inc_int` slot tokens into the project's `game_` function.
+pub fn sync_work_module_inc_int(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::WorkModuleIncIntEvent],
+    edited: &[crate::data::WorkModuleIncIntEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_work_module_inc_int(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
+}
+
 /// The verified direct `WorkModule::set_int` / `set_float` / `set_int64` calls in source order.
 /// The set_int64 corpus is measured in both standard `agent.module_accessor` and HDR `boma`
 /// receiver forms; preserving the receiver keeps export and source sync lossless.
@@ -9963,6 +10065,67 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         edited[1].call.value = "make_value()".into();
         let (after, report) =
             rewrite_work_module_sets(text, "mario/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert_eq!(report.changed, 0, "{report:?}");
+        assert_eq!(report.skipped.len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn work_module_inc_int_source_sync_rewrites_authored_slots_for_standard_and_hdr() {
+        let standard = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        WorkModule::inc_int(agent.module_accessor, *FIGHTER_STATUS_WORK_INT_NEXT_STEP);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(standard).to_work_module_inc_int_events();
+        let mut edited = pristine.clone();
+        edited[0].call.slot = "9".into();
+        let (after, report) =
+            rewrite_work_module_inc_int(standard, "mario/x", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("WorkModule::inc_int(agent.module_accessor, 9);"));
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&after).to_work_module_inc_int_events(),
+            edited
+        );
+
+        let hdr = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    let boma = agent.boma();
+    frame(agent.lua_state_agent, 5.0);
+    if is_excute(agent) {
+        WorkModule::inc_int(boma, *FIGHTER_STATUS_WORK_INT_NEXT_STEP);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(hdr).to_work_module_inc_int_events();
+        let mut edited = pristine.clone();
+        edited[0].call.slot = "*FIGHTER_STATUS_WORK_INT_OTHER".into();
+        let (after, report) =
+            rewrite_work_module_inc_int(hdr, "mario/x_hdr", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("WorkModule::inc_int(boma, *FIGHTER_STATUS_WORK_INT_OTHER);"));
+        assert!(after.contains("let boma = agent.boma();"));
+    }
+
+    #[test]
+    fn work_module_inc_int_source_sync_refuses_retiming_and_malformed_edits() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        WorkModule::inc_int(agent.module_accessor, 7);
+        WorkModule::inc_int(agent.module_accessor, 8);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_acmd_script(text).to_work_module_inc_int_events();
+        let mut edited = pristine.clone();
+        edited[0].frame = 2;
+        edited[1].call.slot = "make_slot()".into();
+        let (after, report) =
+            rewrite_work_module_inc_int(text, "mario/x", &pristine, &edited).unwrap();
         assert_eq!(after, text);
         assert_eq!(report.changed, 0, "{report:?}");
         assert_eq!(report.skipped.len(), 2, "{report:?}");
