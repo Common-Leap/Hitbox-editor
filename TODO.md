@@ -3698,18 +3698,18 @@ ambiguous repeated prologue instead of selecting the first match, then installs 
 wrapper fallback and labels it partial because those direct body callers remain outside its
 coverage.
 
-When the inline body hook is disabled, the installer now uses that ABI-verified wrapper fallback
-by default and marks the hook installed after registration. This makes the documented partial
-fallback reachable without repeatedly registering the callback; it still cannot cover the direct
-body callers. The installer and debug-enabled hit path now emit `COLLISION_HOOK` and `COLLISION`
-lines into the bounded `sd:/slight/diag.txt` session, so a fresh boot can distinguish a loaded
-wrapper fallback and an observed collision without relying on the emulator console.
+When the inline body hook is disabled or its version-pinned scan fails, the installer uses that
+ABI-verified wrapper fallback and marks the hook installed after registration. This keeps the
+documented partial fallback reachable without repeatedly registering the callback; it still
+cannot cover the direct body callers. The installer and debug-enabled hit path now emit
+`COLLISION_HOOK` and `COLLISION` lines into the bounded `sd:/slight/diag.txt` session, while the
+unconditional `collisions=` STATS field proves callback entry without relying on the emulator
+console or a debug marker.
 
-The shipped constant remains `ENABLE_INLINE_COLLISION_HOOK = false`. For a controlled live test,
-creating `sd:/slight/debug/inline_collision_hook.txt` before boot requests the inline path once;
-the installer consumes that trigger before scanning, then reports `request=inline-one-shot` in
-the diagnostic session. This is a test affordance, not runtime proof: the trigger must still
-produce an `inline-body` install line and a collision line without a crash on the target.
+The shipped constant is now `ENABLE_INLINE_COLLISION_HOOK = true`, based on the successful Eden
+inline test below. Creating `sd:/slight/debug/inline_collision_hook.txt` before boot still
+requests the inline path explicitly and records `request=inline-one-shot`; it is a test affordance
+that is no longer required for the normal shipped path.
 
 The match-lifecycle audit also fixed a real state bug: `on_fight_start()` calls the hook system's
 clear path, but the native hook and its callback registration are boot-lifetime state. Clearing
@@ -3728,14 +3728,15 @@ did not yet prove callback execution.
 
 The first one-shot inline Eden session then reported `COLLISION_HOOK request=inline-one-shot` and
 `COLLISION_HOOK mode=inline-body offset=0x67a7b0`, stayed alive, and continued writing normal
-`STATS`/ACMD activity after the user's hits. It still contained no detailed `COLLISION` line. That
-boot used the older debug-gated diagnostic, so it proves the body hook installed without an
-immediate crash but does not yet prove that the callback ran. The rebuilt plugin now adds an
-unconditional cumulative `collisions=` field to each `STATS` line for the next controlled boot.
+`STATS`/ACMD activity after the user's hits. It still contained no detailed `COLLISION` line, so
+the older debug-gated diagnostic only proved installation without an immediate crash. The rebuilt
+plugin's unconditional counter was then exercised in a second inline session: `collisions=` rose
+from 0 to 10 across the `STATS` lines after the user's hits, with no failure or crash marker. That
+proves the corrected inline callback ran and returned through the trampoline ten times on Eden.
 
-R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
-trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
-enable the inline hook based on static analysis alone.
+R3 remains open only until one normal boot verifies that the newly shipped default selects the
+same inline path without the one-shot marker. Physical Switch runtime remains outside this
+machine's evidence boundary.
 
 ### [x] R4 — Guard against the double-plugin footgun (done 2026-08-05)
 

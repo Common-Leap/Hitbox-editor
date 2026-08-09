@@ -2485,7 +2485,7 @@ mod tests {
             "COLLISION_HOOK mode=wrapper-fallback coverage=partial",
             "COLLISION attacker=",
             "note_collision()",
-            "const ENABLE_INLINE_COLLISION_HOOK: bool = false;",
+            "const ENABLE_INLINE_COLLISION_HOOK: bool = true;",
             "DEBUG_INLINE_COLLISION",
             "consume_sd_trigger",
             "orig(",

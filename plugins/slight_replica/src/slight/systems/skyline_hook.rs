@@ -10,11 +10,12 @@ static INSTALLED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 static HITS: LazyLock<Mutex<VecDeque<HitRecord>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(32)));
 
-/// Whether to install the manual inline collision hook in every boot. Off by default: use the
-/// ABI-verified binding wrapper fallback, which is partial because direct body callers bypass the
-/// exported wrapper. A one-shot `sd:/slight/debug/inline_collision_hook.txt` trigger can request
-/// the inline path for a live test without changing the shipped default.
-const ENABLE_INLINE_COLLISION_HOOK: bool = false;
+/// Whether to install the manual inline collision hook in every boot. The corrected ABI and
+/// trampoline have now been exercised on Eden; keep the complete body path as the shipped default.
+/// If the version-pinned body scan is missing or ambiguous, installation falls back to the
+/// ABI-verified wrapper path and reports its partial coverage. A one-shot
+/// `sd:/slight/debug/inline_collision_hook.txt` trigger remains available for an explicit test.
+const ENABLE_INLINE_COLLISION_HOOK: bool = true;
 
 /// 40-byte ARM64 pattern scanned in game `.text` @ FUN_71000d1fb4.
 const COLLISION_PATTERN: [u8; 40] = [
@@ -85,9 +86,8 @@ pub fn install() {
     // shows that the wrapper branches to this body and that other game sites call the body
     // directly. Hook the body so those sites are not missed; a wrapper-only
     // `skyline::hook(replace=…)` would provide incomplete collision coverage. The trampoline's
-    // native ABI is corrected above, but an earlier Eden run still produced a bad trampoline that
-    // null-jumped when a hit fired. Keep this disabled until the corrected path is proven on
-    // hardware or with a compatible hook implementation.
+    // native ABI is corrected above. The corrected path has been exercised on Eden; retain the
+    // wrapper fallback for a missing/ambiguous body scan rather than selecting an unsafe target.
     if !inline_requested {
         skyline::println!(
             "[SLight] Skyline Hook: inline collision hook disabled (Eden-unsafe); installing wrapper fallback (partial coverage)"
