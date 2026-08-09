@@ -6720,8 +6720,8 @@ impl VisionaryApp {
             );
             ui.label(
                 "The numeric rate is source-editable and exportable. Live replacement is sent \
-                 only when this frame has one direct capture and no game_ partial-rate call; \
-                 ambiguous category-free captures stay source-only.",
+                 only when an exact native (part kind, pristine rate, frame) capture identity is \
+                 unique; shared or unresolved identities stay source-only.",
             );
             for event in &partial_rate_events {
                 let active = event.frame == self.state.current_frame;
@@ -6790,7 +6790,7 @@ impl VisionaryApp {
                         .insert(key, self.state.expression_script.clone());
                 }
                 self.state.status =
-                    "Expression MotionModule::set_rate_partial edit staged — live replacement is sent only when its frame has one unambiguous direct capture and no game_ partial-rate call; otherwise export or sync it into the linked source project."
+                    "Expression MotionModule::set_rate_partial edit staged — live replacement is sent only when its exact native (part kind, pristine rate, frame) capture identity is unique; otherwise export or sync it into the linked source project."
                         .into();
                 self.push_expression_motion_module_set_rate_partial_rules();
             }

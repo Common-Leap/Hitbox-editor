@@ -2801,6 +2801,13 @@ source value, and no direct text callers were found for these exported symbols. 
 ABI shape without closing the source/runtime evidence gap, so the three-argument calls remain
 source-preserved and untyped.
 
+The version-matched Lua registration table also ties `set_frame_partial` and
+`set_frame_partial_sync_anim_cmd` to separate wrapper bodies (`FUN_0173d400` and
+`LAB_0173d6b0` respectively). That confirms the missing boolean is part of the native Lua wrapper
+contract rather than a naming or parser artifact, but the available decompilation export does not
+include either wrapper body or its stack reads/default. The stronger registration evidence still
+does not identify a safe source default, so the typed/live boundary remains closed.
+
 A second read-only check of the available status decompilation corpus found four native status
 call sites: Ken and Ryu pass an explicitly converted `true`, and Pac-Man's trampoline Break and
 Shake statuses pass `true` directly. That corpus is an older 2023-08-22 public status dump, and
