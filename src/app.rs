@@ -29,6 +29,252 @@ fn carrier_send_reached_goal(
 /// The editor, ACMD source, exports, and user-facing timeline all use one-based game frames.
 const FIRST_GAME_FRAME: u32 = 1;
 
+/// The primary editor is deliberately split into task-sized surfaces.  The underlying ACMD
+/// model is still one move; this enum only controls which part of that model is in front of the
+/// user at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryEditorTab {
+    Collisions,
+    MotionState,
+    AudioFeedback,
+}
+
+impl PrimaryEditorTab {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Collisions => "Collisions",
+            Self::MotionState => "Motion & state",
+            Self::AudioFeedback => "Sound & feedback",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Collisions => {
+                "Attack, grab, detection, wind, throw-damage, hurtbox-state, and active-hitbox commands for the selected move."
+            }
+            Self::MotionState => {
+                "Facing, velocity, kinetic, animation-timing, ground/air, and stored script-state commands from the move's game_ script."
+            }
+            Self::AudioFeedback => {
+                "Sounds plus camera shake, controller rumble, and the supported animation controls from the move's sound_ and expression_ scripts."
+            }
+        }
+    }
+}
+
+const VISUAL_EFFECTS_DESCRIPTION: &str =
+    "Particle spawns, trails, model or screen colour changes, and effect-control commands from the selected move's effect_ script.";
+const WORK_FLAGS_DESCRIPTION: &str =
+    "Work flags are named on/off switches stored by the game for this fighter. Move and status scripts use them to remember or signal conditions such as enabling a combo or marking a move phase; the flag's authored name identifies its exact purpose.";
+
+/// Main-editor section names always carry a plain-language explanation on the name itself.
+/// Keeping that convention in helpers makes a bare, unexplained heading easy to spot in review.
+fn editor_section_heading(ui: &mut Ui, title: &str, description: &str) {
+    ui.heading(title).on_hover_text(description);
+}
+
+fn editor_subsection_heading(ui: &mut Ui, title: &str, description: &str) {
+    ui.label(RichText::new(title).strong())
+        .on_hover_text(description);
+}
+
+fn editor_section_heading_with_badge(
+    ui: &mut Ui,
+    title: &str,
+    description: &str,
+    badge_color: Color32,
+    badge: &str,
+) {
+    ui.horizontal_wrapped(|ui| {
+        editor_section_heading(ui, title, description);
+        ui.colored_label(badge_color, badge)
+            .on_hover_text(description);
+    });
+}
+
+fn editor_command_subsection_heading(
+    ui: &mut Ui,
+    title: &str,
+    description: &str,
+    badge_color: Color32,
+    badge: &str,
+) {
+    ui.horizontal_wrapped(|ui| {
+        editor_subsection_heading(ui, title, description);
+        ui.colored_label(badge_color, badge)
+            .on_hover_text(description);
+    });
+}
+
+fn editor_collapsing(
+    ui: &mut Ui,
+    title: &str,
+    description: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) {
+    let response = ui.collapsing(title, add_contents);
+    response.header_response.on_hover_text(description);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorFocus {
+    Primary,
+    Effects,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryAction {
+    Undo,
+    Redo,
+}
+
+/// A session-only snapshot for the currently open move.  Scripts and edit records are stored as
+/// JSON bytes because several of the deliberately lossless ACMD enums do not implement
+/// `PartialEq`; serializing them also means the equality check sees raw source tokens exactly as
+/// the export path does.
+#[derive(Debug, Clone, PartialEq)]
+struct EditSnapshot {
+    hitboxes: Vec<Hitbox>,
+    script: Vec<u8>,
+    effect_script: Vec<u8>,
+    effects: Vec<crate::data::EffectCall>,
+    sound_script: Vec<u8>,
+    expression_script: Vec<u8>,
+    effect_call_edits: Option<Vec<u8>>,
+    effect_call_full: Option<Vec<u8>>,
+    effect_dropped_lines: Option<Vec<u8>>,
+    effect_frame_residue: Option<Vec<u8>>,
+    sound_script_edit: Option<Vec<u8>>,
+    expression_script_edit: Option<Vec<u8>>,
+    edit_record: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    label: String,
+    before: EditSnapshot,
+    after: EditSnapshot,
+}
+
+#[derive(Debug, Default)]
+struct MoveEditHistory {
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineCategory {
+    Collisions,
+    Effects,
+    MotionState,
+    AudioFeedback,
+}
+
+impl TimelineCategory {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Collisions => "Collisions",
+            Self::Effects => "Visual effects",
+            Self::MotionState => "Motion & state",
+            Self::AudioFeedback => "Sound & feedback",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Collisions => {
+                "Show or hide attack, grab, detection, wind, throw-damage, hurtbox, and active-hitbox events on the timeline."
+            }
+            Self::Effects => "Show or hide visual-effect and effect-control events on the timeline.",
+            Self::MotionState => {
+                "Show or hide movement, kinetic, animation-timing, and stored state events on the timeline."
+            }
+            Self::AudioFeedback => {
+                "Show or hide sound, camera, rumble, and expression animation events on the timeline."
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod editor_section_copy_tests {
+    use super::*;
+
+    #[test]
+    fn primary_editor_and_timeline_use_the_same_category_names() {
+        for (tab, category) in [
+            (PrimaryEditorTab::Collisions, TimelineCategory::Collisions),
+            (PrimaryEditorTab::MotionState, TimelineCategory::MotionState),
+            (
+                PrimaryEditorTab::AudioFeedback,
+                TimelineCategory::AudioFeedback,
+            ),
+        ] {
+            assert_eq!(tab.title(), category.title());
+            assert!(tab.description().split_whitespace().count() >= 8);
+            assert!(category.description().split_whitespace().count() >= 8);
+        }
+        assert_eq!(TimelineCategory::Effects.title(), "Visual effects");
+        assert!(VISUAL_EFFECTS_DESCRIPTION.split_whitespace().count() >= 8);
+    }
+
+    #[test]
+    fn work_flags_help_defines_the_engine_term_in_plain_language() {
+        assert!(WORK_FLAGS_DESCRIPTION.contains("named on/off switches"));
+        assert!(WORK_FLAGS_DESCRIPTION.contains("remember or signal conditions"));
+        assert!(WORK_FLAGS_DESCRIPTION.contains("authored name"));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TimelineSelection {
+    Hitbox(usize),
+    Effect(usize),
+    Command { family: String, site: usize },
+}
+
+#[derive(Debug, Clone)]
+struct TimelineRow {
+    category: TimelineCategory,
+    selection: TimelineSelection,
+    label: String,
+    start: u32,
+    end: u32,
+    seek_frame: u32,
+    color: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineFilters {
+    collisions: bool,
+    effects: bool,
+    motion_state: bool,
+    audio_feedback: bool,
+}
+
+impl Default for TimelineFilters {
+    fn default() -> Self {
+        Self {
+            collisions: true,
+            effects: true,
+            motion_state: true,
+            audio_feedback: true,
+        }
+    }
+}
+
+impl TimelineFilters {
+    fn shows(self, category: TimelineCategory) -> bool {
+        match category {
+            TimelineCategory::Collisions => self.collisions,
+            TimelineCategory::Effects => self.effects,
+            TimelineCategory::MotionState => self.motion_state,
+            TimelineCategory::AudioFeedback => self.audio_feedback,
+        }
+    }
+}
+
 /// Effect rotations are stored in the editor's human-readable order. ACMD spawn macros carry
 /// the same values as `zr, yr, xr`, so the parser/exporter handles that wire-order conversion.
 const EFFECT_ROTATION_AXIS_LABELS: [&str; 3] = ["X", "Y", "Z"];
@@ -508,6 +754,7 @@ fn timeline_scroll_area(viewport_height: f32) -> egui::ScrollArea {
         .max_height(viewport_height.max(1.0))
 }
 
+#[allow(dead_code)]
 fn hitbox_menu_scroll_area(viewport_height: f32) -> egui::ScrollArea {
     let viewport_height = viewport_height.max(1.0);
     egui::ScrollArea::vertical()
@@ -1358,6 +1605,24 @@ pub struct VisionaryApp {
     add_kb_base: i32,
     add_kb_scaling: i32,
     selected_hitbox: Option<usize>,
+    /// Which primary editing surface is open.  Effects remain an independent panel, but the
+    /// compact layout uses the same focus value to decide which inspector gets the scarce width.
+    primary_tab: PrimaryEditorTab,
+    inspector_focus: InspectorFocus,
+    timeline_filters: TimelineFilters,
+    /// The selected source command for the non-collision tabs.  The command site is stable for a
+    /// source statement, including loop repetitions; the current frame still identifies which
+    /// occurrence the user navigated to.
+    selected_command: Option<(String, usize)>,
+    /// Optional effect transform overrides stay hidden until requested; the common effect name,
+    /// command, bone, and frame fields remain visible for the normal edit path.
+    show_effect_advanced: bool,
+    /// Per-move session history.  Keeping this outside AppState makes it impossible for Undo to
+    /// become part of a portable project or a plugin message.
+    edit_history: HashMap<String, MoveEditHistory>,
+    history_before_frame: Option<(String, EditSnapshot)>,
+    history_suppress_frame: bool,
+    pending_history_action: Option<HistoryAction>,
     // Current model/anim paths for the viewport callback
     current_model_dir: Option<PathBuf>,
     current_anim_path: Option<PathBuf>,
@@ -1672,6 +1937,15 @@ impl VisionaryApp {
             add_kb_base: 50,
             add_kb_scaling: 100,
             selected_hitbox: None,
+            primary_tab: PrimaryEditorTab::Collisions,
+            inspector_focus: InspectorFocus::Primary,
+            timeline_filters: load_timeline_filters(),
+            selected_command: None,
+            show_effect_advanced: false,
+            edit_history: HashMap::new(),
+            history_before_frame: None,
+            history_suppress_frame: false,
+            pending_history_action: None,
             current_model_dir: None,
             current_anim_path: None,
             current_skel_path: None,
@@ -2439,6 +2713,12 @@ impl VisionaryApp {
 
     fn select_move(&mut self, mut move_entry: MoveEntry) {
         self.state.current_frame = FIRST_GAME_FRAME;
+        self.selected_hitbox = None;
+        self.state.selected_effect_call = None;
+        self.selected_command = None;
+        self.primary_tab = PrimaryEditorTab::Collisions;
+        self.inspector_focus = InspectorFocus::Primary;
+        self.show_add_hitbox = false;
         // The frame count is parsed here rather than when the list was built. Reading ~460
         // `.nuanmb` files up front is what the old six-substring family filter existed to avoid,
         // and hiding most of the roster's moves was too high a price for it — see R5. One parse
@@ -5480,7 +5760,11 @@ impl VisionaryApp {
         let mut restore_forgotten = false;
         let mut forget_fighter: Option<String> = None;
         ui.horizontal(|ui| {
-            ui.heading("Fighters");
+            editor_section_heading(
+                ui,
+                "Fighters",
+                "Choose the fighter whose moves, scripts, and visual effects you want to inspect or edit.",
+            );
             if !self.forgotten_fighters.is_empty()
                 && ui
                     .small_button(format!("Restore ({})", self.forgotten_fighters.len()))
@@ -5541,7 +5825,11 @@ impl VisionaryApp {
                     let response = ui.selectable_label(selected, &label).on_hover_text(hover);
                     let clicked = response.clicked();
                     response.context_menu(|ui| {
-                        ui.label(egui::RichText::new("Fighter memory").strong());
+                        editor_subsection_heading(
+                            ui,
+                            "Cached fighter data",
+                            "Scripts, edits, and live-preview data Visionary has remembered for this fighter during editing.",
+                        );
                         ui.label(
                             egui::RichText::new(concat!(
                                 "Clears cached scripts, edits, and live effect previews. ",
@@ -5566,7 +5854,11 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.heading("Moves");
+        editor_section_heading(
+            ui,
+            "Moves",
+            "Choose one animation or action for the selected fighter. Categories group the game's internal motion names by their usual purpose.",
+        );
         ui.add(
             egui::TextEdit::singleline(&mut self.move_search)
                 .hint_text("Search moves…")
@@ -5619,7 +5911,7 @@ impl VisionaryApp {
                         // user just filtered for stay hidden behind a collapsed header.
                         header = header.open(Some(true));
                     }
-                    header.show(ui, |ui| {
+                    let response = header.show(ui, |ui| {
                         for m in group {
                             let selected = self
                                 .state
@@ -5640,6 +5932,9 @@ impl VisionaryApp {
                             }
                         }
                     });
+                    response
+                        .header_response
+                        .on_hover_text(order[ci].description());
                 }
                 if let Some(m) = to_select {
                     self.select_move(m);
@@ -5649,12 +5944,19 @@ impl VisionaryApp {
 
     fn draw_right_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Hitboxes");
+            editor_section_heading(
+                ui,
+                self.primary_tab.title(),
+                self.primary_tab.description(),
+            );
+            if self.state.selected_move.is_none() {
+                ui.weak("Select a move");
+            }
             if self.state.selected_move.is_some() {
                 let btn_text = if self.fetching_acmd {
-                    "..."
+                    "Loading…"
                 } else {
-                    "Fetch ACMD"
+                    "Fetch source"
                 };
                 if ui
                     .add_enabled(!self.fetching_acmd, egui::Button::new(btn_text))
@@ -5681,7 +5983,7 @@ impl VisionaryApp {
                     self.load_from_capture();
                 }
                 if ui
-                    .add_enabled(has_capture, egui::Button::new("⌫"))
+                    .add_enabled(has_capture, egui::Button::new("Forget capture"))
                     .on_hover_text(
                         "Forget the locked live-ACMD snapshots. Each move is captured from its \
                          first playback only; clear when you intentionally want to \
@@ -5703,9 +6005,71 @@ impl VisionaryApp {
                     ui.colored_label(color, txt)
                         .on_hover_text(format!("Data source: {}", self.state.acmd_source));
                 }
+                if ui
+                    .add_enabled(
+                        self.current_move_has_edits(),
+                        egui::Button::new("Restore move"),
+                    )
+                    .on_hover_text(
+                        "Discard this move's collision, motion, effect, sound, and expression edits and restore the loaded source or capture baseline",
+                    )
+                    .clicked()
+                {
+                    self.restore_current_move_edits();
+                }
             }
-            if ui.button("+").clicked() {
+            if ui
+                .add_enabled(
+                    self.state.selected_move.is_some()
+                        && matches!(self.primary_tab, PrimaryEditorTab::Collisions),
+                    egui::Button::new("Add collision"),
+                )
+                .clicked()
+            {
                 self.show_add_hitbox = !self.show_add_hitbox;
+            }
+            if ui
+                .add_enabled(self.has_undo(), egui::Button::new("Undo"))
+                .on_hover_text("Undo the last edit in this move (Ctrl+Z)")
+                .clicked()
+            {
+                self.queue_history_action(HistoryAction::Undo);
+            }
+            if ui
+                .add_enabled(self.has_redo(), egui::Button::new("Redo"))
+                .on_hover_text("Redo the last undone edit in this move (Ctrl+Shift+Z)")
+                .clicked()
+            {
+                self.queue_history_action(HistoryAction::Redo);
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            for tab in [
+                PrimaryEditorTab::Collisions,
+                PrimaryEditorTab::MotionState,
+                PrimaryEditorTab::AudioFeedback,
+            ] {
+                if ui
+                    .selectable_label(self.primary_tab == tab, tab.title())
+                    .on_hover_text(tab.description())
+                    .clicked()
+                {
+                    self.primary_tab = tab;
+                    self.inspector_focus = InspectorFocus::Primary;
+                    self.show_add_hitbox = false;
+                }
+            }
+            if self.state.show_effects_panel
+                && ui
+                    .selectable_label(
+                        self.inspector_focus == InspectorFocus::Effects,
+                        "Visual effects",
+                    )
+                    .on_hover_text(VISUAL_EFFECTS_DESCRIPTION)
+                    .clicked()
+            {
+                self.inspector_focus = InspectorFocus::Effects;
             }
         });
 
@@ -5713,8 +6077,13 @@ impl VisionaryApp {
             ui.colored_label(Color32::RED, err);
         }
 
-        if self.show_add_hitbox {
+        if self.show_add_hitbox && matches!(self.primary_tab, PrimaryEditorTab::Collisions) {
             ui.group(|ui| {
+                editor_subsection_heading(
+                    ui,
+                    "New collision",
+                    "Create an attack, grab, or wind area beginning at the current game frame. More properties become available after it is selected.",
+                );
                 ui.horizontal(|ui| {
                     ui.label("Type:");
                     egui::ComboBox::from_id_salt("add_hitbox_category")
@@ -5844,207 +6213,263 @@ impl VisionaryApp {
             });
         }
 
-        let menu_height = ui.available_height();
-        hitbox_menu_scroll_area(menu_height).show(ui, |ui| {
-            // **An empty list is the ordinary case for most of the roster now.** The move list
-            // used to be filtered to attacks, so "no hitboxes" meant "not fetched yet" and a
-            // blank panel was readable. R5 widened it, and a walk cycle legitimately has none —
-            // the first person to open one concluded the editor could not edit its sounds,
-            // because nothing on screen said where they were. Say it.
-            if self.state.hitboxes.is_empty() && self.state.selected_move.is_some() {
-                let fetched = !self.state.acmd_source.is_empty();
-                if !fetched {
-                    ui.weak("Nothing loaded yet — press Fetch ACMD.");
-                } else {
-                    ui.weak("This move has no hitboxes.");
-                    let mut has = Vec::new();
-                    if !self.state.sounds.is_empty() {
-                        has.push(format!("{} sound(s)", self.state.sounds.len()));
-                    }
-                    if !self.state.effects.is_empty() {
-                        has.push(format!("{} effect(s)", self.state.effects.len()));
-                    }
-                    if has.is_empty() {
-                        ui.weak("It has no effects or sounds either.");
-                    } else {
-                        ui.weak(format!("It does have {} — see below.", has.join(" and ")));
-                    }
-                }
-            }
-            let mut to_delete = None;
-            for (i, hb) in self.state.hitboxes.iter().enumerate() {
-                let color = hitbox_display_color(hb);
-                let selected = self.selected_hitbox == Some(i);
-                ui.horizontal(|ui| {
-                    ui.colored_label(color, "*");
-                    let shape = if hb.category == 2 {
-                        if hb.wind.as_ref().is_some_and(|wind| wind.is_radial()) {
-                            "◯"
-                        } else {
-                            "▭"
-                        }
-                    } else if hb.capsule_end.is_some() {
-                        "⬭"
-                    } else {
-                        "●"
-                    };
-                    let label = match hb.category {
-                        1 => format!(
-                            "{} GRAB #{} {} [{}-{}]",
-                            shape, hb.id, hb.bone_name, hb.active_start, hb.active_end
-                        ),
-                        // No damage to name, so what it is looking for takes that slot — it is
-                        // the property that distinguishes two search boxes on the same bone.
-                        crate::data::CAT_SEARCH => format!(
-                            "{} SEARCH #{} {} {} [{}-{}]",
-                            shape,
-                            hb.id,
-                            hb.bone_name,
-                            hb.search
-                                .as_ref()
-                                .map(|s| search_kind_short(&s.collision_kind))
-                                .unwrap_or("?"),
-                            hb.active_start,
-                            hb.active_end
-                        ),
-                        2 => format!(
-                            "{} WIND #{} {} [{}-{}]",
-                            shape,
-                            hb.id,
-                            hb.wind
-                                .as_ref()
-                                .map(|wind| if wind.is_radial() {
-                                    format!("RAD r{:.1}", wind.radius())
+        if matches!(self.primary_tab, PrimaryEditorTab::Collisions) {
+            let menu_height = ui.available_height();
+            let master_height = (menu_height * 0.30).clamp(120.0, 240.0);
+            ui.vertical(|ui| {
+                editor_section_heading(
+                    ui,
+                    "Collision entries",
+                    "Every attack, grab, detection area, wind area, and throw-damage event loaded for this move. Select one to edit its settings below.",
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("collision_master_list")
+                    .auto_shrink([false, false])
+                    .max_height(master_height)
+                    .show(ui, |ui| {
+                        // **An empty list is the ordinary case for most of the roster now.** The move list
+                        // used to be filtered to attacks, so "no hitboxes" meant "not fetched yet" and a
+                        // blank panel was readable. R5 widened it, and a walk cycle legitimately has none —
+                        // the first person to open one concluded the editor could not edit its sounds,
+                        // because nothing on screen said where they were. Say it.
+                        if self.state.hitboxes.is_empty() && self.state.selected_move.is_some() {
+                            let fetched = !self.state.acmd_source.is_empty();
+                            if !fetched {
+                                ui.weak("Nothing loaded yet — press Fetch ACMD.");
+                            } else {
+                                ui.weak("This move has no hitboxes.");
+                                let mut has = Vec::new();
+                                if !self.state.sounds.is_empty() {
+                                    has.push(format!("{} sound(s)", self.state.sounds.len()));
+                                }
+                                if !self.state.effects.is_empty() {
+                                    has.push(format!("{} effect(s)", self.state.effects.len()));
+                                }
+                                if has.is_empty() {
+                                    ui.weak("It has no effects or sounds either.");
                                 } else {
-                                    let [width, height] = wind.dimensions();
-                                    format!("RECT {width:.1}×{height:.1}")
-                                })
-                                .unwrap_or_else(|| format!("~{:.1}", hb.size)),
-                            hb.active_start,
-                            hb.active_end
-                        ),
-                        // No bone and no size to name, so the kind takes their place — it is
-                        // the only thing distinguishing two of these in the same block, and
-                        // kirby/ThrowF has exactly that.
-                        crate::data::CAT_ABS => format!(
-                            "◈ {} {:.1}dmg {} [{}-{}]",
-                            hb.abs
-                                .as_ref()
-                                .map(|a| abs_kind_short(&a.kind))
-                                .unwrap_or("ABS"),
-                            hb.damage,
-                            angle_short_label(hb.angle),
-                            hb.active_start,
-                            hb.active_end
-                        ),
-                        crate::data::CAT_ATTACK_FP => format!(
-                            "◇ ATTACK_FP #{} {:.1}dmg {} [{}-{}]",
-                            hb.id,
-                            hb.damage,
-                            angle_short_label(hb.angle),
-                            hb.active_start,
-                            hb.active_end
-                        ),
-                        _ => format!(
-                            "{} #{} {} {:.1}dmg {} [{}-{}]",
-                            shape,
-                            hb.id,
-                            hb.bone_name,
-                            hb.damage,
-                            angle_short_label(hb.angle),
-                            hb.active_start,
-                            hb.active_end
-                        ),
-                    };
-                    if ui.selectable_label(selected, &label).clicked() {
-                        self.selected_hitbox = if selected { None } else { Some(i) };
-                    }
-                    if ui
-                        .small_button("🗑")
-                        .on_hover_text("Delete this collision box")
-                        .clicked()
-                    {
-                        to_delete = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = to_delete {
-                self.state.hitboxes.remove(i);
-                self.selected_hitbox = match self.selected_hitbox {
-                    Some(selected) if selected == i => None,
-                    Some(selected) if selected > i => Some(selected - 1),
-                    selected => selected,
-                };
-            }
-
-            // Property editor for selected hitbox — fields shown depend on the collision
-            // family. It shares this one full-height scrollbar with the collision list.
-            if let Some(idx) = self.selected_hitbox {
-                let bone_names = self.bone_names.clone();
-                let max_frame = self
-                    .state
-                    .total_frames
-                    .max(timeline_frame_extent_with_change_kinetic(
-                        &self.state.hitboxes,
-                        &self.state.effects,
-                        &self.state.sounds,
-                        &self.state.expressions,
-                        &self.state.script.to_reverse_lr_events(),
-                        &self.state.script.to_speed_ex_events(),
-                        &self.state.script.to_speed_events(),
-                        &self.state.script.to_add_speed_no_limit_events(),
-                        &self.state.script.to_correct_events(),
-                        &self.state.script.to_ft_catch_stop_events(),
-                        &self.state.script.to_ft_start_adjust_motion_frame_events(),
-                        &self.state.script.to_clr_speed_events(),
-                        &self.state.script.to_set_air_events(),
-                        &self.state.script.to_change_kinetic_events(),
-                        &self.state.script.to_kinetic_energy_events(),
-                        &self.state.script.to_kinetic_add_speed_events(),
-                        &self.state.script.to_kinetic_clear_speed_all_events(),
-                        &self
-                            .state
-                            .script
-                            .to_kinetic_set_consider_ground_friction_events(),
-                        &self.state.script.to_motion_module_set_rate_events(),
-                        &self
-                            .state
-                            .script
-                            .to_motion_module_set_helper_calculation_events(),
-                        &self.state.script.to_motion_module_set_rate_partial_events(),
-                        &self.state.script.to_work_flag_events(),
-                        &self.state.script.to_work_transition_term_events(),
-                        &self.state.script.to_work_module_inc_int_events(),
-                        &self.state.script.to_work_module_set_events(),
-                    ))
-                    .max(FIRST_GAME_FRAME);
-                if let Some(hb) = self.state.hitboxes.get_mut(idx) {
-                    ui.separator();
-                    let (cat_label, cat_color) = match hb.category {
-                        1 => ("Grab box", egui::Color32::from_rgb(80, 200, 255)),
-                        2 => ("Wind box", egui::Color32::from_rgb(120, 240, 140)),
-                        crate::data::CAT_ABS => {
-                            ("Throw damage", egui::Color32::from_rgb(230, 160, 255))
+                                    ui.weak(format!(
+                                        "It does have {} — see below.",
+                                        has.join(" and ")
+                                    ));
+                                }
+                            }
                         }
-                        crate::data::CAT_SEARCH => {
-                            ("Detection box", egui::Color32::from_rgb(255, 210, 90))
-                        }
-                        crate::data::CAT_ATTACK_FP => {
-                            ("ATTACK_FP hitbox", egui::Color32::from_rgb(240, 120, 220))
-                        }
-                        _ => ("Attack hitbox", egui::Color32::from_rgb(255, 120, 120)),
-                    };
-                    ui.horizontal(|ui| {
-                        ui.heading("Properties");
-                        ui.colored_label(cat_color, cat_label);
-                    });
-                    // `ATTACK_ABS` applies to an opponent already caught. It has no volume at
-                    // all — no bone, no size, no offsets — so the kind it applies to takes the
-                    // place of all of them, and the geometry blocks below are skipped rather
-                    // than shown zeroed, which would read as a hitbox sitting at the origin.
-                    if hb.category == crate::data::CAT_ABS {
-                        if let Some(abs) = hb.abs.as_mut() {
+                        let mut to_delete = None;
+                        for (i, hb) in self.state.hitboxes.iter().enumerate() {
+                            let color = hitbox_display_color(hb);
+                            let selected = self.selected_hitbox == Some(i);
                             ui.horizontal(|ui| {
+                                ui.colored_label(color, "*");
+                                let shape = if hb.category == 2 {
+                                    if hb.wind.as_ref().is_some_and(|wind| wind.is_radial()) {
+                                        "◯"
+                                    } else {
+                                        "▭"
+                                    }
+                                } else if hb.capsule_end.is_some() {
+                                    "⬭"
+                                } else {
+                                    "●"
+                                };
+                                let label = match hb.category {
+                                    1 => format!(
+                                        "{} GRAB #{} {} [{}-{}]",
+                                        shape, hb.id, hb.bone_name, hb.active_start, hb.active_end
+                                    ),
+                                    // No damage to name, so what it is looking for takes that slot — it is
+                                    // the property that distinguishes two search boxes on the same bone.
+                                    crate::data::CAT_SEARCH => format!(
+                                        "{} SEARCH #{} {} {} [{}-{}]",
+                                        shape,
+                                        hb.id,
+                                        hb.bone_name,
+                                        hb.search
+                                            .as_ref()
+                                            .map(|s| search_kind_short(&s.collision_kind))
+                                            .unwrap_or("?"),
+                                        hb.active_start,
+                                        hb.active_end
+                                    ),
+                                    2 => format!(
+                                        "{} WIND #{} {} [{}-{}]",
+                                        shape,
+                                        hb.id,
+                                        hb.wind
+                                            .as_ref()
+                                            .map(|wind| if wind.is_radial() {
+                                                format!("RAD r{:.1}", wind.radius())
+                                            } else {
+                                                let [width, height] = wind.dimensions();
+                                                format!("RECT {width:.1}×{height:.1}")
+                                            })
+                                            .unwrap_or_else(|| format!("~{:.1}", hb.size)),
+                                        hb.active_start,
+                                        hb.active_end
+                                    ),
+                                    // No bone and no size to name, so the kind takes their place — it is
+                                    // the only thing distinguishing two of these in the same block, and
+                                    // kirby/ThrowF has exactly that.
+                                    crate::data::CAT_ABS => format!(
+                                        "◈ {} {:.1}dmg {} [{}-{}]",
+                                        hb.abs
+                                            .as_ref()
+                                            .map(|a| abs_kind_short(&a.kind))
+                                            .unwrap_or("ABS"),
+                                        hb.damage,
+                                        angle_short_label(hb.angle),
+                                        hb.active_start,
+                                        hb.active_end
+                                    ),
+                                    crate::data::CAT_ATTACK_FP => format!(
+                                        "◇ ATTACK_FP #{} {:.1}dmg {} [{}-{}]",
+                                        hb.id,
+                                        hb.damage,
+                                        angle_short_label(hb.angle),
+                                        hb.active_start,
+                                        hb.active_end
+                                    ),
+                                    _ => format!(
+                                        "{} #{} {} {:.1}dmg {} [{}-{}]",
+                                        shape,
+                                        hb.id,
+                                        hb.bone_name,
+                                        hb.damage,
+                                        angle_short_label(hb.angle),
+                                        hb.active_start,
+                                        hb.active_end
+                                    ),
+                                };
+                                if ui.selectable_label(selected, &label).clicked() {
+                                    self.selected_hitbox = if selected { None } else { Some(i) };
+                                }
+                                if ui
+                                    .small_button("🗑")
+                                    .on_hover_text("Delete this collision box")
+                                    .clicked()
+                                {
+                                    to_delete = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(i) = to_delete {
+                            self.state.hitboxes.remove(i);
+                            self.selected_hitbox = match self.selected_hitbox {
+                                Some(selected) if selected == i => None,
+                                Some(selected) if selected > i => Some(selected - 1),
+                                selected => selected,
+                            };
+                        }
+                    });
+
+                ui.separator();
+                editor_section_heading(
+                    ui,
+                    "Selected collision settings",
+                    "Settings for the collision selected above. The available fields change with its collision family so unsupported values are not invented.",
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("collision_detail_scroll")
+                    .auto_shrink([false, false])
+                    .max_height((menu_height - master_height - 56.0).max(180.0))
+                    .show(ui, |ui| {
+                        // Property editor for selected hitbox — fields shown depend on the collision
+                        // family. Its detail scroll stays independent from the master list above.
+                        if let Some(idx) = self.selected_hitbox {
+                            let bone_names = self.bone_names.clone();
+                            let max_frame = self
+                                .state
+                                .total_frames
+                                .max(timeline_frame_extent_with_change_kinetic(
+                                    &self.state.hitboxes,
+                                    &self.state.effects,
+                                    &self.state.sounds,
+                                    &self.state.expressions,
+                                    &self.state.script.to_reverse_lr_events(),
+                                    &self.state.script.to_speed_ex_events(),
+                                    &self.state.script.to_speed_events(),
+                                    &self.state.script.to_add_speed_no_limit_events(),
+                                    &self.state.script.to_correct_events(),
+                                    &self.state.script.to_ft_catch_stop_events(),
+                                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                                    &self.state.script.to_clr_speed_events(),
+                                    &self.state.script.to_set_air_events(),
+                                    &self.state.script.to_change_kinetic_events(),
+                                    &self.state.script.to_kinetic_energy_events(),
+                                    &self.state.script.to_kinetic_add_speed_events(),
+                                    &self.state.script.to_kinetic_clear_speed_all_events(),
+                                    &self
+                                        .state
+                                        .script
+                                        .to_kinetic_set_consider_ground_friction_events(),
+                                    &self.state.script.to_motion_module_set_rate_events(),
+                                    &self
+                                        .state
+                                        .script
+                                        .to_motion_module_set_helper_calculation_events(),
+                                    &self.state.script.to_motion_module_set_rate_partial_events(),
+                                    &self.state.script.to_work_flag_events(),
+                                    &self.state.script.to_work_transition_term_events(),
+                                    &self.state.script.to_work_module_inc_int_events(),
+                                    &self.state.script.to_work_module_set_events(),
+                                ))
+                                .max(FIRST_GAME_FRAME);
+                            if let Some(hb) = self.state.hitboxes.get_mut(idx) {
+                                ui.separator();
+                                let (cat_label, cat_color, cat_description) = match hb.category {
+                                    1 => (
+                                        "Grab box",
+                                        egui::Color32::from_rgb(80, 200, 255),
+                                        "A catch volume that grabs a valid target instead of dealing an ordinary hit.",
+                                    ),
+                                    2 => (
+                                        "Wind area",
+                                        egui::Color32::from_rgb(120, 240, 140),
+                                        "A non-damaging area that pushes objects according to its wind settings.",
+                                    ),
+                                    crate::data::CAT_ABS => {
+                                        (
+                                            "Throw damage",
+                                            egui::Color32::from_rgb(230, 160, 255),
+                                            "Damage and knockback applied to an opponent who is already caught; it has no position or shape.",
+                                        )
+                                    }
+                                    crate::data::CAT_SEARCH => {
+                                        (
+                                            "Detection area",
+                                            egui::Color32::from_rgb(255, 210, 90),
+                                            "A non-damaging area that detects matching objects or hit states for the move script.",
+                                        )
+                                    }
+                                    crate::data::CAT_ATTACK_FP => {
+                                        (
+                                            "ATTACK_FP hitbox",
+                                            egui::Color32::from_rgb(240, 120, 220),
+                                            "A special attack primitive whose proven combat fields are editable while its remaining source payload is preserved.",
+                                        )
+                                    }
+                                    _ => (
+                                        "Attack hitbox",
+                                        egui::Color32::from_rgb(255, 120, 120),
+                                        "A positioned attack volume that deals damage and knockback when a valid target enters it.",
+                                    ),
+                                };
+                                ui.horizontal(|ui| {
+                                    editor_section_heading(
+                                        ui,
+                                        "Collision properties",
+                                        "Identity, combat behavior, target filters, shape, feedback, and active frames for the selected collision.",
+                                    );
+                                    ui.colored_label(cat_color, cat_label)
+                                        .on_hover_text(cat_description);
+                                });
+                                // `ATTACK_ABS` applies to an opponent already caught. It has no volume at
+                                // all — no bone, no size, no offsets — so the kind it applies to takes the
+                                // place of all of them, and the geometry blocks below are skipped rather
+                                // than shown zeroed, which would read as a hitbox sitting at the origin.
+                                if hb.category == crate::data::CAT_ABS {
+                                    if let Some(abs) = hb.abs.as_mut() {
+                                        ui.horizontal(|ui| {
                                 ui.label("Applies to:");
                                 egui::ComboBox::from_id_salt("edit_abs_kind")
                                     .selected_text(abs_kind_short(&abs.kind))
@@ -6081,304 +6506,507 @@ impl VisionaryApp {
                                  knockback applied to an opponent who is already caught — this \
                                  picks which outcome it describes.",
                             );
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("ID:");
-                            ui.add(egui::DragValue::new(&mut hb.id));
-                        });
-                    }
-                    // Wind areas are object-relative 2D regions rather than bone-local attack
-                    // spheres. Attack/grab retain the normal bone selector.
-                    if hb.category != 2 && hb.category != crate::data::CAT_ABS {
-                        if hb.category != crate::data::CAT_ATTACK_FP {
-                            ui.horizontal(|ui| {
-                                ui.label("Bone:");
-                                if bone_names.is_empty() {
-                                    ui.text_edit_singleline(&mut hb.bone_name);
-                                } else {
-                                    egui::ComboBox::from_id_salt("edit_bone_select")
-                                        .selected_text(&hb.bone_name)
-                                        .show_ui(ui, |ui| {
-                                            for name in &bone_names {
-                                                ui.selectable_value(
-                                                    &mut hb.bone_name,
-                                                    name.clone(),
-                                                    name,
-                                                );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("ID:");
+                                        ui.add(egui::DragValue::new(&mut hb.id));
+                                    });
+                                }
+                                // Wind areas are object-relative 2D regions rather than bone-local attack
+                                // spheres. Attack/grab retain the normal bone selector.
+                                if hb.category != 2 && hb.category != crate::data::CAT_ABS {
+                                    if hb.category != crate::data::CAT_ATTACK_FP {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Bone:");
+                                            if bone_names.is_empty() {
+                                                ui.text_edit_singleline(&mut hb.bone_name);
+                                            } else {
+                                                egui::ComboBox::from_id_salt("edit_bone_select")
+                                                    .selected_text(&hb.bone_name)
+                                                    .show_ui(ui, |ui| {
+                                                        for name in &bone_names {
+                                                            ui.selectable_value(
+                                                                &mut hb.bone_name,
+                                                                name.clone(),
+                                                                name,
+                                                            );
+                                                        }
+                                                    });
                                             }
                                         });
-                                }
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("ID:");
-                            ui.add(egui::DragValue::new(&mut hb.id));
-                            // `SEARCH` takes a part slot too, and the write-back keys on it —
-                            // so it has to be visible here, or a box could never be told apart
-                            // from another with the same id.
-                            if hb.category == 0
-                                || hb.category == crate::data::CAT_SEARCH
-                                || hb.category == crate::data::CAT_ATTACK_FP
-                            {
-                                ui.label("Part:");
-                                ui.add(egui::DragValue::new(&mut hb.part));
-                            }
-                        });
-                    }
-
-                    // ── Attack-only combat fields ────────────────────────
-                    if hb.category == 0 {
-                        ui.horizontal(|ui| {
-                            ui.label("Macro:");
-                            egui::ComboBox::from_id_salt("edit_attack_func")
-                                .selected_text(&hb.func)
-                                .show_ui(ui, |ui| {
-                                    for name in crate::acmd::ATTACK_FUNCS {
-                                        ui.selectable_value(
-                                            &mut hb.func,
-                                            (*name).to_string(),
-                                            *name,
-                                        );
                                     }
-                                });
-                        })
-                        .response
-                        .on_hover_text(
-                            "ATTACK_IGNORE_THROW still hits a fighter who is already being \
-                             thrown. Everything else about the two is identical.",
-                        );
-                        wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
-                        angle_picker(ui, &mut hb.angle);
-                        wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
-                        wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
-                        wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
-                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("ID:");
+                                        ui.add(egui::DragValue::new(&mut hb.id));
+                                        // `SEARCH` takes a part slot too, and the write-back keys on it —
+                                        // so it has to be visible here, or a box could never be told apart
+                                        // from another with the same id.
+                                        if hb.category == 0
+                                            || hb.category == crate::data::CAT_SEARCH
+                                            || hb.category == crate::data::CAT_ATTACK_FP
+                                        {
+                                            ui.label("Part:");
+                                            ui.add(egui::DragValue::new(&mut hb.part));
+                                        }
+                                    });
+                                }
 
-                    // ATTACK_FP keeps its own complete payload and has no proven bone-local
-                    // geometry editing surface. These are the fields whose meanings and slots
-                    // match the ordinary hit-property controls; every other FP slot remains
-                    // preserved from the source/capture.
-                    if hb.category == crate::data::CAT_ATTACK_FP {
-                        ui.weak(
+                                // ── Attack-only combat fields ────────────────────────
+                                if hb.category == 0 {
+                                    ui.horizontal(|ui| {
+                                ui.label("Macro:");
+                                egui::ComboBox::from_id_salt("edit_attack_func")
+                                    .selected_text(&hb.func)
+                                    .show_ui(ui, |ui| {
+                                        for name in crate::acmd::ATTACK_FUNCS {
+                                            ui.selectable_value(
+                                                &mut hb.func,
+                                                (*name).to_string(),
+                                                *name,
+                                            );
+                                        }
+                                    });
+                            })
+                            .response
+                            .on_hover_text(
+                                "ATTACK_IGNORE_THROW still hits a fighter who is already being \
+                             thrown. Everything else about the two is identical.",
+                            );
+                                    wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
+                                    angle_picker(ui, &mut hb.angle);
+                                    wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
+                                    wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
+                                    wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                                }
+
+                                // ATTACK_FP keeps its own complete payload and has no proven bone-local
+                                // geometry editing surface. These are the fields whose meanings and slots
+                                // match the ordinary hit-property controls; every other FP slot remains
+                                // preserved from the source/capture.
+                                if hb.category == crate::data::CAT_ATTACK_FP {
+                                    ui.weak(
                             "ATTACK_FP geometry is preserved but not shown as a bone-local volume.",
                         );
-                        wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
-                        angle_picker(ui, &mut hb.angle);
-                        wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
-                        wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
-                        wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
-                        ui.collapsing("Supported Hit Properties", |ui| {
-                            wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag Mult");
-                            wide_slider_f32(ui, &mut hb.sdi_mult, 0.0..=5.0, "SDI Mult");
-                            lr_check_combo(ui, &mut hb.lr_check, "fp_lr_check");
-                            ui.add(egui::DragValue::new(&mut hb.ground_or_air).prefix("Rehit: "));
-                            ui.checkbox(&mut hb.is_clang, "Clang");
-                            ui.checkbox(&mut hb.is_reflectable, "Reflectable");
-                            ui.checkbox(&mut hb.is_absorbable, "Absorbable");
-                        });
-                        ui.collapsing("Effect / Sound", |ui| {
-                            collision_attr_combo(ui, &mut hb.collision_attr, "fp_col_attr");
-                            sound_level_combo(ui, &mut hb.sound_level, "fp_snd_lvl");
-                            sound_attr_combo(ui, &mut hb.sound_attr, "fp_snd_attr");
-                            attack_region_combo(ui, &mut hb.attack_region, "fp_region");
-                        });
-                    }
-
-                    // The same combat block for a throw, minus the macro dropdown — there is
-                    // only one member of this family. These are genuinely the same arguments,
-                    // in a different slot order, which is why the family gets its own table.
-                    if hb.category == crate::data::CAT_ABS {
-                        wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
-                        angle_picker(ui, &mut hb.angle);
-                        wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
-                        wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
-                        wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
-                        wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag");
-                        lr_check_combo(ui, &mut hb.lr_check, "abs_lr_check");
-                        ui.collapsing("Effect / Sound", |ui| {
-                            collision_attr_combo(ui, &mut hb.collision_attr, "abs_col_attr");
-                            sound_level_combo(ui, &mut hb.sound_level, "abs_snd_lvl");
-                            sound_attr_combo(ui, &mut hb.sound_attr, "abs_snd_attr");
-                            attack_region_combo(ui, &mut hb.attack_region, "abs_region");
-                        });
-                    }
-
-                    // ── Size + position/shape ────────────────────────────
-                    if hb.category == 2 {
-                        if let Some(wind) = hb.wind.as_mut().filter(|wind| wind.is_valid()) {
-                            let radial = wind.is_radial();
-                            ui.horizontal(|ui| {
-                                ui.label("ID:");
-                                let mut id = wind.id();
-                                if ui
-                                    .add(egui::DragValue::new(&mut id).range(0..=255))
-                                    .changed()
-                                {
-                                    wind.args[0] = id as f32;
+                                    wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
+                                    angle_picker(ui, &mut hb.angle);
+                                    wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
+                                    wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
+                                    wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                                    editor_collapsing(
+                                        ui,
+                                        "Editable hit behavior",
+                                        "The ATTACK_FP combat values whose source argument meanings are proven and safe to edit. Unlisted payload values remain unchanged.",
+                                        |ui| {
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.hitlag_mult,
+                                            0.0..=5.0,
+                                            "Hitlag Mult",
+                                        );
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.sdi_mult,
+                                            0.0..=5.0,
+                                            "SDI Mult",
+                                        );
+                                        lr_check_combo(ui, &mut hb.lr_check, "fp_lr_check");
+                                        ui.add(
+                                            egui::DragValue::new(&mut hb.ground_or_air)
+                                                .prefix("Rehit: "),
+                                        );
+                                        ui.checkbox(&mut hb.is_clang, "Clang");
+                                        ui.checkbox(&mut hb.is_reflectable, "Reflectable");
+                                        ui.checkbox(&mut hb.is_absorbable, "Absorbable");
+                                        },
+                                    );
+                                    editor_collapsing(
+                                        ui,
+                                        "Hit feedback",
+                                        "The collision attribute, hit sound level and type, and attack region used when this collision connects.",
+                                        |ui| {
+                                        collision_attr_combo(
+                                            ui,
+                                            &mut hb.collision_attr,
+                                            "fp_col_attr",
+                                        );
+                                        sound_level_combo(ui, &mut hb.sound_level, "fp_snd_lvl");
+                                        sound_attr_combo(ui, &mut hb.sound_attr, "fp_snd_attr");
+                                        attack_region_combo(ui, &mut hb.attack_region, "fp_region");
+                                        },
+                                    );
                                 }
-                            });
-                            ui.collapsing("Wind Physics", |ui| {
-                                wide_slider_f32(ui, &mut wind.args[1], 0.0..=5.0, "Strength");
-                                let second = if radial {
-                                    "Radial Falloff"
-                                } else {
-                                    "Direction (degrees)"
-                                };
-                                wide_slider_f32(ui, &mut wind.args[2], -360.0..=360.0, second);
-                                wide_slider_f32(ui, &mut wind.args[3], 0.0..=1000.0, "Speed Limit");
-                                wide_slider_f32(ui, &mut wind.args[4], 0.0..=5.0, "Acceleration");
-                            });
-                            ui.collapsing("Position / Shape", |ui| {
-                                wide_slider_f32(ui, &mut wind.args[5], -50.0..=50.0, "Offset X");
-                                wide_slider_f32(ui, &mut wind.args[6], -50.0..=50.0, "Offset Y");
-                                if radial {
-                                    wide_slider_f32(ui, &mut wind.args[7], 0.1..=100.0, "Radius");
-                                } else {
-                                    wide_slider_f32(ui, &mut wind.args[7], 0.1..=100.0, "Width");
-                                    wide_slider_f32(ui, &mut wind.args[8], 0.1..=100.0, "Height");
+
+                                // The same combat block for a throw, minus the macro dropdown — there is
+                                // only one member of this family. These are genuinely the same arguments,
+                                // in a different slot order, which is why the family gets its own table.
+                                if hb.category == crate::data::CAT_ABS {
+                                    wide_slider_f32(ui, &mut hb.damage, 0.0..=50.0, "Damage");
+                                    angle_picker(ui, &mut hb.angle);
+                                    wide_slider_i32(ui, &mut hb.kb_base, 0..=200, "KB Base");
+                                    wide_slider_i32(ui, &mut hb.kb_scaling, 0..=200, "KB Scaling");
+                                    wide_slider_i32(ui, &mut hb.fkb, 0..=200, "Fixed KB");
+                                    wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag");
+                                    lr_check_combo(ui, &mut hb.lr_check, "abs_lr_check");
+                                    editor_collapsing(
+                                        ui,
+                                        "Hit feedback",
+                                        "The collision attribute, hit sound level and type, and attack region used when this throw damage is applied.",
+                                        |ui| {
+                                        collision_attr_combo(
+                                            ui,
+                                            &mut hb.collision_attr,
+                                            "abs_col_attr",
+                                        );
+                                        sound_level_combo(ui, &mut hb.sound_level, "abs_snd_lvl");
+                                        sound_attr_combo(ui, &mut hb.sound_attr, "abs_snd_attr");
+                                        attack_region_combo(
+                                            ui,
+                                            &mut hb.attack_region,
+                                            "abs_region",
+                                        );
+                                        },
+                                    );
                                 }
-                            });
-                            if wind.has_lifetime() {
-                                let last = wind.args.len() - 1;
-                                wide_slider_f32(ui, &mut wind.args[last], 0.0..=600.0, "Lifetime");
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("Lifetime: until AreaModule::erase_wind")
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-                            }
-                            hb.id = wind.id();
-                            // The lifetime argument is what ends the area, so dragging it has
-                            // to move the timeline bar with it. Leaving the two to disagree
-                            // meant the export — which writes the lifetime back out of the
-                            // frame range — silently undid whatever the slider had just set.
-                            // Only when the command has that slot: the shorter forms are ended
-                            // by an `erase_wind` elsewhere in the script, and that end frame is
-                            // not this call's to overwrite.
-                            if wind.has_lifetime() {
-                                hb.active_end = wind.end_frame(hb.active_start);
-                            }
-                            let [x, y] = wind.offset();
-                            hb.offset_x = x;
-                            hb.offset_y = y;
-                            hb.size = if radial {
-                                wind.radius()
-                            } else {
-                                let [width, height] = wind.dimensions();
-                                width.max(height) * 0.5
-                            };
-                        } else {
-                            ui.colored_label(
+
+                                // ── Size + position/shape ────────────────────────────
+                                if hb.category == 2 {
+                                    if let Some(wind) =
+                                        hb.wind.as_mut().filter(|wind| wind.is_valid())
+                                    {
+                                        let radial = wind.is_radial();
+                                        ui.horizontal(|ui| {
+                                            ui.label("ID:");
+                                            let mut id = wind.id();
+                                            if ui
+                                                .add(egui::DragValue::new(&mut id).range(0..=255))
+                                                .changed()
+                                            {
+                                                wind.args[0] = id as f32;
+                                            }
+                                        });
+                                        editor_collapsing(
+                                            ui,
+                                            "Wind behavior",
+                                            "How strongly this area pushes, how the push is directed or falls off, and how its speed limit and acceleration behave.",
+                                            |ui| {
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[1],
+                                                0.0..=5.0,
+                                                "Strength",
+                                            );
+                                            let second = if radial {
+                                                "Radial Falloff"
+                                            } else {
+                                                "Direction (degrees)"
+                                            };
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[2],
+                                                -360.0..=360.0,
+                                                second,
+                                            );
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[3],
+                                                0.0..=1000.0,
+                                                "Speed Limit",
+                                            );
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[4],
+                                                0.0..=5.0,
+                                                "Acceleration",
+                                            );
+                                            },
+                                        );
+                                        editor_collapsing(
+                                            ui,
+                                            "Shape & position",
+                                            "The wind area's object-relative offset and its radial or rectangular dimensions on the gameplay plane.",
+                                            |ui| {
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[5],
+                                                -50.0..=50.0,
+                                                "Offset X",
+                                            );
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[6],
+                                                -50.0..=50.0,
+                                                "Offset Y",
+                                            );
+                                            if radial {
+                                                wide_slider_f32(
+                                                    ui,
+                                                    &mut wind.args[7],
+                                                    0.1..=100.0,
+                                                    "Radius",
+                                                );
+                                            } else {
+                                                wide_slider_f32(
+                                                    ui,
+                                                    &mut wind.args[7],
+                                                    0.1..=100.0,
+                                                    "Width",
+                                                );
+                                                wide_slider_f32(
+                                                    ui,
+                                                    &mut wind.args[8],
+                                                    0.1..=100.0,
+                                                    "Height",
+                                                );
+                                            }
+                                            },
+                                        );
+                                        if wind.has_lifetime() {
+                                            let last = wind.args.len() - 1;
+                                            wide_slider_f32(
+                                                ui,
+                                                &mut wind.args[last],
+                                                0.0..=600.0,
+                                                "Lifetime",
+                                            );
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Lifetime: until AreaModule::erase_wind",
+                                                )
+                                                .small()
+                                                .color(egui::Color32::GRAY),
+                                            );
+                                        }
+                                        hb.id = wind.id();
+                                        // The lifetime argument is what ends the area, so dragging it has
+                                        // to move the timeline bar with it. Leaving the two to disagree
+                                        // meant the export — which writes the lifetime back out of the
+                                        // frame range — silently undid whatever the slider had just set.
+                                        // Only when the command has that slot: the shorter forms are ended
+                                        // by an `erase_wind` elsewhere in the script, and that end frame is
+                                        // not this call's to overwrite.
+                                        if wind.has_lifetime() {
+                                            hb.active_end = wind.end_frame(hb.active_start);
+                                        }
+                                        let [x, y] = wind.offset();
+                                        hb.offset_x = x;
+                                        hb.offset_y = y;
+                                        hb.size = if radial {
+                                            wind.radius()
+                                        } else {
+                                            let [width, height] = wind.dimensions();
+                                            width.max(height) * 0.5
+                                        };
+                                    } else {
+                                        ui.colored_label(
                                 egui::Color32::YELLOW,
                                 "This legacy project has no wind payload. Fetch the move again.",
                             );
-                        }
-                    } else if hb.category != crate::data::CAT_ABS
-                        && hb.category != crate::data::CAT_ATTACK_FP
-                    {
-                        wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
-                        ui.collapsing("Position / Shape", |ui| {
-                            wide_slider_f32(ui, &mut hb.offset_x, -20.0..=20.0, "Offset X");
-                            wide_slider_f32(ui, &mut hb.offset_y, -20.0..=20.0, "Offset Y");
-                            wide_slider_f32(ui, &mut hb.offset_z, -20.0..=20.0, "Offset Z");
-                            let is_capsule = hb.capsule_end.is_some();
-                            let mut toggle = is_capsule;
-                            ui.checkbox(&mut toggle, "Capsule (second endpoint)");
-                            if toggle && !is_capsule {
-                                hb.capsule_end = Some([hb.offset_x, hb.offset_y, hb.offset_z]);
-                            } else if !toggle && is_capsule {
-                                hb.capsule_end = None;
+                                    }
+                                } else if hb.category != crate::data::CAT_ABS
+                                    && hb.category != crate::data::CAT_ATTACK_FP
+                                {
+                                    wide_slider_f32(ui, &mut hb.size, 0.1..=20.0, "Size");
+                                    editor_collapsing(
+                                        ui,
+                                        "Shape & position",
+                                        "The collision's bone-local offset, size, and optional second endpoint. A second endpoint turns the sphere into a capsule.",
+                                        |ui| {
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.offset_x,
+                                            -20.0..=20.0,
+                                            "Offset X",
+                                        );
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.offset_y,
+                                            -20.0..=20.0,
+                                            "Offset Y",
+                                        );
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.offset_z,
+                                            -20.0..=20.0,
+                                            "Offset Z",
+                                        );
+                                        let is_capsule = hb.capsule_end.is_some();
+                                        let mut toggle = is_capsule;
+                                        ui.checkbox(&mut toggle, "Capsule (second endpoint)");
+                                        if toggle && !is_capsule {
+                                            hb.capsule_end =
+                                                Some([hb.offset_x, hb.offset_y, hb.offset_z]);
+                                        } else if !toggle && is_capsule {
+                                            hb.capsule_end = None;
+                                        }
+                                        if let Some(ref mut end) = hb.capsule_end {
+                                            wide_slider_f32(ui, &mut end[0], -20.0..=20.0, "End X");
+                                            wide_slider_f32(ui, &mut end[1], -20.0..=20.0, "End Y");
+                                            wide_slider_f32(ui, &mut end[2], -20.0..=20.0, "End Z");
+                                        }
+                                        },
+                                    );
+                                }
+
+                                // ── Attack-only detail sections ──────────────────────
+                                if hb.category == 0 {
+                                    editor_collapsing(
+                                        ui,
+                                        "Hit behavior",
+                                        "How the attack interacts after contact: hitlag, SDI, rehit timing, facing checks, clanging, reflection, absorption, shields, and finish-camera behavior.",
+                                        |ui| {
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.hitlag_mult,
+                                            0.0..=5.0,
+                                            "Hitlag Mult",
+                                        );
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.sdi_mult,
+                                            0.0..=5.0,
+                                            "SDI Mult",
+                                        );
+                                        wide_slider_f32(
+                                            ui,
+                                            &mut hb.hitbox_attr,
+                                            -10.0..=10.0,
+                                            "Hitbox Attr",
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut hb.is_add_attack)
+                                                .prefix("Add Attack: "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut hb.ground_or_air)
+                                                .prefix("Rehit: "),
+                                        );
+
+                                        setoff_combo(ui, &mut hb.setoff_kind, "setoff_kind");
+                                        lr_check_combo(ui, &mut hb.lr_check, "lr_check");
+
+                                        ui.checkbox(&mut hb.is_clang, "Clang");
+                                        ui.checkbox(&mut hb.is_mtk, "MTK (intangible)");
+                                        ui.checkbox(&mut hb.is_shield_disable, "Shield Disable");
+                                        ui.checkbox(&mut hb.is_reflectable, "Reflectable");
+                                        ui.checkbox(&mut hb.is_absorbable, "Absorbable");
+                                        ui.checkbox(&mut hb.is_landing_attack, "Landing Attack");
+                                        ui.checkbox(&mut hb.no_finish_camera, "No Finish Camera");
+                                        },
+                                    );
+                                    editor_collapsing(
+                                        ui,
+                                        "Valid targets",
+                                        "Filters which ground or air situations, object categories, and target parts this attack can hit.",
+                                        |ui| {
+                                        situation_mask_combo(
+                                            ui,
+                                            &mut hb.situation_mask,
+                                            "sit_mask",
+                                        );
+                                        category_mask_combo(ui, &mut hb.category_mask, "cat_mask");
+                                        part_mask_combo(ui, &mut hb.part_mask, "part_mask");
+                                        },
+                                    );
+                                }
+
+                                // ── Detection-only fields ────────────────────────────
+                                //
+                                // A search box has no damage and no knockback, so what it *looks for* is
+                                // the whole of its behaviour. Its three trailing masks are the same three
+                                // an attack has and reuse those controls; the two above them are its own.
+                                if hb.category == crate::data::CAT_SEARCH {
+                                    if let Some(search) = hb.search.as_mut() {
+                                        const_combo(
+                                            ui,
+                                            &mut search.collision_kind,
+                                            "search_kind",
+                                            "Looks for:",
+                                            crate::param_labels::COLLISION_KIND_MASK,
+                                        );
+                                        const_combo(
+                                            ui,
+                                            &mut search.hit_status,
+                                            "search_hit_status",
+                                            "Counts states:",
+                                            crate::param_labels::HIT_STATUS_MASK,
+                                        );
+                                    }
+                                    editor_collapsing(
+                                        ui,
+                                        "Valid targets",
+                                        "Filters which ground or air situations, object categories, and target parts this detection area can notice.",
+                                        |ui| {
+                                        situation_mask_combo(
+                                            ui,
+                                            &mut hb.situation_mask,
+                                            "search_sit_mask",
+                                        );
+                                        category_mask_combo(
+                                            ui,
+                                            &mut hb.category_mask,
+                                            "search_cat_mask",
+                                        );
+                                        part_mask_combo(ui, &mut hb.part_mask, "search_part_mask");
+                                        },
+                                    );
+                                    editor_collapsing(
+                                        ui,
+                                        "Detection feedback",
+                                        "The collision attribute, sound settings, and attack region carried by this detection command when the source provides them.",
+                                        |ui| {
+                                        collision_attr_combo(
+                                            ui,
+                                            &mut hb.collision_attr,
+                                            "col_attr",
+                                        );
+                                        sound_level_combo(ui, &mut hb.sound_level, "snd_lvl");
+                                        sound_attr_combo(ui, &mut hb.sound_attr, "snd_attr");
+                                        attack_region_combo(
+                                            ui,
+                                            &mut hb.attack_region,
+                                            "atk_region",
+                                        );
+                                        },
+                                    );
+                                }
+
+                                // ── Timeline (all families) ──────────────────────────
+                                wide_slider_u32(
+                                    ui,
+                                    &mut hb.active_start,
+                                    FIRST_GAME_FRAME..=max_frame,
+                                    "Start Frame",
+                                );
+                                wide_slider_u32(
+                                    ui,
+                                    &mut hb.active_end,
+                                    FIRST_GAME_FRAME..=max_frame,
+                                    "End Frame",
+                                );
                             }
-                            if let Some(ref mut end) = hb.capsule_end {
-                                wide_slider_f32(ui, &mut end[0], -20.0..=20.0, "End X");
-                                wide_slider_f32(ui, &mut end[1], -20.0..=20.0, "End Y");
-                                wide_slider_f32(ui, &mut end[2], -20.0..=20.0, "End Z");
-                            }
-                        });
-                    }
-
-                    // ── Attack-only detail sections ──────────────────────
-                    if hb.category == 0 {
-                        ui.collapsing("Hit Properties", |ui| {
-                            wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag Mult");
-                            wide_slider_f32(ui, &mut hb.sdi_mult, 0.0..=5.0, "SDI Mult");
-                            wide_slider_f32(ui, &mut hb.hitbox_attr, -10.0..=10.0, "Hitbox Attr");
-                            ui.add(
-                                egui::DragValue::new(&mut hb.is_add_attack).prefix("Add Attack: "),
-                            );
-                            ui.add(egui::DragValue::new(&mut hb.ground_or_air).prefix("Rehit: "));
-
-                            setoff_combo(ui, &mut hb.setoff_kind, "setoff_kind");
-                            lr_check_combo(ui, &mut hb.lr_check, "lr_check");
-
-                            ui.checkbox(&mut hb.is_clang, "Clang");
-                            ui.checkbox(&mut hb.is_mtk, "MTK (intangible)");
-                            ui.checkbox(&mut hb.is_shield_disable, "Shield Disable");
-                            ui.checkbox(&mut hb.is_reflectable, "Reflectable");
-                            ui.checkbox(&mut hb.is_absorbable, "Absorbable");
-                            ui.checkbox(&mut hb.is_landing_attack, "Landing Attack");
-                            ui.checkbox(&mut hb.no_finish_camera, "No Finish Camera");
-                        });
-                        ui.collapsing("Collision Masks", |ui| {
-                            situation_mask_combo(ui, &mut hb.situation_mask, "sit_mask");
-                            category_mask_combo(ui, &mut hb.category_mask, "cat_mask");
-                            part_mask_combo(ui, &mut hb.part_mask, "part_mask");
-                        });
-                    }
-
-                    // ── Detection-only fields ────────────────────────────
-                    //
-                    // A search box has no damage and no knockback, so what it *looks for* is
-                    // the whole of its behaviour. Its three trailing masks are the same three
-                    // an attack has and reuse those controls; the two above them are its own.
-                    if hb.category == crate::data::CAT_SEARCH {
-                        if let Some(search) = hb.search.as_mut() {
-                            const_combo(
-                                ui,
-                                &mut search.collision_kind,
-                                "search_kind",
-                                "Looks for:",
-                                crate::param_labels::COLLISION_KIND_MASK,
-                            );
-                            const_combo(
-                                ui,
-                                &mut search.hit_status,
-                                "search_hit_status",
-                                "Counts states:",
-                                crate::param_labels::HIT_STATUS_MASK,
-                            );
                         }
-                        ui.collapsing("Collision Masks", |ui| {
-                            situation_mask_combo(ui, &mut hb.situation_mask, "search_sit_mask");
-                            category_mask_combo(ui, &mut hb.category_mask, "search_cat_mask");
-                            part_mask_combo(ui, &mut hb.part_mask, "search_part_mask");
-                        });
-                        ui.collapsing("Effect / Sound", |ui| {
-                            collision_attr_combo(ui, &mut hb.collision_attr, "col_attr");
-                            sound_level_combo(ui, &mut hb.sound_level, "snd_lvl");
-                            sound_attr_combo(ui, &mut hb.sound_attr, "snd_attr");
-                            attack_region_combo(ui, &mut hb.attack_region, "atk_region");
-                        });
-                    }
-
-                    // ── Timeline (all families) ──────────────────────────
-                    wide_slider_u32(
-                        ui,
-                        &mut hb.active_start,
-                        FIRST_GAME_FRAME..=max_frame,
-                        "Start Frame",
-                    );
-                    wide_slider_u32(
-                        ui,
-                        &mut hb.active_end,
-                        FIRST_GAME_FRAME..=max_frame,
-                        "End Frame",
-                    );
-                }
-            }
-
+                    });
+            });
             self.draw_hurtbox_section(ui);
+            self.draw_attack_mod_section(ui);
+        }
+        if matches!(self.primary_tab, PrimaryEditorTab::MotionState) {
+            // A few structural command editors stay visible on any loaded game script or move
+            // with hitboxes so the user can add the first point. Include that add surface in the
+            // group even when the current script has no typed movement command yet.
+            let has_movement_edit_surface =
+                !self.state.script.stmts.is_empty() || !self.state.hitboxes.is_empty();
+            if has_movement_edit_surface {
+                ui.separator();
+                editor_section_heading_with_badge(
+                    ui,
+                    "Motion & state commands",
+                    "Facing, velocity, kinetic, animation-timing, ground/air, and stored script-state commands from the game_ script. Each command family below keeps its exact native name beside the plain-language section name.",
+                    egui::Color32::from_rgb(175, 195, 225),
+                    "game_ script",
+                );
+            }
             self.draw_reverse_lr_section(ui);
             self.draw_speed_section(ui);
             self.draw_speed_ex_section(ui);
@@ -6400,11 +7028,12 @@ impl VisionaryApp {
             self.draw_work_transition_term_section(ui);
             self.draw_work_module_inc_int_section(ui);
             self.draw_work_module_set_section(ui);
-            self.draw_attack_mod_section(ui);
             self.draw_motion_rate_section(ui);
+        }
+        if matches!(self.primary_tab, PrimaryEditorTab::AudioFeedback) {
             self.draw_sound_section(ui);
             self.draw_expression_section(ui);
-        });
+        }
     }
 
     /// Animation playback rate, and the game frames it turns this move's script frames into.
@@ -6424,21 +7053,17 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            // "Motion rate", not "Playback rate". The effects list already has a per-spawn
-            // "Rate" (`LAST_EFFECT_SET_RATE`) that its own code called the playback rate, and
-            // the two were confused on the first day this section existed — a live effect-rate
-            // edit was reported as this feature working, which it is not: they are different
-            // macros, on different scripts, travelling on different channels.
-            ui.heading("Motion rate");
-            ui.colored_label(egui::Color32::from_rgb(160, 190, 235), "FT_MOTION_RATE");
-        })
-        .response
-        .on_hover_text(
+        // This is animation timing, not the per-spawn Effect rate field. They are different
+        // macros, in different scripts, travelling on different live-edit channels.
+        editor_section_heading_with_badge(
+            ui,
+            "Animation timing",
             "FT_MOTION_RATE scales how fast the whole ANIMATION advances from that frame on — \
              not the speed of an effect, which is the Rate field on each effect spawn. A rate \
              BELOW 1 makes the move play faster, not slower: the engine advances 1/rate motion \
              frames per game frame, so 0.25 crosses four frames of windup in one.",
+            egui::Color32::from_rgb(160, 190, 235),
+            "FT_MOTION_RATE",
         );
 
         let mut edit: Option<(usize, f32)> = None;
@@ -6533,15 +7158,14 @@ impl VisionaryApp {
         let candidates = sound_candidates(&self.state.labels, &fighter);
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Sounds");
-            ui.colored_label(egui::Color32::from_rgb(150, 210, 150), "sound_ script");
-        })
-        .response
-        .on_hover_text(
+        editor_section_heading_with_badge(
+            ui,
+            "Move sounds",
             "The PLAY_SE family names a sound label from the fighter's own sound bank. A label \
              the bank does not have is silent rather than an error, so a typo here plays nothing \
              and the game says nothing about it.",
+            egui::Color32::from_rgb(150, 210, 150),
+            "sound_ script",
         );
         // Names the vocabulary and where it comes from. The banks are worth spelling out: a
         // modder looking for a voice clip will not guess that `vc_` is the prefix, and a
@@ -6571,33 +7195,40 @@ impl VisionaryApp {
 
         for event in &self.state.sounds {
             let active = event.frame == self.state.current_frame;
-            ui.horizontal(|ui| {
-                // `STOP_SE` silences rather than plays, and reads colder for it — the same
-                // distinction the timeline band draws.
-                let color = if event.call.func.starts_with("STOP") {
-                    egui::Color32::from_rgb(120, 140, 160)
-                } else if active {
-                    egui::Color32::from_rgb(150, 210, 150)
-                } else {
-                    egui::Color32::from_rgb(100, 150, 100)
-                };
-                ui.colored_label(color, if active { "◆" } else { "◇" });
-                ui.label(format!("[{}] {}", event.frame, event.call.func));
+            egui::ScrollArea::horizontal()
+                .id_salt(("sound_row", event.site))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // `STOP_SE` silences rather than plays, and reads colder for it — the
+                        // same distinction the timeline band draws.
+                        let color = if event.call.func.starts_with("STOP") {
+                            egui::Color32::from_rgb(120, 140, 160)
+                        } else if active {
+                            egui::Color32::from_rgb(150, 210, 150)
+                        } else {
+                            egui::Color32::from_rgb(100, 150, 100)
+                        };
+                        ui.colored_label(color, if active { "◆" } else { "◇" });
+                        ui.label(format!("[{}] {}", event.frame, event.call.func));
 
-                let mut call = event.call.clone();
-                let mut changed = false;
-                for (index, name) in call.sounds.iter_mut().enumerate() {
-                    changed |= sound_name_picker(ui, name, &candidates, (event.site, index));
-                }
-                // Shown, not editable: the suppression window is the one non-hash argument in
-                // the family and nothing has measured what a sensible range for it is.
-                if let Some(tail) = &event.call.tail {
-                    ui.weak(format!("for {tail} frames"));
-                }
-                if changed {
-                    edit = Some((event.site, ExcuteStmt::Sound(call)));
-                }
-            });
+                        let mut call = event.call.clone();
+                        let mut changed = false;
+                        for (index, name) in call.sounds.iter_mut().enumerate() {
+                            changed |=
+                                sound_name_picker(ui, name, &candidates, (event.site, index));
+                        }
+                        // Shown, not editable: the suppression window is the one non-hash
+                        // argument in the family and nothing has measured what a sensible range
+                        // for it is.
+                        if let Some(tail) = &event.call.tail {
+                            ui.weak(format!("for {tail} frames"));
+                        }
+                        if changed {
+                            edit = Some((event.site, ExcuteStmt::Sound(call)));
+                        }
+                    });
+                });
         }
 
         if let Some((site, replacement)) = edit {
@@ -6992,22 +7623,27 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Expression");
-            ui.colored_label(egui::Color32::from_rgb(210, 180, 245), "expression_ script");
-        })
-        .response
-        .on_hover_text(
-            "Measured camera and rumble calls from the expression_ script. Unknown expression \
-             commands stay in the source and are not silently regenerated here; source-only \
-             partial-frame calls are shown below until their native boolean is measured.",
+        editor_section_heading_with_badge(
+            ui,
+            "Camera & rumble",
+            "Camera shake, controller rumble, and supported partial-animation controls from the expression_ script. Unknown expression commands stay in the source rather than being guessed or silently regenerated.",
+            egui::Color32::from_rgb(210, 180, 245),
+            "expression_ script",
+        );
+        ui.weak(
+            "Expression arguments are authored source tokens. For example, `as u32` is a valid \
+             Rust type cast in `ControlModule::set_rumble`, not an editor error; the original token \
+             is kept so export and source sync remain lossless.",
         );
 
         let mut partial_rate_edit: Option<(usize, f32)> = None;
         if !partial_rate_events.is_empty() {
-            ui.colored_label(
+            editor_command_subsection_heading(
+                ui,
+                "Partial animation rate",
+                "Changes the playback rate of one named animation part from an expression_ script call. Only the proven numeric rate is editable here.",
                 egui::Color32::from_rgb(170, 220, 190),
-                "MotionModule::set_rate_partial (expression_)",
+                "MotionModule::set_rate_partial",
             );
             ui.label(
                 "The numeric rate is source-editable and exportable. Live replacement is sent \
@@ -7017,24 +7653,29 @@ impl VisionaryApp {
             for event in &partial_rate_events {
                 let active = event.frame == self.state.current_frame;
                 let mut rate = event.call.rate;
-                let changed = ui
-                    .horizontal(|ui| {
-                        ui.colored_label(
-                            if active {
-                                egui::Color32::from_rgb(170, 220, 190)
-                            } else {
-                                egui::Color32::from_gray(140)
-                            },
-                            if active { "◆" } else { "◇" },
-                        );
-                        ui.label(format!("[{}] {}", event.frame, event.call.part_kind));
-                        ui.add(
-                            egui::DragValue::new(&mut rate)
-                                .speed(0.05)
-                                .range(0.0..=100.0)
-                                .prefix("rate "),
-                        )
-                        .changed()
+                let changed = egui::ScrollArea::horizontal()
+                    .id_salt(("expression_partial_rate_row", event.site))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                if active {
+                                    egui::Color32::from_rgb(170, 220, 190)
+                                } else {
+                                    egui::Color32::from_gray(140)
+                                },
+                                if active { "◆" } else { "◇" },
+                            );
+                            ui.label(format!("[{}] {}", event.frame, event.call.part_kind));
+                            ui.add(
+                                egui::DragValue::new(&mut rate)
+                                    .speed(0.05)
+                                    .range(0.0..=100.0)
+                                    .prefix("rate "),
+                            )
+                            .changed()
+                        })
+                        .inner
                     })
                     .inner;
                 if changed {
@@ -7044,27 +7685,35 @@ impl VisionaryApp {
         }
 
         if !raw_partial_frames.is_empty() {
-            ui.colored_label(
+            editor_command_subsection_heading(
+                ui,
+                "Source-only partial animation commands",
+                "Partial-animation calls that Visionary preserves for export but cannot safely edit live because their native boolean argument has not been measured.",
                 egui::Color32::from_rgb(235, 185, 100),
-                "Source-only MotionModule partial-frame calls",
+                "source-only",
             );
             ui.label(
                 "These authored partial-frame calls are preserved for export and source write-back. Their \
                  native fourth boolean is not measured, so they are not live-editable.",
             );
-            for event in raw_partial_frames {
+            for (row, event) in raw_partial_frames.into_iter().enumerate() {
                 let active = event.frame == self.state.current_frame;
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        if active {
-                            egui::Color32::from_rgb(235, 185, 100)
-                        } else {
-                            egui::Color32::from_gray(140)
-                        },
-                        if active { "◆" } else { "◇" },
-                    );
-                    ui.label(format!("[{}] {}", event.frame, event.source));
-                });
+                egui::ScrollArea::horizontal()
+                    .id_salt(("expression_raw_row", row))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                if active {
+                                    egui::Color32::from_rgb(235, 185, 100)
+                                } else {
+                                    egui::Color32::from_gray(140)
+                                },
+                                if active { "◆" } else { "◇" },
+                            );
+                            ui.label(format!("[{}] {}", event.frame, event.source));
+                        });
+                    });
             }
         }
 
@@ -7092,45 +7741,80 @@ impl VisionaryApp {
             let active = event.frame == self.state.current_frame;
             let mut call = event.call.clone();
             let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    if active {
-                        egui::Color32::from_rgb(210, 180, 245)
-                    } else {
-                        egui::Color32::from_gray(140)
-                    },
-                    if active { "◆" } else { "◇" },
-                );
-                ui.label(format!("[{}] {}", event.frame, call.func()));
-                match &mut call {
-                    ExpressionCall::RumbleHit { kind, unk } => {
-                        changed |= expression_token_edit(ui, kind, (event.site, 0));
-                        changed |= expression_token_edit(ui, unk, (event.site, 1));
-                    }
-                    ExpressionCall::Quake { kind } => {
-                        changed |= expression_token_edit(ui, kind, (event.site, 0));
-                    }
-                    ExpressionCall::FtAttackAbsCameraQuake {
-                        attack_abs_kind,
-                        quake_kind,
-                    } => {
-                        changed |= expression_token_edit(ui, attack_abs_kind, (event.site, 0));
-                        changed |= expression_token_edit(ui, quake_kind, (event.site, 1));
-                    }
-                    ExpressionCall::ControlModuleSetRumble {
-                        kind,
-                        duration,
-                        looped,
-                        target,
-                        ..
-                    } => {
-                        changed |= expression_token_edit(ui, kind, (event.site, 0));
-                        changed |= expression_token_edit(ui, duration, (event.site, 1));
-                        changed |= expression_token_edit(ui, looped, (event.site, 2));
-                        changed |= expression_token_edit(ui, target, (event.site, 3));
-                    }
-                }
-            });
+            egui::ScrollArea::horizontal()
+                .id_salt(("expression_row", event.site))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            if active {
+                                egui::Color32::from_rgb(210, 180, 245)
+                            } else {
+                                egui::Color32::from_gray(140)
+                            },
+                            if active { "◆" } else { "◇" },
+                        );
+                        ui.label(format!("[{}] {}", event.frame, call.func()));
+                        match &mut call {
+                            ExpressionCall::RumbleHit { kind, unk } => {
+                                changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                                changed |= expression_token_edit(ui, "arg2", unk, (event.site, 1));
+                            }
+                            ExpressionCall::Quake { kind } => {
+                                changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                            }
+                            ExpressionCall::FtAttackAbsCameraQuake {
+                                attack_abs_kind,
+                                quake_kind,
+                            } => {
+                                changed |= expression_token_edit(
+                                    ui,
+                                    "attack kind",
+                                    attack_abs_kind,
+                                    (event.site, 0),
+                                );
+                                changed |= expression_token_edit(
+                                    ui,
+                                    "quake kind",
+                                    quake_kind,
+                                    (event.site, 1),
+                                );
+                            }
+                            ExpressionCall::ControlModuleSetRumble {
+                                kind,
+                                duration,
+                                looped,
+                                target,
+                                ..
+                            } => {
+                                changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                                changed |= expression_token_edit(
+                                    ui,
+                                    "duration",
+                                    duration,
+                                    (event.site, 1),
+                                );
+                                changed |=
+                                    expression_token_edit(ui, "looped", looped, (event.site, 2));
+                                let target_hint = if target.contains("BATTLE_OBJECT_ID_INVALID") {
+                                    "Valid source expression: BATTLE_OBJECT_ID_INVALID is the \
+                                     invalid/default battle-object sentinel, and `as u32` is the \
+                                     type cast required by this binding."
+                                } else {
+                                    "Target battle-object expression, preserved as authored source \
+                                     text for export and source sync."
+                                };
+                                changed |= expression_token_edit_with_hint(
+                                    ui,
+                                    "target",
+                                    target,
+                                    (event.site, 3),
+                                    target_hint,
+                                );
+                            }
+                        }
+                    });
+                });
             if changed {
                 edit = Some((event.site, call));
             }
@@ -7167,15 +7851,14 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(190, 150, 245), "REVERSE_LR");
-        })
-        .response
-        .on_hover_text(
+        editor_command_subsection_heading(
+            ui,
+            "Reverse facing direction",
             "REVERSE_LR flips the fighter's facing direction at one point in the move. It has no \
              numeric arguments; this editor changes its presence and frame. The desktop viewport \
              does not simulate the orientation change yet.",
+            egui::Color32::from_rgb(190, 150, 245),
+            "REVERSE_LR",
         );
 
         let mut action: Option<(usize, Option<u32>)> = None;
@@ -7286,14 +7969,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(245, 170, 110), "SET_SPEED");
-        })
-        .response
-        .on_hover_text(
-            "SET_SPEED writes the fighter's direct x/y velocity at one point. The frame and call
-             placement stay structural; x and y are editable here.",
+        editor_command_subsection_heading(
+            ui,
+            "Set velocity",
+            "SET_SPEED replaces the fighter's x/y velocity at this point. X and y are editable; moving or replacing the source call remains a structural edit.",
+            egui::Color32::from_rgb(245, 170, 110),
+            "SET_SPEED",
         );
 
         let mut edit: Option<(usize, f32, f32)> = None;
@@ -7348,14 +8029,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(110, 190, 255), "SET_SPEED_EX");
-        })
-        .response
-        .on_hover_text(
-            "SET_SPEED_EX writes x/y velocity into a named kinetic-energy reserve at one point. \
-             The kinetic kind stays as authored source text; x and y are editable here.",
+        editor_command_subsection_heading(
+            ui,
+            "Set kinetic-reserve velocity",
+            "SET_SPEED_EX replaces x/y velocity in one named kinetic-energy reserve. A reserve is one engine movement component; its authored name stays visible while x and y are editable.",
+            egui::Color32::from_rgb(110, 190, 255),
+            "SET_SPEED_EX",
         );
 
         let mut edit: Option<(usize, f32, f32)> = None;
@@ -7410,14 +8089,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(90, 220, 180), "ADD_SPEED_NO_LIMIT");
-        })
-        .response
-        .on_hover_text(
-            "ADD_SPEED_NO_LIMIT adds x/y velocity at one point. The frame and source-site \
-             placement stay structural; x and y are editable here.",
+        editor_command_subsection_heading(
+            ui,
+            "Add unrestricted velocity",
+            "ADD_SPEED_NO_LIMIT adds x/y velocity without the ordinary speed limit at this point. X and y are editable; the call's placement remains structural.",
+            egui::Color32::from_rgb(90, 220, 180),
+            "ADD_SPEED_NO_LIMIT",
         );
 
         let mut edit: Option<(usize, f32, f32)> = None;
@@ -7466,15 +8143,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(255, 205, 120), "CORRECT");
-        })
-        .response
-        .on_hover_text(
-            "CORRECT changes the fighter's ground-correction mode at one point. The kind stays \
-             as source text so named constants remain portable; live replacement needs a numeric \
-             capture of the call.",
+        editor_command_subsection_heading(
+            ui,
+            "Ground correction mode",
+            "CORRECT selects how the fighter is aligned or corrected against ground and air geometry at this point. The exact named mode stays as authored source text.",
+            egui::Color32::from_rgb(255, 205, 120),
+            "CORRECT",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -7524,15 +8198,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(220, 155, 245), "FT_CATCH_STOP");
-        })
-        .response
-        .on_hover_text(
-            "FT_CATCH_STOP is a measured two-argument point. The editor keeps both arguments as\n\
-             numeric ToF32 values; frame, placement, and adding/removing calls remain structural\n\
-             export/source operations.",
+        editor_command_subsection_heading(
+            ui,
+            "Catch stop",
+            "FT_CATCH_STOP is the engine's two-value catch-stop command. The exact gameplay role of each value is not decoded, so they stay honestly labeled arg1 and arg2 instead of receiving guessed names.",
+            egui::Color32::from_rgb(220, 155, 245),
+            "FT_CATCH_STOP",
         );
 
         let mut edit: Option<(usize, f32, f32)> = None;
@@ -7583,16 +8254,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(130, 220, 245),
-                "FT_START_ADJUST_MOTION_FRAME_arg1",
-            );
-        })
-        .response
-        .on_hover_text(
-            "This measured one-argument motion-frame adjustment stays numeric because the game meaning is not decoded here. Frame, placement, and adding/removing calls remain structural export/source operations.",
+        editor_command_subsection_heading(
+            ui,
+            "Motion-frame adjustment",
+            "FT_START_ADJUST_MOTION_FRAME_arg1 carries one measured numeric value. Its more specific gameplay meaning is not decoded, so the editor preserves the native name and avoids inventing a misleading label.",
+            egui::Color32::from_rgb(130, 220, 245),
+            "FT_START_ADJUST_MOTION_FRAME_arg1",
         );
 
         let mut edit: Option<(usize, f32)> = None;
@@ -7644,16 +8311,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(170, 205, 255),
-                "MotionModule::set_rate",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Sets the animation rate at a conditional direct module point. This value-only slice preserves the call's frame and execution context; structural add/remove/retime changes remain source/export operations.",
+        editor_command_subsection_heading(
+            ui,
+            "Animation playback rate",
+            "MotionModule::set_rate directly sets the animation's playback rate at this conditional script point. Only the numeric value is edited; its frame and execution condition remain intact.",
+            egui::Color32::from_rgb(170, 205, 255),
+            "MotionModule::set_rate",
         );
 
         let mut edit: Option<(usize, f32)> = None;
@@ -7704,16 +8367,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(170, 220, 190),
-                "MotionModule::set_rate_partial",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Sets one partial animation's rate. The authored part kind stays source-owned; this measured slice edits only the numeric rate, while structural and part-kind changes remain source/export operations.",
+        editor_command_subsection_heading(
+            ui,
+            "Partial animation playback rate",
+            "MotionModule::set_rate_partial changes only one named animation part. The numeric rate is editable; the authored part name, frame, and execution context stay intact.",
+            egui::Color32::from_rgb(170, 220, 190),
+            "MotionModule::set_rate_partial",
         );
 
         let mut edit: Option<(usize, f32)> = None;
@@ -7771,16 +8430,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(180, 225, 190),
-                "MotionModule::set_helper_calculation",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Toggles helper animation calculation at a conditional direct module point. This value-only slice preserves the call's frame and execution context; structural add/remove/retime changes remain source/export operations.",
+        editor_command_subsection_heading(
+            ui,
+            "Helper animation calculation",
+            "MotionModule::set_helper_calculation turns the engine's helper-animation calculation on or off at this conditional script point. Its exact visible effect depends on the move; only the proven boolean is editable.",
+            egui::Color32::from_rgb(180, 225, 190),
+            "MotionModule::set_helper_calculation",
         );
 
         let mut edit: Option<(usize, bool)> = None;
@@ -7831,13 +8486,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(245, 125, 175), "CLR_SPEED");
-        })
-        .response
-        .on_hover_text(
-            "CLR_SPEED clears one named kinetic-energy reserve. The authored kinetic ID stays as source text; frame and structural placement are written through export/source sync.",
+        editor_command_subsection_heading(
+            ui,
+            "Clear one kinetic velocity",
+            "CLR_SPEED clears the velocity stored in one named kinetic-energy reserve, which is one engine movement component. The authored reserve name stays as source text.",
+            egui::Color32::from_rgb(245, 125, 175),
+            "CLR_SPEED",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -7891,13 +8545,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(255, 190, 120), "change_kinetic");
-        })
-        .response
-        .on_hover_text(
-            "KineticModule::change_kinetic changes the fighter's current kinetic type. The authored token stays as source text; numeric live overrides require a matching capture.",
+        editor_command_subsection_heading(
+            ui,
+            "Movement mode",
+            "KineticModule::change_kinetic selects the fighter's engine movement mode, which determines the set of movement rules and energies currently in use. The authored mode name stays as source text.",
+            egui::Color32::from_rgb(255, 190, 120),
+            "KineticModule::change_kinetic",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -7951,16 +8604,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(205, 160, 255),
-                "KineticModule energy",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Suspends, resumes, enables, or unables one measured kinetic energy. The authored energy ID stays as source text; numeric live overrides require a matching capture.",
+        editor_command_subsection_heading(
+            ui,
+            "Movement component state",
+            "Enables, disables, suspends, or resumes one kinetic energy: an engine movement component such as gravity, player control, or animation-driven motion. The authored component name stays as source text.",
+            egui::Color32::from_rgb(205, 160, 255),
+            "KineticModule energy",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -8018,13 +8667,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(120, 190, 255), "KineticModule::add_speed");
-        })
-        .response
-        .on_hover_text(
-            "Adds a measured x/y velocity vector directly. The supported source shape has z = 0.0; receiver and frame stay structural.",
+        editor_command_subsection_heading(
+            ui,
+            "Add kinetic velocity",
+            "KineticModule::add_speed adds the shown x/y vector directly to movement velocity. The supported source form has z = 0.0; the receiver and frame stay unchanged.",
+            egui::Color32::from_rgb(120, 190, 255),
+            "KineticModule::add_speed",
         );
 
         let mut edit: Option<(usize, f32, f32)> = None;
@@ -8079,16 +8727,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(150, 220, 180),
-                "KineticModule::clear_speed_all",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Clears all kinetic speed in the measured direct call. This editor changes its presence and frame; the desktop viewport does not simulate the kinetic transition.",
+        editor_command_subsection_heading(
+            ui,
+            "Clear all kinetic velocity",
+            "KineticModule::clear_speed_all clears velocity from every kinetic movement component at this point. This editor changes the call's presence and frame; the viewport does not simulate the transition.",
+            egui::Color32::from_rgb(150, 220, 180),
+            "KineticModule::clear_speed_all",
         );
 
         let mut action: Option<(usize, Option<u32>)> = None;
@@ -8211,16 +8855,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(
-                egui::Color32::from_rgb(235, 205, 120),
-                "KineticModule::set_consider_ground_friction",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Sets whether a kinetic energy considers ground friction. The bool is editable; the reserve attribute remains an authored token for source/export and becomes a live numeric override only when capture proves it.",
+        editor_command_subsection_heading(
+            ui,
+            "Ground friction",
+            "Chooses whether one kinetic movement component is slowed by contact with the ground. The on/off value is editable; the authored component attribute stays visible beside it.",
+            egui::Color32::from_rgb(235, 205, 120),
+            "KineticModule::set_consider_ground_friction",
         );
 
         let mut value_edit: Option<(usize, bool, String)> = None;
@@ -8397,13 +9037,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement / Status");
-            ui.colored_label(egui::Color32::from_rgb(235, 190, 120), "WorkModule flag");
-        })
-        .response
-        .on_hover_text(
-            "Toggles one fighter work flag at this point. The measured on_flag/off_flag call and authored flag token are preserved; numeric live replacement requires a matching capture.",
+        editor_command_subsection_heading(
+            ui,
+            "Work flags",
+            WORK_FLAGS_DESCRIPTION,
+            egui::Color32::from_rgb(235, 190, 120),
+            "WorkModule::on_flag / off_flag",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -8461,16 +9100,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement / Status");
-            ui.colored_label(
-                egui::Color32::from_rgb(205, 170, 235),
-                "transition term / group",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Enables or unables one status transition term or transition-term group. The measured direct WorkModule operation and authored token are preserved; numeric live replacement requires a matching capture.",
+        editor_command_subsection_heading(
+            ui,
+            "Allowed state transitions",
+            "Transition terms are named state changes the engine may consider, such as a particular cancel or movement transition. These commands enable or disable one term or a related group at this point.",
+            egui::Color32::from_rgb(205, 170, 235),
+            "WorkModule transition term / group",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -8524,13 +9159,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement / Status");
-            ui.colored_label(egui::Color32::from_rgb(220, 190, 140), "WorkModule increment");
-        })
-        .response
-        .on_hover_text(
-            "Increments one WorkModule integer slot. The measured direct receiver and authored slot token are preserved; numeric live replacement requires a matching capture.",
+        editor_command_subsection_heading(
+            ui,
+            "Increment stored counter",
+            "WorkModule::inc_int adds one to a named integer stored by the game for this fighter. Scripts use these slots for counters and other move or status state; the authored slot name identifies the exact value.",
+            egui::Color32::from_rgb(220, 190, 140),
+            "WorkModule::inc_int",
         );
 
         let mut edit: Option<(usize, String)> = None;
@@ -8582,16 +9216,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement / Status");
-            ui.colored_label(
-                egui::Color32::from_rgb(150, 215, 205),
-                "WorkModule value",
-            );
-        })
-        .response
-        .on_hover_text(
-            "Writes a value into one WorkModule slot. The measured direct set_int/set_float/set_int64 receiver, value token, and slot token are preserved; numeric live replacement requires a matching capture.",
+        editor_command_subsection_heading(
+            ui,
+            "Stored script values",
+            "WorkModule stores named integer, floating-point, and 64-bit values for fighter scripts. These calls replace one stored value; both the authored value and slot name remain visible for lossless export.",
+            egui::Color32::from_rgb(150, 215, 205),
+            "WorkModule::set_int / set_float / set_int64",
         );
 
         let mut edit: Option<(usize, String, String)> = None;
@@ -8661,13 +9291,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Movement");
-            ui.colored_label(egui::Color32::from_rgb(170, 200, 255), "SET_AIR");
-        })
-        .response
-        .on_hover_text(
-            "SET_AIR switches the fighter's kinetic state to air at one point. This editor changes its presence and frame; the desktop viewport does not simulate the state transition.",
+        editor_command_subsection_heading(
+            ui,
+            "Switch to air state",
+            "SET_AIR marks the fighter as airborne and switches to the corresponding kinetic state at this point. This editor changes the call's presence and frame; the viewport does not simulate the transition.",
+            egui::Color32::from_rgb(170, 200, 255),
+            "SET_AIR",
         );
 
         let mut action: Option<(usize, Option<u32>)> = None;
@@ -8785,15 +9414,14 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Hitbox tuning");
-            ui.colored_label(egui::Color32::from_rgb(180, 220, 160), "Post-hoc");
-        })
-        .response
-        .on_hover_text(
+        editor_section_heading_with_badge(
+            ui,
+            "Active hitbox changes",
             "ATK_POWER and ATK_SET_SHIELD_SETOFF_MUL retune a hitbox that is already out. They \
              run on their own frame, which is why they are listed here rather than as fields on \
              the hitbox they name.",
+            egui::Color32::from_rgb(180, 220, 160),
+            "ATK_POWER / shield setoff",
         );
 
         // The ids this move actually opens, so a modifier naming one that was never created can
@@ -8875,14 +9503,12 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.heading("Hurtboxes");
-            ui.colored_label(egui::Color32::from_rgb(255, 200, 90), "Intangibility");
-        })
-        .response
-        .on_hover_text(
-            "HIT_NODE / HIT_NO set how one bone or hurtbox group receives hits. A state runs \
-             from its own call until another call takes it back, or until HIT_RESET_ALL.",
+        editor_section_heading_with_badge(
+            ui,
+            "Hurtbox states",
+            "HIT_NODE, HIT_NO, WHOLE_HIT, and HIT_RESET_ALL change how a bone, hurtbox group, or the whole fighter receives hits. Each state lasts until another command changes or resets it.",
+            egui::Color32::from_rgb(255, 200, 90),
+            "normal / intangible / invincible",
         );
 
         let bone_names = self.bone_names.clone();
@@ -8999,13 +9625,35 @@ impl VisionaryApp {
         let current = self.state.current_frame;
 
         ui.horizontal(|ui| {
-            ui.heading("Effect spawns");
+            editor_section_heading(ui, "Visual effects", VISUAL_EFFECTS_DESCRIPTION);
             ui.label(
                 egui::RichText::new(format!("— Frame {}", current))
                     .color(egui::Color32::LIGHT_GRAY),
             );
+            if ui
+                .small_button("Primary editor")
+                .on_hover_text("Focus the Collisions, Motion & state, or Sound & feedback editor.")
+                .clicked()
+            {
+                self.inspector_focus = InspectorFocus::Primary;
+            }
+            if let Some((family, site)) = &self.selected_command {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("Selected {family} · source site {site}"))
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                if ui.small_button("Clear selection").clicked() {
+                    self.selected_command = None;
+                }
+            }
         });
         ui.checkbox(&mut self.state.show_all_effect_calls, "show all frames");
+        ui.checkbox(&mut self.show_effect_advanced, "show advanced overrides")
+            .on_hover_text(
+                "Reveal optional rate, camera, WorkModule, tint, alpha, and scale overrides",
+            );
         ui.separator();
 
         let has_effect_data =
@@ -9087,6 +9735,7 @@ impl VisionaryApp {
                                 {
                                     self.state.selected_effect_call =
                                         if selected { None } else { Some(i) };
+                                    self.inspector_focus = InspectorFocus::Effects;
                                 }
                             });
                         }
@@ -9229,6 +9878,11 @@ impl VisionaryApp {
                 .filter(|i| *i < self.state.effects.len())
             {
                 ui.separator();
+                editor_subsection_heading(
+                    ui,
+                    "Selected effect event",
+                    "Settings for the selected particle spawn, trail, colour change, or effect-control command. Only fields represented by its exact source command are shown.",
+                );
                 let pristine = self.state.effects_pristine.get(i).cloned();
                 let bone_names = self.bone_names.clone();
                 let mut changed = false;
@@ -9237,6 +9891,7 @@ impl VisionaryApp {
                 let mut toggle_pick = false;
                 {
                     let ec = &mut self.state.effects[i];
+                    let show_advanced = self.show_effect_advanced;
                     // A trail is placed by the joints it names — its call has no position,
                     // rotation, or scale arguments at all. Offering those fields let the user
                     // drag values that no export and no write-back could ever put anywhere.
@@ -9752,6 +10407,7 @@ impl VisionaryApp {
                                 }
                                 ui.end_row();
 
+                                if show_advanced {
                                 // Playback rate — the `LAST_EFFECT_SET_RATE` line that follows
                                 // this spawn. It belongs here rather than on a row of its own
                                 // because the macro names no effect: it modifies whatever
@@ -10123,6 +10779,7 @@ impl VisionaryApp {
                                 }
                                 ui.end_row();
                             }
+                            }
 
                             // One-shot effects have no meaningful "end" (they play their own
                             // lifetime), so only follow effects show an end frame — otherwise the
@@ -10339,6 +10996,11 @@ impl VisionaryApp {
         }
 
         ui.separator();
+        editor_subsection_heading(
+            ui,
+            "Fighter effect file",
+            "Shows whether the selected fighter's .eff resource file is available. The file supplies effect definitions and assets; the move's effect_ script decides when to use them.",
+        );
 
         // VFX file check
         let fighter_name = self
@@ -10361,14 +11023,17 @@ impl VisionaryApp {
             ];
             let found = candidates.iter().find(|p| p.exists());
             if found.is_some() {
-                ui.colored_label(egui::Color32::from_rgb(100, 220, 100), "VFX file: present");
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 220, 100),
+                    "Effect file: present",
+                );
             } else if self.current_eff_path.is_some() {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 220, 100),
-                    "VFX file: loaded manually",
+                    "Effect file: loaded manually",
                 );
             } else {
-                ui.colored_label(egui::Color32::GRAY, "VFX file: not found");
+                ui.colored_label(egui::Color32::GRAY, "Effect file: not found");
                 ui.label(
                     egui::RichText::new("Extract effect/fighter/ from data.arc, or:")
                         .small()
@@ -10409,7 +11074,11 @@ impl VisionaryApp {
         let mut picked: Option<String> = None;
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("🔍 Pick effect").strong());
+                editor_subsection_heading(
+                    ui,
+                    "Choose visual effect",
+                    "Search effect names observed in the running game or discovered in available .eff resource files, then assign one to the selected spawn.",
+                );
                 if ui.small_button("✕").on_hover_text("Close picker").clicked() {
                     self.effect_pick_open = false;
                 }
@@ -10448,9 +11117,12 @@ impl VisionaryApp {
                 .show(ui, |ui| {
                     if !live.is_empty() {
                         ui.label(
-                            egui::RichText::new("live in game")
+                            egui::RichText::new("Observed live")
                                 .small()
                                 .color(egui::Color32::from_rgb(120, 200, 120)),
+                        )
+                        .on_hover_text(
+                            "Effect names reported by the connected game during this session.",
                         );
                         for name in &live {
                             if ui.selectable_label(false, name).clicked() {
@@ -10466,12 +11138,15 @@ impl VisionaryApp {
                         .unwrap_or((0, 0));
                     ui.label(
                         egui::RichText::new(if scanning {
-                            format!("all effs (scanning {done}/{total})")
+                            format!("Effect files (scanning {done}/{total})")
                         } else {
-                            "all effs".into()
+                            "Effect files".into()
                         })
                         .small()
                         .color(egui::Color32::GRAY),
+                    )
+                    .on_hover_text(
+                        "Effect names discovered by scanning the available .eff resource files.",
                     );
                     for name in pool_hits.iter().filter(|n| !live.contains(n)) {
                         if ui.selectable_label(false, name).clicked() {
@@ -10497,6 +11172,394 @@ impl VisionaryApp {
             .map(|f| f.name.clone())?;
         let mv = self.state.selected_move.as_ref()?.name.clone();
         Some(format!("{fighter}/{mv}"))
+    }
+
+    fn json_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
+        serde_json::to_vec(value).unwrap_or_default()
+    }
+
+    fn capture_edit_snapshot(&self, key: &str) -> EditSnapshot {
+        let effect_call_edits = self.state.effect_call_edits.get(key).map(Self::json_bytes);
+        let effect_call_full = self.state.effect_call_full.get(key).map(Self::json_bytes);
+        let effect_dropped_lines = self
+            .state
+            .effect_dropped_lines
+            .get(key)
+            .map(Self::json_bytes);
+        let effect_frame_residue = self
+            .state
+            .effect_frame_residue
+            .get(key)
+            .map(Self::json_bytes);
+        let sound_script_edit = self.state.sound_script_edits.get(key).map(Self::json_bytes);
+        let expression_script_edit = self
+            .state
+            .expression_script_edits
+            .get(key)
+            .map(Self::json_bytes);
+        let edit_record = key.split_once('/').and_then(|(fighter, move_name)| {
+            self.state
+                .edit_log
+                .entries
+                .get(fighter)
+                .and_then(|moves| moves.get(move_name))
+                .map(Self::json_bytes)
+        });
+        EditSnapshot {
+            hitboxes: self.state.hitboxes.clone(),
+            script: Self::json_bytes(&self.state.script),
+            effect_script: Self::json_bytes(&self.state.effect_script),
+            effects: self.state.effects.clone(),
+            sound_script: Self::json_bytes(&self.state.sound_script),
+            expression_script: Self::json_bytes(&self.state.expression_script),
+            effect_call_edits,
+            effect_call_full,
+            effect_dropped_lines,
+            effect_frame_residue,
+            sound_script_edit,
+            expression_script_edit,
+            edit_record,
+        }
+    }
+
+    fn current_edit_snapshot(&self) -> Option<(String, EditSnapshot)> {
+        let key = self.current_move_key()?;
+        Some((key.clone(), self.capture_edit_snapshot(&key)))
+    }
+
+    fn decode_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+        serde_json::from_slice(bytes).ok()
+    }
+
+    /// Restore a canonical move snapshot and rebuild every derived/live surface through the
+    /// existing rule builders.  Undo must take this same path as a normal edit; directly copying
+    /// a displayed event list would otherwise make the export and game disagree with the panel.
+    fn restore_edit_snapshot(&mut self, key: &str, snapshot: &EditSnapshot) -> bool {
+        let Some(script) = Self::decode_json(&snapshot.script) else {
+            return false;
+        };
+        let Some(effect_script) = Self::decode_json(&snapshot.effect_script) else {
+            return false;
+        };
+        let Some(sound_script) = Self::decode_json(&snapshot.sound_script) else {
+            return false;
+        };
+        let Some(expression_script) = Self::decode_json(&snapshot.expression_script) else {
+            return false;
+        };
+        self.state.hitboxes = snapshot.hitboxes.clone();
+        self.state.script = script;
+        self.state.effect_script = effect_script;
+        self.state.effects = snapshot.effects.clone();
+        self.state.sound_script = sound_script;
+        self.state.expression_script = expression_script;
+        self.state.sounds = self.state.sound_script.to_sound_events();
+        self.state.expressions = self.state.expression_script.to_expression_events();
+
+        if let Some((fighter, move_name)) = key.split_once('/') {
+            if let Some(bytes) = &snapshot.edit_record {
+                if let Some(record) = Self::decode_json(bytes) {
+                    self.state
+                        .edit_log
+                        .entries
+                        .entry(fighter.to_string())
+                        .or_default()
+                        .insert(move_name.to_string(), record);
+                }
+            } else {
+                self.state
+                    .edit_log
+                    .entries
+                    .get_mut(fighter)
+                    .map(|moves| moves.remove(move_name));
+                if self
+                    .state
+                    .edit_log
+                    .entries
+                    .get(fighter)
+                    .is_some_and(std::collections::HashMap::is_empty)
+                {
+                    self.state.edit_log.entries.remove(fighter);
+                }
+            }
+        }
+        Self::restore_map_entry(
+            &mut self.state.effect_call_edits,
+            key,
+            snapshot.effect_call_edits.as_deref(),
+        );
+        Self::restore_map_entry(
+            &mut self.state.effect_call_full,
+            key,
+            snapshot.effect_call_full.as_deref(),
+        );
+        Self::restore_map_entry(
+            &mut self.state.effect_dropped_lines,
+            key,
+            snapshot.effect_dropped_lines.as_deref(),
+        );
+        Self::restore_map_entry(
+            &mut self.state.effect_frame_residue,
+            key,
+            snapshot.effect_frame_residue.as_deref(),
+        );
+        Self::restore_map_entry(
+            &mut self.state.sound_script_edits,
+            key,
+            snapshot.sound_script_edit.as_deref(),
+        );
+        Self::restore_map_entry(
+            &mut self.state.expression_script_edits,
+            key,
+            snapshot.expression_script_edit.as_deref(),
+        );
+        self.hitbox_watch = Some((key.to_string(), self.state.hitboxes.clone()));
+        self.hitbox_dirty_at = None;
+        self.refresh_current_live_rules();
+        true
+    }
+
+    fn restore_map_entry<T: serde::de::DeserializeOwned>(
+        map: &mut HashMap<String, T>,
+        key: &str,
+        bytes: Option<&[u8]>,
+    ) {
+        if let Some(bytes) = bytes.and_then(Self::decode_json) {
+            map.insert(key.to_string(), bytes);
+        } else {
+            map.remove(key);
+        }
+    }
+
+    fn refresh_current_live_rules(&mut self) {
+        self.push_hitbox_rules();
+        self.push_hurtbox_rules();
+        self.push_attack_mod_rules();
+        self.push_sound_rules();
+        self.push_expression_rules();
+        self.push_reverse_lr_rules();
+        self.push_speed_rules();
+        self.push_speed_ex_rules();
+        self.push_add_speed_no_limit_rules();
+        self.push_correct_rules();
+        self.push_ft_catch_stop_rules();
+        self.push_ft_start_adjust_motion_frame_rules();
+        self.push_motion_module_set_rate_rules();
+        self.push_motion_module_set_helper_calculation_rules();
+        self.push_motion_module_set_rate_partial_rules();
+        self.push_clr_speed_rules();
+        self.push_set_air_rules();
+        self.push_change_kinetic_rules();
+        self.push_kinetic_energy_rules();
+        self.push_kinetic_add_speed_rules();
+        self.push_work_flag_rules();
+        self.push_work_transition_term_rules();
+        self.push_work_module_inc_int_rules();
+        self.push_work_module_set_rules();
+        self.push_kinetic_clear_speed_all_rules();
+        self.push_kinetic_set_consider_ground_friction_rules();
+        self.push_effect_rules();
+    }
+
+    fn queue_history_action(&mut self, action: HistoryAction) {
+        self.pending_history_action = Some(action);
+        self.history_suppress_frame = true;
+    }
+
+    fn apply_history_action(&mut self, action: HistoryAction) {
+        let Some(key) = self.current_move_key() else {
+            return;
+        };
+        let entry = {
+            let Some(history) = self.edit_history.get_mut(&key) else {
+                return;
+            };
+            match action {
+                HistoryAction::Undo => history.undo.pop(),
+                HistoryAction::Redo => history.redo.pop(),
+            }
+        };
+        let Some(entry) = entry else {
+            return;
+        };
+        let entry_label = entry.label.clone();
+        let restore = match action {
+            HistoryAction::Undo => &entry.before,
+            HistoryAction::Redo => &entry.after,
+        };
+        if self.restore_edit_snapshot(&key, restore) {
+            if let Some(history) = self.edit_history.get_mut(&key) {
+                match action {
+                    HistoryAction::Undo => history.redo.push(entry),
+                    HistoryAction::Redo => history.undo.push(entry),
+                }
+            }
+            self.state.status = match action {
+                HistoryAction::Undo => format!("Undid {entry_label}."),
+                HistoryAction::Redo => format!("Redid {entry_label}."),
+            };
+        } else if let Some(history) = self.edit_history.get_mut(&key) {
+            // A corrupt/legacy serialized snapshot must not silently consume the user's only
+            // undo entry. Put it back on the stack it came from and leave the visible move as-is.
+            match action {
+                HistoryAction::Undo => history.undo.push(entry),
+                HistoryAction::Redo => history.redo.push(entry),
+            }
+            self.state.status = "Could not restore that history entry.".into();
+        }
+    }
+
+    fn begin_history_frame(&mut self) {
+        self.history_before_frame = self.current_edit_snapshot();
+    }
+
+    fn finish_history_frame(&mut self) {
+        if let Some(action) = self.pending_history_action.take() {
+            self.apply_history_action(action);
+        }
+        let Some((before_key, before)) = self.history_before_frame.take() else {
+            self.history_suppress_frame = false;
+            return;
+        };
+        let Some((after_key, after)) = self.current_edit_snapshot() else {
+            self.history_suppress_frame = false;
+            return;
+        };
+        if !self.history_suppress_frame && before_key == after_key && before != after {
+            let history = self.edit_history.entry(before_key).or_default();
+            history.undo.push(HistoryEntry {
+                label: "Move edit".into(),
+                before,
+                after,
+            });
+            if history.undo.len() > 100 {
+                history.undo.remove(0);
+            }
+            history.redo.clear();
+        }
+        self.history_suppress_frame = false;
+    }
+
+    fn has_undo(&self) -> bool {
+        self.current_move_key()
+            .and_then(|key| self.edit_history.get(&key))
+            .is_some_and(|history| !history.undo.is_empty())
+    }
+
+    fn has_redo(&self) -> bool {
+        self.current_move_key()
+            .and_then(|key| self.edit_history.get(&key))
+            .is_some_and(|history| !history.redo.is_empty())
+    }
+
+    fn current_move_has_edits(&self) -> bool {
+        let Some(key) = self.current_move_key() else {
+            return false;
+        };
+        self.state.hitboxes != self.state.hitboxes_pristine
+            || self.state.effects != self.state.effects_pristine
+            || self.state.sounds != self.state.sounds_pristine
+            || self.state.expressions != self.state.expressions_pristine
+            || !Self::edited_prefixes(&self.state).is_empty()
+            || self.state.effect_call_edits.contains_key(&key)
+            || self.state.effect_call_full.contains_key(&key)
+            || self.state.sound_script_edits.contains_key(&key)
+            || self.state.expression_script_edits.contains_key(&key)
+            || key.split_once('/').is_some_and(|(fighter, move_name)| {
+                self.state
+                    .edit_log
+                    .entries
+                    .get(fighter)
+                    .and_then(|moves| moves.get(move_name))
+                    .is_some()
+            })
+    }
+
+    /// Discard the current move's editable overlays and reload the original fetched/captured
+    /// payload.  This is intentionally a move-scoped action: the edit log and live rule stores
+    /// for every other move remain untouched, and the session history records the restore so it
+    /// can still be undone once.
+    fn restore_current_move_edits(&mut self) {
+        let Some(key) = self.current_move_key() else {
+            return;
+        };
+        // Capture-only moves do not retain an original source body. The first history entry is
+        // nevertheless an exact baseline for edits made during this session, including motion
+        // statements that cannot be reconstructed from the hitbox list alone.
+        let session_baseline = self
+            .edit_history
+            .get(&key)
+            .and_then(|history| history.undo.first())
+            .map(|entry| entry.before.clone());
+        self.state.effect_call_edits.remove(&key);
+        self.state.effect_call_full.remove(&key);
+        self.state.effect_dropped_lines.remove(&key);
+        self.state.effect_frame_residue.remove(&key);
+        self.state.sound_script_edits.remove(&key);
+        self.state.expression_script_edits.remove(&key);
+        if let Some((fighter, move_name)) = key.split_once('/') {
+            self.state
+                .edit_log
+                .entries
+                .get_mut(fighter)
+                .map(|moves| moves.remove(move_name));
+            if self
+                .state
+                .edit_log
+                .entries
+                .get(fighter)
+                .is_some_and(std::collections::HashMap::is_empty)
+            {
+                self.state.edit_log.entries.remove(fighter);
+            }
+        }
+
+        // A fetched source body is the most complete baseline because it restores the scripts,
+        // not only the displayed event lists. Capture-only moves have no body, so their pristine
+        // per-family snapshots are the authoritative fallback.
+        if !self.state.loaded_body.is_empty() {
+            let body = self.state.loaded_body.clone();
+            let mut hitboxes = crate::acmd::parse_acmd_script(&body).to_hitboxes();
+            self.normalize_hitbox_bones(&mut hitboxes);
+            let script = crate::acmd::parse_acmd_script(&body);
+            self.state.hitboxes_pristine = hitboxes.clone();
+            self.state.hitboxes = hitboxes;
+            self.state.set_script(script);
+            self.state.effect_script = crate::acmd::parse_effect_script(&body);
+            self.state.effects_pristine = self.state.effect_script.to_effect_calls();
+            self.state.effects = self.state.effects_pristine.clone();
+            self.state.sound_script = crate::acmd::parse_sound_script(&body);
+            self.state.sounds_pristine = self.state.sound_script.to_sound_events();
+            self.state.sounds = self.state.sounds_pristine.clone();
+            self.state.expression_script = crate::acmd::parse_expression_script(&body);
+            self.state.expressions_pristine = self.state.expression_script.to_expression_events();
+            self.state.expressions = self.state.expressions_pristine.clone();
+            self.state
+                .expression_motion_module_set_rate_partial_pristine = self
+                .state
+                .expression_script
+                .to_motion_module_set_rate_partial_events();
+            self.record_dropped_effect_lines();
+        } else if let Some(baseline) = session_baseline {
+            if !self.restore_edit_snapshot(&key, &baseline) {
+                self.state.hitboxes = self.state.hitboxes_pristine.clone();
+                self.state.effects = self.state.effects_pristine.clone();
+                self.state.sounds = self.state.sounds_pristine.clone();
+                self.state.expressions = self.state.expressions_pristine.clone();
+            }
+        } else {
+            self.state.hitboxes = self.state.hitboxes_pristine.clone();
+            self.state.effects = self.state.effects_pristine.clone();
+            self.state.sounds = self.state.sounds_pristine.clone();
+            self.state.expressions = self.state.expressions_pristine.clone();
+        }
+        self.selected_hitbox = None;
+        self.state.selected_effect_call = None;
+        self.selected_command = None;
+        self.hitbox_watch = Some((key.clone(), self.state.hitboxes.clone()));
+        self.hitbox_dirty_at = None;
+        self.refresh_current_live_rules();
+        self.state.status = "Restored this move to its loaded source or capture baseline.".into();
     }
 
     /// Put this move's saved sound script back over the freshly parsed one, if there is one.
@@ -20114,7 +21177,7 @@ impl VisionaryApp {
                         if self.use_scan.is_some() {
                             "No uses found yet — the scan is still running."
                         } else {
-                            "No known uses — retarget calls later in the Effects panel."
+                            "No known uses — retarget calls later in the Visual effects panel."
                         },
                     );
                 } else {
@@ -20968,7 +22031,574 @@ impl VisionaryApp {
         }
     }
 
+    fn timeline_total_frames(&self) -> u32 {
+        self.state
+            .total_frames
+            .max(timeline_frame_extent_with_change_kinetic(
+                &self.state.hitboxes,
+                &self.state.effects,
+                &self.state.sounds,
+                &self.state.expressions,
+                &self.state.script.to_reverse_lr_events(),
+                &self.state.script.to_speed_ex_events(),
+                &self.state.script.to_speed_events(),
+                &self.state.script.to_add_speed_no_limit_events(),
+                &self.state.script.to_correct_events(),
+                &self.state.script.to_ft_catch_stop_events(),
+                &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                &self.state.script.to_clr_speed_events(),
+                &self.state.script.to_set_air_events(),
+                &self.state.script.to_change_kinetic_events(),
+                &self.state.script.to_kinetic_energy_events(),
+                &self.state.script.to_kinetic_add_speed_events(),
+                &self.state.script.to_kinetic_clear_speed_all_events(),
+                &self
+                    .state
+                    .script
+                    .to_kinetic_set_consider_ground_friction_events(),
+                &self.state.script.to_motion_module_set_rate_events(),
+                &self
+                    .state
+                    .script
+                    .to_motion_module_set_helper_calculation_events(),
+                &self.state.script.to_motion_module_set_rate_partial_events(),
+                &self.state.script.to_work_flag_events(),
+                &self.state.script.to_work_transition_term_events(),
+                &self.state.script.to_work_module_inc_int_events(),
+                &self.state.script.to_work_module_set_events(),
+            ))
+            .max(FIRST_GAME_FRAME)
+    }
+
+    fn command_row(
+        rows: &mut Vec<TimelineRow>,
+        family: &str,
+        site: usize,
+        frame: u32,
+        label: impl Into<String>,
+        category: TimelineCategory,
+        color: Color32,
+    ) {
+        rows.push(TimelineRow {
+            category,
+            selection: TimelineSelection::Command {
+                family: family.to_string(),
+                site,
+            },
+            label: label.into(),
+            start: frame,
+            end: frame,
+            seek_frame: frame,
+            color,
+        });
+    }
+
+    fn timeline_rows(&self, total: u32) -> Vec<TimelineRow> {
+        let mut rows = Vec::new();
+        for (index, hb) in self.state.hitboxes.iter().enumerate() {
+            let kind = match hb.category {
+                1 => "Grab",
+                2 => "Wind",
+                crate::data::CAT_ABS => "Throw damage",
+                crate::data::CAT_SEARCH => "Detection",
+                crate::data::CAT_ATTACK_FP => "ATTACK_FP",
+                _ => "Attack",
+            };
+            rows.push(TimelineRow {
+                category: TimelineCategory::Collisions,
+                selection: TimelineSelection::Hitbox(index),
+                label: format!("{kind} #{}", hb.id),
+                start: hb.active_start,
+                end: hb.active_end.min(total),
+                seek_frame: hb.active_start,
+                color: hitbox_display_color(hb),
+            });
+        }
+        let (hurtboxes, priorities) = self.state.script.to_hurtboxes();
+        for state in hurtboxes
+            .into_iter()
+            .filter(|state| state.status != "HIT_STATUS_NORMAL")
+        {
+            Self::command_row(
+                &mut rows,
+                "hurtbox",
+                state.site,
+                state.active_start,
+                format!("Hurtbox {}", state.target.label()),
+                TimelineCategory::Collisions,
+                Color32::from_rgb(255, 185, 100),
+            );
+            if let Some(row) = rows.last_mut() {
+                row.end = state.active_end.min(total);
+            }
+        }
+        for state in priorities {
+            Self::command_row(
+                &mut rows,
+                "col_pri",
+                state.site,
+                state.active_start,
+                format!("Collision priority {}", state.pri),
+                TimelineCategory::Collisions,
+                Color32::from_rgb(235, 160, 240),
+            );
+            if let Some(row) = rows.last_mut() {
+                row.end = state.active_end.min(total);
+            }
+        }
+        for event in self.state.script.to_attack_mods() {
+            Self::command_row(
+                &mut rows,
+                "attack_mod",
+                event.site,
+                event.frame,
+                format!("{} #{}", event.kind.macro_name(), event.id),
+                TimelineCategory::Collisions,
+                Color32::from_rgb(240, 150, 210),
+            );
+        }
+        for (index, effect) in self.state.effects.iter().enumerate() {
+            rows.push(TimelineRow {
+                category: TimelineCategory::Effects,
+                selection: TimelineSelection::Effect(index),
+                label: effect_call_display_name(effect),
+                start: effect.active_start,
+                end: if effect.follows_bone {
+                    effect.active_end.min(total)
+                } else {
+                    effect
+                        .active_end
+                        .max(effect.active_start.saturating_add(1))
+                        .min(total)
+                },
+                seek_frame: effect.active_start,
+                color: if effect.disabled {
+                    Color32::from_gray(110)
+                } else if effect.follows_bone {
+                    Color32::from_rgb(255, 165, 0)
+                } else {
+                    Color32::from_rgb(255, 220, 0)
+                },
+            });
+        }
+        let motion_color = Color32::from_rgb(190, 230, 170);
+        let mut push_motion = |family: &str, site: usize, frame: u32, label: &str| {
+            Self::command_row(
+                &mut rows,
+                family,
+                site,
+                frame,
+                label,
+                TimelineCategory::MotionState,
+                motion_color,
+            );
+        };
+        for event in self.state.script.to_reverse_lr_events() {
+            push_motion("reverse_lr", event.site, event.frame, "Reverse facing");
+        }
+        for event in self.state.script.to_speed_ex_events() {
+            push_motion(
+                "speed_ex",
+                event.site,
+                event.frame,
+                "Set kinetic-reserve velocity",
+            );
+        }
+        for event in self.state.script.to_speed_events() {
+            push_motion("speed", event.site, event.frame, "Set speed");
+        }
+        for event in self.state.script.to_add_speed_no_limit_events() {
+            push_motion(
+                "add_speed_no_limit",
+                event.site,
+                event.frame,
+                "Add unrestricted velocity",
+            );
+        }
+        for event in self.state.script.to_correct_events() {
+            push_motion("correct", event.site, event.frame, "Ground correction mode");
+        }
+        for event in self.state.script.to_ft_catch_stop_events() {
+            push_motion("ft_catch_stop", event.site, event.frame, "Catch stop");
+        }
+        for event in self.state.script.to_ft_start_adjust_motion_frame_events() {
+            push_motion(
+                "ft_start_adjust",
+                event.site,
+                event.frame,
+                "Motion-frame adjustment",
+            );
+        }
+        for (site, frame, _) in self.state.script.motion_rate_sites() {
+            push_motion("motion_rate", site, frame as u32, "Animation timing");
+        }
+        for event in self.state.script.to_motion_module_set_rate_events() {
+            push_motion(
+                "motion_module_rate",
+                event.site,
+                event.frame,
+                "Animation playback rate",
+            );
+        }
+        for event in self
+            .state
+            .script
+            .to_motion_module_set_helper_calculation_events()
+        {
+            push_motion(
+                "motion_helper",
+                event.site,
+                event.frame,
+                "Helper animation calculation",
+            );
+        }
+        for event in self.state.script.to_motion_module_set_rate_partial_events() {
+            push_motion(
+                "motion_rate_partial",
+                event.site,
+                event.frame,
+                "Partial animation playback rate",
+            );
+        }
+        for event in self.state.script.to_clr_speed_events() {
+            push_motion(
+                "clear_speed",
+                event.site,
+                event.frame,
+                "Clear one kinetic velocity",
+            );
+        }
+        for event in self.state.script.to_set_air_events() {
+            push_motion("set_air", event.site, event.frame, "Switch to air state");
+        }
+        for event in self.state.script.to_change_kinetic_events() {
+            push_motion("change_kinetic", event.site, event.frame, "Movement mode");
+        }
+        for event in self.state.script.to_kinetic_energy_events() {
+            push_motion(
+                "kinetic_energy",
+                event.site,
+                event.frame,
+                "Movement component state",
+            );
+        }
+        for event in self.state.script.to_kinetic_add_speed_events() {
+            push_motion(
+                "kinetic_add_speed",
+                event.site,
+                event.frame,
+                "Add kinetic velocity",
+            );
+        }
+        for event in self.state.script.to_kinetic_clear_speed_all_events() {
+            push_motion(
+                "kinetic_clear_speed",
+                event.site,
+                event.frame,
+                "Clear all kinetic velocity",
+            );
+        }
+        for event in self
+            .state
+            .script
+            .to_kinetic_set_consider_ground_friction_events()
+        {
+            push_motion(
+                "kinetic_friction",
+                event.site,
+                event.frame,
+                "Ground friction",
+            );
+        }
+        for event in self.state.script.to_work_flag_events() {
+            push_motion("work_flag", event.site, event.frame, "Work flag");
+        }
+        for event in self.state.script.to_work_transition_term_events() {
+            push_motion(
+                "work_transition",
+                event.site,
+                event.frame,
+                "Allowed state transition",
+            );
+        }
+        for event in self.state.script.to_work_module_inc_int_events() {
+            push_motion(
+                "work_inc_int",
+                event.site,
+                event.frame,
+                "Increment stored counter",
+            );
+        }
+        for event in self.state.script.to_work_module_set_events() {
+            push_motion("work_set", event.site, event.frame, "Stored script value");
+        }
+        let audio_color = Color32::from_rgb(150, 210, 180);
+        for event in &self.state.sounds {
+            Self::command_row(
+                &mut rows,
+                "sound",
+                event.site,
+                event.frame,
+                format!("{} {}", event.call.func, event.call.sounds.join(" / ")),
+                TimelineCategory::AudioFeedback,
+                audio_color,
+            );
+        }
+        for event in &self.state.expressions {
+            Self::command_row(
+                &mut rows,
+                "expression",
+                event.site,
+                event.frame,
+                event.call.func(),
+                TimelineCategory::AudioFeedback,
+                Color32::from_rgb(210, 180, 245),
+            );
+        }
+        for (site, event) in self
+            .state
+            .expression_script
+            .to_motion_module_set_rate_partial_events()
+            .into_iter()
+            .enumerate()
+        {
+            Self::command_row(
+                &mut rows,
+                "expression_rate_partial",
+                event.site.max(site),
+                event.frame,
+                "Partial animation rate (expression)",
+                TimelineCategory::AudioFeedback,
+                Color32::from_rgb(170, 220, 190),
+            );
+        }
+        rows.sort_by_key(|row| (row.start, row.category as u8));
+        rows
+    }
+
+    fn select_timeline_row(&mut self, row: &TimelineRow) {
+        self.state.current_frame = row.seek_frame.max(FIRST_GAME_FRAME);
+        match &row.selection {
+            TimelineSelection::Hitbox(index) => {
+                self.selected_hitbox = Some(*index);
+                self.primary_tab = PrimaryEditorTab::Collisions;
+                self.inspector_focus = InspectorFocus::Primary;
+            }
+            TimelineSelection::Effect(index) => {
+                self.state.selected_effect_call = Some(*index);
+                self.state.show_effects_panel = true;
+                self.inspector_focus = InspectorFocus::Effects;
+            }
+            TimelineSelection::Command { family, site } => {
+                self.selected_command = Some((family.clone(), *site));
+                self.primary_tab = match row.category {
+                    TimelineCategory::Collisions => PrimaryEditorTab::Collisions,
+                    TimelineCategory::MotionState => PrimaryEditorTab::MotionState,
+                    TimelineCategory::AudioFeedback => PrimaryEditorTab::AudioFeedback,
+                    TimelineCategory::Effects => self.primary_tab,
+                };
+                self.inspector_focus = InspectorFocus::Primary;
+            }
+        }
+    }
+
     fn draw_scrubber(&mut self, ui: &mut Ui) {
+        let total = self.timeline_total_frames();
+        if total == 0 {
+            return;
+        }
+        let current = self.state.current_frame.clamp(FIRST_GAME_FRAME, total);
+        let filters_before = self.timeline_filters;
+        ui.horizontal_wrapped(|ui| {
+            let play_label = if self.state.playing { "Pause" } else { "Play" };
+            if ui.button(play_label).clicked() {
+                self.state.playing = !self.state.playing;
+            }
+            if ui.button("Start").clicked() {
+                self.state.current_frame = FIRST_GAME_FRAME;
+                self.state.playing = false;
+            }
+            ui.label(format!("Frame {current} / {total}"));
+            ui.separator();
+            for category in [
+                TimelineCategory::Collisions,
+                TimelineCategory::Effects,
+                TimelineCategory::MotionState,
+                TimelineCategory::AudioFeedback,
+            ] {
+                let shown = self.timeline_filters.shows(category);
+                if ui
+                    .selectable_label(shown, category.title())
+                    .on_hover_text(category.description())
+                    .clicked()
+                {
+                    match category {
+                        TimelineCategory::Collisions => self.timeline_filters.collisions = !shown,
+                        TimelineCategory::Effects => self.timeline_filters.effects = !shown,
+                        TimelineCategory::MotionState => {
+                            self.timeline_filters.motion_state = !shown
+                        }
+                        TimelineCategory::AudioFeedback => {
+                            self.timeline_filters.audio_feedback = !shown
+                        }
+                    }
+                }
+            }
+            if ui.small_button("All").clicked() {
+                self.timeline_filters = TimelineFilters::default();
+            }
+        });
+        if self.timeline_filters != filters_before {
+            save_timeline_filters(self.timeline_filters);
+        }
+
+        let rows: Vec<TimelineRow> = self
+            .timeline_rows(total)
+            .into_iter()
+            .filter(|row| self.timeline_filters.shows(row.category))
+            .collect();
+        let row_height = 18.0;
+        let label_width = (ui.available_width() * 0.22).clamp(110.0, 180.0);
+        let timeline_width = ui.available_width().max(1.0);
+        let content_height = (rows.len() as f32 * row_height + 28.0).max(60.0);
+        let viewport_height = ui.available_height().max(1.0);
+        if rows.is_empty() {
+            ui.weak("No timeline events match the current filters.");
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("timeline_rows_v3")
+            .auto_shrink([false, false])
+            .max_height(viewport_height)
+            .show(ui, |ui| {
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(timeline_width, content_height),
+                    egui::Sense::click_and_drag(),
+                );
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 2.0, Color32::from_rgb(20, 20, 30));
+                let grid_left = rect.left() + label_width;
+                let grid_width = (rect.width() - label_width).max(1.0);
+                let frame_x = |frame: u32| {
+                    grid_left + timeline_frame_start_fraction(frame, total) * grid_width
+                };
+                let frame_end_x =
+                    |frame: u32| grid_left + timeline_frame_end_fraction(frame, total) * grid_width;
+                for f in FIRST_GAME_FRAME..=total {
+                    if f != FIRST_GAME_FRAME && f % 5 != 0 {
+                        continue;
+                    }
+                    let x = frame_x(f);
+                    let major = f == FIRST_GAME_FRAME || f % 10 == 0;
+                    painter.line_segment(
+                        [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                        egui::Stroke::new(
+                            1.0,
+                            if major {
+                                Color32::from_gray(65)
+                            } else {
+                                Color32::from_gray(35)
+                            },
+                        ),
+                    );
+                    if major {
+                        painter.text(
+                            egui::pos2(x + 2.0, rect.top() + 2.0),
+                            egui::Align2::LEFT_TOP,
+                            f.to_string(),
+                            egui::FontId::monospace(9.0),
+                            Color32::from_gray(135),
+                        );
+                    }
+                }
+                for (index, row) in rows.iter().enumerate() {
+                    let y = rect.top() + 22.0 + index as f32 * row_height;
+                    if index % 2 == 0 {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(rect.left(), y),
+                                egui::pos2(rect.right(), y + row_height),
+                            ),
+                            0.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 5),
+                        );
+                    }
+                    painter
+                        .with_clip_rect(egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), y),
+                            egui::pos2(grid_left - 2.0, y + row_height),
+                        ))
+                        .text(
+                            egui::pos2(rect.left() + 4.0, y + row_height * 0.5),
+                            egui::Align2::LEFT_CENTER,
+                            &row.label,
+                            egui::FontId::monospace(10.0),
+                            row.color,
+                        );
+                    let start = frame_x(row.start.min(total));
+                    let end = frame_end_x(row.end.max(row.start).min(total)).max(start + 3.0);
+                    let selected = match &row.selection {
+                        TimelineSelection::Hitbox(i) => self.selected_hitbox == Some(*i),
+                        TimelineSelection::Effect(i) => self.state.selected_effect_call == Some(*i),
+                        TimelineSelection::Command { family, site } => self
+                            .selected_command
+                            .as_ref()
+                            .is_some_and(|(selected_family, selected_site)| {
+                                selected_family == family && selected_site == site
+                            }),
+                    };
+                    let bar = egui::Rect::from_min_max(
+                        egui::pos2(start, y + 3.0),
+                        egui::pos2(end.min(rect.right()), y + row_height - 3.0),
+                    );
+                    painter.rect_filled(
+                        bar,
+                        2.0,
+                        egui::Color32::from_rgba_unmultiplied(
+                            row.color.r(),
+                            row.color.g(),
+                            row.color.b(),
+                            if selected { 235 } else { 170 },
+                        ),
+                    );
+                    if selected {
+                        painter.rect_stroke(
+                            bar,
+                            2.0,
+                            egui::Stroke::new(1.5, Color32::WHITE),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+                let playhead = frame_x(current);
+                painter.line_segment(
+                    [
+                        egui::pos2(playhead, rect.top()),
+                        egui::pos2(playhead, rect.bottom()),
+                    ],
+                    egui::Stroke::new(2.0, Color32::WHITE),
+                );
+                if response.dragged() || response.clicked() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let row_hit = if response.clicked() && pos.y >= rect.top() + 22.0 {
+                            let index = ((pos.y - rect.top() - 22.0) / row_height) as usize;
+                            rows.get(index).cloned()
+                        } else {
+                            None
+                        };
+                        if let Some(row) = row_hit {
+                            self.select_timeline_row(&row);
+                        } else {
+                            let fraction = ((pos.x - grid_left) / grid_width).clamp(0.0, 1.0);
+                            self.state.current_frame = timeline_frame_at_fraction(fraction, total);
+                            self.state.playing = false;
+                        }
+                    }
+                }
+            });
+    }
+
+    #[allow(dead_code)]
+    fn draw_scrubber_legacy(&mut self, ui: &mut Ui) {
         let total = self
             .state
             .total_frames
@@ -22043,6 +23673,8 @@ impl VisionaryApp {
                         } else {
                             Some(row)
                         };
+                        self.primary_tab = PrimaryEditorTab::Collisions;
+                        self.inspector_focus = InspectorFocus::Primary;
                     } else {
                         // Scrub the playhead
                         let t = ((pos.x - rect.left()) / w).clamp(0.0, 1.0);
@@ -22189,6 +23821,21 @@ impl eframe::App for VisionaryApp {
             ctx.request_repaint_after(next);
         }
 
+        // History is captured only after background loading and playback have settled.  This
+        // keeps navigation and animation state out of the edit stack while still covering every
+        // main-window editor, including the independently visible Visual effects panel.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Z)) {
+            self.apply_history_action(HistoryAction::Undo);
+            self.history_suppress_frame = true;
+        } else if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Z)
+                || i.consume_key(egui::Modifiers::CTRL, egui::Key::Y)
+        }) {
+            self.apply_history_action(HistoryAction::Redo);
+            self.history_suppress_frame = true;
+        }
+        self.begin_history_frame();
+
         // Edit log window
         if self.show_edit_log {
             let t = self.perf.start();
@@ -22317,8 +23964,8 @@ impl eframe::App for VisionaryApp {
                             self.eff_editor.queue_load(&p);
                         }
                     }
-                    ui.checkbox(&mut self.state.show_effects_panel, "Effects panel")
-                        .on_hover_text("Effect spawns of the current move");
+                    ui.checkbox(&mut self.state.show_effects_panel, "Visual effects panel")
+                        .on_hover_text(VISUAL_EFFECTS_DESCRIPTION);
                     ui.checkbox(&mut self.show_transplant, "Transplant Effects")
                         .on_hover_text(
                             "Transplant any effect from another EFF into the current fighter's \
@@ -22431,10 +24078,49 @@ impl eframe::App for VisionaryApp {
                 ui.colored_label(dot, "●");
                 ui.label(egui::RichText::new(gtxt).small());
                 ui.separator();
-                ui.label(egui::RichText::new(&self.state.status).color(egui::Color32::LIGHT_GRAY));
             });
         });
         self.perf.end("menu_bar", t_menu);
+
+        // Keep transient fetch/export/live-link messages out of the command row.  The narrow
+        // strip remains visible while the editor tabs and timeline resize, so the user can tell
+        // whether a value is merely staged or has reached the game without sacrificing a menu
+        // button to a long status sentence.
+        egui::Panel::bottom("status_strip")
+            .default_size(24.0)
+            .min_size(24.0)
+            .max_size(24.0)
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Status").small().strong())
+                        .on_hover_text(
+                        "The latest load, edit, live-sync, or export result for the main editor.",
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(&self.state.status)
+                            .small()
+                            .color(Color32::LIGHT_GRAY),
+                    );
+                    if !self.state.acmd_source.is_empty() {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("Source: {}", self.state.acmd_source))
+                                .small()
+                                .color(Color32::GRAY),
+                        );
+                    }
+                    if self.has_undo() {
+                        ui.separator();
+                        ui.label(
+                            RichText::new("Unsaved edits")
+                                .small()
+                                .color(Color32::YELLOW),
+                        );
+                    }
+                });
+            });
 
         // Bottom timeline
         let t = self.perf.start();
@@ -22983,11 +24669,26 @@ impl eframe::App for VisionaryApp {
             self.preview_transplant_result(&fighter);
         }
 
-        // Effects panel (right side, shown when toggled)
-        if self.state.show_effects_panel {
+        // On a narrow main window the viewport gets a usable minimum width by showing only the
+        // inspector that was focused most recently.  Wide windows keep the two panels separate
+        // and visible together, as before.
+        let compact_inspectors = ui.available_width() < 1180.0;
+        let show_effects_here = self.state.show_effects_panel
+            && (!compact_inspectors || self.inspector_focus == InspectorFocus::Effects);
+        let show_primary_here = !compact_inspectors
+            || self.inspector_focus == InspectorFocus::Primary
+            || !self.state.show_effects_panel;
+
+        // Visual effects panel (right side, shown when toggled)
+        if show_effects_here {
             let t = self.perf.start();
-            egui::Panel::right("effects_panel")
-                .min_size(220.0)
+            egui::Panel::right("effects_panel_layout_v2")
+                // Start at a useful width, but let the user drag the divider as far as the
+                // window allows. Long editor rows scroll horizontally inside the panel, so the
+                // panel's contents never force it wider or get compressed to fit.
+                .default_size(320.0)
+                .min_size(240.0)
+                .resizable(true)
                 .show_inside(ui, |ui| {
                     self.draw_effects_panel(ui);
                 });
@@ -23003,21 +24704,29 @@ impl eframe::App for VisionaryApp {
 
         // Left panel
         let t = self.perf.start();
-        egui::Panel::left("left_panel")
-            .min_size(200.0)
+        egui::Panel::left("left_panel_layout_v2")
+            .default_size(240.0)
+            .min_size(190.0)
+            .resizable(true)
             .show_inside(ui, |ui| {
                 self.draw_left_panel(ui);
             });
         self.perf.end("left_panel", t);
 
         // Right panel
-        let t = self.perf.start();
-        egui::Panel::right("right_panel")
-            .min_size(240.0)
-            .show_inside(ui, |ui| {
-                self.draw_right_panel(ui);
-            });
-        self.perf.end("right_panel", t);
+        if show_primary_here {
+            let t = self.perf.start();
+            egui::Panel::right("right_panel_layout_v2")
+                .default_size(400.0)
+                .min_size(320.0)
+                .resizable(true)
+                .show_inside(ui, |ui| {
+                    self.draw_right_panel(ui);
+                });
+            self.perf.end("right_panel", t);
+        } else {
+            ui.skip_ahead_auto_ids(1);
+        }
 
         // Commit any edits made this frame to the log
         let t = self.perf.start();
@@ -23363,12 +25072,96 @@ impl eframe::App for VisionaryApp {
                             }
                         }
 
-                        // Effect spawn markers: blue circles at bone position + script offset.
+                        // A viewport click should be able to enter the same inspector as a
+                        // timeline click.  The draw loop above deliberately stays paint-only;
+                        // this small second pass uses the same bone convention to hit-test the
+                        // visible center of each active collision without changing export data.
                         let click_pos = ui.input(|i| {
                             i.pointer
                                 .interact_pos()
                                 .filter(|p| i.pointer.primary_clicked() && rect.contains(*p))
                         });
+                        let mut best_hitbox_pick: Option<(usize, f32)> = None;
+                        if let Some(cp) = click_pos {
+                            for (i, hb) in self.state.hitboxes.iter().enumerate() {
+                                if hb.category == crate::data::CAT_ABS
+                                    || hb.category == crate::data::CAT_ATTACK_FP
+                                {
+                                    continue;
+                                }
+                                let active = hb.active_frames_empty()
+                                    || (frame_num >= hb.active_start && frame_num <= hb.active_end);
+                                if !active {
+                                    continue;
+                                }
+                                let (world_pos, world_radius) = if let Some(wind) = hb
+                                    .wind
+                                    .as_ref()
+                                    .filter(|wind| hb.category == 2 && wind.is_valid())
+                                {
+                                    let root = bone_matrices
+                                        .get("top")
+                                        .or_else(|| bone_matrices.get("Top"))
+                                        .copied()
+                                        .unwrap_or(glam::Mat4::IDENTITY);
+                                    let root = glam::Mat4::from_translation(root.col(3).truncate());
+                                    let [x, y] = wind.offset();
+                                    let center = wind_area_world_point(root, x, y);
+                                    let radius = if wind.is_radial() {
+                                        wind.radius()
+                                    } else {
+                                        let [width, height] = wind.dimensions();
+                                        (width * width + height * height).sqrt() * 0.5
+                                    };
+                                    (center, radius.max(1.0))
+                                } else {
+                                    let Some(bone_mat) = bone_matrices
+                                        .get(&hb.bone_name)
+                                        .or_else(|| bone_matrices.get(&hb.bone_name.to_lowercase()))
+                                        .copied()
+                                    else {
+                                        continue;
+                                    };
+                                    let bone_mat = if is_system_bone(&hb.bone_name) {
+                                        glam::Mat4::from_translation(bone_mat.col(3).truncate())
+                                    } else {
+                                        bone_mat
+                                    };
+                                    let start = bone_mat.transform_point3(glam::Vec3::new(
+                                        hb.offset_x,
+                                        hb.offset_y,
+                                        hb.offset_z,
+                                    ));
+                                    let center = hb
+                                        .capsule_end
+                                        .map(|[x, y, z]| {
+                                            (start
+                                                + bone_mat
+                                                    .transform_point3(glam::Vec3::new(x, y, z)))
+                                                * 0.5
+                                        })
+                                        .unwrap_or(start);
+                                    (center, hb.size.max(0.5))
+                                };
+                                let Some(screen_pos) = rs.world_to_screen(world_pos, rect) else {
+                                    continue;
+                                };
+                                let radius = rs
+                                    .world_radius_to_screen(world_pos, world_radius, rect)
+                                    .unwrap_or(world_radius * 4.0)
+                                    .clamp(8.0, 140.0);
+                                let distance = cp.distance(screen_pos);
+                                if distance <= radius
+                                    && best_hitbox_pick
+                                        .map(|(_, best)| distance < best)
+                                        .unwrap_or(true)
+                                {
+                                    best_hitbox_pick = Some((i, distance));
+                                }
+                            }
+                        }
+
+                        // Effect spawn markers: blue circles at bone position + script offset.
                         let mut best_pick: Option<(usize, f32)> = None;
                         for (i, ec) in self.state.effects.iter().enumerate() {
                             if ec.disabled {
@@ -23442,6 +25235,12 @@ impl eframe::App for VisionaryApp {
                         if let Some((i, _)) = best_pick {
                             self.state.selected_effect_call = Some(i);
                             self.state.show_effects_panel = true;
+                            self.inspector_focus = InspectorFocus::Effects;
+                        } else if let Some((i, _)) = best_hitbox_pick {
+                            self.selected_hitbox = Some(i);
+                            self.state.selected_effect_call = None;
+                            self.primary_tab = PrimaryEditorTab::Collisions;
+                            self.inspector_focus = InspectorFocus::Primary;
                         }
                     }
                 }
@@ -23467,6 +25266,7 @@ impl eframe::App for VisionaryApp {
         // Same reason: the source window and the editor panels have both had their turn, so
         // a value changed in either one is reconciled against the other before the next frame.
         self.reconcile_source_buffer(&ctx);
+        self.finish_history_frame();
         self.perf.end_frame(frame_t);
     }
 
@@ -24361,12 +26161,41 @@ fn nothing_to_load(
 /// per row, so it is scoped to the call being edited.
 ///
 /// Returns whether the name changed.
-fn expression_token_edit(ui: &mut Ui, token: &mut String, salt: (usize, usize)) -> bool {
+fn expression_token_edit(
+    ui: &mut Ui,
+    field: &str,
+    token: &mut String,
+    salt: (usize, usize),
+) -> bool {
+    expression_token_edit_with_hint(
+        ui,
+        field,
+        token,
+        salt,
+        "Authored source token. It is kept verbatim so named constants and casts survive export and source sync.",
+    )
+}
+
+fn expression_token_edit_with_hint(
+    ui: &mut Ui,
+    field: &str,
+    token: &mut String,
+    salt: (usize, usize),
+    hint: &str,
+) -> bool {
+    ui.label(
+        RichText::new(field)
+            .small()
+            .color(egui::Color32::from_gray(170)),
+    )
+    .on_hover_text(hint);
     ui.add(
         egui::TextEdit::singleline(token)
             .id_salt(("expression_token", salt.0, salt.1))
-            .desired_width(220.0),
+            .desired_width(220.0)
+            .hint_text("source token"),
     )
+    .on_hover_text(hint)
     .changed()
 }
 
@@ -24979,6 +26808,47 @@ fn run_export(
 
 // ── Persistent config ─────────────────────────────────────────────────────────
 
+fn save_timeline_filters(filters: TimelineFilters) {
+    let Some(dest) = config_path("editor_timeline_filters") else {
+        return;
+    };
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = format!(
+        "v1,{},{},{},{}",
+        u8::from(filters.collisions),
+        u8::from(filters.effects),
+        u8::from(filters.motion_state),
+        u8::from(filters.audio_feedback)
+    );
+    let _ = std::fs::write(dest, body);
+}
+
+fn load_timeline_filters() -> TimelineFilters {
+    let Some(dest) = config_path("editor_timeline_filters") else {
+        return TimelineFilters::default();
+    };
+    let Ok(body) = std::fs::read_to_string(dest) else {
+        return TimelineFilters::default();
+    };
+    let values: Vec<bool> = body
+        .trim()
+        .split(',')
+        .skip(1)
+        .map(|value| value == "1")
+        .collect();
+    if values.len() != 4 {
+        return TimelineFilters::default();
+    }
+    TimelineFilters {
+        collisions: values[0],
+        effects: values[1],
+        motion_state: values[2],
+        audio_feedback: values[3],
+    }
+}
+
 fn config_path(key: &str) -> Option<std::path::PathBuf> {
     let base = dirs::config_dir()?;
     Some(base.join("visionary").join(key))
@@ -25252,6 +27122,39 @@ fn save_recent_effs(list: &[PathBuf]) {
             .collect::<Vec<_>>()
             .join("\n");
         let _ = std::fs::write(&dest, body);
+    }
+}
+
+#[cfg(test)]
+mod editor_timeline_filter_tests {
+    use super::{timeline_frame_at_fraction, TimelineCategory, TimelineFilters, FIRST_GAME_FRAME};
+
+    #[test]
+    fn filters_start_with_every_editor_category_visible() {
+        let filters = TimelineFilters::default();
+        assert!(filters.shows(TimelineCategory::Collisions));
+        assert!(filters.shows(TimelineCategory::Effects));
+        assert!(filters.shows(TimelineCategory::MotionState));
+        assert!(filters.shows(TimelineCategory::AudioFeedback));
+    }
+
+    #[test]
+    fn filters_hide_only_the_category_the_user_toggles() {
+        let filters = TimelineFilters {
+            effects: false,
+            ..TimelineFilters::default()
+        };
+        assert!(filters.shows(TimelineCategory::Collisions));
+        assert!(!filters.shows(TimelineCategory::Effects));
+        assert!(filters.shows(TimelineCategory::MotionState));
+        assert!(filters.shows(TimelineCategory::AudioFeedback));
+    }
+
+    #[test]
+    fn timeline_seek_keeps_the_one_based_game_frame_contract() {
+        assert_eq!(timeline_frame_at_fraction(0.0, 60), FIRST_GAME_FRAME);
+        assert_eq!(timeline_frame_at_fraction(0.5, 60), 31);
+        assert_eq!(timeline_frame_at_fraction(1.0, 60), 60);
     }
 }
 

@@ -70,6 +70,37 @@ the executable for native window decorations on Windows and X11.
 Visionary reads the dumped data from its existing location and remembers the
 selected export root for future sessions.
 
+### Editing a move
+
+The main window keeps editing tasks in one focused inspector. Select a move in
+the Fighters list, then use the tabs beside the viewport:
+
+- **Collisions** contains attacks, grabs, wind, hurtbox, and collision-priority
+  data. Common values are shown first; **Hit behavior**, **Valid targets**, and
+  other less-used fields stay in clearly named collapsible sections.
+- **Motion & state** contains facing, velocity, kinetic, animation-timing,
+  ground/air, and stored script-state commands.
+- **Sound & feedback** contains move sounds, camera shake, controller rumble,
+  and supported expression-script animation controls.
+
+The **Visual effects** panel is independent, so it can remain open beside the
+primary editor on a wide window. On a narrow window, the last inspector you
+used is shown and the other one can be brought forward with its focus button.
+Section names use plain language first and show the native macro name where it
+matters. Hover any section name to see what it controls, including engine terms
+such as **Work flags** and **kinetic energy**.
+
+The timeline below the viewport is a shared view of every loaded category.
+Click a row or its bar to select the item and seek to its first game frame;
+click empty space to scrub. Category filters are manual and remembered between
+sessions. Game frames are one-based, matching the frame numbers used by the
+editor and the source scripts.
+
+Edits preview immediately. **Undo** and **Redo** apply to the current move and
+remain available when you switch moves during the session. **Restore move**
+discards the current move's staged collision, motion, effect, sound, and
+expression edits and reloads the loaded source or capture baseline.
+
 To hide a fighter from the sidebar, right-click its name and choose **Forget
 fighter**. Visionary removes that fighter's cached scripts, saved edits, and
 live effect previews while leaving the dumped and mod files unchanged. Use the
@@ -296,7 +327,7 @@ a fighter-specific kind such as Terry's final smash. Two of these often sit in
 one block naming the same id and differing only in that, so they are matched on
 the kind and never on the id.
 
-Intangibility is the **Hurtboxes** section under the collision list. `HIT_NODE`
+Intangibility is the **Hurtbox states** section under **Collision entries**. `HIT_NODE`
 and `HIT_NO` set how one bone or one numbered hurtbox group receives hits, and
 `WHOLE_HIT` sets every bone at once — shown as **all bones**, with no target to
 pick because the macro has none. The game holds that setting until something
@@ -323,7 +354,7 @@ things, so one is never used to close the other. It appears among the hurtboxes
 because that is where a `game_` script's statements are edited; in an `effect_`
 script the pair is edited with the colour commands below.
 
-**Hitbox tuning** is the section below that, for the two commands that retune a
+**Active hitbox changes** is the section below that, for the two commands that retune a
 hitbox which is *already out*. `ATK_POWER` re-sets a box's damage and
 `ATK_SET_SHIELD_SETOFF_MUL` scales the shield push-off it applies; each names the
 hitbox id it acts on, and each runs on its own frame. That frame is the reason
@@ -368,7 +399,7 @@ export instead of being written into your source. `SET_SEARCH_SIZE_EXIST`, which
 re-sizes a box already out, is not modelled: it belongs with the hitbox tuning
 above rather than here, and no vanilla script uses it.
 
-**Sounds** get their own band at the bottom of the timeline, one row per call,
+**Move sounds** get their own band at the bottom of the timeline, one row per call,
 each a tick at the frame it fires on with the sound's name beside it. A move's
 `sound_` script is read alongside its hitboxes and effects, so you can see the
 swing that goes with a hitbox, the footsteps a run plays, and the landing thud
@@ -379,7 +410,7 @@ because it silences a sound rather than playing one.
 A sound is a tick and not a bar on purpose: the script says when one starts and
 nothing in ACMD says when it ends.
 
-A **Sounds** section below the hurtboxes lists the same calls with the sound name
+A **Move sounds** section in **Sound & feedback** lists the same calls with the sound name
 editable, so you can give a punch a heavier impact or swap a fighter's footsteps
 for someone else's. The name is a label in the fighter's own sound bank; one the
 bank does not have plays nothing rather than reporting an error, so a typo is
@@ -396,8 +427,8 @@ game keeps playing the original until the mod is built and installed. A move
 whose sounds you have not touched is left out of the export entirely, so the
 fighter's own `sound_` script keeps playing exactly as it did.
 
-**Movement** points appear in their own timeline lanes and in the Movement
-section of the editor:
+**Motion & state commands** appear in their own timeline lanes and in the
+matching editor tab:
 
 - `REVERSE_LR` places or removes a facing-direction change.
 - `SET_SPEED` edits the direct x/y velocity written at a point.
@@ -419,7 +450,15 @@ section of the editor:
 - `MotionModule::set_rate_partial` edits the playback rate of a named partial-animation part while preserving that part token.
 - `WorkModule::on_flag` and `WorkModule::off_flag` edit the authored flag token for the supported direct calls.
 - `WorkModule::enable_transition_term`, `unable_transition_term`, `enable_transition_term_group`, and `unable_transition_term_group_ex` edit the authored transition-term or group token for the supported direct calls.
+- `WorkModule::inc_int` increments the named stored integer counter.
 - `WorkModule::set_int` and `WorkModule::set_float` edit the authored value and WorkModule slot tokens for the supported direct calls.
+
+**Work flags** is the engine's accurate name for named on/off values stored for
+a fighter. Move and status scripts use them to remember or signal conditions,
+such as enabling a combo or marking a move phase; the authored flag name tells
+you the exact purpose. Nearby **Allowed state transitions**, **Increment stored
+counter**, and **Stored script values** sections expose the corresponding
+WorkModule state without hiding its native command name.
 
 Value controls edit their point values while keeping their source frame. Placement
 controls such as `REVERSE_LR` and `SET_AIR` change a point's presence or frame.

@@ -100,6 +100,35 @@ impl MoveGroup {
             MoveGroup::Other => "Other",
         }
     }
+
+    /// Plain-language help for the matching move-list section.
+    pub fn description(self) -> &'static str {
+        match self {
+            MoveGroup::Jab => "Standing neutral attacks, including rapid-jab phases.",
+            MoveGroup::Tilt => "Grounded directional attacks that are not smash attacks.",
+            MoveGroup::Smash => "Side, up, and down smash attacks, including charge phases.",
+            MoveGroup::DashAttack => "Attacks performed from a dash.",
+            MoveGroup::Aerial => "Neutral, forward, back, up, and down aerial attacks.",
+            MoveGroup::Special => "This fighter's neutral, side, up, and down special moves.",
+            MoveGroup::CopySpecial => {
+                "Special moves copied from another fighter, primarily Kirby copy abilities."
+            }
+            MoveGroup::Grab => "Grab, pummel, catch, and throw animations.",
+            MoveGroup::Ledge => "Ledge catches, climbs, attacks, rolls, and related states.",
+            MoveGroup::FinalSmash => "Final Smash animations and their supporting phases.",
+            MoveGroup::Movement => "Walking, running, dashing, turning, and braking animations.",
+            MoveGroup::JumpLand => "Jump, fall, and landing animations.",
+            MoveGroup::Idle => "Standing idle, crouching, and related waiting animations.",
+            MoveGroup::Defense => "Shield, dodge, and other defensive animations.",
+            MoveGroup::Damage => "Hit reactions, knockdown, capture, sleep, and recovery states.",
+            MoveGroup::Item => "Shared item-use and weapon-specific animations.",
+            MoveGroup::Presentation => "Taunts, entrances, victories, losses, and result poses.",
+            MoveGroup::Situational => {
+                "Uncommon environment or mechanic states such as swimming, ladders, and wall contact."
+            }
+            MoveGroup::Other => "Moves whose internal names do not fit a known category.",
+        }
+    }
 }
 
 /// Weapon movesets that do not share the `_swing` shape, matched as prefixes.
@@ -345,6 +374,21 @@ mod tests {
     #[test]
     fn an_unnamed_motion_still_gets_a_group() {
         assert_eq!(group_of("0x00000b1a8c28e7"), MoveGroup::Other);
+    }
+
+    #[test]
+    fn every_move_list_section_has_explanatory_hover_text() {
+        for group in MoveGroup::ORDER
+            .into_iter()
+            .chain(std::iter::once(MoveGroup::Other))
+        {
+            assert!(!group.label().trim().is_empty(), "{group:?} has no label");
+            assert!(
+                group.description().split_whitespace().count() >= 4,
+                "{} does not explain its contents",
+                group.label()
+            );
+        }
     }
 
     /// Every distinct move name in the corpus lands in a group, and few land in `Other`.
