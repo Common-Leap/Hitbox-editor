@@ -2750,7 +2750,7 @@ desktop suite passed 619 tests plus 1 existing ignored benchmark, the six deploy
 and the Skyline plugin release build passed. No live game runtime was used, so hook behavior on
 hardware remains explicitly unverified.
 
-#### [!] E1q — direct `MotionModule::set_rate_partial` points (game slice complete; expression identity bounded)
+#### [x] E1q — direct `MotionModule::set_rate_partial` points (completed 2026-08-08; live runtime unverified)
 
 The retained public dumped-script corpus contains 44 exact direct
 `MotionModule::set_rate_partial(receiver, part_kind, rate)` calls in each of the standard and
@@ -2758,24 +2758,25 @@ HDR trees. Every standard call uses `agent.module_accessor`, every HDR call uses
 measured part tokens are the fighter upper-body part plus Pac-Man and Big Pac-Man material parts.
 The linked binding is the direct `(BattleObjectModuleAccessor, i32, f32) -> ()` primitive.
 
-The 42 `game_` calls are covered on the five measured surfaces: the typed parser/IR preserves the
-authored part token and numeric rate; the movement panel and timeline expose the point; export
-reproduces the direct call; source write-back retunes only an existing numeric rate; and the live
-editor/plugin wire uses category 31, the captured numeric part kind plus pristine rate, and a
-positive finite replacement. Part-kind changes, add/remove, retiming, malformed calls, and zero
-live replacements remain source/export-only or explicitly reported as unrepresentable.
+All 44 calls are covered on the five measured surfaces: the typed parser/IR preserves the
+authored part token and numeric rate; the movement or expression panel and timeline expose the
+point; export reproduces the direct call in its source category; source write-back retunes only an
+existing numeric rate; and the live editor/plugin wire uses category 31, the captured numeric part
+kind plus pristine rate, and a positive finite replacement. Part-kind changes, add/remove,
+retiming, malformed calls, and zero live replacements remain source/export-only or explicitly
+reported as unrepresentable.
 
 The two Pac-Man `expression_` calls remain visible and editable in the expression panel, export
-with the expression script, and write back only their numeric rate. Their live path is now guarded
-by the strongest identity the current capture contract can prove: a changed expression point is
-sent only when exactly one direct partial-rate capture exists at that frame and the parsed `game_`
-script has no partial-rate call there. If the frame has multiple direct calls or an opposite
-category call, the edit remains source/export-only; `CaptureLine` still carries no originating
-ACMD category, so a same-frame pair cannot be separated without changing the capture contract.
+with the expression script, and write back only their numeric rate. Their live path resolves the
+three measured source part tokens to the pinned native integers and selects the sole capture with
+the exact `(part_kind, pristine_rate, frame)` identity used by the plugin hook. Same-frame calls
+from opposite categories are therefore separable when their native keys differ; duplicate exact
+keys, unresolved source tokens, or missing/ambiguous captures remain source/export-only. The
+capture contract still does not need an originating ACMD category for this measured identity.
 `set_frame_partial` remains separate because its frame and sync-boolean payloads are not
 interchangeable with this rate-only shape.
 
-Offline validation for this slice passed: 653 desktop tests, 1 existing ignored renderer
+Offline validation for this slice passed: 661 desktop tests, 1 existing ignored renderer
 benchmark, all 6 deployment tests, strict Clippy, format/diff checks, the locked Linux release
 build, the Skyline plugin release build, and the Windows MSVC cross-build. No emulator, game, or
 UI automation was run, so live hook behavior remains explicitly unverified. The E1 parent remains

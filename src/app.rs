@@ -6658,7 +6658,6 @@ impl VisionaryApp {
                 expression_partial_pristine,
                 &expression_partial_shown,
                 &self.state.motion_module_set_rate_partial_pristine,
-                true,
             );
         let partial_key = format!("{mv_key}#expression_motion_module_set_rate_partial");
         if partial_rules.is_empty() {
@@ -14652,7 +14651,7 @@ impl VisionaryApp {
         }
     }
 
-    fn motion_module_set_rate_partial_capture_for<'a>(
+    fn motion_module_set_rate_partial_capture_by_occurrence<'a>(
         captures: &'a [crate::game_link::CaptureLine],
         pristine: &[crate::data::MotionModuleSetRatePartialEvent],
         index: usize,
@@ -14672,18 +14671,51 @@ impl VisionaryApp {
             .nth(occurrence)
     }
 
-    /// Return the sole direct partial-rate capture at one script frame, if the hook stream makes
-    /// that call unambiguous. The binding hook does not know whether its caller was `game_` or
-    /// `expression_`; a unique frame is therefore the strongest category-free identity the
-    /// editor can safely use for an expression rule.
-    fn unique_motion_module_set_rate_partial_capture_for(
+    /// Resolve the measured source part-kind tokens to the integer values passed to the native
+    /// binding. These values come from the pinned `skyline-smash` `lua_const.rs` table: upper body
+    /// is 1, fighter Pac-Man material is 5, and weapon Big Pac-Man material is 1. Unknown source
+    /// expressions stay outside the live rule path.
+    fn motion_module_set_rate_partial_source_part_kind(part_kind: &str) -> Option<i64> {
+        let token = part_kind.trim();
+        if let Ok(value) = token.parse::<i64>() {
+            return Some(value);
+        }
+        match token.strip_prefix('*').unwrap_or(token) {
+            "FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY" => Some(1),
+            "FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL" => Some(5),
+            "WEAPON_PACMAN_BIGPACMAN_MOTION_PART_SET_KIND_MATERIAL" => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Return the sole direct partial-rate capture with the exact native identity at one script
+    /// frame. The capture has no ACMD category, but the native hook key includes both the integer
+    /// part kind and pristine rate, so distinct same-frame `game_`/`expression_` calls can still
+    /// be separated without inventing category metadata.
+    fn motion_module_set_rate_partial_capture_for_identity(
         captures: &[crate::game_link::CaptureLine],
         frame: u32,
+        part_kind: i64,
+        pristine_rate: f32,
     ) -> Option<&crate::game_link::CaptureLine> {
         let mut matches = captures.iter().filter(|line| {
-            line.func == crate::data::MotionModuleSetRatePartialCall::FUNC
-                && Self::motion_to_script_frame(line.frame) == frame
-                && line.args.len() == 2
+            if line.func != crate::data::MotionModuleSetRatePartialCall::FUNC
+                || Self::motion_to_script_frame(line.frame) != frame
+                || line.args.len() != 2
+            {
+                return false;
+            }
+            let Some(captured_part_kind) = line
+                .args
+                .first()
+                .and_then(Self::motion_module_set_rate_partial_capture_part_kind)
+            else {
+                return false;
+            };
+            let Some(captured_rate) = line.args.get(1).and_then(|arg| arg.as_f32()) else {
+                return false;
+            };
+            captured_part_kind == part_kind && captured_rate.to_bits() == pristine_rate.to_bits()
         });
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
@@ -14699,21 +14731,79 @@ impl VisionaryApp {
         }
     }
 
+    fn motion_module_set_rate_partial_source_id(
+        event: &crate::data::MotionModuleSetRatePartialEvent,
+    ) -> Option<(i64, u32)> {
+        Some((
+            Self::motion_module_set_rate_partial_source_part_kind(&event.call.part_kind)?,
+            event.call.rate.to_bits(),
+        ))
+    }
+
+    /// Whether two source points may address the same category-free native hook key.
+    ///
+    /// An unresolved part token is deliberately treated as overlapping any point at the same
+    /// frame: the editor cannot prove that its native integer identity differs. This keeps
+    /// unsupported source shapes source/export-only while allowing distinct measured keys to
+    /// coexist across `game_` and `expression_`.
+    fn motion_module_set_rate_partial_may_share_identity(
+        left: &crate::data::MotionModuleSetRatePartialEvent,
+        right: &crate::data::MotionModuleSetRatePartialEvent,
+    ) -> bool {
+        if left.frame != right.frame {
+            return false;
+        }
+        match (
+            Self::motion_module_set_rate_partial_source_id(left),
+            Self::motion_module_set_rate_partial_source_id(right),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        }
+    }
+
+    fn motion_module_set_rate_partial_capture_identity_for(
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::MotionModuleSetRatePartialEvent],
+        index: usize,
+        event: &crate::data::MotionModuleSetRatePartialEvent,
+    ) -> Option<(i64, u32)> {
+        let donor = if let Some(part_kind) =
+            Self::motion_module_set_rate_partial_source_part_kind(&event.call.part_kind)
+        {
+            Self::motion_module_set_rate_partial_capture_for_identity(
+                captures,
+                event.frame,
+                part_kind,
+                event.call.rate,
+            )
+        } else {
+            Self::motion_module_set_rate_partial_capture_by_occurrence(
+                captures, pristine, index, event,
+            )
+        }?;
+        Some((
+            donor
+                .args
+                .first()
+                .and_then(Self::motion_module_set_rate_partial_capture_part_kind)?,
+            donor.args.get(1).and_then(|arg| arg.as_f32())?.to_bits(),
+        ))
+    }
+
     /// Build direct partial-rate rules for one ACMD category.
     ///
     /// The native hook receives only `(boma, part_kind, rate)`, so it cannot distinguish a
-    /// `game_` call from an `expression_` call. For the game path, an expression call on the same
-    /// source frame is consequently a hard boundary: even a valid game rule could retune both
-    /// calls. For the expression path, require exactly one parsed call in that category and one
-    /// captured direct call at the frame. This admits the measured Pac-Man expression points
-    /// without pretending that a same-frame pair has a recoverable category identity.
+    /// `game_` call from an `expression_` call. The measured integer part kind and pristine rate
+    /// are also present in the hook key, so distinct same-frame calls remain separable. If either
+    /// category has an unresolved part token, or both categories share the same resolved key, the
+    /// point remains source/export-only.
     fn motion_module_set_rate_partial_rules_for_category(
         motion: u64,
         captures: &[crate::game_link::CaptureLine],
         pristine: &[crate::data::MotionModuleSetRatePartialEvent],
         shown: &[crate::data::MotionModuleSetRatePartialEvent],
         opposite_category: &[crate::data::MotionModuleSetRatePartialEvent],
-        require_unique_capture: bool,
     ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
         use crate::game_link::{HbOverridesWire, HitboxRuleWire};
         if pristine.len() != shown.len() {
@@ -14735,10 +14825,18 @@ impl VisionaryApp {
             }
             if opposite_category
                 .iter()
-                .any(|other| other.frame == was.frame)
+                .any(|other| Self::motion_module_set_rate_partial_may_share_identity(was, other))
             {
-                // The direct binding hook has no ACMD category. A rule for this frame could
-                // therefore rewrite the other category's call as well.
+                // The direct binding hook has no ACMD category. Reject only a potentially shared
+                // native key; a different measured part/rate identity is safe to separate.
+                unrepresentable += 1;
+                continue;
+            }
+            if pristine.iter().enumerate().any(|(other_index, other)| {
+                other_index != index
+                    && Self::motion_module_set_rate_partial_may_share_identity(was, other)
+            }) {
+                // Same-category duplicate keys are just as indistinguishable to the primitive.
                 unrepresentable += 1;
                 continue;
             }
@@ -14748,20 +14846,21 @@ impl VisionaryApp {
                 unrepresentable += 1;
                 continue;
             }
-            if require_unique_capture
-                && pristine
-                    .iter()
-                    .filter(|other| other.frame == was.frame)
-                    .count()
-                    != 1
+            let donor = if let Some(part_kind) =
+                Self::motion_module_set_rate_partial_source_part_kind(&was.call.part_kind)
             {
-                unrepresentable += 1;
-                continue;
-            }
-            let donor = if require_unique_capture {
-                Self::unique_motion_module_set_rate_partial_capture_for(captures, was.frame)
+                Self::motion_module_set_rate_partial_capture_for_identity(
+                    captures,
+                    was.frame,
+                    part_kind,
+                    was.call.rate,
+                )
             } else {
-                Self::motion_module_set_rate_partial_capture_for(captures, pristine, index, was)
+                // Unmeasured source expressions retain the old ordered fallback only when the
+                // opposite category has no point on this frame; the guard above enforces that.
+                Self::motion_module_set_rate_partial_capture_by_occurrence(
+                    captures, pristine, index, was,
+                )
             };
             let Some(donor) = donor else {
                 unrepresentable += 1;
@@ -14788,22 +14887,14 @@ impl VisionaryApp {
                 .enumerate()
                 .filter(|(other_index, other)| *other_index != index && other.frame == was.frame)
                 .filter_map(|(other_index, other)| {
-                    let donor = Self::motion_module_set_rate_partial_capture_for(
+                    Self::motion_module_set_rate_partial_capture_identity_for(
                         captures,
                         pristine,
                         other_index,
                         other,
-                    )?;
-                    let part = donor
-                        .args
-                        .first()
-                        .and_then(Self::motion_module_set_rate_partial_capture_part_kind)?;
-                    let rate = donor.args.get(1).and_then(|arg| arg.as_f32())?;
-                    Some((part, rate))
+                    )
                 })
-                .filter(|(part, rate)| {
-                    *part == part_kind && rate.to_bits() == captured_rate.to_bits()
-                })
+                .filter(|(part, rate)| *part == part_kind && *rate == captured_rate.to_bits())
                 .count();
             if duplicate_key != 0 {
                 // The direct hook has only `(part_kind, pristine_rate)` plus frame as its key.
@@ -14851,7 +14942,6 @@ impl VisionaryApp {
             &self.state.motion_module_set_rate_partial_pristine,
             &self.state.script.to_motion_module_set_rate_partial_events(),
             &expression_pristine,
-            false,
         );
         let key = format!("{mv_key}#motion_module_set_rate_partial");
         if rules.is_empty() {
@@ -14873,8 +14963,8 @@ impl VisionaryApp {
         }
     }
 
-    /// Send expression partial-rate edits only when the category-free native hook has a unique
-    /// identity for the point. Same-frame game/expression pairs stay source/export-only.
+    /// Send expression partial-rate edits when the category-free native hook has an exact
+    /// `(part_kind, pristine_rate, frame)` identity for the point.
     fn push_expression_motion_module_set_rate_partial_rules(&mut self) {
         let Some(mv_key) = self.current_move_key() else {
             return;
@@ -14896,7 +14986,6 @@ impl VisionaryApp {
             expression_pristine,
             &expression_shown,
             &self.state.motion_module_set_rate_partial_pristine,
-            true,
         );
         let key = format!("{mv_key}#expression_motion_module_set_rate_partial");
         if rules.is_empty() {
@@ -14913,7 +15002,7 @@ impl VisionaryApp {
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
             self.state.status = format!(
-                "Expression partial-rate edit staged, but {unrepresentable} point(s) need a unique direct capture at their frame with no game_ partial-rate call sharing it"
+                "Expression partial-rate edit staged, but {unrepresentable} point(s) need an exact numeric part/rate capture, a unique same-frame native key, and a positive live replacement"
             );
         }
     }
@@ -26985,7 +27074,7 @@ mod live_effect_capture_tests {
             motion,
             frame: 5.0,
             func: "MotionModule::set_rate_partial".into(),
-            args: vec![A::Int(2), A::Num(0.8)],
+            args: vec![A::Int(1), A::Num(0.8)],
             run: 1,
         }];
         let pristine = crate::acmd::parse_acmd_script(
@@ -27007,7 +27096,6 @@ mod live_effect_capture_tests {
                 &pristine,
                 &edited,
                 &[],
-                false,
             );
         assert_eq!(unrepresentable, 0);
         assert_eq!(rules.len(), 1);
@@ -27019,7 +27107,7 @@ mod live_effect_capture_tests {
             rules[0].hitbox_id,
             Some(crate::game_link::numeric_point_key(
                 crate::data::MotionModuleSetRatePartialCall::FUNC,
-                &[2.0, 0.8]
+                &[1.0, 0.8]
             ))
         );
         assert_eq!(
@@ -27046,14 +27134,43 @@ mod live_effect_capture_tests {
                 &pristine,
                 &edited,
                 &[],
-                false,
             );
         assert!(rules.is_empty());
         assert_eq!(unrepresentable, 1);
     }
 
     #[test]
-    fn expression_partial_rate_live_rules_require_a_unique_category_free_capture() {
+    fn motion_module_set_rate_partial_source_part_kinds_match_native_values() {
+        assert_eq!(
+            VisionaryApp::motion_module_set_rate_partial_source_part_kind(
+                "*FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            VisionaryApp::motion_module_set_rate_partial_source_part_kind(
+                "*FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL"
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            VisionaryApp::motion_module_set_rate_partial_source_part_kind(
+                "*WEAPON_PACMAN_BIGPACMAN_MOTION_PART_SET_KIND_MATERIAL"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            VisionaryApp::motion_module_set_rate_partial_source_part_kind("7"),
+            Some(7)
+        );
+        assert_eq!(
+            VisionaryApp::motion_module_set_rate_partial_source_part_kind("*UNKNOWN_PART"),
+            None
+        );
+    }
+
+    #[test]
+    fn partial_rate_live_rules_use_exact_numeric_identity_without_category_metadata() {
         let motion = hash40::hash40("appeal_lw_l").0;
         let expression_pristine = vec![crate::data::MotionModuleSetRatePartialEvent {
             frame: 8,
@@ -27070,7 +27187,7 @@ mod live_effect_capture_tests {
             motion,
             frame: 7.0,
             func: "MotionModule::set_rate_partial".into(),
-            args: vec![A::Int(3), A::Num(0.0)],
+            args: vec![A::Int(5), A::Num(0.0)],
             run: 1,
         };
 
@@ -27081,7 +27198,6 @@ mod live_effect_capture_tests {
                 &expression_pristine,
                 &expression_shown,
                 &[],
-                true,
             );
         assert_eq!(unrepresentable, 0);
         assert_eq!(rules.len(), 1);
@@ -27089,7 +27205,7 @@ mod live_effect_capture_tests {
             rules[0].hitbox_id,
             Some(crate::game_link::numeric_point_key(
                 crate::data::MotionModuleSetRatePartialCall::FUNC,
-                &[3.0, 0.0]
+                &[5.0, 0.0]
             ))
         );
         assert_eq!(
@@ -27101,28 +27217,15 @@ mod live_effect_capture_tests {
             Some(0.5)
         );
 
-        // A second direct call at the same frame destroys the only category-free identity.
-        let ambiguous = vec![
+        // A different native key at the same frame is still separable, even though the capture
+        // stream does not retain whether either call came from `game_` or `expression_`.
+        let distinct_same_frame = vec![
             capture.clone(),
             CaptureLine {
-                args: vec![A::Int(3), A::Num(0.25)],
+                args: vec![A::Int(1), A::Num(0.8)],
                 ..capture.clone()
             },
         ];
-        let (rules, unrepresentable) =
-            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
-                motion,
-                &ambiguous,
-                &expression_pristine,
-                &expression_shown,
-                &[],
-                true,
-            );
-        assert!(rules.is_empty());
-        assert_eq!(unrepresentable, 1);
-
-        // Even one captured line is unsafe when the parsed game_ script has a point on the same
-        // frame: the binding hook would apply this rule to either caller.
         let game_same_frame = vec![crate::data::MotionModuleSetRatePartialEvent {
             frame: 8,
             call: crate::data::MotionModuleSetRatePartialCall {
@@ -27134,16 +27237,37 @@ mod live_effect_capture_tests {
         let (rules, unrepresentable) =
             VisionaryApp::motion_module_set_rate_partial_rules_for_category(
                 motion,
-                std::slice::from_ref(&capture),
+                &distinct_same_frame,
                 &expression_pristine,
                 &expression_shown,
                 &game_same_frame,
-                true,
+            );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+
+        // Duplicate captured identities remain ambiguous, even when their source categories are
+        // known, because the category-free primitive would see the same rule key twice.
+        let duplicate_identity = vec![capture.clone(), capture.clone()];
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                &duplicate_identity,
+                &expression_pristine,
+                &expression_shown,
+                &[],
             );
         assert!(rules.is_empty());
         assert_eq!(unrepresentable, 1);
 
-        // The same cross-category guard protects a game edit from retuning an expression call.
+        // The same exact-key guard protects a game edit from retuning an expression call. A
+        // numeric source token is used here to model the shared native part explicitly.
+        let same_identity_expression = vec![crate::data::MotionModuleSetRatePartialEvent {
+            call: crate::data::MotionModuleSetRatePartialCall {
+                part_kind: "1".into(),
+                rate: 0.8,
+            },
+            ..game_same_frame[0].clone()
+        }];
         let game_shown = vec![crate::data::MotionModuleSetRatePartialEvent {
             call: crate::data::MotionModuleSetRatePartialCall {
                 part_kind: "*FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY".into(),
@@ -27154,11 +27278,10 @@ mod live_effect_capture_tests {
         let (rules, unrepresentable) =
             VisionaryApp::motion_module_set_rate_partial_rules_for_category(
                 motion,
-                std::slice::from_ref(&capture),
+                &distinct_same_frame,
                 &game_same_frame,
                 &game_shown,
-                &expression_pristine,
-                false,
+                &same_identity_expression,
             );
         assert!(rules.is_empty());
         assert_eq!(unrepresentable, 1);
