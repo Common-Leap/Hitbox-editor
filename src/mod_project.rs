@@ -619,8 +619,15 @@ mod tests {
                     }),
                     ExcuteStmt::WorkModuleSet(WorkModuleSetCall {
                         kind: WorkModuleSetKind::Int,
+                        receiver: "agent.module_accessor".into(),
                         value: "4".into(),
                         slot: "*FIGHTER_STATUS_WORK_INT_NEXT_STEP".into(),
+                    }),
+                    ExcuteStmt::WorkModuleSet(WorkModuleSetCall {
+                        kind: WorkModuleSetKind::Int64,
+                        receiver: "boma".into(),
+                        value: "hash40(\"fall_damage\") as i64".into(),
+                        slot: "FIGHTER_STATUS_FINAL_WORK_INT_REQUEST_LOOP_DAMAGE_MOTION".into(),
                     }),
                 ]),
             ],

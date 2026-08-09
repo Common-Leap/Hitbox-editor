@@ -276,7 +276,8 @@ pub const CAT_WORK_FLAG: u8 = 32;
 /// editor's wire category.
 pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
 
-/// Direct `WorkModule::set_int` / `set_float` point. Must equal the editor's wire category.
+/// Direct `WorkModule::set_int` / `set_float` / `set_int64` point. Must equal the editor's wire
+/// category.
 pub const CAT_WORK_MODULE_SET: u8 = 34;
 
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
@@ -967,6 +968,8 @@ pub struct HbOverrides {
     pub work_transition_term: Option<i64>,
     /// Replacement integer value for a direct `WorkModule::set_int` call.
     pub work_module_set_int_value: Option<i64>,
+    /// Replacement exact 64-bit value for a direct `WorkModule::set_int64` call.
+    pub work_module_set_int64_value: Option<i64>,
     /// Replacement float value for a direct `WorkModule::set_float` call.
     pub work_module_set_float_value: Option<f32>,
     /// Replacement WorkModule slot for either direct value setter.
@@ -1191,6 +1194,24 @@ fn numeric_point_key(func: &str, args: &[f32]) -> u64 {
     }
     for arg in args {
         for byte in arg.to_bits().to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// Stable key for exact integer point arguments. Keep this in lockstep with
+/// `game_link::integer_point_key`; `set_int64` values can be hash40s and must never pass through
+/// `f32`.
+fn integer_point_key(func: &str, args: &[i64]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in func.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for arg in args {
+        for byte in arg.to_le_bytes() {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(0x1000_0000_01b3);
         }
@@ -1734,6 +1755,48 @@ unsafe fn hook_work_module_set_int(
                     .work_module_set_int_value
                     .and_then(|item| i32::try_from(item).ok())
                     .unwrap_or(value);
+                let replacement_slot = overrides
+                    .work_module_set_slot
+                    .and_then(|item| i32::try_from(item).ok())
+                    .unwrap_or(slot);
+                if replacement_value != value || replacement_slot != slot {
+                    original!()(boma, replacement_value, replacement_slot);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, value, slot)
+}
+
+/// Capture and sparsely override the verified direct `WorkModule::set_int64` shape. The exact
+/// integer key is separate from the older setter key because hash40 payloads must not be narrowed
+/// through `f32`.
+#[skyline::hook(replace = smash::app::lua_bind::WorkModule::set_int64)]
+unsafe fn hook_work_module_set_int64(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    value: i64,
+    slot: i32,
+) {
+    let args = [LuaArg::Int(value), LuaArg::Int(slot as i64)];
+    record_for_boma(boma, "WorkModule::set_int64", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        let key = integer_point_key("WorkModule::set_int64", &[value, slot as i64]);
+        if let Some((suppress, overrides)) = action_for_func(
+            CAT_WORK_MODULE_SET,
+            motion,
+            key,
+            frame,
+            "WorkModule::set_int64",
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(overrides) = overrides {
+                let replacement_value =
+                    overrides.work_module_set_int64_value.unwrap_or(value);
                 let replacement_slot = overrides
                     .work_module_set_slot
                     .and_then(|item| i32::try_from(item).ok())
@@ -3309,7 +3372,8 @@ pub fn install() {
         hook_work_module_enable_transition_term,
         hook_work_module_unable_transition_term,
         hook_work_module_set_int,
-        hook_work_module_set_float
+        hook_work_module_set_float,
+        hook_work_module_set_int64
     );
     // Installed separately rather than folded into the list above: `install_hooks!` takes a
     // fixed list, and the sound family is twelve more names for a surface that has nothing to

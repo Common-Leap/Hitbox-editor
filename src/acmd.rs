@@ -2378,16 +2378,54 @@ fn parse_work_transition_term_call(line: &str) -> Option<ExcuteStmt> {
     None
 }
 
-/// Parse the measured direct WorkModule value-set shapes from the local cache:
-/// `WorkModule::set_int(agent.module_accessor, value, slot)` and
-/// `WorkModule::set_float(agent.module_accessor, value, slot)`. The cache contains only the
-/// standard receiver for this family, so HDR `boma` calls remain raw until separately measured.
+fn valid_work_module_identifier(value: &str) -> bool {
+    let mut chars = value.trim().chars();
+    chars.next().is_some_and(|character| {
+        (character.is_ascii_alphabetic() || character == '_')
+            && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+fn valid_work_module_slot_token(value: &str) -> bool {
+    let value = value.trim();
+    value.parse::<i64>().is_ok()
+        || value
+            .strip_prefix('*')
+            .is_some_and(valid_work_module_identifier)
+        || valid_work_module_identifier(value)
+}
+
+fn valid_work_module_legacy_token(value: &str) -> bool {
+    let value = value.trim();
+    value.parse::<i64>().is_ok()
+        || value
+            .strip_prefix('*')
+            .is_some_and(valid_work_module_identifier)
+}
+
+fn valid_work_module_int64_value(value: &str) -> bool {
+    let value = value.trim();
+    value.parse::<i64>().is_ok()
+        || valid_work_module_slot_token(value)
+        || value
+            .strip_prefix("hash40(\"")
+            .and_then(|value| value.strip_suffix("\") as i64"))
+            .is_some_and(|value| !value.is_empty() && !value.contains('"'))
+}
+
+/// Parse the measured direct WorkModule value-set shapes:
+/// `WorkModule::set_int(agent.module_accessor, value, slot)`, the equivalent HDR `boma`
+/// receiver, and the three-argument `set_int64` shape measured in the standard/HDR corpus.
 fn parse_work_module_set_call(line: &str) -> Option<ExcuteStmt> {
     for (func, kind) in [
         ("WorkModule::set_int", crate::data::WorkModuleSetKind::Int),
         (
             "WorkModule::set_float",
             crate::data::WorkModuleSetKind::Float,
+        ),
+        (
+            "WorkModule::set_int64",
+            crate::data::WorkModuleSetKind::Int64,
         ),
     ] {
         let needle = format!("{func}(");
@@ -2399,32 +2437,28 @@ fn parse_work_module_set_call(line: &str) -> Option<ExcuteStmt> {
         let [module_accessor, value, slot] = tokens.as_slice() else {
             continue;
         };
-        if module_accessor.trim() != "agent.module_accessor" {
+        let receiver = module_accessor.trim();
+        if !matches!(receiver, "agent.module_accessor" | "boma") {
             continue;
         }
         let value = value.trim();
         let valid_value = if kind.is_float() {
             value.parse::<f32>().is_ok_and(f32::is_finite)
+        } else if kind.is_int64() {
+            valid_work_module_int64_value(value)
         } else {
-            value.parse::<i64>().is_ok()
-                || value.strip_prefix('*').is_some_and(|name| {
-                    !name.is_empty()
-                        && name
-                            .chars()
-                            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-                })
+            valid_work_module_legacy_token(value)
         };
         let slot = slot.trim();
-        let valid_slot = slot.parse::<i64>().is_ok()
-            || slot.strip_prefix('*').is_some_and(|name| {
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
-            });
+        let valid_slot = if kind.is_int64() {
+            valid_work_module_slot_token(slot)
+        } else {
+            valid_work_module_legacy_token(slot)
+        };
         if valid_value && valid_slot {
             return Some(ExcuteStmt::WorkModuleSet(crate::data::WorkModuleSetCall {
                 kind,
+                receiver: receiver.to_string(),
                 value: value.to_string(),
                 slot: slot.to_string(),
             }));
@@ -3054,8 +3088,9 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 call.transition_term
             ),
             crate::data::ExcuteStmt::WorkModuleSet(call) => format!(
-                "{indent}{}(agent.module_accessor, {}, {});",
+                "{indent}{}({}, {}, {});",
                 call.func(),
+                call.receiver,
                 call.value,
                 call.slot
             ),
@@ -9863,11 +9898,15 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     if is_excute(agent) {
         WorkModule::set_float(agent.module_accessor, 5.0, *FIGHTER_INSTANCE_WORK_ID_FLOAT_FINISH_CAMERA_THROW_RAY_LENGTH);
     }
+    frame(agent.lua_state_agent, 70.0);
+    if is_excute(agent) {
+        WorkModule::set_int64(boma, hash40("fall_damage") as i64, FIGHTER_STATUS_FINAL_WORK_INT_REQUEST_LOOP_DAMAGE_MOTION);
+    }
 }
 "#;
         let script = parse_acmd_script(source);
         let events = script.to_work_module_set_events();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].frame, 5);
         assert_eq!(events[0].call.kind, crate::data::WorkModuleSetKind::Int);
         assert_eq!(events[0].call.value, "*FIGHTER_ITEM_GRASS_PULL_STEP_PICKUP");
@@ -9878,6 +9917,14 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert_eq!(events[1].frame, 47);
         assert_eq!(events[1].call.kind, crate::data::WorkModuleSetKind::Float);
         assert_eq!(events[1].call.value, "5.0");
+        assert_eq!(events[2].frame, 70);
+        assert_eq!(events[2].call.kind, crate::data::WorkModuleSetKind::Int64);
+        assert_eq!(events[2].call.receiver, "boma");
+        assert_eq!(events[2].call.value, "hash40(\"fall_damage\") as i64");
+        assert_eq!(
+            events[2].call.slot,
+            "FIGHTER_STATUS_FINAL_WORK_INT_REQUEST_LOOP_DAMAGE_MOTION"
+        );
 
         let emitted = preview_game_fn(&script, "item_grass_pull");
         assert!(emitted.contains(
@@ -9885,6 +9932,9 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         ));
         assert!(emitted.contains(
             "WorkModule::set_float(agent.module_accessor, 5.0, *FIGHTER_INSTANCE_WORK_ID_FLOAT_FINISH_CAMERA_THROW_RAY_LENGTH);"
+        ));
+        assert!(emitted.contains(
+            "WorkModule::set_int64(boma, hash40(\"fall_damage\") as i64, FIGHTER_STATUS_FINAL_WORK_INT_REQUEST_LOOP_DAMAGE_MOTION);"
         ));
         assert_eq!(
             parse_acmd_script(&emitted).to_work_module_set_events(),
@@ -9904,6 +9954,10 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         WorkModule::set_float(agent.module_accessor, NaN, 2);
         WorkModule::set_float(agent.module_accessor, 1.0, make_slot());
         WorkModule::set_int(agent.module_accessor, 1, slot);
+        WorkModule::set_int64(agent.module_accessor, hash40("fall_damage"), 2);
+        WorkModule::set_int64(other.module_accessor, hash40("fall_damage") as i64, 2);
+        WorkModule::set_int64(agent.module_accessor, make_value(), 2);
+        WorkModule::set_int64(agent.module_accessor, hash40("fall_damage") as i64, make_slot());
     }
 }
 "#;
@@ -9919,6 +9973,10 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "WorkModule::set_float(agent.module_accessor, NaN, 2);",
             "WorkModule::set_float(agent.module_accessor, 1.0, make_slot());",
             "WorkModule::set_int(agent.module_accessor, 1, slot);",
+            "WorkModule::set_int64(agent.module_accessor, hash40(\"fall_damage\"), 2);",
+            "WorkModule::set_int64(other.module_accessor, hash40(\"fall_damage\") as i64, 2);",
+            "WorkModule::set_int64(agent.module_accessor, make_value(), 2);",
+            "WorkModule::set_int64(agent.module_accessor, hash40(\"fall_damage\") as i64, make_slot());",
         ] {
             assert!(emitted.contains(line), "raw line lost: {line}\n{emitted}");
         }

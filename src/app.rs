@@ -8170,7 +8170,7 @@ impl VisionaryApp {
         })
         .response
         .on_hover_text(
-            "Writes a value into one WorkModule slot. The measured direct set_int/set_float receiver, value token, and slot token are preserved; numeric live replacement requires a matching capture.",
+            "Writes a value into one WorkModule slot. The measured direct set_int/set_float/set_int64 receiver, value token, and slot token are preserved; numeric live replacement requires a matching capture.",
         );
 
         let mut edit: Option<(usize, String, String)> = None;
@@ -12734,11 +12734,14 @@ impl VisionaryApp {
                         },
                     ))
                 }
-                "WorkModule::set_int" | "WorkModule::set_float" if line.args.len() == 2 => {
-                    let kind = if line.func == "WorkModule::set_int" {
-                        crate::data::WorkModuleSetKind::Int
-                    } else {
-                        crate::data::WorkModuleSetKind::Float
+                "WorkModule::set_int" | "WorkModule::set_float" | "WorkModule::set_int64"
+                    if line.args.len() == 2 =>
+                {
+                    let kind = match line.func.as_str() {
+                        "WorkModule::set_int" => crate::data::WorkModuleSetKind::Int,
+                        "WorkModule::set_float" => crate::data::WorkModuleSetKind::Float,
+                        "WorkModule::set_int64" => crate::data::WorkModuleSetKind::Int64,
+                        _ => unreachable!("matched WorkModule value setter"),
                     };
                     let value = if kind.is_float() {
                         let value = line.args.first()?.as_f32()?;
@@ -12748,6 +12751,7 @@ impl VisionaryApp {
                     };
                     Some(ExcuteStmt::WorkModuleSet(crate::data::WorkModuleSetCall {
                         kind,
+                        receiver: "agent.module_accessor".into(),
                         value,
                         slot: line.args.get(1)?.as_i64()?.to_string(),
                     }))
@@ -15633,6 +15637,59 @@ impl VisionaryApp {
                     continue;
                 }
             };
+            if was.call.kind.is_int64() {
+                let Some(captured_value) = donor.args.first().and_then(|arg| arg.as_i64()) else {
+                    unrepresentable += 1;
+                    continue;
+                };
+                let Ok(replacement_value) = now.call.value.trim().parse::<i64>() else {
+                    unrepresentable += 1;
+                    continue;
+                };
+                let duplicate_key = pristine
+                    .iter()
+                    .enumerate()
+                    .filter(|(other_index, other)| {
+                        *other_index != index
+                            && other.frame == was.frame
+                            && other.call.kind == was.call.kind
+                    })
+                    .filter_map(|(other_index, other)| {
+                        let donor = Self::work_module_set_capture_for(
+                            captures,
+                            pristine,
+                            other_index,
+                            other,
+                        )?;
+                        Some((donor.args.first()?.as_i64()?, donor.args.get(1)?.as_i64()?))
+                    })
+                    .filter(|(value, slot)| *value == captured_value && *slot == captured_slot)
+                    .count();
+                if duplicate_key != 0 {
+                    unrepresentable += 1;
+                    continue;
+                }
+                let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+                rules.push(HitboxRuleWire {
+                    motion,
+                    category: crate::game_link::CAT_WORK_MODULE_SET,
+                    hitbox_id: Some(crate::game_link::integer_point_key(
+                        was.call.func(),
+                        &[captured_value, captured_slot],
+                    )),
+                    suppress: false,
+                    frame_start,
+                    frame_end,
+                    overrides: Some(HbOverridesWire {
+                        work_module_set_int64_value: Some(replacement_value),
+                        work_module_set_slot: Some(replacement_slot),
+                        ..Default::default()
+                    }),
+                    inject: None,
+                    func: Some(was.call.func().into()),
+                });
+                continue;
+            }
             let (captured_value, replacement_value, numeric_value) = if was.call.kind.is_float() {
                 let Some(captured) = donor.args.first().and_then(|arg| arg.as_f32()) else {
                     unrepresentable += 1;
@@ -16557,6 +16614,7 @@ impl VisionaryApp {
             work_flag: None,
             work_transition_term: None,
             work_module_set_int_value: None,
+            work_module_set_int64_value: None,
             work_module_set_float_value: None,
             work_module_set_slot: None,
             // Expression primitives use their own category and replacement vector.
@@ -27481,10 +27539,18 @@ mod live_effect_capture_tests {
                 args: vec![A::Num(5.0), A::Int(8)],
                 run: 1,
             },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 69.0,
+                func: "WorkModule::set_int64".into(),
+                args: vec![A::Int(0x1000_0000_0001), A::Int(11)],
+                run: 1,
+            },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let baseline = script.to_work_module_set_events();
-        assert_eq!(baseline.len(), 2);
+        assert_eq!(baseline.len(), 3);
         assert_eq!(baseline[0].frame, 5);
         assert_eq!(baseline[0].call.kind, crate::data::WorkModuleSetKind::Int);
         assert_eq!(baseline[0].call.value, "1");
@@ -27493,19 +27559,28 @@ mod live_effect_capture_tests {
         assert_eq!(baseline[1].call.kind, crate::data::WorkModuleSetKind::Float);
         assert_eq!(baseline[1].call.value, "5");
         assert_eq!(baseline[1].call.slot, "8");
+        assert_eq!(baseline[2].frame, 70);
+        assert_eq!(baseline[2].call.kind, crate::data::WorkModuleSetKind::Int64);
+        assert_eq!(baseline[2].call.value, "17592186044417");
+        assert_eq!(baseline[2].call.slot, "11");
         let exported = crate::acmd::export_acmd_source(&script, "kirby", "item_grass_pull");
         assert!(exported.contains("WorkModule::set_int(agent.module_accessor, 1, 7);"));
         assert!(exported.contains("WorkModule::set_float(agent.module_accessor, 5, 8);"));
+        assert!(
+            exported.contains("WorkModule::set_int64(agent.module_accessor, 17592186044417, 11);")
+        );
 
         let mut edited = baseline.clone();
         edited[0].call.value = "3".into();
         edited[0].call.slot = "9".into();
         edited[1].call.value = "6.25".into();
         edited[1].call.slot = "10".into();
+        edited[2].call.value = "17592186044419".into();
+        edited[2].call.slot = "12".into();
         let (rules, unrepresentable) =
             VisionaryApp::work_module_set_rules_for(motion, &captures, &baseline, &edited);
         assert_eq!(unrepresentable, 0);
-        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.len(), 3);
         assert_eq!(rules[0].category, crate::game_link::CAT_WORK_MODULE_SET);
         assert_eq!(
             rules[0].hitbox_id,
@@ -27528,11 +27603,25 @@ mod live_effect_capture_tests {
         let float_overrides = rules[1].overrides.as_ref().unwrap();
         assert_eq!(float_overrides.work_module_set_float_value, Some(6.25));
         assert_eq!(float_overrides.work_module_set_slot, Some(10));
+        assert_eq!(rules[2].func.as_deref(), Some("WorkModule::set_int64"));
+        assert_eq!(
+            rules[2].hitbox_id,
+            Some(crate::game_link::integer_point_key(
+                "WorkModule::set_int64",
+                &[0x1000_0000_0001, 11]
+            ))
+        );
+        let int64_overrides = rules[2].overrides.as_ref().unwrap();
+        assert_eq!(
+            int64_overrides.work_module_set_int64_value,
+            Some(17592186044419)
+        );
+        assert_eq!(int64_overrides.work_module_set_slot, Some(12));
 
         edited[0].call.value = "*FIGHTER_STATUS_WORK_ID_INT_VALUE".into();
         let (rules, unrepresentable) =
             VisionaryApp::work_module_set_rules_for(motion, &captures, &baseline, &edited);
-        assert!(rules.len() <= 1);
+        assert_eq!(rules.len(), 2);
         assert_eq!(unrepresentable, 1);
     }
 

@@ -2870,6 +2870,26 @@ same-frame identities, malformed calls, and symbolic-only live replacements rema
 source/export-only. No emulator, game, or UI automation was run, so live hook behavior remains
 explicitly unverified.
 
+#### [x] E1v — direct `WorkModule::set_int64` points (completed 2026-08-08; live runtime unverified)
+
+The retained public dumped-script corpus contains 54 standard `smashline` calls and 54 HDR calls.
+Every measured call has the exact three-argument shape `(receiver, value, slot)`, with
+`agent.module_accessor` in the standard tree and `boma` in the HDR tree. The pinned
+`skyline-smash` binding verifies `set_int64(BattleObjectModuleAccessor, c_long, c_int) -> ()`;
+on the Switch target the value is carried as an exact 64-bit integer. Common values include
+`hash40("...") as i64`, so the rule identity uses integer bytes rather than narrowing through
+`f32`.
+
+The five surfaces are covered for that measured shape: typed parser/IR and source-site walk,
+editable Movement / Status panel and timeline lane, capture reconstruction, category-34 sparse
+live rules and the matching Skyline hook, generated ACMD export, project persistence, and value/
+slot source write-back. The receiver spelling is preserved for standard and HDR source export;
+source-only hash40 and symbolic slot tokens remain lossless, while live replacement requires an
+exact numeric capture and numeric replacement. Operation/frame/receiver changes, duplicate
+same-frame identities, malformed calls, and symbolic-only live replacements remain
+source/export-only. No emulator, game, or UI automation was run, so live hook behavior remains
+explicitly unverified.
+
 ### [x] E2 — Model `FT_MOTION_RATE` (done 2026-08-06 — live surface unverified in game)
 
 `FT_MOTION_RATE`, `FT_MOTION_RATE_RANGE`, `FT_DESIRED_RATE` are preserved verbatim, and their

@@ -332,6 +332,26 @@ pub fn numeric_point_key(func: &str, args: &[f32]) -> u64 {
     hash
 }
 
+/// Stable key for a point call whose payload is a fixed list of exact integer arguments.
+///
+/// This is deliberately separate from [`numeric_point_key`]: a WorkModule `set_int64` value
+/// commonly carries a hash40 and must not be narrowed through `f32` before the desktop and
+/// plugin derive the same rule identity.
+pub fn integer_point_key(func: &str, args: &[i64]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in func.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for arg in args {
+        for byte in arg.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    hash
+}
+
 /// One captured ACMD call, as streamed by the plugin (`AcmdCapture`).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct CaptureLine {
@@ -513,7 +533,7 @@ pub const CAT_WORK_FLAG: u8 = 32;
 /// `unable_transition_term` point overrides.
 pub const CAT_WORK_TRANSITION_TERM: u8 = 33;
 
-/// Wire category for direct `WorkModule::set_int` / `set_float` point overrides.
+/// Wire category for direct `WorkModule::set_int` / `set_float` / `set_int64` point overrides.
 pub const CAT_WORK_MODULE_SET: u8 = 34;
 
 /// The wire category a modifier's rules go out under.
@@ -687,6 +707,9 @@ pub struct HbOverridesWire {
     /// Replacement integer value for a direct `WorkModule::set_int` call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_module_set_int_value: Option<i64>,
+    /// Replacement exact 64-bit value for a direct `WorkModule::set_int64` call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_module_set_int64_value: Option<i64>,
     /// Replacement float value for a direct `WorkModule::set_float` call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_module_set_float_value: Option<f32>,
@@ -3018,6 +3041,7 @@ mod tests {
         assert!(module.contains("pub work_flag: Option<i64>"));
         assert!(module.contains("pub work_transition_term: Option<i64>"));
         assert!(module.contains("pub work_module_set_int_value: Option<i64>"));
+        assert!(module.contains("pub work_module_set_int64_value: Option<i64>"));
         assert!(module.contains("pub work_module_set_float_value: Option<f32>"));
         assert!(module.contains("pub work_module_set_slot: Option<i64>"));
         assert!(module.contains("pub motion_module_rate: Option<f32>"));
@@ -3048,8 +3072,10 @@ mod tests {
         assert!(module.contains("hook_work_module_unable_transition_term"));
         assert!(module.contains("replace = smash::app::lua_bind::WorkModule::set_int)"));
         assert!(module.contains("replace = smash::app::lua_bind::WorkModule::set_float)"));
+        assert!(module.contains("replace = smash::app::lua_bind::WorkModule::set_int64)"));
         assert!(module.contains("hook_work_module_set_int"));
         assert!(module.contains("hook_work_module_set_float"));
+        assert!(module.contains("hook_work_module_set_int64"));
         assert!(rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_rate"));
         assert!(rate_hooks.contains("hook_motion_module_set_rate"));
         assert!(rate_hooks
@@ -3280,6 +3306,41 @@ mod tests {
         assert_eq!(
             rule["overrides"]["work_module_set_int_value"].as_i64(),
             Some(3)
+        );
+        assert_eq!(rule["overrides"]["work_module_set_slot"].as_i64(), Some(9));
+    }
+
+    #[test]
+    fn outbound_work_module_set_int64_rules_preserve_exact_integer_wire_fields() {
+        let link = GameLink::default();
+        let value = 0x1000_0000_0001;
+        let slot = 7;
+        let key = integer_point_key("WorkModule::set_int64", &[value, slot]);
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_WORK_MODULE_SET,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(13.5),
+            frame_end: Some(13.5),
+            overrides: Some(HbOverridesWire {
+                work_module_set_int64_value: Some(0x1000_0000_0003),
+                work_module_set_slot: Some(9),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("WorkModule::set_int64".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value_json: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value_json["hitbox_rules"][0];
+        assert_eq!(rule["category"].as_u64(), Some(CAT_WORK_MODULE_SET as u64));
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(rule["func"].as_str(), Some("WorkModule::set_int64"));
+        assert_eq!(
+            rule["overrides"]["work_module_set_int64_value"].as_i64(),
+            Some(0x1000_0000_0003)
         );
         assert_eq!(rule["overrides"]["work_module_set_slot"].as_i64(), Some(9));
     }

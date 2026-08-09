@@ -1348,10 +1348,10 @@ pub enum ExcuteStmt {
     /// transition term. Only the measured direct receiver and one-token shape is typed; the
     /// authored transition token remains source-owned for export and source sync.
     WorkTransitionTerm(WorkTransitionTermCall),
-    /// `WorkModule::set_int` / `WorkModule::set_float` — write one value into a work slot.
+    /// `WorkModule::set_int` / `set_float` / `set_int64` — write one value into a work slot.
     ///
-    /// Only the measured direct receiver and numeric/dereferenced value and slot tokens are
-    /// typed; authored names remain source-owned for export and source sync.
+    /// Only the measured direct receiver and operation-specific value/slot tokens are typed;
+    /// authored names and expressions remain source-owned for export and source sync.
     WorkModuleSet(WorkModuleSetCall),
     /// Any other line we don't interpret — preserved verbatim.
     Raw(String),
@@ -1672,6 +1672,7 @@ impl WorkTransitionTermCall {
 pub enum WorkModuleSetKind {
     Int,
     Float,
+    Int64,
 }
 
 impl WorkModuleSetKind {
@@ -1679,19 +1680,43 @@ impl WorkModuleSetKind {
         match self {
             Self::Int => "WorkModule::set_int",
             Self::Float => "WorkModule::set_float",
+            Self::Int64 => "WorkModule::set_int64",
         }
     }
 
     pub const fn is_float(self) -> bool {
         matches!(self, Self::Float)
     }
+
+    pub const fn is_int64(self) -> bool {
+        matches!(self, Self::Int64)
+    }
 }
 
-/// A parsed direct `WorkModule::{set_int,set_float}(receiver, value, slot)` call.
+fn default_work_module_receiver() -> String {
+    "agent.module_accessor".into()
+}
+
+fn is_default_work_module_receiver(receiver: &str) -> bool {
+    receiver == "agent.module_accessor"
+}
+
+/// A parsed direct `WorkModule::{set_int,set_float,set_int64}(receiver, value, slot)` call.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkModuleSetCall {
     pub kind: WorkModuleSetKind,
-    /// Authored value token, numeric for `set_float` and numeric/dereferenced for `set_int`.
+    /// Receiver spelling from the source (`agent.module_accessor` or HDR's `boma`).
+    ///
+    /// Older project files omitted this field because the local setter slice only emitted the
+    /// standard receiver; they deserialize to the standard spelling and omit it again when
+    /// serialized.
+    #[serde(
+        default = "default_work_module_receiver",
+        skip_serializing_if = "is_default_work_module_receiver"
+    )]
+    pub receiver: String,
+    /// Authored value token, numeric/dereferenced for `set_int`, numeric for `set_float`, and
+    /// numeric or a measured `hash40("...") as i64` expression for `set_int64`.
     pub value: String,
     /// Authored WorkModule slot token, usually a dereferenced lua constant.
     pub slot: String,

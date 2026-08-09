@@ -4748,6 +4748,32 @@ fn valid_work_flag_token(value: &str) -> bool {
         })
 }
 
+fn valid_work_module_identifier(value: &str) -> bool {
+    let mut chars = value.trim().chars();
+    chars.next().is_some_and(|character| {
+        (character.is_ascii_alphabetic() || character == '_')
+            && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+fn valid_work_module_slot_token(value: &str) -> bool {
+    let value = value.trim();
+    valid_work_flag_token(value)
+        || value
+            .strip_prefix('*')
+            .is_some_and(valid_work_module_identifier)
+        || valid_work_module_identifier(value)
+}
+
+fn valid_work_module_int64_value(value: &str) -> bool {
+    let value = value.trim();
+    valid_work_module_slot_token(value)
+        || value
+            .strip_prefix("hash40(\"")
+            .and_then(|value| value.strip_suffix("\") as i64"))
+            .is_some_and(|value| !value.is_empty() && !value.contains('"'))
+}
+
 /// The verified direct `WorkModule::on_flag` / `off_flag` calls in source order.
 pub(crate) fn work_flag_sites(text: &str) -> Vec<MacroSite> {
     let mut sites = Vec::new();
@@ -4981,14 +5007,15 @@ pub fn sync_work_transition_terms(
     })
 }
 
-/// The verified direct `WorkModule::set_int` / `set_float` calls in source order. The local
-/// cache contains the standard `agent.module_accessor` receiver for this family; other receiver
-/// forms remain source-only until measured.
+/// The verified direct `WorkModule::set_int` / `set_float` / `set_int64` calls in source order.
+/// The set_int64 corpus is measured in both standard `agent.module_accessor` and HDR `boma`
+/// receiver forms; preserving the receiver keeps export and source sync lossless.
 pub(crate) fn work_module_set_sites(text: &str) -> Vec<MacroSite> {
     let mut sites = Vec::new();
     for kind in [
         crate::data::WorkModuleSetKind::Int,
         crate::data::WorkModuleSetKind::Float,
+        crate::data::WorkModuleSetKind::Int64,
     ] {
         sites.extend(scan_named_sites(text, kind.func(), 0..text.len()));
     }
@@ -4999,16 +5026,23 @@ pub(crate) fn work_module_set_sites(text: &str) -> Vec<MacroSite> {
             let kind = match site.name.as_str() {
                 "WorkModule::set_int" => crate::data::WorkModuleSetKind::Int,
                 "WorkModule::set_float" => crate::data::WorkModuleSetKind::Float,
+                "WorkModule::set_int64" => crate::data::WorkModuleSetKind::Int64,
                 _ => return false,
             };
             site.args.len() == 3
                 && site
                     .arg(text, 0)
-                    .is_some_and(|value| value.trim() == "agent.module_accessor")
+                    .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
                 && site
                     .arg(text, 1)
                     .is_some_and(|value| valid_work_module_set_value(value, kind))
-                && site.arg(text, 2).is_some_and(valid_work_flag_token)
+                && site.arg(text, 2).is_some_and(|value| {
+                    if kind.is_int64() {
+                        valid_work_module_slot_token(value)
+                    } else {
+                        valid_work_flag_token(value)
+                    }
+                })
         })
         .collect()
 }
@@ -5017,6 +5051,8 @@ fn valid_work_module_set_value(value: &str, kind: crate::data::WorkModuleSetKind
     let value = value.trim();
     if kind.is_float() {
         value.parse::<f32>().is_ok_and(f32::is_finite)
+    } else if kind.is_int64() {
+        valid_work_module_int64_value(value)
     } else {
         valid_work_flag_token(value)
     }
@@ -5062,7 +5098,7 @@ pub fn rewrite_work_module_sets(
         }
         if before.call.kind != now.call.kind {
             report.skipped.push(format!(
-                "{label}: WorkModule set site {} changed between set_int and set_float — source syncing preserves the authored operation",
+                "{label}: WorkModule set site {} changed setter operation — source syncing preserves the authored operation",
                 before.site
             ));
             continue;
@@ -5074,7 +5110,7 @@ pub fn rewrite_work_module_sets(
             || site.args.len() != 3
             || site
                 .arg(text, 0)
-                .is_none_or(|value| value.trim() != "agent.module_accessor")
+                .is_none_or(|value| value.trim() != before.call.receiver.trim())
             || site
                 .arg(text, 1)
                 .is_none_or(|value| value.trim() != before.call.value.trim())
@@ -5088,8 +5124,13 @@ pub fn rewrite_work_module_sets(
             ));
             continue;
         }
-        if !valid_work_module_set_value(&now.call.value, now.call.kind)
-            || !valid_work_flag_token(&now.call.slot)
+        if !matches!(now.call.receiver.trim(), "agent.module_accessor" | "boma")
+            || !valid_work_module_set_value(&now.call.value, now.call.kind)
+            || if now.call.kind.is_int64() {
+                !valid_work_module_slot_token(&now.call.slot)
+            } else {
+                !valid_work_flag_token(&now.call.slot)
+            }
         {
             report.skipped.push(format!(
                 "{label}: WorkModule set site {} has an unsupported or empty value/slot token — source syncing leaves the authored call intact",
@@ -9878,6 +9919,10 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
     if macros::is_excute(agent) {
         WorkModule::set_float(agent.module_accessor, 5.0, *FIGHTER_INSTANCE_WORK_ID_FLOAT_FINISH_CAMERA_THROW_RAY_LENGTH);
     }
+    frame(agent.lua_state_agent, 70.0);
+    if macros::is_excute(agent) {
+        WorkModule::set_int64(boma, hash40("fall_damage") as i64, FIGHTER_STATUS_FINAL_WORK_INT_REQUEST_LOOP_DAMAGE_MOTION);
+    }
 }
 "#;
         let pristine = crate::acmd::parse_acmd_script(text).to_work_module_set_events();
@@ -9886,13 +9931,16 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         edited[0].call.slot = "9".into();
         edited[1].call.value = "6.25".into();
         edited[1].call.slot = "12".into();
+        edited[2].call.value = "1099511627777".into();
+        edited[2].call.slot = "14".into();
 
         let (after, report) =
             rewrite_work_module_sets(text, "kirby/item_grass_pull", &pristine, &edited).unwrap();
-        assert_eq!(report.changed, 4, "{report:?}");
+        assert_eq!(report.changed, 6, "{report:?}");
         assert!(report.skipped.is_empty(), "{report:?}");
         assert!(after.contains("WorkModule::set_int(agent.module_accessor, 4, 9);"));
         assert!(after.contains("WorkModule::set_float(agent.module_accessor, 6.25, 12);"));
+        assert!(after.contains("WorkModule::set_int64(boma, 1099511627777, 14);"));
         assert_eq!(
             crate::acmd::parse_acmd_script(&after).to_work_module_set_events(),
             edited

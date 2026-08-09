@@ -1758,6 +1758,7 @@ mod tests {
             stmts: vec![AcmdStmt::Excute(vec![ExcuteStmt::WorkModuleSet(
                 crate::data::WorkModuleSetCall {
                     kind: crate::data::WorkModuleSetKind::Int,
+                    receiver: "agent.module_accessor".into(),
                     value: String::new(),
                     slot: String::new(),
                 },
