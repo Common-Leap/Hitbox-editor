@@ -2420,7 +2420,11 @@ also counted the read-only condition inputs `WorkModule::is_flag` (5,841), `get_
 `prev_status_kind` (3), and `situation_kind` (1). These calls remain source-preserved until
 expression and status-module editing has a measured contract; they are not treated as another
 guessed E1 point family. A regression test pins all of these names through the raw-block export
-and fixed-point path so the evidence boundary cannot become silent data loss.
+and fixed-point path so the evidence boundary cannot become silent data loss. The same guard now
+runs across every retained `game_` body that contains one of these families, counting before
+export, after export, and after a second parse/export pass while checking balanced output. This
+is preservation evidence only; it does not claim an editable or live-game contract for these
+expressions.
 
 `REVERSE_LR` is the local-cache exception that started this slice: **7 real calls**, all
 `macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,

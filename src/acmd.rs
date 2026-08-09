@@ -9258,6 +9258,87 @@ unsafe extern "C" fn game_status_getters(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// The sample above proves each family in isolation. The retained fetch cache is the
+    /// stronger boundary: these calls appear inside real game scripts, where a parser change
+    /// could silently drop a condition without making the generated function syntactically
+    /// invalid. Count every named family before export, after export, and after a second
+    /// parse/export pass. This is preservation evidence only; it is not an editable condition
+    /// or live-game contract.
+    #[test]
+    fn every_corpus_read_only_condition_survives_raw_export() {
+        const CONDITION_FAMILIES: [&str; 9] = [
+            "WorkModule::is_flag(",
+            "WorkModule::get_int64(",
+            "WorkModule::get_float(",
+            "WorkModule::get_int(",
+            "WorkModule::get_param_float(",
+            "KineticModule::get_sum_speed_y(",
+            "StatusModule::status_kind(",
+            "StatusModule::prev_status_kind(",
+            "StatusModule::situation_kind(",
+        ];
+
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+
+        let mut checked = 0usize;
+        let mut total_conditions = 0usize;
+        let mut family_totals = [0usize; CONDITION_FAMILIES.len()];
+
+        for (path, body) in bodies {
+            let Some(source_interior) = function_interior(&body, "game_") else {
+                continue;
+            };
+            let script = parse_acmd_script(&body);
+            let emitted = preview_game_fn(&script, "read_only_conditions");
+            let reparsed = parse_acmd_script(&emitted);
+            let reemitted = preview_game_fn(&reparsed, "read_only_conditions");
+
+            assert_eq!(
+                emitted.matches('{').count(),
+                emitted.matches('}').count(),
+                "raw condition export is unbalanced for {path}:\n{emitted}"
+            );
+            assert_eq!(
+                reemitted, emitted,
+                "raw condition export is not a fixed point for {path}"
+            );
+
+            let mut body_conditions = 0usize;
+            for (index, needle) in CONDITION_FAMILIES.iter().enumerate() {
+                let source_count = source_interior.matches(needle).count();
+                let emitted_count = emitted.matches(needle).count();
+                let reemitted_count = reemitted.matches(needle).count();
+                assert_eq!(
+                    emitted_count, source_count,
+                    "raw condition family {needle:?} changed during export for {path}"
+                );
+                assert_eq!(
+                    reemitted_count, source_count,
+                    "raw condition family {needle:?} changed during re-export for {path}"
+                );
+                family_totals[index] += source_count;
+                body_conditions += source_count;
+            }
+            total_conditions += body_conditions;
+            checked += 1;
+        }
+
+        if checked == 0 {
+            return;
+        }
+        assert!(
+            total_conditions > 0,
+            "the retained game_ corpus contained no read-only condition family to check"
+        );
+        assert!(
+            family_totals.iter().any(|count| *count > 0),
+            "the retained game_ corpus condition-family totals were all zero"
+        );
+    }
+
     /// The frame walk has always read a conditional hitbox as an unconditional one, because the
     /// branch used to be flattened. Blocks must not change that on their own — eighteen `game_`
     /// scripts in the corpus put an `ATTACK` inside an `if`, and they would all lose their
