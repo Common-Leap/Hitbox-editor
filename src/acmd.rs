@@ -9104,6 +9104,74 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         );
     }
 
+    /// Read-only module calls are condition inputs, not editable mutation points yet. They must
+    /// still survive the source/export boundary exactly: dropping one changes which arm runs,
+    /// while inventing a typed event would make the panel and live wire claim an edit contract
+    /// that has not been measured.
+    #[test]
+    fn read_only_getters_and_status_conditions_remain_verbatim_and_balanced() {
+        let source = r#"
+unsafe extern "C" fn game_status_getters(agent: &mut L2CAgentBase) {
+    if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD) {
+        frame(agent.lua_state_agent, 1.0);
+    }
+    if WorkModule::get_int(agent.module_accessor, *FIGHTER_STATUS_WORK_INT_NEXT_STEP) > 0 {
+        frame(agent.lua_state_agent, 2.0);
+    }
+    if WorkModule::get_int64(agent.module_accessor, *FIGHTER_STATUS_WORK_INT64) != 0 {
+        frame(agent.lua_state_agent, 3.0);
+    }
+    if WorkModule::get_float(agent.module_accessor, *FIGHTER_STATUS_WORK_FLOAT) > 0.0 {
+        frame(agent.lua_state_agent, 4.0);
+    }
+    if WorkModule::get_param_float(agent.module_accessor, hash40("param"), 0) > 0.0 {
+        frame(agent.lua_state_agent, 5.0);
+    }
+    if KineticModule::get_sum_speed_y(agent.module_accessor, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN) > 0.0 {
+        frame(agent.lua_state_agent, 6.0);
+    }
+    if StatusModule::status_kind(agent.module_accessor) == *FIGHTER_STATUS_KIND_ATTACK {
+        frame(agent.lua_state_agent, 7.0);
+    }
+    if StatusModule::prev_status_kind(agent.module_accessor) == *FIGHTER_STATUS_KIND_ATTACK {
+        frame(agent.lua_state_agent, 8.0);
+    }
+    if StatusModule::situation_kind(agent.module_accessor) == *SITUATION_KIND_GROUND {
+        frame(agent.lua_state_agent, 9.0);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert_eq!(script.stmts.len(), 9);
+        assert!(script
+            .stmts
+            .iter()
+            .all(|stmt| matches!(stmt, crate::data::AcmdStmt::RawBlock { .. })));
+
+        let emitted = preview_game_fn(&script, "status_getters");
+        for line in [
+            "if WorkModule::is_flag(agent.module_accessor, *FIGHTER_STATUS_ATTACK_FLAG_START_SMASH_HOLD) {",
+            "if WorkModule::get_int(agent.module_accessor, *FIGHTER_STATUS_WORK_INT_NEXT_STEP) > 0 {",
+            "if WorkModule::get_int64(agent.module_accessor, *FIGHTER_STATUS_WORK_INT64) != 0 {",
+            "if WorkModule::get_float(agent.module_accessor, *FIGHTER_STATUS_WORK_FLOAT) > 0.0 {",
+            "if WorkModule::get_param_float(agent.module_accessor, hash40(\"param\"), 0) > 0.0 {",
+            "if KineticModule::get_sum_speed_y(agent.module_accessor, *KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN) > 0.0 {",
+            "if StatusModule::status_kind(agent.module_accessor) == *FIGHTER_STATUS_KIND_ATTACK {",
+            "if StatusModule::prev_status_kind(agent.module_accessor) == *FIGHTER_STATUS_KIND_ATTACK {",
+            "if StatusModule::situation_kind(agent.module_accessor) == *SITUATION_KIND_GROUND {",
+        ] {
+            assert!(emitted.contains(line), "read-only condition lost: {line}\n{emitted}");
+        }
+        assert_eq!(emitted.matches('{').count(), emitted.matches('}').count());
+
+        let reparsed = parse_acmd_script(&emitted);
+        let reemitted = preview_game_fn(&reparsed, "status_getters");
+        assert_eq!(
+            reemitted, emitted,
+            "raw condition export must be a fixed point"
+        );
+    }
+
     /// The frame walk has always read a conditional hitbox as an unconditional one, because the
     /// branch used to be flattened. Blocks must not change that on their own — eighteen `game_`
     /// scripts in the corpus put an `ATTACK` inside an `if`, and they would all lose their

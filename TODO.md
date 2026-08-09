@@ -270,7 +270,7 @@ paraphrase it from memory.
 
 - [ ] The five surfaces above are coherent, or the entry names the out-of-scope surface.
 - [ ] `bash build_check.sh` passes.
-- [ ] `cargo test` passes (**661 passed, 1 ignored + 6 integration in the current desktop suite**; the integration ones
+- [ ] `cargo test` passes (**663 passed, 1 ignored + 6 integration in the current desktop suite**; the integration ones
       are [tests/deploy_plugin.rs](tests/deploy_plugin.rs) and shell out to `python3`),
       including the eight corpus oracles — run
       them by name with `cargo test cached_script`, `cargo test still_loses`,
@@ -2412,9 +2412,13 @@ status-module and `sv_kinetic_energy` families remain open.
 The remaining direct name in the retained corpus is `KineticModule::get_sum_speed_y`: 162 exact
 calls in each standard and HDR tree, all using `*KINETIC_ENERGY_RESERVE_ATTRIBUTE_MAIN`. Its
 linked binding returns an `f32`, and the calls feed conditional/status expressions rather than
-performing a standalone mutation point. They therefore remain preserved until expression and
-status-module editing has a measured contract; they are not treated as another guessed E1 point
-family.
+performing a standalone mutation point. A separate scan of the pinned public `smashline` tree
+also counted the read-only condition inputs `WorkModule::is_flag` (5,841), `get_int64` (1,242),
+`get_float` (850), `get_int` (669), `get_param_float` (18), `StatusModule::status_kind` (25),
+`prev_status_kind` (3), and `situation_kind` (1). These calls remain source-preserved until
+expression and status-module editing has a measured contract; they are not treated as another
+guessed E1 point family. A regression test pins all of these names through the raw-block export
+and fixed-point path so the evidence boundary cannot become silent data loss.
 
 `REVERSE_LR` is the local-cache exception that started this slice: **7 real calls**, all
 `macros::REVERSE_LR(agent)`, all Kirby (`ItemLightThrowB`, `ItemLightThrowB4`,
