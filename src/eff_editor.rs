@@ -3983,7 +3983,7 @@ impl EffEditor {
         );
         ui.label(
             egui::RichText::new(format!(
-                "pos [{:.2} {:.2} {:.2}] · rot [{:.2} {:.2} {:.2}] · bone {}",
+                "pos [{:.2} {:.2} {:.2}] · rot X {:.2} · Y {:.2} · Z {:.2} · bone {}",
                 d.pos.x, d.pos.y, d.pos.z, d.rot.x, d.rot.y, d.rot.z, d.bone_name
             ))
             .small()

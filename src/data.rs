@@ -126,7 +126,8 @@ pub struct Hitbox {
     pub is_add_attack: i32,
     /// Hitbox attribute float (usually 0.0).
     pub hitbox_attr: f32,
-    /// Ground/air flag (int, usually 0).
+    /// Rehit flag (int, usually 0). The serialized field name remains `ground_or_air` for wire
+    /// compatibility with existing projects and plugin messages.
     pub ground_or_air: i32,
     pub is_mtk: bool,
     pub is_shield_disable: bool,
@@ -6152,6 +6153,8 @@ pub struct EffectCall {
     pub spawn_func: String,
     pub bone_name: String,
     pub offset: [f32; 3],
+    /// Euler rotation in editor order `[X, Y, Z]`; ACMD spawn arguments are `Z, Y, X` and are
+    /// converted at the parser/export boundaries.
     pub rotation: [f32; 3],
     pub scale: f32,
     /// `true` when the effect follows the bone (EFFECT_FOLLOW variants).

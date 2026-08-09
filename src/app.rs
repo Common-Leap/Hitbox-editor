@@ -29,6 +29,10 @@ fn carrier_send_reached_goal(
 /// The editor, ACMD source, exports, and user-facing timeline all use one-based game frames.
 const FIRST_GAME_FRAME: u32 = 1;
 
+/// Effect rotations are stored in the editor's human-readable order. ACMD spawn macros carry
+/// the same values as `zr, yr, xr`, so the parser/exporter handles that wire-order conversion.
+const EFFECT_ROTATION_AXIS_LABELS: [&str; 3] = ["X", "Y", "Z"];
+
 /// Convert a game-frame playhead to the zero-based frame index stored in `.nuanmb` animations.
 fn animation_frame_for_game_frame(frame: u32) -> f32 {
     crate::data::script_to_motion_frame(frame)
@@ -6167,9 +6171,7 @@ impl VisionaryApp {
                             wide_slider_f32(ui, &mut hb.hitlag_mult, 0.0..=5.0, "Hitlag Mult");
                             wide_slider_f32(ui, &mut hb.sdi_mult, 0.0..=5.0, "SDI Mult");
                             lr_check_combo(ui, &mut hb.lr_check, "fp_lr_check");
-                            ui.add(
-                                egui::DragValue::new(&mut hb.ground_or_air).prefix("Ground/Air: "),
-                            );
+                            ui.add(egui::DragValue::new(&mut hb.ground_or_air).prefix("Rehit: "));
                             ui.checkbox(&mut hb.is_clang, "Clang");
                             ui.checkbox(&mut hb.is_reflectable, "Reflectable");
                             ui.checkbox(&mut hb.is_absorbable, "Absorbable");
@@ -6305,9 +6307,7 @@ impl VisionaryApp {
                             ui.add(
                                 egui::DragValue::new(&mut hb.is_add_attack).prefix("Add Attack: "),
                             );
-                            ui.add(
-                                egui::DragValue::new(&mut hb.ground_or_air).prefix("Ground/Air: "),
-                            );
+                            ui.add(egui::DragValue::new(&mut hb.ground_or_air).prefix("Rehit: "));
 
                             setoff_combo(ui, &mut hb.setoff_kind, "setoff_kind");
                             lr_check_combo(ui, &mut hb.lr_check, "lr_check");
@@ -9715,16 +9715,24 @@ impl VisionaryApp {
 
                                 ui.label("Rotation");
                                 ui.horizontal(|ui| {
-                                    for v in ec.rotation.iter_mut() {
+                                    for (axis, v) in EFFECT_ROTATION_AXIS_LABELS
+                                        .into_iter()
+                                        .zip(ec.rotation.iter_mut())
+                                    {
                                         changed |=
-                                            ui.add(egui::DragValue::new(v).speed(0.5)).changed();
+                                            ui.add(
+                                                egui::DragValue::new(v)
+                                                    .speed(0.5)
+                                                    .prefix(format!("{axis}: ")),
+                                            )
+                                            .changed();
                                     }
                                 });
                                 if let Some(p) = &pristine {
                                     orig(
                                         ui,
                                         format!(
-                                            "orig [{:.1} {:.1} {:.1}]",
+                                            "orig X {:.1} · Y {:.1} · Z {:.1}",
                                             p.rotation[0], p.rotation[1], p.rotation[2]
                                         ),
                                     );
@@ -29565,6 +29573,11 @@ mod live_effect_capture_tests {
         assert_eq!(timeline_frame_at_fraction(0.0, 60), 1);
         assert_eq!(timeline_frame_at_fraction(9.0 / 60.0, 60), 10);
         assert_eq!(timeline_frame_at_fraction(1.0, 60), 60);
+    }
+
+    #[test]
+    fn effect_rotation_editor_labels_are_xyz() {
+        assert_eq!(EFFECT_ROTATION_AXIS_LABELS, ["X", "Y", "Z"]);
     }
 
     #[test]

@@ -2419,7 +2419,7 @@ fn attack_edits(
         ),
         (
             23,
-            "ground/air",
+            "rehit",
             before.ground_or_air != after.ground_or_air,
             ArgValue::Int(after.ground_or_air as i64),
         ),
@@ -2579,7 +2579,7 @@ fn attack_fp_edits(
         ),
         (
             22,
-            "ground/air",
+            "rehit",
             before.ground_or_air != after.ground_or_air,
             ArgValue::Int(after.ground_or_air as i64),
         ),
