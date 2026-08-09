@@ -317,10 +317,9 @@ pub fn drain_hits() -> Vec<HitRecord> {
 }
 
 pub fn clear() {
+    // This function is called at every fight start, while the Skyline hook and its callback
+    // registration are installed once for the plugin lifetime. Clearing either here would make
+    // the first match work and every later match silently lose collision processing; an inline
+    // trampoline cannot be discarded while the game text is still patched to call it.
     HITS.lock().clear();
-    unsafe {
-        TRAMPOLINE = None;
-    }
-    CALLBACKS.lock().clear();
-    *INSTALLED.lock() = false;
 }

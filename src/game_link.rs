@@ -2517,6 +2517,25 @@ mod tests {
                 "disabled collision hook path is missing {needle:?}"
             );
         }
+
+        let clear_start = source
+            .find("pub fn clear()")
+            .expect("collision hook must expose its match-state clear");
+        let clear_body = &source[clear_start..];
+        assert!(
+            clear_body.contains("HITS.lock().clear();"),
+            "collision hook clear must discard per-match hit records"
+        );
+        for needle in [
+            "TRAMPOLINE = None;",
+            "CALLBACKS.lock().clear();",
+            "*INSTALLED.lock() = false;",
+        ] {
+            assert!(
+                !clear_body.contains(needle),
+                "fight-start clear must not tear down the boot-lifetime hook state: {needle:?}"
+            );
+        }
     }
 
     /// The rate category and override field the editor sends are the ones the plugin reads.

@@ -3709,6 +3709,12 @@ the installer consumes that trigger before scanning, then reports `request=inlin
 the diagnostic session. This is a test affordance, not runtime proof: the trigger must still
 produce an `inline-body` install line and a collision line without a crash on the target.
 
+The match-lifecycle audit also fixed a real state bug: `on_fight_start()` calls the hook system's
+clear path, but the native hook and its callback registration are boot-lifetime state. Clearing
+the callback list or inline trampoline there made the first match work and later matches silently
+lose collision processing. The clear path now discards only per-match hit records; the hook remains
+installed until the plugin itself is gone.
+
 R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
 trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
 enable the inline hook based on static analysis alone.
