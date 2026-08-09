@@ -19,6 +19,9 @@ static SYNTH: AtomicU64 = AtomicU64::new(0); // handle==0 → synthetic pseudo-h
 static NEWS: AtomicU64 = AtomicU64::new(0);
 static DEDUPS: AtomicU64 = AtomicU64::new(0);
 static RESHOWS: AtomicU64 = AtomicU64::new(0); // slot reuse with changed hash → re-shown
+// Collision callbacks are counted unconditionally so a runtime hook test does not depend on
+// the debug-log trigger still existing when the hit occurs. Detailed fields remain opt-in below.
+static COLLISION_HITS: AtomicU64 = AtomicU64::new(0);
 
 // Reconcile (per-frame cleanup) cumulative counters.
 static REC_GONE: AtomicU64 = AtomicU64::new(0); // is_exist_effect said gone
@@ -112,6 +115,11 @@ pub fn note_result(is_new: bool, reshow: bool) {
     }
 }
 
+/// Count a collision callback without allocating or requiring debug logging.
+pub fn note_collision() {
+    COLLISION_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Per-frame reconcile outcome (only counted; a line is emitted with STATS).
 pub fn note_reconcile(gone: u64, dead_accessor: u64, expired: u64) {
     REC_GONE.fetch_add(gone, Ordering::Relaxed);
@@ -178,9 +186,10 @@ pub fn note_stats(
     push(format!(
         "STATS frame={frame} tracker={tracker_count} pend={pending_depth} outbox={outbox_depth} \
          agents={live_fighters}f/{live_weapons}w \
-         frame_ms={fmin:.2}/{favg:.2}/{fmax:.2} \
+         frame_ms={fmin:.2}/{favg:.2}/{fmax:.2} collisions={} \
          spawns={} (fighter={} follow={} synth={}) new={} reshow={} dedup={} \
          rec_gone={} rec_dead={} rec_ttl={} flushed={} edits={}ok/{}fail",
+        COLLISION_HITS.load(Ordering::Relaxed),
         SPAWNS.load(Ordering::Relaxed),
         SPAWNS_FIGHTER.load(Ordering::Relaxed),
         SPAWNS_FOLLOW.load(Ordering::Relaxed),

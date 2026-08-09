@@ -266,6 +266,10 @@ fn collision_queue_callback(ctx: &CollisionContext) {
 
 /// Collision hit notify + damage/overload queues.
 pub fn notify_log_event_collision_hit(ctx: &CollisionContext) {
+    // Keep the callback proof independent of the optional detail logger. The bounded STATS
+    // counter is cheap enough for every hit and distinguishes an observed callback from an
+    // installed-but-unexercised trampoline even when activate.txt is removed after boot.
+    crate::slight::diag::note_collision();
     record_hit(ctx.attacker_boid, ctx.defender_boid, ctx.tick);
     crate::slight::systems::damage_manager::on_collision_hit(ctx);
     if crate::slight::smash_utils::debug_logging_enabled() {

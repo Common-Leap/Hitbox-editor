@@ -2484,6 +2484,7 @@ mod tests {
             "body pattern missing or ambiguous",
             "COLLISION_HOOK mode=wrapper-fallback coverage=partial",
             "COLLISION attacker=",
+            "note_collision()",
             "const ENABLE_INLINE_COLLISION_HOOK: bool = false;",
             "DEBUG_INLINE_COLLISION",
             "consume_sd_trigger",
@@ -2498,6 +2499,21 @@ mod tests {
             !source.contains("type CollisionHitHook =") && !source.contains("param_1: u32"),
             "the obsolete six-integer collision hook ABI is still present"
         );
+
+        let diag_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/diag.rs");
+        let diag_source = std::fs::read_to_string(&diag_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", diag_path.display()));
+        for needle in [
+            "static COLLISION_HITS: AtomicU64",
+            "pub fn note_collision()",
+            "frame_ms={fmin:.2}/{favg:.2}/{fmax:.2} collisions={}",
+        ] {
+            assert!(
+                diag_source.contains(needle),
+                "collision diagnostic counter is missing {needle:?}"
+            );
+        }
 
         let disabled_start = source
             .find("if !inline_requested")

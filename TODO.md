@@ -3723,7 +3723,15 @@ ACMD/effect activity. The user also reported landing hits during that session, b
 contained no `COLLISION attacker=...` line. This is useful evidence that the fallback installed and
 the plugin stayed alive, not proof that the collision callback saw the hit: it is consistent with
 the statically known direct body callers bypassing the exported wrapper. The corrected inline body
-path still needs a deliberate one-shot boot test before this entry can close.
+path therefore required a deliberate one-shot boot test; the first result is recorded below, but it
+did not yet prove callback execution.
+
+The first one-shot inline Eden session then reported `COLLISION_HOOK request=inline-one-shot` and
+`COLLISION_HOOK mode=inline-body offset=0x67a7b0`, stayed alive, and continued writing normal
+`STATS`/ACMD activity after the user's hits. It still contained no detailed `COLLISION` line. That
+boot used the older debug-gated diagnostic, so it proves the body hook installed without an
+immediate crash but does not yet prove that the callback ran. The rebuilt plugin now adds an
+unconditional cumulative `collisions=` field to each `STATS` line for the next controlled boot.
 
 R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
 trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
