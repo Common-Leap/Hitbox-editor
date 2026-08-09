@@ -84,7 +84,7 @@ pub fn install() {
         Some(off) => off,
         None => {
             skyline::println!(
-                "[SLight] Skyline Hook: body pattern not found; installing wrapper fallback (partial coverage)"
+                "[SLight] Skyline Hook: body pattern missing or ambiguous; installing wrapper fallback (partial coverage)"
             );
             skyline::install_hook!(fallback_collision_hit_hook);
             *INSTALLED.lock() = true;
@@ -133,14 +133,21 @@ fn scan_collision_pattern() -> Option<usize> {
             return None;
         }
         let slide = len - COLLISION_PATTERN.len();
+        let mut match_offset = None;
         for off in 0..=slide {
             if (0..COLLISION_PATTERN.len())
                 .all(|i| *text_start.add(off + i) == COLLISION_PATTERN[i])
             {
-                return Some(off);
+                // A repeated prologue is not evidence that the first match is the collision
+                // body. Refuse to hook an ambiguous target and let the binding fallback report
+                // its known partial coverage instead of risking an unrelated trampoline.
+                if match_offset.is_some() {
+                    return None;
+                }
+                match_offset = Some(off);
             }
         }
-        None
+        match_offset
     }
 }
 

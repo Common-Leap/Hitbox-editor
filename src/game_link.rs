@@ -2451,6 +2451,9 @@ mod tests {
             "    bool,\n) -> u64;",
             "#[skyline::hook(\n    replace = smash::app::lua_bind::FighterManager::notify_log_event_collision_hit\n)]",
             "skyline::install_hook!(fallback_collision_hit_hook);",
+            "let mut match_offset = None;",
+            "if match_offset.is_some()",
+            "body pattern missing or ambiguous",
             "orig(",
         ] {
             assert!(
