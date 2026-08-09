@@ -2363,19 +2363,21 @@ calls named in the original entry are not expression calls: `FILL_SCREEN_MODEL_C
 `CANCEL_FILL_SCREEN` each occur twice in `effect_` functions and belong to the effect-family
 residue work instead. They are removed from this scope rather than claimed by the wrong lane.
 
-Implement the three measured expression macros through the same staged parse/IR, panel, live,
-export, and source-write-back gate. Unknown expression lines stay verbatim until a later
-measured slice; a parser that drops raw rumble or slope/module lines is not full expression
-coverage.
+Implement the measured expression calls through the same staged parse/IR, panel, live, export,
+and source-write-back gate. Unknown expression lines stay verbatim until a later measured slice;
+a parser that drops raw rumble or slope/module lines is not full expression coverage.
 
 **Result 2026-08-08.** The measured slice now has one shared IR/event/site walk, an editable
 `expression_` panel and source checkout, timeline coverage, capture adoption, sparse live rules,
 portable project persistence, generated Skyline source, export read-back verification, and
 argument-only source write-back. `RUMBLE_HIT`, `QUAKE`, and `FT_ATTACK_ABS_CAMERA_QUAKE` retain
-their source tokens; structural changes are reported instead of invented. The local corpus gate
-still measures 335 expression bodies and exactly 65, 51, and 2 calls respectively, all typed and
-round-tripped. The plugin's category-10 wire lane and three hooks build successfully; live game
-behaviour remains unverified because no emulator or UI automation was run.
+their source tokens; structural changes are reported instead of invented. The newly measured
+direct `ControlModule::set_rumble` slice has 21,019 textual calls in the retained public
+`smashline` tree: 21,017 exact five-argument calls are typed, while the two one-argument dump
+artifacts remain raw. The local cache gate now measures 335 expression bodies and exactly 65,
+51, 2, and 279 calls respectively, all typed and round-tripped. The plugin's category-10 wire
+lane and four hooks build successfully; live game behaviour remains unverified because no
+emulator or UI automation was run.
 
 ## Gameplay
 

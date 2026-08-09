@@ -6532,7 +6532,15 @@ impl VisionaryApp {
             return Some(A::Hash(value));
         }
         match donor {
-            A::Hash(_) => token.parse::<u64>().ok().map(A::Hash),
+            A::Hash(_) => {
+                let raw = token.trim().replace('_', "");
+                let raw = raw.strip_prefix('*').unwrap_or(&raw);
+                raw.strip_prefix("0x")
+                    .or_else(|| raw.strip_prefix("0X"))
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                    .or_else(|| raw.parse::<u64>().ok())
+                    .map(A::Hash)
+            }
             A::Int(_) => token.parse::<i64>().ok().map(A::Int),
             A::Num(_) => token
                 .parse::<f32>()
@@ -6590,12 +6598,25 @@ impl VisionaryApp {
                 unrepresentable += 1;
                 continue;
             };
+            let pristine_tokens = was.call.tokens();
             let tokens = now.call.tokens();
             let Some(args) = tokens
                 .iter()
                 .enumerate()
                 .map(|(slot, token)| {
-                    Self::expression_arg_wire(token, donor.args.get(slot)?, was.call.func(), slot)
+                    let donor_arg = donor.args.get(slot)?;
+                    if pristine_tokens
+                        .get(slot)
+                        .is_some_and(|pristine| *pristine == *token)
+                    {
+                        // A source token such as `*BATTLE_OBJECT_ID_INVALID as u32` has no
+                        // recoverable Lua scalar spelling. It is still safe when unchanged:
+                        // use the captured native value as the complete replacement vector and
+                        // only decode slots the user actually edited.
+                        Some(donor_arg.clone())
+                    } else {
+                        Self::expression_arg_wire(token, donor_arg, was.call.func(), slot)
+                    }
                 })
                 .collect::<Option<Vec<_>>>()
             else {
@@ -6825,6 +6846,18 @@ impl VisionaryApp {
                     } => {
                         changed |= expression_token_edit(ui, attack_abs_kind, (event.site, 0));
                         changed |= expression_token_edit(ui, quake_kind, (event.site, 1));
+                    }
+                    ExpressionCall::ControlModuleSetRumble {
+                        kind,
+                        duration,
+                        looped,
+                        target,
+                        ..
+                    } => {
+                        changed |= expression_token_edit(ui, kind, (event.site, 0));
+                        changed |= expression_token_edit(ui, duration, (event.site, 1));
+                        changed |= expression_token_edit(ui, looped, (event.site, 2));
+                        changed |= expression_token_edit(ui, target, (event.site, 3));
                     }
                 }
             });
@@ -13101,6 +13134,25 @@ impl VisionaryApp {
                                 quake_kind: quake_kind.to_string(),
                             }
                         })
+                }
+                "ControlModule::set_rumble" if line.args.len() == 4 => {
+                    let tokens = line
+                        .args
+                        .iter()
+                        .map(crate::game_link::LuaArgWire::to_source_arg)
+                        .collect::<Option<Vec<_>>>();
+                    tokens.and_then(|tokens| {
+                        let [kind, duration, looped, target] = tokens.as_slice() else {
+                            return None;
+                        };
+                        Some(ExpressionCall::ControlModuleSetRumble {
+                            receiver: "agent.module_accessor".into(),
+                            kind: kind.clone(),
+                            duration: duration.clone(),
+                            looped: looped.clone(),
+                            target: target.clone(),
+                        })
+                    })
                 }
                 _ => None,
             };
@@ -25331,10 +25383,20 @@ mod live_effect_capture_tests {
                 10.0,
                 vec![A::Int(0), A::Int(7)],
             ),
+            expression_capture(
+                "ControlModule::set_rumble",
+                12.0,
+                vec![
+                    A::Hash(hash40::hash40("rbkind_walk").0),
+                    A::Int(0),
+                    A::Bool(false),
+                    A::Int(u32::MAX as i64),
+                ],
+            ),
         ];
         let script = VisionaryApp::expression_script_from_captures(&captures);
         let events = script.to_expression_events();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
         let expected_kind = format!("Hash40::new_raw({:#x})", hash40::hash40("rbkind_attackm").0);
         assert!(matches!(
             &events[0].call,
@@ -25343,6 +25405,19 @@ mod live_effect_capture_tests {
         ));
         assert_eq!(events[1].call.func(), "QUAKE");
         assert_eq!(events[2].frame, 11);
+        assert!(matches!(
+            &events[3].call,
+            crate::data::ExpressionCall::ControlModuleSetRumble {
+                receiver,
+                duration,
+                looped,
+                target,
+                ..
+            } if receiver == "agent.module_accessor"
+                && duration == "0"
+                && looped == "false"
+                && target == &u32::MAX.to_string()
+        ));
     }
 
     #[test]
@@ -25377,6 +25452,69 @@ mod live_effect_capture_tests {
         assert_eq!(
             rule.overrides.as_ref().unwrap().expression_args,
             Some(vec![A::Int(7)])
+        );
+    }
+
+    #[test]
+    fn a_direct_rumble_rule_reuses_unchanged_symbolic_target() {
+        let pristine = vec![crate::data::ExpressionEvent {
+            frame: 12,
+            site: 0,
+            call: crate::data::ExpressionCall::ControlModuleSetRumble {
+                receiver: "agent.module_accessor".into(),
+                kind: "Hash40::new(\"rbkind_walk\")".into(),
+                duration: "0".into(),
+                looped: "false".into(),
+                target: "*BATTLE_OBJECT_ID_INVALID as u32".into(),
+            },
+        }];
+        let shown = vec![crate::data::ExpressionEvent {
+            frame: 12,
+            site: 0,
+            call: crate::data::ExpressionCall::ControlModuleSetRumble {
+                receiver: "agent.module_accessor".into(),
+                kind: "Hash40::new(\"rbkind_attackl\")".into(),
+                duration: "6".into(),
+                looped: "true".into(),
+                target: "*BATTLE_OBJECT_ID_INVALID as u32".into(),
+            },
+        }];
+        let captures = vec![expression_capture(
+            "ControlModule::set_rumble",
+            11.0,
+            vec![
+                A::Hash(hash40::hash40("rbkind_walk").0),
+                A::Int(0),
+                A::Bool(false),
+                A::Int(u32::MAX as i64),
+            ],
+        )];
+        let (rules, unrepresentable) = VisionaryApp::expression_rules_for(
+            hash40::hash40("walk").0,
+            &captures,
+            &pristine,
+            &shown,
+        );
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one direct rumble rule, got {}", rules.len());
+        };
+        assert_eq!(rule.func.as_deref(), Some("ControlModule::set_rumble"));
+        assert_eq!(
+            rule.hitbox_id,
+            Some(crate::game_link::expression_key(
+                "ControlModule::set_rumble",
+                &captures[0].args,
+            ))
+        );
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().expression_args,
+            Some(vec![
+                A::Hash(hash40::hash40("rbkind_attackl").0),
+                A::Int(6),
+                A::Bool(true),
+                A::Int(u32::MAX as i64)
+            ])
         );
     }
 

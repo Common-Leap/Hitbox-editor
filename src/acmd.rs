@@ -272,6 +272,15 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
             continue;
         }
 
+        // A direct expression primitive played outside every `is_excute` block. The source
+        // corpus contains this native call both wrapped and bare; keep its authored structure
+        // while giving the measured five-argument shape the same event walk as the macros.
+        if let Some(expression) = parse_direct_expression_call(line) {
+            stmts.push(AcmdStmt::Bare(Box::new(expression)));
+            pos += 1;
+            continue;
+        }
+
         // A sound played outside every `is_excute` block. Fifteen corpus `sound_` scripts end
         // this way, and the D1c oracle found them: they parsed as `Raw`, so a move whose last
         // footstep is written bare showed one fewer sound than it plays. Only this family is
@@ -1846,12 +1855,48 @@ fn parse_sound_call(line: &str) -> Option<ExcuteStmt> {
     }))
 }
 
-/// Read one of the three measured expression calls, or leave the line as `Raw`.
+/// Parse the measured direct `ControlModule::set_rumble` shape.
+///
+/// The standard public corpus uses `agent.module_accessor`; the HDR source form uses `boma`.
+/// The native payload is retained as source tokens, but duration and looped are required to be
+/// the measured integer/boolean spellings so the editor can map edits back to the native hook.
+/// Wrong arity and other expressions remain raw rather than being regenerated through a guess.
+fn parse_direct_expression_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "ControlModule::set_rumble(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args_balanced(&line[start..end]);
+    let [receiver, kind, duration, looped, target] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(receiver.trim(), "agent.module_accessor" | "boma")
+        || kind.trim().is_empty()
+        || duration.trim().parse::<i32>().is_err()
+        || !matches!(looped.trim(), "true" | "false")
+        || target.trim().is_empty()
+    {
+        return None;
+    }
+    Some(ExcuteStmt::Expression(
+        crate::data::ExpressionCall::ControlModuleSetRumble {
+            receiver: receiver.clone(),
+            kind: kind.clone(),
+            duration: duration.clone(),
+            looped: looped.clone(),
+            target: target.clone(),
+        },
+    ))
+}
+
+/// Read one of the measured expression calls, or leave the line as `Raw`.
 ///
 /// The expression family has several similarly named raw module calls beside these macros, so
 /// the exact `macros::NAME(` spelling and exact arity are both required. Arguments stay as
 /// tokens: source constants and live numeric captures must each survive an export.
 fn parse_expression_call(line: &str) -> Option<ExcuteStmt> {
+    if let Some(call) = parse_direct_expression_call(line) {
+        return Some(call);
+    }
     let args = |name: &str| -> Option<Vec<String>> {
         let needle = format!("macros::{name}(");
         let start = line.find(&needle)? + needle.len();
@@ -2560,6 +2605,15 @@ fn emit_expression(call: &crate::data::ExpressionCall, indent: &str) -> String {
         } => format!(
             "{indent}macros::{}(agent, {attack_abs_kind}, {quake_kind});",
             call.func()
+        ),
+        crate::data::ExpressionCall::ControlModuleSetRumble {
+            receiver,
+            kind,
+            duration,
+            looped,
+            target,
+        } => format!(
+            "{indent}ControlModule::set_rumble({receiver}, {kind}, {duration}, {looped}, {target});"
         ),
     }
 }
@@ -6061,22 +6115,30 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
         macros::RUMBLE_HIT(agent, Hash40::new("rbkind_attackm"), 0);
         macros::QUAKE(agent, *CAMERA_QUAKE_KIND_M);
+        ControlModule::set_rumble(agent.module_accessor, Hash40::new("rbkind_attackm"), 3, false, *BATTLE_OBJECT_ID_INVALID as u32);
     }
+    frame(agent.lua_state_agent, 7.0);
+    ControlModule::set_rumble(agent.module_accessor, Hash40::new("rbkind_walk"), 0, true, *BATTLE_OBJECT_ID_INVALID as u32);
 }
 "#;
         let script = parse_expression_script(source);
         let events = script.to_expression_events();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         assert_eq!(events[0].frame, 1);
         assert_eq!(events[1].frame, 6);
         assert_eq!(events[0].call.func(), "FT_ATTACK_ABS_CAMERA_QUAKE");
         assert_eq!(events[1].call.func(), "RUMBLE_HIT");
         assert_eq!(events[2].call.func(), "QUAKE");
+        assert_eq!(events[3].call.func(), "ControlModule::set_rumble");
+        assert_eq!(events[4].frame, 7);
 
         let emitted = preview_expression_fn(&script, "throw_hi");
         assert!(emitted.contains("slope!(agent, *MA_MSC_CMD_SLOPE_SLOPE, *SLOPE_STATUS_LR);"));
         assert!(emitted.contains(
             "macros::FT_ATTACK_ABS_CAMERA_QUAKE(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, *CAMERA_QUAKE_KIND_NONE);"
+        ));
+        assert!(emitted.contains(
+            "ControlModule::set_rumble(agent.module_accessor, Hash40::new(\"rbkind_walk\"), 0, true, *BATTLE_OBJECT_ID_INVALID as u32);"
         ));
         assert_eq!(
             parse_expression_script(&emitted).to_expression_events(),
@@ -6084,9 +6146,24 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
         );
     }
 
+    #[test]
+    fn malformed_direct_rumble_shape_stays_raw() {
+        let source = r#"
+unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        ControlModule::set_rumble(agent.module_accessor);
+    }
+}
+"#;
+        let script = parse_expression_script(source);
+        assert!(script.to_expression_events().is_empty());
+        let emitted = preview_expression_fn(&script, "bad");
+        assert!(emitted.contains("ControlModule::set_rumble(agent.module_accessor);"));
+    }
+
     /// Every measured expression call in the local script cache is typed and survives the same
     /// parse/emit/read-back path as the fixture above. The cache is the evidence boundary for
-    /// D2: unknown expression lines remain raw, while these three known macros must never
+    /// D2: unknown expression lines remain raw, while these measured calls must never
     /// silently fall through to raw text or disappear from an export.
     #[test]
     fn every_measured_expression_call_in_the_corpus_is_typed() {
@@ -6096,17 +6173,26 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
         }
 
         let mut expression_scripts = 0usize;
-        let mut written = [0usize; 3];
-        let mut typed = [0usize; 3];
+        let mut written = [0usize; 4];
+        let mut typed = [0usize; 4];
         let mut problems = Vec::new();
         for (path, body) in &bodies {
             let Some(interior) = function_interior(body, "expression_") else {
                 continue;
             };
             expression_scripts += 1;
-            let names = ["RUMBLE_HIT", "QUAKE", "FT_ATTACK_ABS_CAMERA_QUAKE"];
+            let names = [
+                "RUMBLE_HIT",
+                "QUAKE",
+                "FT_ATTACK_ABS_CAMERA_QUAKE",
+                "ControlModule::set_rumble",
+            ];
             for (index, name) in names.iter().enumerate() {
-                written[index] += interior.matches(&format!("macros::{name}(")).count();
+                written[index] += if *name == "ControlModule::set_rumble" {
+                    interior.matches("ControlModule::set_rumble(").count()
+                } else {
+                    interior.matches(&format!("macros::{name}(")).count()
+                };
             }
 
             let script = parse_expression_script(body);
@@ -6139,7 +6225,7 @@ unsafe extern "C" fn expression_throwhi(agent: &mut L2CAgentBase) {
         );
         assert_eq!(
             written,
-            [65, 51, 2],
+            [65, 51, 2, 279],
             "the measured expression macro counts changed; update D2 before expanding scope"
         );
     }

@@ -779,11 +779,12 @@ unsafe extern "C" fn expression_attackairn(agent: &mut L2CAgentBase) {
     if macros::is_excute(agent) {
         macros::RUMBLE_HIT(agent, Hash40::new("rbkind_attackm"), 0);
         macros::QUAKE(agent, *CAMERA_QUAKE_KIND_M);
+        ControlModule::set_rumble(agent.module_accessor, Hash40::new("rbkind_attackm"), 3, false, *BATTLE_OBJECT_ID_INVALID as u32);
     }
 }
 "#;
         let script = crate::acmd::parse_expression_script(source);
-        assert_eq!(script.to_expression_events().len(), 2);
+        assert_eq!(script.to_expression_events().len(), 3);
 
         let mut project = ModProjectFile {
             version: PROJECT_VERSION,
@@ -817,6 +818,9 @@ unsafe extern "C" fn expression_attackairn(agent: &mut L2CAgentBase) {
         assert!(acmd.contains("unsafe extern \"C\" fn expression_attackairn"));
         assert!(acmd.contains("macros::RUMBLE_HIT(agent"));
         assert!(acmd.contains("macros::QUAKE(agent"));
+        assert!(acmd.contains(
+            "ControlModule::set_rumble(agent.module_accessor, Hash40::new(\"rbkind_attackm\"), 3, false, *BATTLE_OBJECT_ID_INVALID as u32);"
+        ));
         assert!(acmd.contains(
             "agent.acmd(\"expression_attackairn\", expression_attackairn, smashline::Priority::Default);"
         ));

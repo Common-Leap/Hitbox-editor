@@ -6449,14 +6449,21 @@ pub(crate) fn expression_sites(text: &str) -> Vec<MacroSite> {
         ("QUAKE", 2),
         ("FT_ATTACK_ABS_CAMERA_QUAKE", 3),
     ];
-    scan_macro_sites(text, 0..text.len())
+    let mut sites: Vec<MacroSite> = scan_macro_sites(text, 0..text.len())
         .into_iter()
         .filter(|site| {
             CALLS
                 .iter()
                 .any(|(name, arity)| site.name == *name && site.args.len() == *arity)
         })
-        .collect()
+        .collect();
+    sites.extend(
+        scan_named_sites(text, "ControlModule::set_rumble", 0..text.len())
+            .into_iter()
+            .filter(|site| site.args.len() == 5),
+    );
+    sites.sort_by_key(|site| site.span.start);
+    sites
 }
 
 fn expression_tokens(call: &crate::data::ExpressionCall) -> Vec<&str> {
@@ -6467,6 +6474,13 @@ fn expression_tokens(call: &crate::data::ExpressionCall) -> Vec<&str> {
             attack_abs_kind,
             quake_kind,
         } => vec![attack_abs_kind, quake_kind],
+        crate::data::ExpressionCall::ControlModuleSetRumble {
+            kind,
+            duration,
+            looped,
+            target,
+            ..
+        } => vec![kind, duration, looped, target],
     }
 }
 
@@ -6818,6 +6832,45 @@ mod tests {
         assert!(out.contains("Hash40::new(\"rbkind_attackl\")"));
         assert!(out.contains("slope!(agent, *MA_MSC_CMD_SLOPE_SLOPE, *SLOPE_STATUS_LR);"));
         assert!(out.contains("// Keep this comment"));
+        assert_eq!(
+            crate::acmd::parse_expression_script(&out).to_expression_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn a_direct_rumble_edit_rewrites_payload_but_keeps_symbolic_target() {
+        let source = r#"unsafe extern "C" fn expression_walk(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_M);
+        ControlModule::set_rumble(agent.module_accessor, Hash40::new("rbkind_walk"), 0, false, *BATTLE_OBJECT_ID_INVALID as u32);
+        ControlModule::set_rumble(agent.module_accessor);
+    }
+}
+"#;
+        let script = crate::acmd::parse_expression_script(source);
+        let pristine = script.to_expression_events();
+        assert_eq!(pristine.len(), 2);
+        assert_eq!(pristine[1].call.func(), "ControlModule::set_rumble");
+
+        let mut edited_script = script.clone();
+        let call = edited_script.expression_stmt_mut(1).unwrap();
+        *call = crate::data::ExpressionCall::ControlModuleSetRumble {
+            receiver: "agent.module_accessor".into(),
+            kind: "Hash40::new(\"rbkind_attackl\")".into(),
+            duration: "6".into(),
+            looped: "true".into(),
+            target: "*BATTLE_OBJECT_ID_INVALID as u32".into(),
+        };
+        let edited = edited_script.to_expression_events();
+
+        let (out, report) = rewrite_expressions(source, "kirby/walk", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 3);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(out.contains(
+            "ControlModule::set_rumble(agent.module_accessor, Hash40::new(\"rbkind_attackl\"), 6, true, *BATTLE_OBJECT_ID_INVALID as u32);"
+        ));
+        assert!(out.contains("ControlModule::set_rumble(agent.module_accessor);"));
         assert_eq!(
             crate::acmd::parse_expression_script(&out).to_expression_events(),
             edited

@@ -776,7 +776,7 @@ pub struct HitboxRuleWire {
     pub overrides: Option<HbOverridesWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject: Option<InjectRuleWire>,
-    /// The exact ACMD macro this rule is for, when the category alone does not identify it.
+    /// The exact ACMD call this rule is for, when the category alone does not identify it.
     ///
     /// [`CAT_SOUND`] and [`CAT_EXPRESSION`] set it. Sound members share one category and every
     /// one of them carries a `Hash40` in slot 0, so a rule for `PLAY_SE` would otherwise apply
@@ -2843,7 +2843,8 @@ mod tests {
         );
     }
 
-    /// The editor and plugin agree on the expression category, field, and all three hook names.
+    /// The editor and plugin agree on the expression category, field, and every measured hook
+    /// name, including the direct native rumble binding.
     #[test]
     fn the_expression_category_and_hooks_match_the_plugin() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2851,7 +2852,12 @@ mod tests {
         let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
         assert!(module.contains(&format!("pub const CAT_EXPRESSION: u8 = {CAT_EXPRESSION};")));
         assert!(module.contains("pub expression_args: Option<Vec<LuaArg>>,"));
-        for func in ["RUMBLE_HIT", "QUAKE", "FT_ATTACK_ABS_CAMERA_QUAKE"] {
+        for func in [
+            "RUMBLE_HIT",
+            "QUAKE",
+            "FT_ATTACK_ABS_CAMERA_QUAKE",
+            "ControlModule::set_rumble",
+        ] {
             assert!(
                 module.contains(&format!("\"{func}\"")),
                 "missing {func} hook"

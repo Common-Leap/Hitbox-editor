@@ -1378,7 +1378,7 @@ pub struct SoundCall {
     pub tail: Option<String>,
 }
 
-/// One of the three expression macros measured in the local script corpus.
+/// One of the measured expression calls in the local script corpus.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExpressionCall {
     /// `macros::RUMBLE_HIT(agent, kind, unk)`.
@@ -1390,6 +1390,18 @@ pub enum ExpressionCall {
         attack_abs_kind: String,
         quake_kind: String,
     },
+    /// `ControlModule::set_rumble(module_accessor, kind, duration, looped, target)`.
+    ///
+    /// This is a direct native binding rather than an `sv_animcmd` macro. The receiver remains
+    /// source-owned because standard dumps use `agent.module_accessor` while HDR source uses
+    /// `boma`; the four native payload tokens are what the live hook captures and can retune.
+    ControlModuleSetRumble {
+        receiver: String,
+        kind: String,
+        duration: String,
+        looped: String,
+        target: String,
+    },
 }
 
 impl ExpressionCall {
@@ -1399,6 +1411,7 @@ impl ExpressionCall {
             Self::RumbleHit { .. } => "RUMBLE_HIT",
             Self::Quake { .. } => "QUAKE",
             Self::FtAttackAbsCameraQuake { .. } => "FT_ATTACK_ABS_CAMERA_QUAKE",
+            Self::ControlModuleSetRumble { .. } => "ControlModule::set_rumble",
         }
     }
 
@@ -1411,6 +1424,13 @@ impl ExpressionCall {
                 attack_abs_kind,
                 quake_kind,
             } => vec![attack_abs_kind, quake_kind],
+            Self::ControlModuleSetRumble {
+                kind,
+                duration,
+                looped,
+                target,
+                ..
+            } => vec![kind, duration, looped, target],
         }
     }
 }

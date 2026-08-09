@@ -204,8 +204,8 @@ pub const CAT_SOUND: u8 = 8;
 /// a rate.
 pub const CAT_MOTION_RATE: u8 = 9;
 
-/// The measured `expression_` camera/rumble primitives. The exact macro name is carried on the
-/// rule because the three members have different argument shapes.
+/// The measured `expression_` camera/rumble primitives. The exact call name is carried on the
+/// rule because the members have different argument shapes and one is a direct native binding.
 pub const CAT_EXPRESSION: u8 = 10;
 
 /// `REVERSE_LR` — an argument-less facing-direction point in a `game_` script.
@@ -2168,6 +2168,89 @@ expression_hook!(
     2
 );
 
+/// Convert the editor's four captured payload slots back to the native direct binding. The
+/// receiver is not part of this vector: it is the boma passed to the hook itself. A source token
+/// such as `*BATTLE_OBJECT_ID_INVALID as u32` is therefore represented by the pristine captured
+/// integer before an edit, while changed values must arrive in the concrete native types below.
+fn control_set_rumble_native_args(
+    args: &[LuaArg],
+) -> Option<(smash::phx::Hash40, i32, bool, u32)> {
+    let [kind, duration, looped, target] = args else {
+        return None;
+    };
+    let kind = match kind {
+        LuaArg::Hash(value) => smash::phx::Hash40::new_raw(*value),
+        LuaArg::Int(value) if *value >= 0 => smash::phx::Hash40::new_raw(*value as u64),
+        _ => return None,
+    };
+    let duration = match duration {
+        LuaArg::Int(value) => i32::try_from(*value).ok()?,
+        _ => return None,
+    };
+    let looped = match looped {
+        LuaArg::Bool(value) => *value,
+        _ => return None,
+    };
+    let target = match target {
+        LuaArg::Int(value) => u32::try_from(*value).ok()?,
+        _ => return None,
+    };
+    Some((kind, duration, looped, target))
+}
+
+/// Capture and sparsely override the measured direct `ControlModule::set_rumble` binding.
+///
+/// Unlike the three `sv_animcmd` expression hooks above, this primitive never touches the Lua
+/// stack: it receives the module accessor and concrete native arguments directly. Recording the
+/// same four payload types keeps the editor's expression key and the live rule key identical.
+#[skyline::hook(replace = smash::app::lua_bind::ControlModule::set_rumble)]
+unsafe fn hook_control_set_rumble(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    kind: smash::phx::Hash40,
+    duration: i32,
+    looped: bool,
+    target: u32,
+) {
+    let args = [
+        LuaArg::Hash(kind.hash),
+        LuaArg::Int(duration as i64),
+        LuaArg::Bool(looped),
+        LuaArg::Int(target as i64),
+    ];
+    record_for_boma(boma, "ControlModule::set_rumble", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        if let Some((suppress, overrides)) = expression_action(
+            motion,
+            frame,
+            "ControlModule::set_rumble",
+            &args,
+        ) {
+            if suppress {
+                return;
+            }
+            if let Some(overrides) = overrides {
+                if let Some(replacement) = overrides
+                    .expression_args
+                    .as_deref()
+                    .and_then(control_set_rumble_native_args)
+                {
+                    if replacement.0 != kind
+                        || replacement.1 != duration
+                        || replacement.2 != looped
+                        || replacement.3 != target
+                    {
+                        original!()(boma, replacement.0, replacement.1, replacement.2, replacement.3);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    original!()(boma, kind, duration, looped, target)
+}
+
 /// Inject rules for a motion, tagged with the collision family to fire through.
 fn injection_fingerprint(motion: u64, category: u8, injection: &InjectRule) -> u64 {
     let mut hash = fnv(0xcbf2_9ce4_8422_2325, motion);
@@ -3402,6 +3485,7 @@ pub fn install() {
         hook_rumble_hit,
         hook_quake,
         hook_ft_attack_abs_camera_quake,
+        hook_control_set_rumble,
         hook_reverse_lr,
         hook_set_speed_ex,
         hook_set_speed,
