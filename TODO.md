@@ -3717,6 +3717,14 @@ the callback list or inline trampoline there made the first match work and later
 lose collision processing. The clear path now discards only per-match hit records; the hook remains
 installed until the plugin itself is gone.
 
+The first fresh safe-default Eden session on 2026-08-08 loaded the deployed NRO and wrote
+`COLLISION_HOOK mode=wrapper-fallback coverage=partial`, followed by normal per-frame `STATS` and
+ACMD/effect activity. The user also reported landing hits during that session, but the diagnostic
+contained no `COLLISION attacker=...` line. This is useful evidence that the fallback installed and
+the plugin stayed alive, not proof that the collision callback saw the hit: it is consistent with
+the statically known direct body callers bypassing the exported wrapper. The corrected inline body
+path still needs a deliberate one-shot boot test before this entry can close.
+
 R3 remains open because an earlier Eden run with the old ABI produced a bad `A64HookFunction`
 trampoline, and no run has proven the corrected trampoline on Eden or a physical Switch. Do not
 enable the inline hook based on static analysis alone.
