@@ -2701,7 +2701,8 @@ mod tests {
                 && rules.contains("pub struct ControlInject")
                 && rules.contains("pub work_slot: Option<i32>")
                 && rules.contains("self.args == args")
-                && hooks.contains("WorkModule::get_int64")
+                && hooks.contains("WorkModule::get_int64(boma, slot)")
+                && hooks.contains("args[0] = crate::slight::hitbox_viewer::LuaArg::Int")
                 && hooks.contains("effect control work-slot injection rejected"),
             "the plugin must match controls by their exact captured argument vector"
         );

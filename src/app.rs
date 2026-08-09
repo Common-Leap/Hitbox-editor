@@ -30444,12 +30444,35 @@ mod effect_control_rule_tests {
             None,
             "decimal WorkModule slots must remain integer source text"
         );
-        assert_eq!(
-            VisionaryApp::control_work_slot(
-                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1"
+        let measured_slots = [
+            (
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_AFTERBURNER_LINE",
+                0x100000D3,
             ),
-            Some(0x100000CA)
-        );
+            (
+                "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_ARC1",
+                0x100000CC,
+            ),
+            (
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_ARC2",
+                0x100000CD,
+            ),
+            (
+                "FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_ATTACK_LINE1",
+                0x100000CA,
+            ),
+            (
+                "*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_INT_EFFECT_KIND_BAYONETTA_WITCHTWIST_WIND",
+                0x100000D4,
+            ),
+        ];
+        for (work, value) in measured_slots {
+            assert_eq!(
+                VisionaryApp::control_work_slot(work),
+                Some(value),
+                "measured WorkModule slot {work}"
+            );
+        }
     }
 
     #[test]
