@@ -1006,6 +1006,42 @@ fn enum_combo(ui: &mut egui::Ui, value: &mut String, id: &str, label: &str, opti
     });
 }
 
+/// Build the bone choices using the spelling ACMD expects rather than the display casing stored
+/// in a skeleton. `top` is a synthetic ACMD joint: it is not present in most `.nusktb` files,
+/// but it is a valid and common hitbox attachment point.
+fn acmd_bone_options<I, S>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut options = vec!["top".to_string()];
+    for name in names {
+        let name = name.as_ref().to_ascii_lowercase();
+        if !name.is_empty() && !options.iter().any(|existing| existing == &name) {
+            options.push(name);
+        }
+    }
+    options
+}
+
+#[cfg(test)]
+mod bone_option_tests {
+    use super::acmd_bone_options;
+
+    #[test]
+    fn acmd_bone_options_include_synthetic_top_and_lowercase_skeleton_names() {
+        assert_eq!(
+            acmd_bone_options(["Trans", "HandR", "handr", "", "ArmL"]),
+            ["top", "trans", "handr", "arml"]
+        );
+    }
+
+    #[test]
+    fn an_existing_top_bone_is_not_added_twice() {
+        assert_eq!(acmd_bone_options(["Top", "Trans"]), ["top", "trans"]);
+    }
+}
+
 /// Dropdown backed by a lua-const table: the offered names are exactly the ones the
 /// fetch path decodes into, so a fetched value always matches an entry.
 fn const_combo(
@@ -2916,7 +2952,7 @@ impl VisionaryApp {
         } else {
             None
         };
-        self.bone_names = skel
+        let mut loaded_bone_names: Vec<String> = skel
             .exists()
             .then(|| ssbh_data::skel_data::SkelData::from_file(&skel).ok())
             .flatten()
@@ -2939,14 +2975,18 @@ impl VisionaryApp {
                     continue;
                 };
                 if let Ok(wskel) = ssbh_data::skel_data::SkelData::from_file(&weapon_skel_path) {
-                    for bone in wskel.bones {
-                        if !self.bone_names.contains(&bone.name) {
-                            self.bone_names.push(bone.name);
-                        }
-                    }
+                    loaded_bone_names.extend(wskel.bones.into_iter().map(|bone| bone.name));
                 }
             }
         }
+        // Keep the text-edit fallback when no skeleton could be loaded. Once there is a
+        // skeleton, expose its names in ACMD's lowercase spelling and include synthetic `top`.
+        self.bone_names = if loaded_bone_names.is_empty() {
+            Vec::new()
+        } else {
+            acmd_bone_options(loaded_bone_names)
+        };
+        self.add_bone = self.add_bone.to_ascii_lowercase();
         self.current_model_dir = Some(model_dir.clone());
 
         // Queue model load for wgpu (done in update where we have device/queue access)
@@ -4932,7 +4972,7 @@ impl VisionaryApp {
         }
     }
 
-    /// Rewrite parsed ACMD bone names to the skeleton's own casing.
+    /// Rewrite parsed ACMD bone names to the editor's lowercase ACMD spelling.
     ///
     /// Scripts hash the lowercase resource name, while the skel exposes display case, and
     /// several ACMD joints are virtual — they have no bone of their own and have to resolve
@@ -4941,31 +4981,35 @@ impl VisionaryApp {
         let bone_name_map: std::collections::HashMap<String, String> = self
             .bone_names
             .iter()
-            .map(|n| (n.to_lowercase(), n.clone()))
+            .map(|n| {
+                let lower = n.to_ascii_lowercase();
+                (lower.clone(), lower)
+            })
             .collect();
 
         const VIRTUAL_BONE_FALLBACKS: &[(&str, &str)] = &[
-            ("haver", "HandR"),
-            ("havel", "HandL"),
-            ("haver2", "HandR"),
-            ("throw", "Hip"),
-            ("itemroot", "Hip"),
-            ("top", "Trans"),
-            ("trans", "Trans"),
-            ("rot", "Rot"),
+            ("haver", "handr"),
+            ("havel", "handl"),
+            ("haver2", "handr"),
+            ("throw", "hip"),
+            ("itemroot", "hip"),
+            ("top", "trans"),
+            ("trans", "trans"),
+            ("rot", "rot"),
         ];
 
         for hb in hitboxes {
-            let lower = hb.bone_name.to_lowercase();
-            if let Some(canonical) = bone_name_map.get(&lower) {
-                hb.bone_name = canonical.clone();
-            } else if let Some(&(_, fallback)) =
-                VIRTUAL_BONE_FALLBACKS.iter().find(|(v, _)| *v == lower)
-            {
-                if let Some(canonical) = bone_name_map.get(&fallback.to_lowercase()) {
-                    hb.bone_name = canonical.clone();
-                }
-            }
+            let lower = hb.bone_name.to_ascii_lowercase();
+            hb.bone_name = bone_name_map
+                .get(&lower)
+                .cloned()
+                .or_else(|| {
+                    VIRTUAL_BONE_FALLBACKS
+                        .iter()
+                        .find(|(virtual_name, _)| *virtual_name == lower)
+                        .and_then(|(_, fallback)| bone_name_map.get(*fallback).cloned())
+                })
+                .unwrap_or(lower);
         }
     }
 
@@ -6551,7 +6595,7 @@ impl VisionaryApp {
                     let active_end = active_start.saturating_add(5);
                     let mut hb = Hitbox {
                         id: next_id,
-                        bone_name: self.add_bone.clone(),
+                        bone_name: self.add_bone.to_ascii_lowercase(),
                         damage: self.add_damage,
                         angle: self.add_angle,
                         kb_scaling: self.add_kb_scaling,
