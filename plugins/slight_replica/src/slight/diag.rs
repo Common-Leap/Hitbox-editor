@@ -19,8 +19,8 @@ static SYNTH: AtomicU64 = AtomicU64::new(0); // handle==0 → synthetic pseudo-h
 static NEWS: AtomicU64 = AtomicU64::new(0);
 static DEDUPS: AtomicU64 = AtomicU64::new(0);
 static RESHOWS: AtomicU64 = AtomicU64::new(0); // slot reuse with changed hash → re-shown
-// Collision callbacks are counted unconditionally so a runtime hook test does not depend on
-// the debug-log trigger still existing when the hit occurs. Detailed fields remain opt-in below.
+                                               // Collision callbacks are counted unconditionally so a runtime hook test does not depend on
+                                               // the debug-log trigger still existing when the hit occurs. Detailed fields remain opt-in below.
 static COLLISION_HITS: AtomicU64 = AtomicU64::new(0);
 
 // Reconcile (per-frame cleanup) cumulative counters.

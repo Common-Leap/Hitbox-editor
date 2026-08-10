@@ -10,9 +10,7 @@
 //! arguments, or suppress the call outright (the preview for "mute this"). Nothing here can move
 //! a call to another frame, and the editor never asks it to.
 
-use super::{
-    any_rules, read_args_exact, record, HbOverrides, LuaArg, CAT_SOUND, RULES,
-};
+use super::{any_rules, read_args_exact, record, HbOverrides, LuaArg, CAT_SOUND, RULES};
 
 /// The family: macro name, how many leading `Hash40` arguments it takes, and whether one more
 /// argument follows them.
@@ -91,7 +89,12 @@ fn hash_slots(func: &str) -> usize {
 /// A rule with no `func` at all matches any member, which is what an editor older than this
 /// build sends. That is the documented wire rule — an old field is ignored and the rest applies
 /// — read in the only direction that is safe here: too broad rather than silently dead.
-fn sound_action(motion: u64, hash: u64, frame: f32, func: &str) -> Option<(bool, Option<HbOverrides>)> {
+fn sound_action(
+    motion: u64,
+    hash: u64,
+    frame: f32,
+    func: &str,
+) -> Option<(bool, Option<HbOverrides>)> {
     let rules = RULES.lock();
     let hit = rules
         .iter()

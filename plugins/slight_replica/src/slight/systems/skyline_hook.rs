@@ -29,14 +29,8 @@ const COLLISION_PATTERN: [u8; 40] = [
 /// function also carries the hit value, collision id, and a boolean flag in their ABI-native
 /// registers. Keep the float and bool in their real positions — treating this as six integer
 /// arguments corrupts both the callback fields and the return path on AArch64.
-type CollisionHitTrampoline = unsafe extern "C" fn(
-    *mut smash::app::FighterManager,
-    u32,
-    u32,
-    f32,
-    i32,
-    bool,
-) -> u64;
+type CollisionHitTrampoline =
+    unsafe extern "C" fn(*mut smash::app::FighterManager, u32, u32, f32, i32, bool) -> u64;
 
 type CollisionCallback = fn(&CollisionContext);
 
@@ -199,7 +193,14 @@ unsafe fn fallback_collision_hit_hook(
         flags,
     );
     run_callbacks(&ctx);
-    original!()(manager, attacker_boid, defender_boid, damage, collision_id, flags)
+    original!()(
+        manager,
+        attacker_boid,
+        defender_boid,
+        damage,
+        collision_id,
+        flags,
+    )
 }
 
 unsafe extern "C" fn collision_hit_hook(

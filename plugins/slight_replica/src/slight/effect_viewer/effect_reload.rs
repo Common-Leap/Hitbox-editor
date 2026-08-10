@@ -974,7 +974,11 @@ fn effect_manager() -> *mut u64 {
 /// caller as the old DEAD/lifetime retirement path.
 fn item_manager() -> *mut smash::app::ItemManager {
     let text = unsafe { skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as *mut u8 };
-    unsafe { *text.add(ITEM_MANAGER_OFFSET).cast::<*mut smash::app::ItemManager>() }
+    unsafe {
+        *text
+            .add(ITEM_MANAGER_OFFSET)
+            .cast::<*mut smash::app::ItemManager>()
+    }
 }
 
 fn path_hash_from_search_index(search_index: u32) -> Option<u64> {
@@ -1064,8 +1068,7 @@ fn hook_load_effects(manager: *mut u64, handle: u32, search_index: &u32) -> u32 
     }
     // Mark the GAME's own alucard (idx=69) load so hook_build_effect_set logs the a4d90 call it
     // makes INSIDE original — that's the working reference to diff our co-load's a4d90 args against.
-    let mark_game_alucard =
-        trace && !IN_DONOR_LOAD.load(Ordering::Relaxed) && *search_index == 69;
+    let mark_game_alucard = trace && !IN_DONOR_LOAD.load(Ordering::Relaxed) && *search_index == 69;
     if mark_game_alucard {
         GAME_ALUCARD_LOADING.store(true, Ordering::Relaxed);
     }
@@ -2352,10 +2355,7 @@ unsafe fn remove_loose_auto_carrier(held_id: u64, item_kind: i32) -> bool {
         ));
         return false;
     }
-    let result = smash::app::lua_bind::ItemManager::remove_item_from_id(
-        manager,
-        held_id as u32,
-    );
+    let result = smash::app::lua_bind::ItemManager::remove_item_from_id(manager, held_id as u32);
     dlog(&format!(
         "AUTO_CARRIER_REMOVE_MANAGER id={held_id:#x} result={result:#x}"
     ));

@@ -17,9 +17,9 @@
 //! sections draw.
 
 use super::{
-    any_rules, read_args_exact, record, record_for_boma, HbOverrides, LuaArg, CAT_MOTION_RATE,
+    any_rules, read_args_exact, record, record_for_boma, HbOverrides, LuaArg,
     CAT_MOTION_MODULE_SET_HELPER_CALCULATION, CAT_MOTION_MODULE_SET_RATE,
-    CAT_MOTION_MODULE_SET_RATE_PARTIAL,
+    CAT_MOTION_MODULE_SET_RATE_PARTIAL, CAT_MOTION_RATE,
 };
 
 /// Reports per rule set, not per boot.
@@ -151,7 +151,9 @@ unsafe fn rate_action_for_call(lua_state: u64, args: &[LuaArg]) -> bool {
     // clamps its own widget, but a rule can arrive from a saved project or an older build, and
     // wedging the fighter is a much worse failure than ignoring one edit.
     if !(rate > 0.0) || !rate.is_finite() {
-        bail(&format!("refusing rate {rate}, which would stop the animation"));
+        bail(&format!(
+            "refusing rate {rate}, which would stop the animation"
+        ));
         return false;
     }
     let mut vals = args.to_vec();
@@ -227,12 +229,9 @@ unsafe fn hook_motion_module_set_helper_calculation(
             "MotionModule::set_helper_calculation",
             &[if enabled { 1.0 } else { 0.0 }],
         );
-        if let Some((suppress, overrides)) = super::action_for(
-            CAT_MOTION_MODULE_SET_HELPER_CALCULATION,
-            motion,
-            key,
-            frame,
-        ) {
+        if let Some((suppress, overrides)) =
+            super::action_for(CAT_MOTION_MODULE_SET_HELPER_CALCULATION, motion, key, frame)
+        {
             if suppress {
                 return;
             }
@@ -261,21 +260,15 @@ unsafe fn hook_motion_module_set_rate_partial(
     if any_rules() && !boma.is_null() {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
-        let key = super::numeric_point_key(
-            "MotionModule::set_rate_partial",
-            &[part_kind as f32, rate],
-        );
-        if let Some((suppress, overrides)) = super::action_for(
-            CAT_MOTION_MODULE_SET_RATE_PARTIAL,
-            motion,
-            key,
-            frame,
-        ) {
+        let key =
+            super::numeric_point_key("MotionModule::set_rate_partial", &[part_kind as f32, rate]);
+        if let Some((suppress, overrides)) =
+            super::action_for(CAT_MOTION_MODULE_SET_RATE_PARTIAL, motion, key, frame)
+        {
             if suppress {
                 return;
             }
-            if let Some(replacement) = overrides.and_then(|item| item.motion_module_rate_partial)
-            {
+            if let Some(replacement) = overrides.and_then(|item| item.motion_module_rate_partial) {
                 if replacement.is_finite() && replacement > 0.0 && replacement != rate {
                     original!()(boma, part_kind, replacement);
                     return;

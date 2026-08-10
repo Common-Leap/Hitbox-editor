@@ -2528,12 +2528,12 @@ mod tests {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for needle in [
-            "type CollisionHitTrampoline = unsafe extern \"C\" fn(",
+            "type CollisionHitTrampoline =",
+            "unsafe extern \"C\" fn(",
             "*mut smash::app::FighterManager",
             "damage: f32",
             "collision_id: i32",
             "flags: bool",
-            "    bool,\n) -> u64;",
             "#[skyline::hook(\n    replace = smash::app::lua_bind::FighterManager::notify_log_event_collision_hit\n)]",
             "skyline::install_hook!(fallback_collision_hit_hook);",
             "let mut match_offset = None;",
@@ -2552,6 +2552,11 @@ mod tests {
                 "collision hook ABI guard is missing {needle:?}"
             );
         }
+        let compact_source: String = source.split_whitespace().collect();
+        assert!(
+            compact_source.contains("f32,i32,bool)->u64;"),
+            "collision hook ABI guard is missing the float, collision-id, and bool tail"
+        );
         assert!(
             !source.contains("type CollisionHitHook =") && !source.contains("param_1: u32"),
             "the obsolete six-integer collision hook ABI is still present"

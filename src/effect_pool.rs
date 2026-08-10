@@ -25,6 +25,17 @@ pub struct EffectPool {
     dirty: bool,
 }
 
+/// The entries belonging to one source directory in the transplant picker.
+///
+/// The source directory is kept as the stable identity rather than only exposing its display
+/// label: two different effect kinds can legitimately end up with the same human-readable name,
+/// and the transplant operation still needs the original relative file paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EffectSourceGroup {
+    pub(crate) source_dir: String,
+    pub(crate) entries: Vec<(String, String)>,
+}
+
 fn cache_path() -> PathBuf {
     // v3: entry names are canonicalized to lowercase (v2 caches kept the file's
     // original case, so old scans still showed UPPERCASE names in the pickers).
@@ -165,6 +176,44 @@ impl EffectPool {
         out
     }
 
+    /// Case-insensitive search grouped by the parent directory of each EFF file.
+    ///
+    /// Unlike [`Self::search`], this intentionally has no global result cap: the collapsible
+    /// source sections make the full pool navigable without forcing every entry into the layout
+    /// at once. The source directories and entries are sorted so the picker does not jump around
+    /// as the cache is populated.
+    pub(crate) fn search_grouped(&self, query: &str) -> Vec<EffectSourceGroup> {
+        let q = query.to_lowercase();
+        let mut grouped: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut rels: Vec<&String> = self.cache.keys().collect();
+        rels.sort();
+        for rel in rels {
+            let source_dir = source_dir_of_rel(rel);
+            for name in &self.cache[rel].entries {
+                if q.is_empty() || name.to_lowercase().contains(&q) {
+                    grouped
+                        .entry(source_dir.clone())
+                        .or_default()
+                        .push((rel.clone(), name.clone()));
+                }
+            }
+        }
+
+        let mut source_dirs: Vec<String> = grouped.keys().cloned().collect();
+        source_dirs.sort();
+        source_dirs
+            .into_iter()
+            .map(|source_dir| {
+                let mut entries = grouped.remove(&source_dir).unwrap_or_default();
+                entries.sort();
+                EffectSourceGroup {
+                    source_dir,
+                    entries,
+                }
+            })
+            .collect()
+    }
+
     /// All entry names of one file (donor listing for the currently selected source).
     pub fn entries_of(&self, rel: &str) -> Vec<String> {
         self.cache
@@ -221,6 +270,15 @@ fn entry_names_deduped(idx: &crate::effects::EffIndex) -> Vec<String> {
     names
 }
 
+/// Return the normalized parent directory used as a source-group identity.
+pub(crate) fn source_dir_of_rel(rel: &str) -> String {
+    let normalized = rel.replace('\\', "/");
+    normalized
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or(normalized)
+}
+
 fn walk_effs(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(root) else {
         return;
@@ -241,5 +299,94 @@ fn walk_effs(root: &Path, out: &mut Vec<PathBuf>) {
             }
             out.push(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_with_files(files: &[(&str, &[&str])]) -> EffectPool {
+        let cache = files
+            .iter()
+            .map(|(rel, entries)| {
+                (
+                    (*rel).to_string(),
+                    PoolFile {
+                        mtime: 0,
+                        size: 0,
+                        entries: entries.iter().map(|entry| (*entry).to_string()).collect(),
+                    },
+                )
+            })
+            .collect();
+        EffectPool {
+            root: PathBuf::from("root"),
+            cache,
+            queue: Vec::new(),
+            queued: true,
+            total: files.len(),
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn grouped_search_collects_costume_files_under_one_source() {
+        let pool = pool_with_files(&[
+            (
+                "effect/fighter/kirby/ef_kirby_c01.eff",
+                &["kirby_c01", "kirby_shared"],
+            ),
+            ("effect/system/item/ef_item.eff", &["item_b", "item_a"]),
+            ("effect/fighter/kirby/ef_kirby.eff", &["kirby_base"]),
+        ]);
+
+        let groups = pool.search_grouped("");
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.source_dir.as_str())
+                .collect::<Vec<_>>(),
+            vec!["effect/fighter/kirby", "effect/system/item"]
+        );
+        assert_eq!(
+            groups[0].entries,
+            vec![
+                (
+                    "effect/fighter/kirby/ef_kirby.eff".to_string(),
+                    "kirby_base".to_string()
+                ),
+                (
+                    "effect/fighter/kirby/ef_kirby_c01.eff".to_string(),
+                    "kirby_c01".to_string()
+                ),
+                (
+                    "effect/fighter/kirby/ef_kirby_c01.eff".to_string(),
+                    "kirby_shared".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_search_filters_without_dropping_later_sources() {
+        let pool = pool_with_files(&[
+            ("effect/fighter/pickel/ef_pickel.eff", &["steve_tnt"]),
+            ("effect/system/common/ef_common.eff", &["sys_bomb"]),
+        ]);
+
+        let groups = pool.search_grouped("sys_");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].source_dir, "effect/system/common");
+        assert_eq!(groups[0].entries[0].1, "sys_bomb");
+    }
+
+    #[test]
+    fn source_directory_normalizes_separators() {
+        assert_eq!(
+            source_dir_of_rel("effect\\fighter\\pickel\\ef_pickel.eff"),
+            "effect/fighter/pickel"
+        );
+        assert_eq!(source_dir_of_rel("ef_common.eff"), "ef_common.eff");
     }
 }

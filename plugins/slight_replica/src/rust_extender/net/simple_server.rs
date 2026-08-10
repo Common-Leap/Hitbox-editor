@@ -190,7 +190,9 @@ fn report_bind_failure(port: u16, rc: u32) {
     use crate::slight::diag;
     let build = crate::slight::effect_viewer::live_eff::BUILD_TAG;
     diag::note(DOUBLE_PLUGIN_BANNER);
-    diag::note(format!("     bind :{port} failed rc={rc}; this copy is build={build}"));
+    diag::note(format!(
+        "     bind :{port} failed rc={rc}; this copy is build={build}"
+    ));
     diag::note("     check: `SRV thread entered` appears once per loaded copy — two = two plugins");
     diag::note("     note:  the build= header is written by whichever copy loads LAST, not yours");
     diag::note("     fix:   romfs:/skyline/plugins/ must hold ONE lib_effect_viewer.nro and no");

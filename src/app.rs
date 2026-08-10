@@ -2,7 +2,8 @@ use crate::data::{fighter_display_name, AppState, Hitbox, MoveEntry};
 use crate::renderer::{HitboxRenderState, ViewportCallback};
 use egui::{Color32, RichText, ScrollArea, Ui};
 /// Main egui application for Visionary.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 /// Whether the game has reached the terminal state requested by a carrier send.
@@ -76,6 +77,13 @@ fn editor_section_heading(ui: &mut Ui, title: &str, description: &str) {
 
 fn editor_subsection_heading(ui: &mut Ui, title: &str, description: &str) {
     ui.label(RichText::new(title).strong())
+        .on_hover_text(description);
+}
+
+/// A heading for the resizable left sidebar. Unlike the main editor headings, this one must not
+/// report its full text width as an intrinsic minimum when the sidebar is intentionally clipped.
+fn sidebar_section_heading(ui: &mut Ui, title: &str, description: &str) {
+    ui.add(egui::Label::new(RichText::new(title).heading()).truncate())
         .on_hover_text(description);
 }
 
@@ -224,6 +232,176 @@ mod editor_section_copy_tests {
         assert!(WORK_FLAGS_DESCRIPTION.contains("named on/off switches"));
         assert!(WORK_FLAGS_DESCRIPTION.contains("remember or signal conditions"));
         assert!(WORK_FLAGS_DESCRIPTION.contains("authored name"));
+    }
+}
+
+#[cfg(test)]
+mod picker_state_tests {
+    use super::*;
+
+    #[test]
+    fn effect_source_labels_use_translated_and_qualified_names() {
+        assert_eq!(effect_source_label("effect/fighter/pickel"), "Steve");
+        assert_eq!(effect_source_label("effect/system/common"), "Common");
+        assert_eq!(effect_source_label("effect/system/item"), "Item");
+        assert_eq!(
+            effect_source_label("effect/assist/bomberman"),
+            "Assist: Bomberman"
+        );
+        assert_eq!(effect_source_label("effect/boss/galleom"), "Boss: Galleom");
+        assert_eq!(
+            effect_source_label("effect/weapon/ice_climber"),
+            "Weapon: Ice Climber"
+        );
+        assert_eq!(effect_source_label("effect/fighter/my_mod"), "My_mod");
+    }
+
+    #[test]
+    fn search_restore_preserves_prior_state_and_opens_selected_key() {
+        let mut before = BTreeMap::new();
+        before.insert("closed".to_string(), false);
+        before.insert("open".to_string(), true);
+
+        let opened_during_search = BTreeSet::new();
+        assert!(!restored_search_open(
+            &before,
+            &"closed".to_string(),
+            None,
+            &opened_during_search
+        ));
+        assert!(restored_search_open(
+            &before,
+            &"open".to_string(),
+            None,
+            &opened_during_search
+        ));
+        assert!(restored_search_open(
+            &before,
+            &"closed".to_string(),
+            Some(&"closed".to_string()),
+            &opened_during_search
+        ));
+        assert!(!restored_search_open(
+            &before,
+            &"new".to_string(),
+            None,
+            &opened_during_search
+        ));
+        let mut opened = BTreeSet::new();
+        opened.insert("new".to_string());
+        assert!(restored_search_open(
+            &before,
+            &"new".to_string(),
+            None,
+            &opened
+        ));
+    }
+
+    #[test]
+    fn selected_move_category_can_be_the_search_restore_exception() {
+        use crate::move_kinds::MoveGroup;
+
+        let mut before = BTreeMap::new();
+        before.insert(MoveGroup::Jab, false);
+        before.insert(MoveGroup::Special, true);
+        let opened_during_search = BTreeSet::new();
+
+        assert!(restored_search_open(
+            &before,
+            &MoveGroup::Jab,
+            Some(&MoveGroup::Jab),
+            &opened_during_search
+        ));
+        assert!(restored_search_open(
+            &before,
+            &MoveGroup::Special,
+            None,
+            &opened_during_search
+        ));
+        assert!(!restored_search_open(
+            &before,
+            &MoveGroup::Item,
+            None,
+            &opened_during_search
+        ));
+    }
+
+    #[test]
+    fn picker_scroll_heights_follow_available_space() {
+        assert_eq!(adaptive_scroll_height(1_000.0, 0.5, 120.0, 520.0), 500.0);
+        assert_eq!(adaptive_scroll_height(2_000.0, 0.5, 120.0, 520.0), 520.0);
+        assert_eq!(adaptive_scroll_height(80.0, 0.5, 120.0, 520.0), 80.0);
+    }
+
+    #[test]
+    fn compact_source_fields_grow_with_their_value_but_stay_bounded() {
+        let short = compact_source_field_width_for_text(8.0);
+        let long = compact_source_field_width_for_text(180.0);
+        assert!(short >= COMPACT_SOURCE_FIELD_MIN_WIDTH);
+        assert!(short < long);
+        assert!(long <= COMPACT_SOURCE_FIELD_MAX_WIDTH);
+    }
+
+    #[test]
+    fn compact_panel_limits_follow_content_without_forcing_extra_space() {
+        assert_eq!(scrubber_panel_max_height(0, 500.0), 116.0);
+        assert!(scrubber_panel_max_height(2, 500.0) < scrubber_panel_max_height(20, 500.0));
+        assert_eq!(hitbox_selector_height(0, 800.0), 48.0);
+        assert_eq!(hitbox_selector_height(2, 800.0), 56.0);
+        assert_eq!(
+            hitbox_selector_height(20, 800.0),
+            HITBOX_SELECTOR_MAX_HEIGHT
+        );
+        assert_eq!(hitbox_selector_height(20, 200.0), 152.0);
+    }
+
+    #[test]
+    fn fixed_panel_contents_cannot_expand_the_panel_frame() {
+        egui::__run_test_ui(|ui| {
+            let response = egui::Panel::left("fixed_panel_geometry_test")
+                .exact_size(72.0)
+                .show_inside(ui, |ui| {
+                    show_fixed_panel_contents(ui, "fixed_panel_geometry_contents", |ui| {
+                        ui.allocate_space(egui::vec2(400.0, 20.0));
+                    });
+                });
+            assert!(
+                response.response.rect.width() <= 72.1,
+                "fixed panel expanded to {}",
+                response.response.rect.width()
+            );
+        });
+    }
+
+    #[test]
+    fn toolbar_overflow_cannot_expand_the_compact_editor_sidebar() {
+        egui::__run_test_ui(|ui| {
+            let response = egui::Panel::right("toolbar_panel_geometry_test")
+                .default_size(72.0)
+                .min_size(72.0)
+                .resizable(true)
+                .show_inside(ui, |ui| {
+                    show_fixed_panel_contents(ui, "toolbar_panel_contents", |ui| {
+                        ui.horizontal(|ui| {
+                            for label in [
+                                "Fetch source",
+                                "⟳ Live",
+                                "Forget capture",
+                                "Restore move",
+                                "Undo",
+                                "Redo",
+                            ] {
+                                let _ = ui.button(label);
+                            }
+                        });
+                    });
+                });
+            assert!(
+                response.response.rect.width() <= 72.1,
+                "toolbar expanded the compact sidebar to {}",
+                response.response.rect.width()
+            );
+        });
     }
 }
 
@@ -754,6 +932,40 @@ fn timeline_scroll_area(viewport_height: f32) -> egui::ScrollArea {
         .max_height(viewport_height.max(1.0))
 }
 
+const SCRUBBER_ROW_HEIGHT: f32 = 18.0;
+
+/// Height of the painted timeline itself. The bottom panel uses this to stop its resize handle
+/// above an empty stretch of timeline when the current filters leave only a few rows.
+fn scrubber_chart_height(row_count: usize) -> f32 {
+    (row_count as f32 * SCRUBBER_ROW_HEIGHT + 28.0).max(60.0)
+}
+
+/// Maximum bottom-panel height, including the playback/filter row and the small top inset.
+fn scrubber_panel_max_height(row_count: usize, available_height: f32) -> f32 {
+    let controls = 36.0;
+    let empty_message = if row_count == 0 { 20.0 } else { 0.0 };
+    let content_height = scrubber_chart_height(row_count) + controls + empty_message;
+    content_height.max(72.0).min(available_height.max(72.0))
+}
+
+const HITBOX_SELECTOR_ROW_HEIGHT: f32 = 24.0;
+const HITBOX_SELECTOR_MAX_HEIGHT: f32 = 240.0;
+const HITBOX_DETAIL_HEADER_RESERVE: f32 = 48.0;
+
+/// Size the collision-entry selector to its contents until it reaches the point where it should
+/// become a scroll list. The detail editor then receives every remaining pixel in its parent.
+fn hitbox_selector_height(hitbox_count: usize, available_height: f32) -> f32 {
+    let content_height = if hitbox_count == 0 {
+        48.0
+    } else {
+        hitbox_count as f32 * HITBOX_SELECTOR_ROW_HEIGHT + 8.0
+    };
+    let available_for_selector = (available_height - HITBOX_DETAIL_HEADER_RESERVE).max(1.0);
+    content_height
+        .min(HITBOX_SELECTOR_MAX_HEIGHT)
+        .min(available_for_selector)
+}
+
 #[allow(dead_code)]
 fn hitbox_menu_scroll_area(viewport_height: f32) -> egui::ScrollArea {
     let viewport_height = viewport_height.max(1.0);
@@ -829,6 +1041,109 @@ fn search_kind_short(name: &str) -> &str {
     name.rsplit_once("COLLISION_KIND_MASK_")
         .map(|(_, tail)| tail)
         .unwrap_or(name)
+}
+
+/// Turn an internal source component such as `ice_climber` into a readable fallback label.
+fn source_component_label(component: &str) -> String {
+    component
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Human-readable label for one EFF source directory.
+///
+/// Fighter names go through the shared translation table (`pickel` → `Steve`). System sources
+/// keep their short names (`Common`, `Item`), while assists, bosses, and future source kinds are
+/// qualified so a similarly named source remains distinguishable.
+fn effect_source_label(source_dir: &str) -> String {
+    let parts: Vec<&str> = source_dir
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let effect_index = parts
+        .iter()
+        .rposition(|part| part.eq_ignore_ascii_case("effect"));
+    if let Some(effect_index) = effect_index {
+        if let (Some(kind), Some(name)) = (parts.get(effect_index + 1), parts.get(effect_index + 2))
+        {
+            let name = if kind.eq_ignore_ascii_case("fighter") {
+                fighter_display_name(name)
+            } else {
+                source_component_label(name)
+            };
+            if kind.eq_ignore_ascii_case("fighter") || kind.eq_ignore_ascii_case("system") {
+                return name;
+            }
+            return format!("{}: {name}", source_component_label(kind));
+        }
+    }
+    parts
+        .last()
+        .map(|part| source_component_label(part))
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| source_dir.to_string())
+}
+
+/// Read the persisted open state of a collapsing header using the same parent-aware ID that the
+/// `CollapsingHeader` widget will use when it is rendered.
+fn persistent_collapsing_open(ui: &Ui, salt: impl Hash, default_open: bool) -> bool {
+    let id = ui.make_persistent_id(salt);
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
+        .is_open()
+}
+
+/// Set and persist a collapsing header's open state before the next frame draws it.
+fn set_persistent_collapsing_open(ui: &Ui, salt: impl Hash, open: bool) {
+    let id = ui.make_persistent_id(salt);
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    state.set_open(open);
+    state.store(ui.ctx());
+}
+
+/// Allocate a scroll viewport from the space that remains in its parent rather than letting a
+/// fixed pixel height dominate small windows or leave a large unused strip in tall ones.
+fn adaptive_scroll_height(available_height: f32, fraction: f32, minimum: f32, maximum: f32) -> f32 {
+    let available_height = available_height.max(1.0);
+    (available_height * fraction)
+        .min(maximum)
+        .max(minimum.min(available_height))
+}
+
+/// Render side-panel contents in the panel's current rectangle without allowing overflowing
+/// children to become part of the panel frame's measured minimum size.
+fn show_fixed_panel_contents(ui: &mut Ui, id_salt: impl Hash, add_contents: impl FnOnce(&mut Ui)) {
+    let panel_rect = ui.available_rect_before_wrap();
+    ui.set_min_size(panel_rect.size());
+    let mut content_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(panel_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    add_contents(&mut content_ui);
+}
+
+/// Restore a header's pre-search state, with the selected entry/category as the one intentional
+/// exception. Keys that appeared after the search started default closed.
+fn restored_search_open<K: Ord>(
+    before_search: &BTreeMap<K, bool>,
+    key: &K,
+    selected: Option<&K>,
+    opened_during_search: &BTreeSet<K>,
+) -> bool {
+    selected == Some(key)
+        || opened_during_search.contains(key)
+        || before_search.get(key).copied().unwrap_or(false)
 }
 
 fn setoff_combo(ui: &mut egui::Ui, v: &mut String, id: &str) {
@@ -1683,6 +1998,13 @@ pub struct VisionaryApp {
     effect_pool: Option<crate::effect_pool::EffectPool>,
     show_transplant: bool,
     transplant_search: String,
+    /// Open/closed source sections captured immediately before transplant search mode began.
+    transplant_expansion_before_search: Option<BTreeMap<String, bool>>,
+    /// Source sections the user explicitly opened while transplant search was active.
+    transplant_search_opened: BTreeSet<String>,
+    /// Source sections the user toggled while transplant search was active; this prevents the
+    /// automatic search expansion from immediately undoing a manual close.
+    transplant_search_touched: BTreeSet<String>,
     /// Search text for the Effects-panel effect-name picker (live kinds + pool).
     effect_pick_search: String,
     /// Whether the inline effect-name picker (next to the effect field) is expanded.
@@ -1724,6 +2046,12 @@ pub struct VisionaryApp {
     use_scan: Option<UseScan>,
     fighter_search: String,
     move_search: String,
+    /// Open/closed move categories captured immediately before move search mode began.
+    move_expansion_before_search: Option<BTreeMap<crate::move_kinds::MoveGroup, bool>>,
+    /// Move categories the user explicitly opened while move search was active.
+    move_search_opened: BTreeSet<crate::move_kinds::MoveGroup>,
+    /// Move categories the user toggled while move search was active.
+    move_search_touched: BTreeSet<crate::move_kinds::MoveGroup>,
     /// The user's own smashline project, when linked. Scripts are read from here in
     /// preference to the dumped-script mirror — see `acmd_src`.
     acmd_src: Option<crate::acmd_src::SourceIndex>,
@@ -1977,6 +2305,9 @@ impl VisionaryApp {
             effect_pool: None,
             show_transplant: false,
             transplant_search: String::new(),
+            transplant_expansion_before_search: None,
+            transplant_search_opened: BTreeSet::new(),
+            transplant_search_touched: BTreeSet::new(),
             effect_pick_search: String::new(),
             effect_pick_open: false,
             transplant_sel: None,
@@ -1994,6 +2325,9 @@ impl VisionaryApp {
             use_scan: None,
             fighter_search: String::new(),
             move_search: String::new(),
+            move_expansion_before_search: None,
+            move_search_opened: BTreeSet::new(),
+            move_search_touched: BTreeSet::new(),
             acmd_src: None,
             show_acmd_src: false,
             acmd_src_buffer: None,
@@ -5747,20 +6081,31 @@ impl VisionaryApp {
 
     fn draw_left_panel(&mut self, ui: &mut Ui) {
         if self.state.data_root.is_none() {
-            ui.label(
-                egui::RichText::new("Click 'Open Data Root' above").color(egui::Color32::YELLOW),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Click 'Open Data Root' above")
+                        .color(egui::Color32::YELLOW),
+                )
+                .wrap(),
             );
-            ui.label(egui::RichText::new("to load fighter files.").color(egui::Color32::YELLOW));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("to load fighter files.").color(egui::Color32::YELLOW),
+                )
+                .wrap(),
+            );
             return;
         }
 
         let available = ui.available_height();
-        let half = (available - 80.0) / 2.0; // 80 accounts for headings + search bars + separator
+        // Keep both lists proportional to the panel while retaining a usable minimum when the
+        // window is compressed below its normal height.
+        let half = ((available - 80.0) / 2.0).max(1.0);
 
         let mut restore_forgotten = false;
         let mut forget_fighter: Option<String> = None;
-        ui.horizontal(|ui| {
-            editor_section_heading(
+        ui.horizontal_wrapped(|ui| {
+            sidebar_section_heading(
                 ui,
                 "Fighters",
                 "Choose the fighter whose moves, scripts, and visual effects you want to inspect or edit.",
@@ -5780,7 +6125,7 @@ impl VisionaryApp {
                 .desired_width(f32::INFINITY),
         );
         let fighter_query = self.fighter_search.to_lowercase();
-        ScrollArea::vertical()
+        ScrollArea::both()
             .id_salt("fighters")
             .max_height(half)
             .auto_shrink([false, false])
@@ -5854,7 +6199,7 @@ impl VisionaryApp {
         }
 
         ui.separator();
-        editor_section_heading(
+        sidebar_section_heading(
             ui,
             "Moves",
             "Choose one animation or action for the selected fighter. Categories group the game's internal motion names by their usual purpose.",
@@ -5864,8 +6209,9 @@ impl VisionaryApp {
                 .hint_text("Search moves…")
                 .desired_width(f32::INFINITY),
         );
-        let move_query = self.move_search.to_lowercase();
-        ScrollArea::vertical()
+        let move_query = self.move_search.trim().to_lowercase();
+        let move_searching = !move_query.trim().is_empty();
+        ScrollArea::both()
             .id_salt("moves")
             .max_height(half)
             .auto_shrink([false, false])
@@ -5892,25 +6238,59 @@ impl VisionaryApp {
                         .unwrap_or(order.len() - 1);
                     groups[idx].push(m.clone());
                 }
+
+                let selected_group = self
+                    .state
+                    .selected_move
+                    .as_ref()
+                    .map(|m| crate::move_kinds::group_of(&m.name));
+                let mut center_selected_move = false;
+                if move_searching {
+                    if self.move_expansion_before_search.is_none() {
+                        self.move_search_opened.clear();
+                        self.move_search_touched.clear();
+                        let mut before = BTreeMap::new();
+                        for category in order.iter().copied() {
+                            before.insert(
+                                category,
+                                persistent_collapsing_open(ui, ("movecat", category), false),
+                            );
+                        }
+                        self.move_expansion_before_search = Some(before);
+                    }
+                } else if let Some(before) = self.move_expansion_before_search.take() {
+                    center_selected_move = selected_group.is_some();
+                    for category in order.iter().copied() {
+                        let open = restored_search_open(
+                            &before,
+                            &category,
+                            selected_group.as_ref(),
+                            &self.move_search_opened,
+                        );
+                        set_persistent_collapsing_open(ui, ("movecat", category), open);
+                    }
+                    self.move_search_opened.clear();
+                    self.move_search_touched.clear();
+                }
+
                 let mut to_select: Option<MoveEntry> = None;
                 for (ci, group) in groups.iter().enumerate() {
                     if group.is_empty() {
                         continue;
                     }
-                    let mut header = egui::CollapsingHeader::new(format!(
+                    let category = order[ci];
+                    if move_searching && !self.move_search_touched.contains(&category) {
+                        set_persistent_collapsing_open(ui, ("movecat", category), true);
+                    }
+                    let header = egui::CollapsingHeader::new(format!(
                         "{} ({})",
-                        order[ci].label(),
+                        category.label(),
                         group.len()
                     ))
-                    .id_salt(("movecat", ci))
+                    .id_salt(("movecat", category))
                     // Start collapsed: a full move list is hundreds of entries, and opening
                     // every category by default buries the categories themselves.
                     .default_open(false);
-                    if !move_query.is_empty() {
-                        // While searching, force categories open — otherwise the matches the
-                        // user just filtered for stay hidden behind a collapsed header.
-                        header = header.open(Some(true));
-                    }
                     let response = header.show(ui, |ui| {
                         for m in group {
                             let selected = self
@@ -5927,14 +6307,29 @@ impl VisionaryApp {
                             } else {
                                 format_move_name(&m.name)
                             };
-                            if ui.selectable_label(selected, &label).clicked() && !selected {
+                            let item_response = ui.selectable_label(selected, &label);
+                            if center_selected_move && selected {
+                                item_response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if item_response.clicked() && !selected {
+                                if move_searching {
+                                    self.move_search_opened.insert(category);
+                                }
                                 to_select = Some(m.clone());
                             }
                         }
                     });
+                    if move_searching && response.header_response.clicked() {
+                        self.move_search_touched.insert(category);
+                        if persistent_collapsing_open(ui, ("movecat", category), false) {
+                            self.move_search_opened.insert(category);
+                        } else {
+                            self.move_search_opened.remove(&category);
+                        }
+                    }
                     response
                         .header_response
-                        .on_hover_text(order[ci].description());
+                        .on_hover_text(category.description());
                 }
                 if let Some(m) = to_select {
                     self.select_move(m);
@@ -6214,17 +6609,18 @@ impl VisionaryApp {
         }
 
         if matches!(self.primary_tab, PrimaryEditorTab::Collisions) {
-            let menu_height = ui.available_height();
-            let master_height = (menu_height * 0.30).clamp(120.0, 240.0);
             ui.vertical(|ui| {
                 editor_section_heading(
                     ui,
                     "Collision entries",
                     "Every attack, grab, detection area, wind area, and throw-damage event loaded for this move. Select one to edit its settings below.",
                 );
+                let master_height =
+                    hitbox_selector_height(self.state.hitboxes.len(), ui.available_height());
                 egui::ScrollArea::vertical()
                     .id_salt("collision_master_list")
                     .auto_shrink([false, false])
+                    .min_scrolled_height(1.0)
                     .max_height(master_height)
                     .show(ui, |ui| {
                         // **An empty list is the ordinary case for most of the roster now.** The move list
@@ -6368,10 +6764,12 @@ impl VisionaryApp {
                     "Selected collision settings",
                     "Settings for the collision selected above. The available fields change with its collision family so unsupported values are not invented.",
                 );
+                let detail_height = ui.available_height().max(1.0);
                 egui::ScrollArea::vertical()
                     .id_salt("collision_detail_scroll")
                     .auto_shrink([false, false])
-                    .max_height((menu_height - master_height - 56.0).max(180.0))
+                    .min_scrolled_height(1.0)
+                    .max_height(detail_height)
                     .show(ui, |ui| {
                         // Property editor for selected hitbox — fields shown depend on the collision
                         // family. Its detail scroll stays independent from the master list above.
@@ -7630,11 +8028,7 @@ impl VisionaryApp {
             egui::Color32::from_rgb(210, 180, 245),
             "expression_ script",
         );
-        ui.weak(
-            "Expression arguments are authored source tokens. For example, `as u32` is a valid \
-             Rust type cast in `ControlModule::set_rumble`, not an editor error; the original token \
-             is kept so export and source sync remain lossless.",
-        );
+        ui.weak("Edit authored source tokens; their spelling is kept for export and source sync.");
 
         let mut partial_rate_edit: Option<(usize, f32)> = None;
         if !partial_rate_events.is_empty() {
@@ -7646,36 +8040,30 @@ impl VisionaryApp {
                 "MotionModule::set_rate_partial",
             );
             ui.label(
-                "The numeric rate is source-editable and exportable. Live replacement is sent \
-                 only when an exact native (part kind, pristine rate, frame) capture identity is \
-                 unique; shared or unresolved identities stay source-only.",
+                "Edit the proven numeric rate. Live replacement requires a unique native capture \
+                 identity; shared or unresolved identities stay source-only.",
             );
             for event in &partial_rate_events {
                 let active = event.frame == self.state.current_frame;
                 let mut rate = event.call.rate;
-                let changed = egui::ScrollArea::horizontal()
-                    .id_salt(("expression_partial_rate_row", event.site))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(
-                                if active {
-                                    egui::Color32::from_rgb(170, 220, 190)
-                                } else {
-                                    egui::Color32::from_gray(140)
-                                },
-                                if active { "◆" } else { "◇" },
-                            );
-                            ui.label(format!("[{}] {}", event.frame, event.call.part_kind));
-                            ui.add(
-                                egui::DragValue::new(&mut rate)
-                                    .speed(0.05)
-                                    .range(0.0..=100.0)
-                                    .prefix("rate "),
-                            )
-                            .changed()
-                        })
-                        .inner
+                let changed = ui
+                    .horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            if active {
+                                egui::Color32::from_rgb(170, 220, 190)
+                            } else {
+                                egui::Color32::from_gray(140)
+                            },
+                            if active { "◆" } else { "◇" },
+                        );
+                        ui.label(format!("f{} · {}", event.frame, event.call.part_kind));
+                        ui.add(
+                            egui::DragValue::new(&mut rate)
+                                .speed(0.05)
+                                .range(0.0..=100.0)
+                                .prefix("rate "),
+                        )
+                        .changed()
                     })
                     .inner;
                 if changed {
@@ -7693,27 +8081,24 @@ impl VisionaryApp {
                 "source-only",
             );
             ui.label(
-                "These authored partial-frame calls are preserved for export and source write-back. Their \
-                 native fourth boolean is not measured, so they are not live-editable.",
+                "Preserved for export; not live-editable because the native boolean is unmeasured.",
             );
-            for (row, event) in raw_partial_frames.into_iter().enumerate() {
+            for event in raw_partial_frames {
                 let active = event.frame == self.state.current_frame;
-                egui::ScrollArea::horizontal()
-                    .id_salt(("expression_raw_row", row))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(
-                                if active {
-                                    egui::Color32::from_rgb(235, 185, 100)
-                                } else {
-                                    egui::Color32::from_gray(140)
-                                },
-                                if active { "◆" } else { "◇" },
-                            );
-                            ui.label(format!("[{}] {}", event.frame, event.source));
-                        });
-                    });
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(235, 185, 100)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.add(
+                        egui::Label::new(format!("f{} · {}", event.frame, event.source)).truncate(),
+                    )
+                    .on_hover_text(event.source);
+                });
             }
         }
 
@@ -7741,11 +8126,9 @@ impl VisionaryApp {
             let active = event.frame == self.state.current_frame;
             let mut call = event.call.clone();
             let mut changed = false;
-            egui::ScrollArea::horizontal()
-                .id_salt(("expression_row", event.site))
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
+            ui.push_id(("expression_row", event.site), |ui| {
+                ui.group(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.colored_label(
                             if active {
                                 egui::Color32::from_rgb(210, 180, 245)
@@ -7754,67 +8137,63 @@ impl VisionaryApp {
                             },
                             if active { "◆" } else { "◇" },
                         );
-                        ui.label(format!("[{}] {}", event.frame, call.func()));
-                        match &mut call {
-                            ExpressionCall::RumbleHit { kind, unk } => {
-                                changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
-                                changed |= expression_token_edit(ui, "arg2", unk, (event.site, 1));
-                            }
-                            ExpressionCall::Quake { kind } => {
-                                changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
-                            }
-                            ExpressionCall::FtAttackAbsCameraQuake {
+                        ui.label(format!("f{} · {}", event.frame, call.func()));
+                    });
+                    ui.horizontal_wrapped(|ui| match &mut call {
+                        ExpressionCall::RumbleHit { kind, unk } => {
+                            changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                            changed |= expression_token_edit(ui, "arg2", unk, (event.site, 1));
+                        }
+                        ExpressionCall::Quake { kind } => {
+                            changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                        }
+                        ExpressionCall::FtAttackAbsCameraQuake {
+                            attack_abs_kind,
+                            quake_kind,
+                        } => {
+                            changed |= expression_token_edit(
+                                ui,
+                                "attack kind",
                                 attack_abs_kind,
+                                (event.site, 0),
+                            );
+                            changed |= expression_token_edit(
+                                ui,
+                                "quake kind",
                                 quake_kind,
-                            } => {
-                                changed |= expression_token_edit(
-                                    ui,
-                                    "attack kind",
-                                    attack_abs_kind,
-                                    (event.site, 0),
-                                );
-                                changed |= expression_token_edit(
-                                    ui,
-                                    "quake kind",
-                                    quake_kind,
-                                    (event.site, 1),
-                                );
-                            }
-                            ExpressionCall::ControlModuleSetRumble {
-                                kind,
-                                duration,
-                                looped,
+                                (event.site, 1),
+                            );
+                        }
+                        ExpressionCall::ControlModuleSetRumble {
+                            kind,
+                            duration,
+                            looped,
+                            target,
+                            ..
+                        } => {
+                            changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                            changed |=
+                                expression_token_edit(ui, "duration", duration, (event.site, 1));
+                            changed |= expression_token_edit(ui, "looped", looped, (event.site, 2));
+                            let target_hint = if target.contains("BATTLE_OBJECT_ID_INVALID") {
+                                "Valid source expression: BATTLE_OBJECT_ID_INVALID is the \
+                                 invalid/default battle-object sentinel, and `as u32` is the \
+                                 type cast required by this binding."
+                            } else {
+                                "Target battle-object expression, preserved as authored source \
+                                 text for export and source sync."
+                            };
+                            changed |= expression_token_edit_with_hint(
+                                ui,
+                                "target",
                                 target,
-                                ..
-                            } => {
-                                changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
-                                changed |= expression_token_edit(
-                                    ui,
-                                    "duration",
-                                    duration,
-                                    (event.site, 1),
-                                );
-                                changed |=
-                                    expression_token_edit(ui, "looped", looped, (event.site, 2));
-                                let target_hint = if target.contains("BATTLE_OBJECT_ID_INVALID") {
-                                    "Valid source expression: BATTLE_OBJECT_ID_INVALID is the \
-                                     invalid/default battle-object sentinel, and `as u32` is the \
-                                     type cast required by this binding."
-                                } else {
-                                    "Target battle-object expression, preserved as authored source \
-                                     text for export and source sync."
-                                };
-                                changed |= expression_token_edit_with_hint(
-                                    ui,
-                                    "target",
-                                    target,
-                                    (event.site, 3),
-                                    target_hint,
-                                );
-                            }
+                                (event.site, 3),
+                                target_hint,
+                            );
                         }
                     });
                 });
+            });
             if changed {
                 edit = Some((event.site, call));
             }
@@ -18801,8 +19180,12 @@ impl VisionaryApp {
             .selected_fighter
             .and_then(|i| self.state.fighters.get(i))
             .map(|f| f.name.clone());
-        let fighter_names: Vec<String> =
-            self.state.fighters.iter().map(|f| f.name.clone()).collect();
+        let fighter_names: Vec<(String, String)> = self
+            .state
+            .fighters
+            .iter()
+            .map(|f| (f.name.clone(), f.display_name.clone()))
+            .collect();
         // Import into ANY character — the picker defaults to the selected fighter.
         let target = self.transplant_target.clone().or(selected_fighter);
         // The target's ACTUAL costume slots, however many and however numbered. Indexed
@@ -18895,12 +19278,17 @@ impl VisionaryApp {
                 ui.horizontal(|ui| {
                     ui.label("Target:");
                     egui::ComboBox::from_id_salt("transplant_target_combo")
-                        .selected_text(target.clone().unwrap_or_else(|| "— pick fighter —".into()))
+                        .selected_text(
+                            target
+                                .as_deref()
+                                .map(fighter_display_name)
+                                .unwrap_or_else(|| "— pick fighter —".into()),
+                        )
                         .width(170.0)
                         .show_ui(ui, |ui| {
-                            for name in &fighter_names {
+                            for (name, display_name) in &fighter_names {
                                 let is = target.as_deref() == Some(name.as_str());
-                                if ui.selectable_label(is, name).clicked() {
+                                if ui.selectable_label(is, display_name).clicked() {
                                     self.transplant_target = Some(name.clone());
                                     self.transplant_replace = None;
                                 }
@@ -19062,7 +19450,13 @@ impl VisionaryApp {
                 if avail_slots.len() > 24 {
                     egui::ScrollArea::vertical()
                         .id_salt("one_slot_slot_grid")
-                        .max_height(110.0)
+                        .max_height(adaptive_scroll_height(
+                            ui.available_height(),
+                            0.22,
+                            80.0,
+                            180.0,
+                        ))
+                        .auto_shrink([false, false])
                         .show(ui, |ui| slot_grid(ui, &mut self.one_slot_slots));
                 } else {
                     slot_grid(ui, &mut self.one_slot_slots);
@@ -19091,19 +19485,15 @@ impl VisionaryApp {
                     ui.colored_label(egui::Color32::GRAY, "Pick a target fighter.");
                     return;
                 };
-                let search_response = ui.add(
+                ui.add(
                     egui::TextEdit::singleline(&mut self.transplant_search)
                         .hint_text("Search every effect entry (all fighters + sys/common)…")
                         .desired_width(f32::INFINITY),
                 );
-                if search_response.changed() {
-                    self.transplant_sel = None;
-                    self.transplant_new_name.clear();
-                    self.transplant_replace = None;
-                }
 
                 // Live kinds that match — effects the running game has actually used.
-                let q = self.transplant_search.to_lowercase();
+                let q = self.transplant_search.trim().to_lowercase();
+                let transplant_searching = !q.trim().is_empty();
                 let live_matches: Vec<String> = self
                     .game_link
                     .kinds()
@@ -19114,10 +19504,104 @@ impl VisionaryApp {
                     .collect();
 
                 let results = pool.search(&self.transplant_search, 200);
+                let mut source_groups = pool.search_grouped("");
+                let source_dirs: Vec<String> = source_groups
+                    .iter()
+                    .map(|group| group.source_dir.clone())
+                    .collect();
+                if !q.is_empty() {
+                    for group in &mut source_groups {
+                        group
+                            .entries
+                            .retain(|(_, name)| name.to_lowercase().contains(&q));
+                    }
+                    source_groups.retain(|group| !group.entries.is_empty());
+                }
+                let mut source_label_counts: HashMap<String, usize> = HashMap::new();
+                for group in &source_groups {
+                    *source_label_counts
+                        .entry(effect_source_label(&group.source_dir))
+                        .or_default() += 1;
+                }
+                let source_labels: HashMap<String, String> = source_groups
+                    .iter()
+                    .map(|group| {
+                        let base = effect_source_label(&group.source_dir);
+                        let label = if source_label_counts.get(&base).copied().unwrap_or(0) > 1 {
+                            format!("{base} — {}", group.source_dir)
+                        } else {
+                            base
+                        };
+                        (group.source_dir.clone(), label)
+                    })
+                    .collect();
+
+                let selected_source = self
+                    .transplant_sel
+                    .as_ref()
+                    .map(|(rel, _)| crate::effect_pool::source_dir_of_rel(rel));
+                let mut center_transplant_selection = false;
+
                 let pool_root = pool.root().to_path_buf();
                 let own_rel = format!("effect/fighter/{target}/ef_{target}.eff");
                 let own_entries: Vec<String> = pool.entries_of(&own_rel);
-                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                // The source list should fill the space above the selected donor controls.
+                // A fractional/max height left a blank strip at the bottom of this viewport,
+                // especially when the transplant window was enlarged. Reserve only the
+                // controls that follow the list, allowing the list itself to use the rest.
+                let donor_controls_height = if self.transplant_sel.is_none() {
+                    32.0
+                } else if self.one_slot_slots.is_empty() {
+                    190.0
+                } else {
+                    260.0
+                };
+                let source_list_height =
+                    (ui.available_height() - donor_controls_height).max(1.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("transplant_effect_sources")
+                    .max_height(source_list_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                    // The source headers live in the scroll area's child UI. Snapshot and
+                    // restore their state here so the parent ID is exactly the one used by the
+                    // `CollapsingHeader`, even while the pool gains newly scanned sources.
+                    if transplant_searching {
+                        if self.transplant_expansion_before_search.is_none() {
+                            self.transplant_search_opened.clear();
+                            self.transplant_search_touched.clear();
+                            let mut before = BTreeMap::new();
+                            for source_dir in &source_dirs {
+                                before.insert(
+                                    source_dir.clone(),
+                                    persistent_collapsing_open(
+                                        ui,
+                                        ("transplant_source", source_dir),
+                                        false,
+                                    ),
+                                );
+                            }
+                            self.transplant_expansion_before_search = Some(before);
+                        }
+                    } else if let Some(before) = self.transplant_expansion_before_search.take() {
+                        center_transplant_selection = self.transplant_sel.is_some();
+                        for source_dir in &source_dirs {
+                            let open = restored_search_open(
+                                &before,
+                                source_dir,
+                                selected_source.as_ref(),
+                                &self.transplant_search_opened,
+                            );
+                            set_persistent_collapsing_open(
+                                ui,
+                                ("transplant_source", source_dir),
+                                open,
+                            );
+                        }
+                        self.transplant_search_opened.clear();
+                        self.transplant_search_touched.clear();
+                    }
+
                     if !live_matches.is_empty() {
                         ui.label(egui::RichText::new("Live in game").strong().small());
                         for name in &live_matches {
@@ -19131,11 +19615,22 @@ impl VisionaryApp {
                                 .as_ref()
                                 .map(|(_, n)| n == name)
                                 .unwrap_or(false);
+                            let display_path = file
+                                .as_deref()
+                                .and_then(|path| Path::new(path).file_name())
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("scanned source");
                             let label = match &file {
-                                Some(rel) => format!("● {name}  ({rel})"),
+                                Some(_) => format!("● {name}  ({display_path})"),
                                 None => format!("● {name}"),
                             };
-                            if ui.selectable_label(sel, label).clicked() {
+                            let response = ui
+                                .selectable_label(sel, label)
+                                .on_hover_text(file.as_deref().unwrap_or("source not scanned"));
+                            if center_transplant_selection && sel {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if response.clicked() {
                                 // Unscanned live kinds: derive the eff from the name's
                                 // fighter prefix ("mario_fb_shoot" → ef_mario.eff).
                                 let resolved = file.or_else(|| {
@@ -19164,41 +19659,110 @@ impl VisionaryApp {
                         ui.separator();
                     }
                     ui.label(egui::RichText::new("All effects").strong().small());
-                    for (rel, name) in &results {
-                        let sel = self
-                            .transplant_sel
+                    for group in &source_groups {
+                        let label = source_labels
+                            .get(&group.source_dir)
+                            .cloned()
+                            .unwrap_or_else(|| group.source_dir.clone());
+                        let header = egui::CollapsingHeader::new(format!(
+                            "{label} ({})",
+                            group.entries.len()
+                        ))
+                        .id_salt(("transplant_source", &group.source_dir))
+                        .default_open(false);
+                        let source_was_present_at_search_start = self
+                            .transplant_expansion_before_search
                             .as_ref()
-                            .map(|(r, n)| r == rel && n == name)
-                            .unwrap_or(false);
-                        if ui
-                            .selectable_label(sel, format!("{name}  —  {rel}"))
-                            .clicked()
+                            .is_some_and(|before| before.contains_key(&group.source_dir));
+                        if transplant_searching
+                            && !self
+                                .transplant_search_touched
+                                .contains(&group.source_dir)
                         {
-                            self.transplant_sel = Some((rel.clone(), name.clone()));
-                            self.transplant_new_name = format!(
-                                            "{}{}",
-                                            name.to_lowercase(),
-                                            crate::mod_project::TRANSPLANT_SUFFIX
-                                        );
+                            // A scan can discover a new source after search mode starts. It
+                            // should not inherit an old egui open bit or be expanded merely
+                            // because its first matching entry arrived; only sources present at
+                            // search start are auto-expanded. A selected donor remains visible.
+                            let open = source_was_present_at_search_start
+                                || selected_source.as_ref() == Some(&group.source_dir);
+                            set_persistent_collapsing_open(
+                                ui,
+                                ("transplant_source", &group.source_dir),
+                                open,
+                            );
                         }
+                        let response = header.show(ui, |ui| {
+                            for (rel, name) in &group.entries {
+                                let sel = self
+                                    .transplant_sel
+                                    .as_ref()
+                                    .map(|(r, n)| r == rel && n == name)
+                                    .unwrap_or(false);
+                                let file_name = Path::new(rel)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or(rel);
+                                let item_response = ui
+                                    .selectable_label(sel, format!("{name}  —  {file_name}"))
+                                    .on_hover_text(rel);
+                                if center_transplant_selection && sel {
+                                    item_response.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if item_response.clicked() {
+                                    if transplant_searching {
+                                        self.transplant_search_opened
+                                            .insert(group.source_dir.clone());
+                                    }
+                                    self.transplant_sel = Some((rel.clone(), name.clone()));
+                                    self.transplant_new_name = format!(
+                                        "{}{}",
+                                        name.to_lowercase(),
+                                        crate::mod_project::TRANSPLANT_SUFFIX
+                                    );
+                                }
+                            }
+                        });
+                        if transplant_searching && response.header_response.clicked() {
+                            self.transplant_search_touched
+                                .insert(group.source_dir.clone());
+                            if persistent_collapsing_open(
+                                ui,
+                                ("transplant_source", &group.source_dir),
+                                false,
+                            ) {
+                                self.transplant_search_opened
+                                    .insert(group.source_dir.clone());
+                            } else {
+                                self.transplant_search_opened
+                                    .remove(&group.source_dir);
+                            }
+                        }
+                        response
+                            .header_response
+                            .on_hover_text(&group.source_dir);
                     }
-                    if results.is_empty() {
+                    if source_groups.is_empty() {
                         ui.colored_label(egui::Color32::GRAY, "No matches (yet).");
                     }
-                });
+                    });
 
                 ui.separator();
                 // One-slot scoping selected: the transplant REPLACES an existing entry on
                 // just those costumes, instead of appending a new entry for every skin.
                 let one_slot_mode = !self.one_slot_slots.is_empty();
                 if let Some((rel, donor)) = self.transplant_sel.clone() {
-                    ui.label(format!("Donor: {donor}  ({rel})"));
+                    let donor_file = Path::new(&rel)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(&rel);
+                    ui.label(format!("Donor: {donor}  ({donor_file})"))
+                        .on_hover_text(&rel);
                     if !one_slot_mode {
                         ui.horizontal(|ui| {
                             ui.label("New entry name:");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.transplant_new_name)
-                                    .desired_width(220.0),
+                                    .desired_width(ui.available_width().min(320.0)),
                             );
                         });
                         // A transplant may take ANY name — except Visionary's own reserved
@@ -19243,7 +19807,13 @@ impl VisionaryApp {
                         let filt = self.transplant_replace_search.to_lowercase();
                         egui::ScrollArea::vertical()
                             .id_salt("transplant_replace_list")
-                            .max_height(140.0)
+                            .max_height(adaptive_scroll_height(
+                                ui.available_height(),
+                                0.28,
+                                96.0,
+                                260.0,
+                            ))
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 if own_entries.is_empty() {
                                     ui.colored_label(
@@ -22457,10 +23027,10 @@ impl VisionaryApp {
             .into_iter()
             .filter(|row| self.timeline_filters.shows(row.category))
             .collect();
-        let row_height = 18.0;
+        let row_height = SCRUBBER_ROW_HEIGHT;
         let label_width = (ui.available_width() * 0.22).clamp(110.0, 180.0);
         let timeline_width = ui.available_width().max(1.0);
-        let content_height = (rows.len() as f32 * row_height + 28.0).max(60.0);
+        let content_height = scrubber_chart_height(rows.len());
         let viewport_height = ui.available_height().max(1.0);
         if rows.is_empty() {
             ui.weak("No timeline events match the current filters.");
@@ -22468,6 +23038,7 @@ impl VisionaryApp {
         egui::ScrollArea::vertical()
             .id_salt("timeline_rows_v3")
             .auto_shrink([false, false])
+            .min_scrolled_height(1.0)
             .max_height(viewport_height)
             .show(ui, |ui| {
                 let (rect, response) = ui.allocate_exact_size(
@@ -24124,7 +24695,19 @@ impl eframe::App for VisionaryApp {
 
         // Bottom timeline
         let t = self.perf.start();
-        let max_scrubber_height = (ui.available_height() * 0.55).max(100.0);
+        let total = self.timeline_total_frames();
+        let timeline_row_count = if total == 0 {
+            0
+        } else {
+            self.timeline_rows(total)
+                .into_iter()
+                .filter(|row| self.timeline_filters.shows(row.category))
+                .count()
+        };
+        let max_scrubber_height = scrubber_panel_max_height(
+            timeline_row_count,
+            (ui.available_height() * 0.55).max(100.0),
+        );
         egui::Panel::bottom("scrubber")
             .default_size(180.0)
             .min_size(72.0)
@@ -24706,10 +25289,15 @@ impl eframe::App for VisionaryApp {
         let t = self.perf.start();
         egui::Panel::left("left_panel_layout_v2")
             .default_size(240.0)
-            .min_size(190.0)
+            .min_size(72.0)
             .resizable(true)
             .show_inside(ui, |ui| {
-                self.draw_left_panel(ui);
+                // Panel frames measure the Ui passed directly to them. Keep overflowing labels
+                // and scroll contents in an unallocated child so their intrinsic width cannot
+                // enlarge the frame after the user drags the sidebar narrower.
+                show_fixed_panel_contents(ui, "left_panel_content", |ui| {
+                    self.draw_left_panel(ui);
+                });
             });
         self.perf.end("left_panel", t);
 
@@ -24718,10 +25306,15 @@ impl eframe::App for VisionaryApp {
             let t = self.perf.start();
             egui::Panel::right("right_panel_layout_v2")
                 .default_size(400.0)
-                .min_size(320.0)
+                .min_size(72.0)
                 .resizable(true)
                 .show_inside(ui, |ui| {
-                    self.draw_right_panel(ui);
+                    // The toolbar above the editor is intentionally a single horizontal row.
+                    // Keep its overflowing buttons inside an unallocated child so the row can be
+                    // clipped at a compact sidebar width instead of enlarging the Panel frame.
+                    show_fixed_panel_contents(ui, "right_panel_content", |ui| {
+                        self.draw_right_panel(ui);
+                    });
                 });
             self.perf.end("right_panel", t);
         } else {
@@ -26147,20 +26740,30 @@ fn nothing_to_load(
     )
 }
 
-/// One editable sound name: a text field for typing, and a Browse list for finding.
-///
-/// **Three designs, and the reasons for landing here are worth keeping.** The first had a filter
-/// box shared by every row, so filtering one call filtered all of them. The second folded the
-/// list into the text field as a focus-triggered popup — one control, and it did not open
-/// reliably, which is worse than clunky: the user could not select a sound at all and had no way
-/// to discover that a list existed.
-///
-/// So: a plain `TextEdit` (any name is allowed — the label dump is incomplete and real scripts
-/// play names missing from it) beside a `ComboBox` labelled **Browse**, which is a standard
-/// widget that opens on click and cannot fail to. The filter lives *inside* the dropdown and is
-/// per row, so it is scoped to the call being edited.
-///
-/// Returns whether the name changed.
+const COMPACT_SOURCE_FIELD_MIN_WIDTH: f32 = 52.0;
+const COMPACT_SOURCE_FIELD_MAX_WIDTH: f32 = 220.0;
+
+/// Size a source-token field from the value it currently contains rather than giving every
+/// camera/rumble argument the width of the longest possible field. The upper bound keeps an
+/// unusually long mod-local token from making one event dominate the sidebar.
+fn compact_source_field_width(ui: &Ui, value: &str) -> f32 {
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(value.to_owned(), font_id, ui.visuals().text_color())
+        .size()
+        .x;
+    compact_source_field_width_for_text(text_width)
+}
+
+fn compact_source_field_width_for_text(text_width: f32) -> f32 {
+    (text_width + 16.0).clamp(
+        COMPACT_SOURCE_FIELD_MIN_WIDTH,
+        COMPACT_SOURCE_FIELD_MAX_WIDTH,
+    )
+}
+
+/// Edit one camera/rumble source token while preserving its authored spelling for export.
 fn expression_token_edit(
     ui: &mut Ui,
     field: &str,
@@ -26183,6 +26786,7 @@ fn expression_token_edit_with_hint(
     salt: (usize, usize),
     hint: &str,
 ) -> bool {
+    let desired_width = compact_source_field_width(ui, token);
     ui.label(
         RichText::new(field)
             .small()
@@ -26192,7 +26796,7 @@ fn expression_token_edit_with_hint(
     ui.add(
         egui::TextEdit::singleline(token)
             .id_salt(("expression_token", salt.0, salt.1))
-            .desired_width(220.0)
+            .desired_width(desired_width)
             .hint_text("source token"),
     )
     .on_hover_text(hint)
@@ -26206,11 +26810,12 @@ fn sound_name_picker(
     salt: (usize, usize),
 ) -> bool {
     let mut changed = false;
+    let desired_width = compact_source_field_width(ui, name);
     changed |= ui
         .add(
             egui::TextEdit::singleline(name)
                 .id_salt(("sound_name", salt.0, salt.1))
-                .desired_width(230.0),
+                .desired_width(desired_width),
         )
         .changed();
 

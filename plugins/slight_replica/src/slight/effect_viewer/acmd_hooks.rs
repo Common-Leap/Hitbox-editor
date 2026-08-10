@@ -812,14 +812,22 @@ static PENDING_CAMERA_OFFSET: PendingValue = PendingValue::new();
 static PENDING_ALPHA: PendingValue = PendingValue::new();
 // Three slots rather than one, so a partially-stored tint can never be read: each component is
 // set and read on its own, and `pending_tint` only reports a colour when all three are present.
-static PENDING_TINT: [PendingValue; 3] =
-    [PendingValue::new(), PendingValue::new(), PendingValue::new()];
-static PENDING_PARTICLE_TINT: [PendingValue; 3] =
-    [PendingValue::new(), PendingValue::new(), PendingValue::new()];
-static PENDING_SCALE_W: [PendingValue; 3] =
-    [PendingValue::new(), PendingValue::new(), PendingValue::new()];
-static PENDING_SCALE_W_COUNT: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(0);
+static PENDING_TINT: [PendingValue; 3] = [
+    PendingValue::new(),
+    PendingValue::new(),
+    PendingValue::new(),
+];
+static PENDING_PARTICLE_TINT: [PendingValue; 3] = [
+    PendingValue::new(),
+    PendingValue::new(),
+    PendingValue::new(),
+];
+static PENDING_SCALE_W: [PendingValue; 3] = [
+    PendingValue::new(),
+    PendingValue::new(),
+    PendingValue::new(),
+];
+static PENDING_SCALE_W_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 fn set_pending_rate(rate: Option<f32>) {
     PENDING_RATE.set(rate);
@@ -1738,7 +1746,14 @@ macro_rules! color_hook {
     };
 }
 
-color_hook!(hook_flash, smash::app::sv_animcmd::FLASH, "FLASH", "flash", 0, 4);
+color_hook!(
+    hook_flash,
+    smash::app::sv_animcmd::FLASH,
+    "FLASH",
+    "flash",
+    0,
+    4
+);
 color_hook!(
     hook_flash_frm,
     smash::app::sv_animcmd::FLASH_FRM,

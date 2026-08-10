@@ -17,7 +17,7 @@
 /// Ordered by how often a modder opens one, not alphabetically: the attack families first,
 /// because that is what the editor was built for and what most sessions touch, and the long tail
 /// of situational states last.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MoveGroup {
     Jab,
     Tilt,

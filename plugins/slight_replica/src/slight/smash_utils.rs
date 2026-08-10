@@ -75,9 +75,7 @@ fn load_disabled_subsystems() {
 /// attempt; naming it in a file costs a reboot. Recognised names are listed in the plugin
 /// README.
 pub fn subsystem_disabled(name: &str) -> bool {
-    DISABLED
-        .get()
-        .is_some_and(|d| d.iter().any(|n| n == name))
+    DISABLED.get().is_some_and(|d| d.iter().any(|n| n == name))
 }
 
 /// The subsystems left uninstalled this boot, for the boot log.
@@ -158,7 +156,10 @@ pub fn refresh_debug_logging() {
     let on = std::path::Path::new(DEBUG_ACTIVATE).exists()
         && !std::path::Path::new(DEBUG_DEACTIVATE).exists();
     DEBUG_LOGGING.store(on, Ordering::Relaxed);
-    TRACE.store(std::path::Path::new(DEBUG_TRACE).exists(), Ordering::Relaxed);
+    TRACE.store(
+        std::path::Path::new(DEBUG_TRACE).exists(),
+        Ordering::Relaxed,
+    );
 }
 
 pub fn debug_logging_enabled() -> bool {

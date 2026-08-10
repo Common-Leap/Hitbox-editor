@@ -210,11 +210,7 @@ pub fn tint_for(
 }
 
 /// Per-spawn particle tint for the FIRST non-suppress rule matching this spawn.
-pub fn particle_tint_for(
-    eff_hash: u64,
-    motion: u64,
-    motion_frame: f32,
-) -> Option<[f32; 3]> {
+pub fn particle_tint_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<[f32; 3]> {
     let rules = RULES.try_lock()?;
     rules
         .iter()
@@ -234,8 +230,7 @@ pub fn scale_w_for(eff_hash: u64, motion: u64, motion_frame: f32) -> Option<Vec<
             r.scale_w
                 .as_ref()
                 .filter(|values| {
-                    (1..=3).contains(&values.len())
-                        && values.iter().all(|value| value.is_finite())
+                    (1..=3).contains(&values.len()) && values.iter().all(|value| value.is_finite())
                 })
                 .cloned()
         })
