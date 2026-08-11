@@ -74,7 +74,6 @@ pub fn install() {
         StatusLine::Main,
         weapon_line_main as *const (),
     );
-
     skyline::println!("[SLight] dispatch installed (smashline-2 per-agent line callbacks)");
 }
 
@@ -95,9 +94,10 @@ unsafe extern "C" fn fighter_line_main(agent: &mut L2CFighterBase) {
     crate::slight::effect_viewer::effect_reload::pump_coload_tick();
     // Report carrier readiness to the editor (emits only on change).
     crate::slight::effect_viewer::effect_reload::pump_carrier_status();
-    // Live hitbox + effect-retime injection need THIS agent's lua state at its motion frame.
+    // Live hitbox injection still runs from the per-agent callback. Effect/control retiming is
+    // dispatched from the effect ACMD's call/frame/wait boundaries in acmd_hooks, not from this
+    // status callback.
     crate::slight::hitbox_viewer::inject_tick(lua_state);
-    crate::slight::effect_viewer::acmd_hooks::inject_tick(lua_state);
     // End-of-motion watch: tells the editor when a captured move's script has finished, so
     // its auto "live fetch" adopts the WHOLE script instead of the first few frames.
     crate::slight::hitbox_viewer::capture_tick(lua_state);
@@ -109,7 +109,8 @@ unsafe extern "C" fn fighter_line_main(agent: &mut L2CFighterBase) {
 unsafe extern "C" fn weapon_line_main(agent: &mut L2CFighterBase) {
     let lua_state = agent.agent.lua_state_agent;
     handle_init(lua_state);
-    // Article/weapon agents run ACMD too and are captured by the same hooks.
+    // Article/weapon hitbox capture and injection remain on the existing Main path. ACMD effect
+    // retiming is generic and is handled by the effect coroutine/frame hooks for this agent too.
     crate::slight::hitbox_viewer::capture_tick(lua_state);
     handle_frame(lua_state);
 }

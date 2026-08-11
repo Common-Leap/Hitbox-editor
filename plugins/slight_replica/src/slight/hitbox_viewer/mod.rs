@@ -444,25 +444,40 @@ fn write_capture_diag(stage: &str) {
     );
 }
 
-/// True while an inject_tick replays a captured line through the (hooked) sv_animcmd
+/// Non-zero while a replacement dispatch replays a captured line through the (hooked) sv_animcmd
 /// functions. The replay re-enters the capture hooks, so without this gate every live
 /// retime/inject would be recorded as if the SCRIPT contained it — the editor would then
 /// treat the user's own edit as a pristine spawn on the next capture load.
-static INJECTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+///
+/// This is a depth counter rather than a boolean. A replacement can enter a modifier, carrier,
+/// or trail hook which itself performs another guarded dispatch; dropping the inner guard must
+/// not re-enable authored suppression while the outer replacement is still running.
+static INJECTING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Whether the current ACMD hook call is the replacement side of a live injection.
+///
+/// This is deliberately separate from the injection-attempt latch in the effect viewer. The
+/// guard only answers the capture/suppression question: replacement calls must not be captured as
+/// authored script lines, and an authored suppression rule must not suppress the replacement
+/// itself.
+pub fn is_injecting() -> bool {
+    INJECTING.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
 
 /// RAII guard: capture recording is suspended while this is alive.
 pub struct InjectGuard;
 
 impl InjectGuard {
     pub fn new() -> Self {
-        INJECTING.store(true, std::sync::atomic::Ordering::Relaxed);
+        INJECTING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         InjectGuard
     }
 }
 
 impl Drop for InjectGuard {
     fn drop(&mut self) {
-        INJECTING.store(false, std::sync::atomic::Ordering::Relaxed);
+        let previous = INJECTING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        debug_assert!(previous > 0, "InjectGuard dropped without a matching guard");
     }
 }
 
@@ -491,7 +506,7 @@ pub unsafe fn record_for_boma(
     func: &'static str,
     args: &[LuaArg],
 ) {
-    if INJECTING.load(std::sync::atomic::Ordering::Relaxed) {
+    if is_injecting() {
         return;
     }
     if boma.is_null() {
@@ -927,6 +942,9 @@ pub struct HbOverrides {
     pub hit_target: Option<LuaArg>,
     /// `COL_PRI`'s priority number.
     pub col_pri: Option<i64>,
+    /// `DAMAGE_NO_REACTION` mode/value for the fighter-wide damage-reaction hook.
+    pub hurt_condition_mode: Option<i64>,
+    pub hurt_condition_value: Option<f32>,
     // ── Post-hoc hitbox tuning (CAT_ATK_POWER / CAT_ATK_SETOFF_MUL only) ──────
     /// The hitbox id the modifier names — slot 0 for both members.
     pub atk_mod_id: Option<i64>,
@@ -2856,6 +2874,10 @@ const HURT_KEY_COL_PRI: u64 = u64::MAX;
 /// `game_link::HURT_KEY_WHOLE`.
 const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
 
+/// Rule key for `damage!(…, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, …)`. Keep distinct from
+/// `WHOLE_HIT` so a fighter-wide armor rule can never rewrite a whole-body hit-status slot.
+const HURT_KEY_DAMAGE_REACTION: u64 = u64::MAX - 3;
+
 /// Which slots a hurtbox macro's arguments occupy.
 ///
 /// The three shapes in [`CAT_HURT`] do not agree, and the override application below is
@@ -2868,6 +2890,9 @@ enum HurtShape {
     WholeBody,
     /// `COL_PRI` — priority in slot 0 and no status.
     Priority,
+    /// `damage!(…, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, mode, value)` — mode/value in Lua slots 1/2
+    /// after the command token in slot 0.
+    DamageReaction,
 }
 
 /// Capture one hurtbox call and apply any rule matching it, returning `true` to suppress.
@@ -2891,9 +2916,21 @@ unsafe fn hurt_action(
     if boma.is_null() {
         return false;
     }
+    // A module accessor can reach this hook for articles, weapons, and other agents as well as
+    // fighters. Their motion hashes are not a safe namespace for editor hurtbox rules, and an
+    // article call must never suppress or rewrite a selected fighter's HIT_NODE/HIT_NO state.
+    if smash::app::utility::get_category(&mut *boma)
+        != *smash::lib::lua_const::BATTLE_OBJECT_CATEGORY_FIGHTER
+    {
+        return false;
+    }
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
-    let Some((suppress, overrides)) = action_for(CAT_HURT, motion, target_key, frame) else {
+    // Hurtbox targets share one category, and `WHOLE_HIT`/`HIT_NODE`/`HIT_NO` do not
+    // have interchangeable argument layouts.  Match the command as well as the target
+    // sentinel so a same-frame COL_PRI or WHOLE_HIT rule can never rewrite a status slot.
+    let Some((suppress, overrides)) = action_for_func(CAT_HURT, motion, target_key, frame, func)
+    else {
         return false;
     };
     if suppress {
@@ -2934,6 +2971,14 @@ unsafe fn hurt_action(
                 slot(&mut vals, 0, LuaArg::Int(pri));
             }
         }
+        HurtShape::DamageReaction => {
+            if let Some(mode) = ov.hurt_condition_mode {
+                slot(&mut vals, 1, LuaArg::Int(mode));
+            }
+            if let Some(value) = ov.hurt_condition_value {
+                slot(&mut vals, 2, LuaArg::Num(value));
+            }
+        }
     }
     if vals != args {
         rewrite_args(lua_state, &vals);
@@ -2947,6 +2992,8 @@ unsafe fn hook_hit_node(lua_state: u64) {
     if args.len() >= 2 {
         let bone = match args.first() {
             Some(LuaArg::Hash(h)) => *h,
+            Some(LuaArg::Int(h)) => *h as u64,
+            Some(LuaArg::Num(h)) => *h as u64,
             _ => u64::MAX,
         };
         if hurt_action(lua_state, "HIT_NODE", &args, bone, HurtShape::Targeted) {
@@ -3008,6 +3055,28 @@ unsafe fn hook_whole_hit(lua_state: u64) {
         ) {
             return;
         }
+    }
+    original!()(lua_state)
+}
+
+/// `damage!(agent, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, mode, value)` is a module-access call
+/// rather than an `sv_animcmd` function. It still runs with the same Lua state and motion/frame
+/// context, so the hurtbox rule lane can apply a frame-scoped armor override without changing the
+/// game's authored script or the status geometry.
+#[skyline::hook(replace = smash::app::sv_module_access::damage)]
+unsafe fn hook_damage_no_reaction(lua_state: u64) {
+    let args = read_args_exact(lua_state, 3);
+    if args.len() >= 3
+        && matches!(args.first(), Some(LuaArg::Int(0)) | Some(LuaArg::Num(0.0)))
+        && hurt_action(
+            lua_state,
+            "DAMAGE_NO_REACTION",
+            &args,
+            HURT_KEY_DAMAGE_REACTION,
+            HurtShape::DamageReaction,
+        )
+    {
+        return;
     }
     original!()(lua_state)
 }
@@ -3293,6 +3362,21 @@ pub unsafe fn inject_tick(lua_state: u64) {
                 ));
                 continue;
             }
+            if category == CAT_HURT {
+                let valid = match inj.command.as_deref() {
+                    Some("HIT_NODE") | Some("HIT_NO") => args.len() == 2,
+                    Some("WHOLE_HIT") => args.len() == 1,
+                    Some("COL_PRI") => args.len() == 1,
+                    Some("DAMAGE_NO_REACTION") => args.len() == 3,
+                    _ => false,
+                };
+                if !valid {
+                    crate::slight::diag::note(
+                        "rejected hurtbox injection with wrong command or argument count",
+                    );
+                    continue;
+                }
+            }
             for a in &args {
                 let mut v = a.to_l2c();
                 agent.push_lua_stack(&mut v);
@@ -3366,6 +3450,23 @@ pub unsafe fn inject_tick(lua_state: u64) {
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
                     CAT_ATTACK_FP => smash::app::sv_animcmd::ATTACK_FP(agent.lua_state_agent),
+                    CAT_HURT => match inj.command.as_deref() {
+                        Some("HIT_NODE") => smash::app::sv_animcmd::HIT_NODE(agent.lua_state_agent),
+                        Some("HIT_NO") => smash::app::sv_animcmd::HIT_NO(agent.lua_state_agent),
+                        Some("WHOLE_HIT") => {
+                            smash::app::sv_animcmd::WHOLE_HIT(agent.lua_state_agent)
+                        }
+                        Some("COL_PRI") => smash::app::sv_animcmd::COL_PRI(agent.lua_state_agent),
+                        Some("DAMAGE_NO_REACTION") => {
+                            smash::app::sv_module_access::damage(agent.lua_state_agent)
+                        }
+                        _ => {
+                            crate::slight::diag::note(
+                                "rejected hurtbox injection with an unknown command",
+                            );
+                            continue;
+                        }
+                    },
                     CAT_WIND => match inj.command.as_deref() {
                         Some("AREA_WIND_2ND_RAD") => {
                             smash::app::sv_animcmd::AREA_WIND_2ND_RAD(agent.lua_state_agent)
@@ -3425,6 +3526,7 @@ pub fn install() {
         hook_hit_node,
         hook_hit_no,
         hook_whole_hit,
+        hook_damage_no_reaction,
         hook_col_pri,
         hook_hit_reset_all,
         hook_atk_power,
@@ -3476,4 +3578,22 @@ pub fn install() {
     skyline::println!(
         "[SLight] ACMD ATTACK/CATCH/SEARCH/WIND/CLEAR/HURT/ATKMOD hooks installed (capture + rules)"
     );
+}
+
+#[cfg(test)]
+mod injection_guard_tests {
+    use super::{is_injecting, InjectGuard};
+
+    #[test]
+    fn nested_guards_keep_replacement_context_active() {
+        assert!(!is_injecting());
+        let outer = InjectGuard::new();
+        assert!(is_injecting());
+        let inner = InjectGuard::new();
+        assert!(is_injecting());
+        drop(inner);
+        assert!(is_injecting());
+        drop(outer);
+        assert!(!is_injecting());
+    }
 }

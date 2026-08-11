@@ -93,6 +93,12 @@ impl Default for RpmEffectData {
 pub struct SpawnRuleWire {
     pub eff_hash: u64,
     pub suppress: bool,
+    /// Optional lifetime command this rule suppresses. Ordinary `suppress` rules match spawn
+    /// hooks; a stop rule is consumed only by the named termination hook. Keeping this optional
+    /// makes the wire readable by older plugins and prevents a retimed end from accidentally
+    /// suppressing a start call with the same effect hash.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_func: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion: Option<u64>,
     pub frame_start: Option<f32>,
@@ -148,6 +154,10 @@ pub struct SpawnRuleWire {
     /// the pristine frame). Omitted for plain transform/suppress rules.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject: Option<SpawnInjectWire>,
+    /// Live retime for a colour/control-style effect command. Kept separate from graphic
+    /// injection so the plugin can dispatch the command family with its own argument contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_inject: Option<SpawnInjectWire>,
 }
 
 /// Wire form of plugin `spawn_rules::SpawnInject` — a captured EFFECT spawn to replay.
@@ -387,6 +397,17 @@ pub const HURT_KEY_COL_PRI: u64 = u64::MAX;
 /// priority into a status slot — the cross-family corruption this codebase keeps rediscovering,
 /// arrived at from the other direction. **Must equal the plugin's value.**
 pub const HURT_KEY_WHOLE: u64 = u64::MAX - 1;
+
+/// Rule key for the fighter-wide `damage!(…, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, …)` call.
+///
+/// It shares the hurtbox category but not a target namespace: the plugin uses this sentinel to
+/// apply super armor/damage-based armor to the damage-reaction command without ever treating it
+/// as a `WHOLE_HIT` status update. **Must equal the plugin's value.**
+pub const HURT_KEY_DAMAGE_REACTION: u64 = u64::MAX - 3;
+
+/// Wire category for `HIT_NODE` / `HIT_NO` / `WHOLE_HIT` status rules. Kept explicit rather than
+/// using the display category of a collision, because the plugin reserves this family at 3.
+pub const CAT_HURT: u8 = 3;
 
 /// Rule key for the targetless `SET_AIR` kinetic point.
 ///
@@ -645,6 +666,11 @@ pub struct HbOverridesWire {
     pub hit_target: Option<LuaArgWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub col_pri: Option<i64>,
+    /// `DAMAGE_NO_REACTION` mode and value (category 3, damage-reaction sentinel only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hurt_condition_mode: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hurt_condition_value: Option<f32>,
     // ── Post-hoc hitbox tuning (category 5 only) ─────────────────────────────
     //
     // `ATK_POWER` and `ATK_SET_SHIELD_SETOFF_MUL` share one `(id, value)` layout, so one pair of
@@ -1034,6 +1060,35 @@ struct Shared {
     edits_tx: u64,
 }
 
+const SPAWN_RULES_MARKER: &str = "\"spawn_rules\":";
+
+fn is_spawn_rules_message(message: &str) -> bool {
+    message.contains(SPAWN_RULES_MARKER)
+}
+
+/// Keep only the newest full spawn-rule replacement in an outbound batch. Spawn-rule messages
+/// replace the plugin's entire list, so sending intermediate drag states can only replay stale
+/// edits and churn the plugin's per-playback injection identity.
+fn retain_latest_spawn_rules(messages: &mut Vec<String>) {
+    let Some(latest) = messages
+        .iter()
+        .rposition(|message| is_spawn_rules_message(message))
+    else {
+        return;
+    };
+    let mut index = 0;
+    messages.retain(|message| {
+        let keep = !is_spawn_rules_message(message) || index == latest;
+        index += 1;
+        keep
+    });
+}
+
+fn queue_latest_spawn_rules(outbox: &mut Vec<String>, frame: String) {
+    outbox.push(frame);
+    retain_latest_spawn_rules(outbox);
+}
+
 impl Default for Shared {
     fn default() -> Self {
         Self {
@@ -1136,7 +1191,7 @@ impl GameLink {
         };
         let frame = format!("<TCP_MESSAGE>{payload}</TCP_MESSAGE>");
         if let Ok(mut s) = self.shared.lock() {
-            s.outbox.push(frame);
+            queue_latest_spawn_rules(&mut s.outbox, frame);
             s.edits_tx += 1;
         }
     }
@@ -1526,10 +1581,11 @@ fn serve_connection(shared: &Arc<Mutex<Shared>>, mut stream: TcpStream) -> Optio
 
     loop {
         // Outbound edits first — they're latency-sensitive.
-        let pending: Vec<String> = {
+        let mut pending: Vec<String> = {
             let mut s = shared.lock().unwrap();
             std::mem::take(&mut s.outbox)
         };
+        retain_latest_spawn_rules(&mut pending);
         for msg in pending {
             if let Err(e) = stream.write_all(msg.as_bytes()) {
                 return Some(format!("send: {e}"));
@@ -2708,6 +2764,7 @@ mod tests {
         link.send_spawn_rules(&[SpawnRuleWire {
             eff_hash: 0x99,
             suppress: false,
+            stop_func: None,
             motion: Some(0x1234),
             frame_start: Some(5.0),
             frame_end: Some(5.0),
@@ -2723,6 +2780,7 @@ mod tests {
             color: None,
             transition: None,
             inject: None,
+            color_inject: None,
         }]);
         let frame = link.shared.lock().unwrap().outbox[0].clone();
         let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
@@ -2785,6 +2843,253 @@ mod tests {
                 && hooks.contains("LAST_EFFECT_SET_SCALE_W")
                 && hooks.contains("apply_pending_scale_w"),
             "the plugin no longer rewrites the camera-flat modifier hook"
+        );
+    }
+
+    #[test]
+    fn outbound_colour_injection_is_typed_and_optional_for_legacy_rules() {
+        let link = GameLink::default();
+        link.send_spawn_rules(&[SpawnRuleWire {
+            eff_hash: hash40::hash40("flash").0,
+            suppress: true,
+            stop_func: None,
+            motion: Some(0x99),
+            frame_start: Some(4.5),
+            frame_end: Some(5.5),
+            pos: None,
+            rot: None,
+            scale: None,
+            rate: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            transition: None,
+            inject: None,
+            color_inject: Some(SpawnInjectWire {
+                frame: 7.0,
+                func: "FLASH".into(),
+                args: vec![
+                    LuaArgWire::Num(0.9),
+                    LuaArgWire::Num(0.8),
+                    LuaArgWire::Num(0.7),
+                    LuaArgWire::Num(0.6),
+                ],
+            }),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let inject = &value["spawn_rules"][0]["color_inject"];
+        assert!(value["spawn_rules"][0].get("stop_func").is_none());
+        assert_eq!(
+            inject["frame"].as_f64().map(|value| value as f32),
+            Some(7.0)
+        );
+        assert_eq!(inject["func"], "FLASH");
+        assert_eq!(inject["args"][0]["t"], "n");
+        assert_eq!(
+            inject["args"][0]["v"].as_f64().map(|value| value as f32),
+            Some(0.9)
+        );
+
+        // The plugin's default makes a rule written by an older desktop build readable when the
+        // optional field is absent.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/effect_viewer/spawn_rules.rs");
+        let plugin = std::fs::read_to_string(root).expect("read plugin spawn rules");
+        assert!(plugin.contains("#[serde(default)]\n    pub color_inject: Option<SpawnInject>"));
+        assert!(plugin.contains("#[serde(default)]\n    pub stop_func: Option<String>"));
+
+        let hooks = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/effect_viewer/acmd_hooks.rs"),
+        )
+        .expect("read plugin effect hooks");
+        for needle in [
+            "hook_after_image4_on_arg29",
+            "hook_after_image4_on_work_arg29",
+            "hook_raw_effect",
+            "read_args_exact(lua_state, 27)",
+            "trail_suppressed",
+            "lifetime_stop_suppressed",
+            "stop_suppressed",
+            "L2CAgentBase_start_coroutine",
+            "hook_start_coroutine",
+            "L2CAgentBase_resume_coroutine",
+            "hook_resume_coroutine",
+            "L2CAgentBase_call_coroutine",
+            "hook_call_coroutine",
+            "MotionModule::change_motion",
+            "hook_motion_change",
+            "MotionModule::change_motion_inherit_frame",
+            "hook_motion_change_inherit_frame",
+            "MotionModule::change_motion_inherit_frame_keep_rate",
+            "hook_motion_change_inherit_frame_keep_rate",
+            "MotionModule::change_motion_force_inherit_frame",
+            "hook_motion_change_force_inherit_frame",
+            "MotionModule::change_motion_kind",
+            "hook_motion_change_kind",
+            "sv_animcmd::is_excute",
+            "hook_acmd_is_excute",
+            "sv_animcmd::frame",
+            "hook_acmd_frame",
+            "inject_after_acmd_frame",
+            "sv_animcmd::wait",
+            "hook_acmd_wait",
+            "inject_for_acmd",
+            "CoroutineBoundary::Call",
+            "CoroutineBoundary::Start",
+            "CoroutineBoundary::Effect",
+            "CoroutineBoundary::Control",
+            "MotionHint",
+            "remember_motion_hint",
+            "reset_effect_injection_latches();",
+            "reset_control_injection_latches();",
+            "ACMD_PLAYBACK_STARTED",
+            "begin_acmd_playback",
+            "resolve_injection_motion",
+            "injection_frame",
+            "MAX_ATTEMPTS_PER_FRAME",
+            "\"AFTER_IMAGE3_ON\" => smash::app::sv_module_access::effect",
+            "\"AFTER_IMAGE4_ON_arg29\" => sv::AFTER_IMAGE4_ON_arg29",
+            "\"AFTER_IMAGE_OFF\" => sv::AFTER_IMAGE_OFF",
+            "static EFF_FIRED",
+            "InjectGuard::new()",
+            "preserve_authored_effect",
+        ] {
+            assert!(
+                hooks.contains(needle),
+                "plugin trail/colour runtime guard is missing {needle:?}"
+            );
+        }
+        assert!(
+            !hooks.contains("effect_acmd_state_matches"),
+            "frame-zero dispatch must not wait for a previously observed effect coroutine"
+        );
+        let start_original = hooks
+            .find("let result = original!()(agent, coroutine_index, name, state);")
+            .expect("start coroutine must call the native implementation");
+        let start_injection = hooks
+            .find("inject_for_acmd_at_frame(&mut *agent, CoroutineBoundary::Start, 0.0)")
+            .expect("start coroutine must cover frame zero before the native body");
+        assert!(
+            start_injection < start_original,
+            "startup injection must run before the original coroutine enters its first slice"
+        );
+        let call_original = hooks
+            .find("let result = original!()(agent, coroutine_index, name);")
+            .expect("call coroutine must call the native implementation");
+        let call_injection = hooks
+            .find("inject_for_acmd(&mut *agent, CoroutineBoundary::Call)")
+            .expect("call coroutine must inject after the native implementation");
+        assert!(
+            call_original < call_injection,
+            "call-boundary injection must run after the original coroutine call"
+        );
+        assert!(
+            hooks.contains("inject_after_acmd_frame(lua_state, target)"),
+            "absolute frame waits must inject at the native frame boundary"
+        );
+        assert!(
+            hooks.contains("inject_before_acmd_wait(lua_state, CoroutineBoundary::Wait)"),
+            "relative waits must inject at the native wait boundary"
+        );
+        let frame_injection = hooks
+            .rfind("inject_after_acmd_frame(lua_state, target)")
+            .expect("frame hook must inject after its native call");
+        let frame_original = hooks
+            .find("original!()(lua_state, target);")
+            .expect("frame hook must retain the native call");
+        assert!(
+            frame_original < frame_injection,
+            "frame-boundary injection must run after the script reaches its target"
+        );
+        let wait_injection = hooks
+            .rfind("inject_before_acmd_wait(lua_state, CoroutineBoundary::Wait)")
+            .expect("wait hook must inject at its returned target");
+        let wait_original = hooks
+            .rfind("original!()(lua_state, target);")
+            .expect("wait hook must retain the native call");
+        assert!(
+            wait_original < wait_injection,
+            "wait-boundary injection must run after the script reaches its target"
+        );
+
+        let spawn_rules = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/effect_viewer/spawn_rules.rs"),
+        )
+        .expect("read plugin spawn rules");
+        assert!(spawn_rules.contains("replacement_injections_for_suppression"));
+        assert!(spawn_rules.contains("PENDING_RULES"));
+        assert!(spawn_rules.contains("pub fn service_pending"));
+
+        let control_rules = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/effect_viewer/control_rules.rs"),
+        )
+        .expect("read plugin control rules");
+        assert!(control_rules.contains("PENDING_RULES"));
+        assert!(control_rules.contains("pub fn service_pending"));
+
+        let server = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/rust_extender/net/simple_server.rs"),
+        )
+        .expect("read plugin TCP server");
+        assert!(server.contains("apply_timing_rules_from_network"));
+
+        let debugger =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "plugins/slight_replica/src/rust_extender/debugging/debuggable_server/mod.rs",
+            ))
+            .expect("read plugin debug server");
+        assert!(debugger.contains("pub fn apply_timing_rules_from_network"));
+
+        let agent_extender = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/agent_extender/mod.rs"),
+        )
+        .expect("read plugin agent extender");
+        assert!(agent_extender.contains("StatusLine::Main"));
+        assert!(agent_extender.contains("hitbox_viewer::inject_tick"));
+        assert!(!agent_extender.contains("StatusLine::Post"));
+        assert!(!agent_extender.contains("acmd_hooks::inject_tick"));
+    }
+
+    #[test]
+    fn outbound_stop_suppression_is_typed_and_serialized_only_when_present() {
+        let link = GameLink::default();
+        link.send_spawn_rules(&[SpawnRuleWire {
+            eff_hash: hash40::hash40("moon_explosion").0,
+            suppress: true,
+            stop_func: Some("EFFECT_OFF_KIND".into()),
+            motion: Some(hash40::hash40("attack_air_n").0),
+            frame_start: Some(19.5),
+            frame_end: Some(20.5),
+            pos: None,
+            rot: None,
+            scale: None,
+            rate: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            transition: None,
+            inject: None,
+            color_inject: None,
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        assert_eq!(
+            value["spawn_rules"][0]["stop_func"],
+            serde_json::Value::String("EFFECT_OFF_KIND".into())
         );
     }
 
@@ -4116,5 +4421,50 @@ mod tests {
             "the plugin's key reader must accept an Int-tagged hash, or live sound edits go \
              silently dead while live sound capture keeps working: {body}"
         );
+    }
+
+    #[test]
+    fn repeated_spawn_rule_pushes_keep_only_the_latest_full_rule_list() {
+        fn rule_at(frame: f32) -> SpawnRuleWire {
+            SpawnRuleWire {
+                eff_hash: 0x99,
+                suppress: false,
+                stop_func: None,
+                motion: Some(0x1234),
+                frame_start: Some(frame),
+                frame_end: Some(frame),
+                pos: None,
+                rot: None,
+                scale: None,
+                rate: None,
+                camera_offset: None,
+                tint: None,
+                particle_tint: None,
+                alpha: None,
+                scale_w: None,
+                color: None,
+                transition: None,
+                inject: None,
+                color_inject: None,
+            }
+        }
+
+        let link = GameLink::default();
+        link.send_spawn_rules(&[rule_at(3.0)]);
+        link.send_spawn_rules(&[rule_at(2.0)]);
+        link.send_spawn_rules(&[rule_at(1.0)]);
+
+        let shared = link.shared.lock().unwrap();
+        let pending: Vec<&String> = shared
+            .outbox
+            .iter()
+            .filter(|message| is_spawn_rules_message(message))
+            .collect();
+        assert_eq!(pending.len(), 1, "superseded drag states must not be sent");
+        let frame = pending[0];
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        assert_eq!(value["spawn_rules"][0]["frame_start"].as_f64(), Some(1.0));
+        assert_eq!(value["spawn_rules"][0]["frame_end"].as_f64(), Some(1.0));
     }
 }

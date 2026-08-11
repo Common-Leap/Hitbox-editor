@@ -462,6 +462,10 @@ unsafe fn spawn_via_carrier(
                 "carrier_spawn_buffered logical={logical_hash:#x} real={:#x}",
                 args.eff_hash
             ));
+            // A queued carrier request is accepted by the carrier state machine. There is no
+            // EffectModule handle yet, so this is the carrier path's explicit confirmation and
+            // prevents a second coroutine-boundary attempt from enqueueing the same request again.
+            note_injected_success();
             return true;
         }
         return false;
@@ -489,6 +493,7 @@ unsafe fn spawn_via_carrier(
         0
     };
     if handle != 0 {
+        note_injected_success();
         // Force the absolute transform after creation as well: set_pos/set_rot are explicitly
         // world-space for non-follow handles.
         smash::app::lua_bind::EffectModule::set_pos(carrier, handle, &world_pos);
@@ -1020,6 +1025,9 @@ unsafe fn control_suppressed(
     func: &str,
     args: &[crate::slight::hitbox_viewer::LuaArg],
 ) -> bool {
+    if crate::slight::hitbox_viewer::is_injecting() {
+        return false;
+    }
     if !crate::slight::effect_viewer::control_rules::any_for(func) {
         return false;
     }
@@ -1028,8 +1036,8 @@ unsafe fn control_suppressed(
     if boma.is_null() {
         return false;
     }
-    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let motion = resolve_injection_motion(boma, CoroutineBoundary::Control, frame).0;
     crate::slight::effect_viewer::control_rules::suppressed(func, args, motion, frame)
 }
 
@@ -1038,6 +1046,7 @@ unsafe fn control_suppressed(
 unsafe fn hook_effect_detach_kind(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 2);
     crate::slight::hitbox_viewer::record(lua_state, "EFFECT_DETACH_KIND", &typed);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Control);
     if control_suppressed(lua_state, "EFFECT_DETACH_KIND", &typed) {
         return;
     }
@@ -1052,6 +1061,7 @@ unsafe fn hook_effect_detach_kind(lua_state: u64) {
 unsafe fn hook_effect_detach_kind_work(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 2);
     crate::slight::hitbox_viewer::record(lua_state, "EFFECT_DETACH_KIND_WORK", &typed);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Control);
     if control_suppressed(lua_state, "EFFECT_DETACH_KIND_WORK", &typed) {
         return;
     }
@@ -1062,6 +1072,7 @@ unsafe fn hook_effect_detach_kind_work(lua_state: u64) {
 unsafe fn hook_enable_area(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
     crate::slight::hitbox_viewer::record(lua_state, "ENABLE_AREA", &typed);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Control);
     if control_suppressed(lua_state, "ENABLE_AREA", &typed) {
         return;
     }
@@ -1072,6 +1083,7 @@ unsafe fn hook_enable_area(lua_state: u64) {
 unsafe fn hook_unable_area(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
     crate::slight::hitbox_viewer::record(lua_state, "UNABLE_AREA", &typed);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Control);
     if control_suppressed(lua_state, "UNABLE_AREA", &typed) {
         return;
     }
@@ -1191,6 +1203,7 @@ unsafe fn track(lua_state: u64, args: ParsedEffectArgs, is_follow: bool, h_befor
     // Spawn observability: did THIS kind actually create an effect? get_last_handle changing
     // across original!() is the reliable signal (a bare non-zero handle can be stale).
     let h_after = smash::app::lua_bind::EffectModule::get_last_handle(boma) as u32;
+    note_injected_handle(h_before, h_after);
     record_spawn(args.eff_hash, h_before, h_after);
     // Before the script's own modifier lines run, so a spawn the script never retunes still
     // gets the editor's values. When there IS such a line, it runs after this and would win —
@@ -1231,6 +1244,10 @@ macro_rules! effect_hook {
             // contaminated by the user's pins.
             let parsed = parse_args(lua_state, $flip);
             if let Some(args) = parsed.as_ref() {
+                // A direct effect command can be the first executable statement of a script;
+                // give the replacement engine this real command context even when the script
+                // has no preceding `frame`, `wait`, or `is_excute` boundary.
+                inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
                 // Mark this as ACMD before consulting saved pins. This also migrates away
                 // legacy kind-global pos/rot pins before a carrier-owned transplant can
                 // mistake those script offsets for absolute world coordinates.
@@ -1267,18 +1284,22 @@ macro_rules! effect_hook {
                     let (motion, frame) = if boma.is_null() {
                         (0u64, -1.0f32)
                     } else {
+                        let frame = smash::app::lua_bind::MotionModule::frame(boma);
                         (
-                            smash::app::lua_bind::MotionModule::motion_kind(boma),
-                            smash::app::lua_bind::MotionModule::frame(boma),
+                            resolve_injection_motion(boma, CoroutineBoundary::Effect, frame).0,
+                            frame,
                         )
                     };
                     // A suppressed spawn skips original entirely — the effect never exists
                     // (unlike a visible=false pin, which spawns it).
-                    if crate::slight::effect_viewer::spawn_rules::suppressed(
-                        args.eff_hash,
-                        motion,
-                        frame,
-                    ) {
+                    let preserve_authored = !crate::slight::hitbox_viewer::is_injecting()
+                        && preserve_authored_effect(source_boma, args.eff_hash, motion, frame);
+                    if !crate::slight::hitbox_viewer::is_injecting()
+                        && crate::slight::effect_viewer::spawn_rules::suppressed(
+                            args.eff_hash, motion, frame,
+                        )
+                        && !preserve_authored
+                    {
                         return;
                     }
                     // Scoped transform wins over the global pin for THIS spawn only.
@@ -1666,6 +1687,149 @@ effect_hook!(
 );
 effect_hook!(hook_down_eff, smash::app::sv_animcmd::DOWN_EFFECT, false);
 
+// ── AFTER_IMAGE trails ───────────────────────────────────────────────────────
+//
+// The named arg29 wrappers are ordinary sv_animcmd functions. Vanilla also uses the raw
+// `sv_module_access::effect` path for `MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON`; there is no
+// `AFTER_IMAGE3_ON` Skyline macro to call, so that path stays explicitly bound to the pinned
+// native dispatcher and command id.
+
+fn trail_arg_hash(arg: &crate::slight::hitbox_viewer::LuaArg) -> Option<u64> {
+    match arg {
+        crate::slight::hitbox_viewer::LuaArg::Hash(hash) => Some(*hash),
+        crate::slight::hitbox_viewer::LuaArg::Int(value) => Some(*value as u64),
+        _ => None,
+    }
+}
+
+unsafe fn is_fighter_boma(boma: *mut smash::app::BattleObjectModuleAccessor) -> bool {
+    !boma.is_null()
+        && smash::app::utility::get_category(&mut *boma)
+            == *smash::lib::lua_const::BATTLE_OBJECT_CATEGORY_FIGHTER
+}
+
+unsafe fn trail_suppressed(lua_state: u64, hash: Option<u64>) -> bool {
+    if crate::slight::hitbox_viewer::is_injecting() {
+        return false;
+    }
+    let Some(hash) = hash else {
+        return false;
+    };
+    if !crate::slight::effect_viewer::spawn_rules::any_for(hash) {
+        return false;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return false;
+    }
+    if !is_fighter_boma(boma) {
+        return false;
+    }
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let motion = resolve_injection_motion(boma, CoroutineBoundary::Effect, frame).0;
+    crate::slight::effect_viewer::spawn_rules::suppressed(hash, motion, frame)
+        && !preserve_authored_effect(boma, hash, motion, frame)
+}
+
+unsafe fn lifetime_stop_suppressed(lua_state: u64, func: &str, eff_hash: u64) -> bool {
+    if crate::slight::hitbox_viewer::is_injecting() {
+        return false;
+    }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return false;
+    }
+    if !is_fighter_boma(boma) {
+        return false;
+    }
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let motion = resolve_injection_motion(boma, CoroutineBoundary::Effect, frame).0;
+    crate::slight::effect_viewer::spawn_rules::stop_suppressed(func, eff_hash, motion, frame)
+        && !preserve_authored_effect(boma, eff_hash, motion, frame)
+}
+
+macro_rules! named_trail_hook {
+    ($hook_name:ident, $target:path, $func:literal) => {
+        #[skyline::hook(replace = $target)]
+        unsafe fn $hook_name(lua_state: u64) {
+            let typed = crate::slight::hitbox_viewer::read_args_exact(lua_state, 29);
+            let hash = typed.first().and_then(trail_arg_hash);
+            crate::slight::hitbox_viewer::record(lua_state, $func, &typed);
+            inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
+            if trail_suppressed(lua_state, hash) {
+                return;
+            }
+            original!()(lua_state);
+            if crate::slight::hitbox_viewer::is_injecting() {
+                note_injected_success();
+            }
+        }
+    };
+}
+
+named_trail_hook!(
+    hook_after_image4_on_arg29,
+    smash::app::sv_animcmd::AFTER_IMAGE4_ON_arg29,
+    "AFTER_IMAGE4_ON_arg29"
+);
+named_trail_hook!(
+    hook_after_image4_on_work_arg29,
+    smash::app::sv_animcmd::AFTER_IMAGE4_ON_WORK_arg29,
+    "AFTER_IMAGE4_ON_WORK_arg29"
+);
+
+/// Capture and optionally suppress the raw AFTER_IMAGE3 command. The command id is argument 0;
+/// the editor receives the remaining typed payload so it can retain and replay the exact raw
+/// effect call without pretending an unavailable Skyline macro exists.
+#[skyline::hook(replace = smash::app::sv_module_access::effect)]
+unsafe fn hook_raw_effect(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_exact(lua_state, 27);
+    let command = typed.first().and_then(|arg| match arg {
+        crate::slight::hitbox_viewer::LuaArg::Int(value) => Some(*value as u64),
+        crate::slight::hitbox_viewer::LuaArg::Num(value) => Some(*value as u64),
+        crate::slight::hitbox_viewer::LuaArg::Hash(value) => Some(*value),
+        _ => None,
+    });
+    if command == Some(*smash::lib::lua_const::MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON as u64) {
+        let payload = &typed[1..];
+        let hash = payload.first().and_then(trail_arg_hash);
+        crate::slight::hitbox_viewer::record(lua_state, "AFTER_IMAGE3_ON", payload);
+        inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
+        if trail_suppressed(lua_state, hash) {
+            return;
+        }
+    }
+    original!()(lua_state);
+    if command == Some(*smash::lib::lua_const::MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON as u64)
+        && crate::slight::hitbox_viewer::is_injecting()
+    {
+        note_injected_success();
+    }
+}
+
+/// The trail stop is part of the captured effect timeline. It is also the exact native
+/// termination primitive used by retime injection, so the hook records authored calls and lets
+/// injected calls pass under `InjectGuard`.
+#[skyline::hook(replace = smash::app::sv_animcmd::AFTER_IMAGE_OFF)]
+unsafe fn hook_after_image_off(lua_state: u64) {
+    let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 1);
+    crate::slight::hitbox_viewer::record(lua_state, "AFTER_IMAGE_OFF", &typed);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
+    if lifetime_stop_suppressed(
+        lua_state,
+        "AFTER_IMAGE_OFF",
+        smash::hash40("after_image_off"),
+    ) {
+        return;
+    }
+    original!()(lua_state);
+    if crate::slight::hitbox_viewer::is_injecting() {
+        note_injected_success();
+    }
+}
+
 // ── Model and screen colour ──────────────────────────────────────────────────
 //
 // `FLASH` and the `BURN_COLOR` family tint the fighter's model or the screen flash. They are
@@ -1691,6 +1855,7 @@ macro_rules! color_hook {
         unsafe fn $hook_name(lua_state: u64) {
             let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, $argc);
             crate::slight::hitbox_viewer::record(lua_state, $command, &typed);
+            inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
 
             let cmd_hash = smash::hash40($lower);
             if crate::slight::effect_viewer::spawn_rules::any_for(cmd_hash) {
@@ -1699,14 +1864,22 @@ macro_rules! color_hook {
                 let (motion, frame) = if boma.is_null() {
                     (0u64, -1.0f32)
                 } else {
+                    let frame = smash::app::lua_bind::MotionModule::frame(boma);
                     (
-                        smash::app::lua_bind::MotionModule::motion_kind(boma),
-                        smash::app::lua_bind::MotionModule::frame(boma),
+                        resolve_injection_motion(boma, CoroutineBoundary::Effect, frame).0,
+                        frame,
                     )
                 };
                 // A disabled colour command skips original entirely, so the tint never
                 // happens — the same meaning suppression has for a spawn.
-                if crate::slight::effect_viewer::spawn_rules::suppressed(cmd_hash, motion, frame) {
+                let preserve_authored = !crate::slight::hitbox_viewer::is_injecting()
+                    && preserve_authored_effect(boma, cmd_hash, motion, frame);
+                if !crate::slight::hitbox_viewer::is_injecting()
+                    && crate::slight::effect_viewer::spawn_rules::suppressed(
+                        cmd_hash, motion, frame,
+                    )
+                    && !preserve_authored
+                {
                     return;
                 }
                 if let Some((color, transition)) =
@@ -1742,6 +1915,9 @@ macro_rules! color_hook {
             }
 
             original!()(lua_state);
+            if crate::slight::hitbox_viewer::is_injecting() {
+                note_injected_success();
+            }
         }
     };
 }
@@ -1815,11 +1991,18 @@ color_hook!(
 unsafe fn hook_effect_off_kind(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 3);
     crate::slight::hitbox_viewer::record(lua_state, "EFFECT_OFF_KIND", &typed);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
 
     let mut agent = smash::lib::L2CAgent::new(lua_state);
     let logical_hash = arg_hash(&mut agent, 1);
     let fade = arg_bool(&mut agent, 2, false);
     let detach = arg_bool(&mut agent, 3, true);
+
+    if let Some(logical_hash) = logical_hash {
+        if lifetime_stop_suppressed(lua_state, "EFFECT_OFF_KIND", logical_hash) {
+            return;
+        }
+    }
 
     // Rewrite the KIND ARGUMENT, exactly as the spawn hooks do.
     //
@@ -1866,6 +2049,10 @@ unsafe fn hook_effect_off_kind(lua_state: u64) {
 
     original!()(lua_state);
 
+    if crate::slight::hitbox_viewer::is_injecting() {
+        note_injected_success();
+    }
+
     if let Some(logical_hash) = logical_hash {
         let source = smash::app::sv_system::battle_object_module_accessor(lua_state)
             as *mut smash::app::BattleObjectModuleAccessor;
@@ -1873,23 +2060,610 @@ unsafe fn hook_effect_off_kind(lua_state: u64) {
     }
 }
 
-// ── Live retime injection (per-frame, from the agent line callback) ──────────
+// ── Live retime injection (from the ACMD coroutine boundary) ─────────────────
 
-/// (boid, rule idx) → (motion, frame) it last fired at. Refires when the motion loops
-/// (frame goes backwards) or the motion changes — mirrors the hitbox inject latch.
-static EFF_FIRED: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<(u32, usize), (u64, f32)>>,
+/// Native ACMD can resume more than one coroutine for the same object and motion frame. Permit
+/// one bounded retry across those resumes, but never carry an unconfirmed request into a later
+/// motion frame where it would visibly become a late/original-timing spawn.
+const MAX_ATTEMPTS_PER_FRAME: u8 = 2;
+const MOTION_FRAME_WIDTH: f32 = 0.5;
+const STARTUP_FRAME_MAX: f32 = 1.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoroutineBoundary {
+    Start,
+    Call,
+    Execute,
+    Effect,
+    Control,
+    Frame,
+    Wait,
+    Resume,
+}
+
+impl CoroutineBoundary {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Call => "call",
+            Self::Execute => "execute",
+            Self::Effect => "effect",
+            Self::Control => "control",
+            Self::Frame => "frame",
+            Self::Wait => "wait",
+            Self::Resume => "resume",
+        }
+    }
+}
+
+/// A motion transition publishes its new ACMD coroutines before `MotionModule::motion_kind`
+/// becomes observable from every native callback.  Keep the requested hash per battle object so
+/// the first command boundary cannot accidentally select the previous move's replacement list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MotionHint {
+    motion: u64,
+}
+
+static MOTION_HINTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<u32, MotionHint>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
+/// `start_coroutine` enters the authored function before its hook returns.  Keep a bounded marker
+/// for that first execution so a frame-zero request can be retried from the first real command
+/// boundary if the pre-start native dispatch did not create a handle.
+static ACMD_STARTUP_PENDING: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<(u32, u64)>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+/// A motion transition normally resets the latch, but some native replay paths restart an ACMD
+/// coroutine without going through a visible MotionModule change. Collapse the several category
+/// starts at frame zero into one playback edge and reset once there as well.
+static ACMD_PLAYBACK_STARTED: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<u32>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+unsafe fn remember_motion_hint(boma: *mut smash::app::BattleObjectModuleAccessor, motion: u64) {
+    if boma.is_null() {
+        return;
+    }
+    // A new MotionModule transition is also the boundary between two playbacks of the same
+    // motion. A frame-zero latch may otherwise still contain a confirmed result from the prior
+    // playback when the native frame counter has not yet moved backward far enough to expose the
+    // loop. Reset both rule families before publishing the new startup hint.
+    reset_effect_injection_latches();
+    reset_control_injection_latches();
+    MOTION_HINTS
+        .lock()
+        .insert((*boma).battle_object_id, MotionHint { motion });
+}
+
+unsafe fn remember_acmd_startup(agent: *mut smash::lua2cpp::L2CAgentBase) {
+    if agent.is_null() || (*agent).agent.lua_state_agent == 0 {
+        return;
+    }
+    let boma = (*agent).agent.module_accessor;
+    if boma.is_null() {
+        return;
+    }
+    let mut pending = ACMD_STARTUP_PENDING.lock();
+    if pending.len() >= 128 {
+        pending.clear();
+    }
+    pending.insert(((*boma).battle_object_id, (*agent).agent.lua_state_agent));
+}
+
+unsafe fn begin_acmd_playback(boma: *mut smash::app::BattleObjectModuleAccessor) {
+    if boma.is_null() {
+        return;
+    }
+    let boid = (*boma).battle_object_id;
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    if frame.is_finite() && frame <= STARTUP_FRAME_MAX {
+        let first_category = ACMD_PLAYBACK_STARTED.lock().insert(boid);
+        if first_category {
+            reset_effect_injection_latches();
+            reset_control_injection_latches();
+        }
+    } else if frame.is_finite() {
+        ACMD_PLAYBACK_STARTED.lock().remove(&boid);
+    }
+}
+
+unsafe fn note_acmd_progress(boma: *mut smash::app::BattleObjectModuleAccessor, frame: f32) {
+    if !boma.is_null() && frame.is_finite() && frame > STARTUP_FRAME_MAX {
+        ACMD_PLAYBACK_STARTED
+            .lock()
+            .remove(&(*boma).battle_object_id);
+    }
+}
+
+unsafe fn take_acmd_startup(
+    lua_state: u64,
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+) -> bool {
+    if lua_state == 0 || boma.is_null() {
+        return false;
+    }
+    ACMD_STARTUP_PENDING
+        .lock()
+        .remove(&((*boma).battle_object_id, lua_state))
+}
+
+fn choose_motion_hint(
+    observed: u64,
+    hint: Option<MotionHint>,
+    boundary: CoroutineBoundary,
+    observed_frame: f32,
+    hint_has_rules: bool,
+) -> u64 {
+    let Some(hint) = hint else {
+        return observed;
+    };
+    if hint.motion == observed || !hint_has_rules {
+        return observed;
+    }
+
+    // The explicit pre-start frame-zero path and the following command boundaries are inside the
+    // transition that requested the hinted motion. A post-call notification is still not a
+    // dispatch point. Resume is restricted to the low startup window so an old hint cannot affect
+    // a later, unrelated motion.
+    let startup = matches!(
+        boundary,
+        CoroutineBoundary::Start
+            | CoroutineBoundary::Execute
+            | CoroutineBoundary::Effect
+            | CoroutineBoundary::Control
+            | CoroutineBoundary::Frame
+            | CoroutineBoundary::Wait
+    );
+    let low_resume = boundary == CoroutineBoundary::Resume
+        && observed_frame.is_finite()
+        && observed_frame <= 1.0;
+    if startup || low_resume {
+        hint.motion
+    } else {
+        observed
+    }
+}
+
+unsafe fn resolve_injection_motion(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    boundary: CoroutineBoundary,
+    observed_frame: f32,
+) -> (u64, u64) {
+    let observed = smash::app::lua_bind::MotionModule::motion_kind(boma);
+    let boid = (*boma).battle_object_id;
+    let hint = MOTION_HINTS.lock().get(&boid).copied();
+    let hint_has_rules = hint.is_some_and(|hint| {
+        crate::slight::effect_viewer::spawn_rules::has_inject_for(hint.motion)
+            || crate::slight::effect_viewer::control_rules::has_inject_for(hint.motion)
+    });
+    let resolved = choose_motion_hint(observed, hint, boundary, observed_frame, hint_has_rules);
+    if hint.is_some_and(|hint| hint.motion == observed) {
+        // Keep the hint alive while the native accessor still publishes the old motion. This
+        // covers the entire startup window, including authored suppression and paired stops;
+        // discard it as soon as the accessor agrees with the requested hash.
+        MOTION_HINTS.lock().remove(&boid);
+    }
+    (resolved, observed)
+}
+
+/// The native startup path can briefly report an uninitialized negative frame even though an
+/// ACMD coroutine is executing at motion frame zero. The command-boundary hooks are part of that
+/// same startup path, so normalize them too; resume boundaries and all positive targets retain
+/// the exact native frame.
+fn injection_frame(boundary: CoroutineBoundary, observed_frame: f32) -> f32 {
+    if matches!(
+        boundary,
+        CoroutineBoundary::Start
+            | CoroutineBoundary::Call
+            | CoroutineBoundary::Execute
+            | CoroutineBoundary::Effect
+            | CoroutineBoundary::Control
+            | CoroutineBoundary::Frame
+            | CoroutineBoundary::Wait
+    ) && observed_frame.is_finite()
+        && observed_frame < 0.0
+    {
+        0.0
+    } else {
+        observed_frame
+    }
+}
+
+fn script_frame_to_motion_frame(script_frame: f32) -> Option<f32> {
+    script_frame
+        .is_finite()
+        .then(|| script_frame.max(1.0) - 1.0)
+}
+
+/// A bounded, confirmation-aware live injection latch.
+///
+/// The rule index is the identity of the current desktop rule slot. The motion, target, and
+/// content fingerprint ensure a retime, motion change, motion loop, or changed payload cannot
+/// inherit an old confirmation. `missed` is deliberately distinct from `confirmed`: a native
+/// call that did not produce a confirmation is never reported as fired.
+#[derive(Clone, Copy, Debug)]
+struct InjectionLatch {
+    motion: u64,
+    target_motion_frame: f32,
+    rule_identity: usize,
+    rule_fingerprint: u64,
+    last_attempt_frame: f32,
+    last_observed_frame: f32,
+    attempts: u8,
+    confirmed: bool,
+    missed: bool,
+}
+
+impl InjectionLatch {
+    fn same_identity(
+        &self,
+        motion: u64,
+        target_motion_frame: f32,
+        rule_identity: usize,
+        rule_fingerprint: u64,
+    ) -> bool {
+        self.motion == motion
+            && self.target_motion_frame.to_bits() == target_motion_frame.to_bits()
+            && self.rule_identity == rule_identity
+            && self.rule_fingerprint == rule_fingerprint
+    }
+}
+
+fn in_requested_motion_frame(frame: f32, target: f32) -> bool {
+    frame >= target && frame < target + MOTION_FRAME_WIDTH
+}
+
+fn same_motion_frame(a: f32, b: f32) -> bool {
+    (a - b).abs() < MOTION_FRAME_WIDTH
+}
+
+/// Pure latch policy used by both the effect and point-control injectors. Calls are only accepted
+/// during the requested motion frame, and an unconfirmed request gets one same-frame retry.
+fn latch_can_attempt(
+    latch: Option<&InjectionLatch>,
+    motion: u64,
+    target_motion_frame: f32,
+    rule_identity: usize,
+    rule_fingerprint: u64,
+    frame: f32,
+) -> bool {
+    let Some(latch) = latch else {
+        return in_requested_motion_frame(frame, target_motion_frame);
+    };
+    if !latch.same_identity(motion, target_motion_frame, rule_identity, rule_fingerprint)
+        || frame < latch.last_attempt_frame
+    {
+        return in_requested_motion_frame(frame, target_motion_frame);
+    }
+    if latch.confirmed || latch.missed || latch.attempts >= MAX_ATTEMPTS_PER_FRAME {
+        return false;
+    }
+    in_requested_motion_frame(frame, target_motion_frame)
+}
+
+fn latch_attempt_number(
+    latch: Option<&InjectionLatch>,
+    motion: u64,
+    target_motion_frame: f32,
+    rule_identity: usize,
+    rule_fingerprint: u64,
+    frame: f32,
+) -> u8 {
+    latch
+        .filter(|latch| {
+            latch.same_identity(motion, target_motion_frame, rule_identity, rule_fingerprint)
+                && frame >= latch.last_attempt_frame
+        })
+        .filter(|latch| same_motion_frame(latch.last_attempt_frame, frame))
+        .map_or(1, |latch| latch.attempts.saturating_add(1))
+}
+
+fn store_latch(
+    latches: &mut std::collections::HashMap<(u32, usize), InjectionLatch>,
+    key: (u32, usize),
+    motion: u64,
+    target_motion_frame: f32,
+    rule_identity: usize,
+    rule_fingerprint: u64,
+    frame: f32,
+    confirmed: bool,
+    missed: bool,
+) -> u8 {
+    let attempts = latch_attempt_number(
+        latches.get(&key),
+        motion,
+        target_motion_frame,
+        rule_identity,
+        rule_fingerprint,
+        frame,
+    );
+    latches.insert(
+        key,
+        InjectionLatch {
+            motion,
+            target_motion_frame,
+            rule_identity,
+            rule_fingerprint,
+            last_attempt_frame: frame,
+            last_observed_frame: frame,
+            attempts,
+            confirmed,
+            missed,
+        },
+    );
+    attempts
+}
+
+fn mark_latch_missed(
+    latches: &mut std::collections::HashMap<(u32, usize), InjectionLatch>,
+    key: (u32, usize),
+    motion: u64,
+    target_motion_frame: f32,
+    rule_fingerprint: u64,
+    frame: f32,
+) -> bool {
+    if latches.get(&key).is_some_and(|latch| {
+        latch.same_identity(motion, target_motion_frame, key.1, rule_fingerprint)
+            && (latch.confirmed || latch.missed)
+    }) {
+        return false;
+    }
+    // Marking a request missed is bookkeeping, not another dispatch attempt. Preserve the
+    // number of attempts already made during the requested frame for diagnostics.
+    let attempts = latches
+        .get(&key)
+        .filter(|latch| latch.same_identity(motion, target_motion_frame, key.1, rule_fingerprint))
+        .map_or(0, |latch| latch.attempts);
+    latches.insert(
+        key,
+        InjectionLatch {
+            motion,
+            target_motion_frame,
+            rule_identity: key.1,
+            rule_fingerprint,
+            last_attempt_frame: frame,
+            last_observed_frame: frame,
+            attempts,
+            confirmed: false,
+            missed: true,
+        },
+    );
+    true
+}
+
+#[derive(Clone, Copy)]
+struct InjectionAttemptContext {
+    key: (u32, usize),
+    motion: u64,
+    target_motion_frame: f32,
+    rule_identity: usize,
+    rule_fingerprint: u64,
+    confirmed: bool,
+}
+
+static ACTIVE_INJECTION: std::sync::LazyLock<parking_lot::Mutex<Option<InjectionAttemptContext>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// Context for one native replacement dispatch. This is separate from `InjectGuard`: the latter
+/// prevents the replacement from entering pristine capture, while this context lets effect hooks
+/// report whether their native call actually created the requested runtime object.
+struct InjectionAttemptGuard;
+
+impl InjectionAttemptGuard {
+    fn new(
+        key: (u32, usize),
+        motion: u64,
+        target_motion_frame: f32,
+        rule_fingerprint: u64,
+    ) -> Self {
+        *ACTIVE_INJECTION.lock() = Some(InjectionAttemptContext {
+            key,
+            motion,
+            target_motion_frame,
+            rule_identity: key.1,
+            rule_fingerprint,
+            confirmed: false,
+        });
+        Self
+    }
+
+    fn confirmed() -> bool {
+        ACTIVE_INJECTION
+            .lock()
+            .as_ref()
+            .is_some_and(|context| context.confirmed)
+    }
+}
+
+impl Drop for InjectionAttemptGuard {
+    fn drop(&mut self) {
+        *ACTIVE_INJECTION.lock() = None;
+    }
+}
+
+fn note_injected_success() {
+    if let Some(context) = ACTIVE_INJECTION.lock().as_mut() {
+        // Touch the identity fields while the context is live. Besides documenting the latch
+        // contract, this makes it impossible for a future nested dispatcher to confirm a
+        // different rule without replacing the active context first.
+        let _ = (
+            context.key,
+            context.motion,
+            context.target_motion_frame,
+            context.rule_identity,
+            context.rule_fingerprint,
+        );
+        context.confirmed = true;
+    }
+}
+
+fn note_injected_handle(h_before: u32, h_after: u32) {
+    if h_after != 0 && h_after != h_before {
+        note_injected_success();
+    }
+}
+
+/// An effect command family whose native return is the only confirmation available. Color,
+/// stop, and trail primitives do not expose a new ordinary effect handle, so their hook reaching
+/// the native dispatcher is their success signal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DispatchConfirmation {
+    Handle,
+    NativeReturn,
+}
+
+static EFF_FIRED: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<(u32, usize), InjectionLatch>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+static EFFECT_LATCH_RESET_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static CONTROL_LATCH_RESET_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+static LATE_FALLBACK_NOTED: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<(u32, u64, u64)>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+/// A desktop rule push replaces the entire sparse rule list. Rule indices are therefore not
+/// stable identities: retaining a latch from the previous list can make a newly retimed call
+/// look as if it already fired during the current playback.
+pub fn reset_effect_injection_latches() {
+    if let Some(mut latches) = EFF_FIRED.try_lock() {
+        latches.clear();
+        EFFECT_LATCH_RESET_PENDING.store(false, std::sync::atomic::Ordering::Release);
+    } else {
+        // The network thread can install a rule while the game thread is dispatching a
+        // coroutine. Never park that thread behind the game thread; the next ACMD boundary
+        // services the reset before it reads a latch.
+        EFFECT_LATCH_RESET_PENDING.store(true, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(mut noted) = LATE_FALLBACK_NOTED.try_lock() {
+        noted.clear();
+    }
+}
+
+pub fn reset_control_injection_latches() {
+    if let Some(mut latches) = CONTROL_FIRED.try_lock() {
+        latches.clear();
+        CONTROL_LATCH_RESET_PENDING.store(false, std::sync::atomic::Ordering::Release);
+    } else {
+        CONTROL_LATCH_RESET_PENDING.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn service_pending_latch_resets() {
+    if EFFECT_LATCH_RESET_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if let Some(mut latches) = EFF_FIRED.try_lock() {
+            latches.clear();
+        } else {
+            EFFECT_LATCH_RESET_PENDING.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    if CONTROL_LATCH_RESET_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if let Some(mut latches) = CONTROL_FIRED.try_lock() {
+            latches.clear();
+        } else {
+            CONTROL_LATCH_RESET_PENDING.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// Keep the authored call visible when an earlier replacement was not confirmed in its exact
+/// frame. This is the important late-edit safety boundary: a retime received after frame 1 is
+/// reported/missed and waits for the next playback, but it must not hide the original call at
+/// its old frame and leave an invisible move in the current playback.
+pub unsafe fn preserve_authored_effect(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    authored_hash: u64,
+    motion: u64,
+    frame: f32,
+) -> bool {
+    service_pending_latch_resets();
+    if boma.is_null() {
+        return false;
+    }
+    let boid = (*boma).battle_object_id;
+    let candidates =
+        crate::slight::effect_viewer::spawn_rules::replacement_injections_for_suppression(
+            authored_hash,
+            motion,
+            frame,
+        );
+    let mut late = false;
+    {
+        let latches = EFF_FIRED.lock();
+        for (index, injection, fingerprint) in candidates {
+            if frame < injection.frame + MOTION_FRAME_WIDTH {
+                continue;
+            }
+            let confirmed = latches.get(&(boid, index)).is_some_and(|latch| {
+                latch.same_identity(motion, injection.frame, index, fingerprint) && latch.confirmed
+            });
+            if !confirmed {
+                late = true;
+                break;
+            }
+        }
+    }
+    if late {
+        let key = (boid, motion, authored_hash);
+        let first = {
+            let mut noted = LATE_FALLBACK_NOTED.lock();
+            if noted.len() < 512 {
+                noted.insert(key)
+            } else {
+                false
+            }
+        };
+        if first {
+            crate::slight::diag::note(format!(
+                "preserved authored effect after unconfirmed retime: motion {motion:#x} frame {frame:.1} hash {authored_hash:#x} — replacement applies on next playback"
+            ));
+        }
+    }
+    late
+}
+
 static CONTROL_FIRED: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<(u32, usize), (u64, f32)>>,
+    parking_lot::Mutex<std::collections::HashMap<(u32, usize), InjectionLatch>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 /// Dispatch a captured EFFECT spawn to the matching sv_animcmd function by its short name.
-unsafe fn dispatch_effect(func: &str, lua_state_agent: u64) {
+unsafe fn dispatch_effect(func: &str, lua_state_agent: u64) -> DispatchConfirmation {
     use smash::app::sv_animcmd as sv;
+    let confirmation = match func {
+        "EFFECT_OFF_KIND"
+        | "AFTER_IMAGE_OFF"
+        | "AFTER_IMAGE3_ON"
+        | "AFTER_IMAGE4_ON_arg29"
+        | "AFTER_IMAGE4_ON_WORK_arg29"
+        | "FLASH"
+        | "FLASH_FRM"
+        | "BURN_COLOR"
+        | "BURN_COLOR_FRAME"
+        | "BURN_COLOR_NORMAL"
+        | "START_INFO_FLASH_EYE"
+        | "COL_NORMAL" => DispatchConfirmation::NativeReturn,
+        _ => DispatchConfirmation::Handle,
+    };
     match func {
         "EFFECT_OFF_KIND" => sv::EFFECT_OFF_KIND(lua_state_agent),
+        "AFTER_IMAGE_OFF" => sv::AFTER_IMAGE_OFF(lua_state_agent),
+        // This is the measured native raw-effect route for AFTER_IMAGE3_ON. No Skyline
+        // AFTER_IMAGE3_ON macro exists in the pinned bindings, so do not substitute an arg29
+        // wrapper with a different ABI.
+        "AFTER_IMAGE3_ON" => smash::app::sv_module_access::effect(lua_state_agent),
+        "AFTER_IMAGE4_ON_arg29" => sv::AFTER_IMAGE4_ON_arg29(lua_state_agent),
+        "AFTER_IMAGE4_ON_WORK_arg29" => sv::AFTER_IMAGE4_ON_WORK_arg29(lua_state_agent),
+        "FLASH" => sv::FLASH(lua_state_agent),
+        "FLASH_FRM" => sv::FLASH_FRM(lua_state_agent),
+        "BURN_COLOR" => sv::BURN_COLOR(lua_state_agent),
+        "BURN_COLOR_FRAME" => sv::BURN_COLOR_FRAME(lua_state_agent),
+        "BURN_COLOR_NORMAL" => sv::BURN_COLOR_NORMAL(lua_state_agent),
+        "START_INFO_FLASH_EYE" => sv::START_INFO_FLASH_EYE(lua_state_agent),
+        "COL_NORMAL" => sv::COL_NORMAL(lua_state_agent),
         "DOWN_EFFECT" => sv::DOWN_EFFECT(lua_state_agent),
         "FOOT_EFFECT" => sv::FOOT_EFFECT(lua_state_agent),
         "FOOT_EFFECT_FLIP" => sv::FOOT_EFFECT_FLIP(lua_state_agent),
@@ -1915,146 +2689,590 @@ unsafe fn dispatch_effect(func: &str, lua_state_agent: u64) {
         "EFFECT_FOLLOW_FLIP_RND" => sv::EFFECT_FOLLOW_FLIP_RND(lua_state_agent),
         _ => sv::EFFECT(lua_state_agent),
     }
+    confirmation
 }
 
-unsafe fn dispatch_control(func: &str, lua_state_agent: u64) {
+unsafe fn dispatch_control(func: &str, lua_state_agent: u64) -> bool {
     use smash::app::sv_animcmd as sv;
     match func {
-        "EFFECT_DETACH_KIND" => sv::EFFECT_DETACH_KIND(lua_state_agent),
-        "EFFECT_DETACH_KIND_WORK" => sv::EFFECT_DETACH_KIND_WORK(lua_state_agent),
-        "ENABLE_AREA" => sv::ENABLE_AREA(lua_state_agent),
-        "UNABLE_AREA" => sv::UNABLE_AREA(lua_state_agent),
-        _ => {}
+        "EFFECT_DETACH_KIND" => {
+            sv::EFFECT_DETACH_KIND(lua_state_agent);
+            true
+        }
+        "EFFECT_DETACH_KIND_WORK" => {
+            sv::EFFECT_DETACH_KIND_WORK(lua_state_agent);
+            true
+        }
+        "ENABLE_AREA" => {
+            sv::ENABLE_AREA(lua_state_agent);
+            true
+        }
+        "UNABLE_AREA" => {
+            sv::UNABLE_AREA(lua_state_agent);
+            true
+        }
+        _ => false,
     }
 }
 
-/// Fire due C4 point-control injections once per motion playback. Work-slot controls replay the
+fn clear_stale_latch(
+    latches: &mut std::collections::HashMap<(u32, usize), InjectionLatch>,
+    key: (u32, usize),
+    motion: u64,
+    target_motion_frame: f32,
+    rule_fingerprint: u64,
+    frame: f32,
+) {
+    if latches.get(&key).is_some_and(|latch| {
+        !latch.same_identity(motion, target_motion_frame, key.1, rule_fingerprint)
+            || frame < latch.last_observed_frame
+    }) {
+        latches.remove(&key);
+    }
+}
+
+fn observed_latch(
+    latches: &mut std::collections::HashMap<(u32, usize), InjectionLatch>,
+    key: (u32, usize),
+    motion: u64,
+    target_motion_frame: f32,
+    rule_fingerprint: u64,
+    frame: f32,
+) -> Option<InjectionLatch> {
+    clear_stale_latch(
+        latches,
+        key,
+        motion,
+        target_motion_frame,
+        rule_fingerprint,
+        frame,
+    );
+    if let Some(latch) = latches.get_mut(&key) {
+        latch.last_observed_frame = frame;
+    }
+    latches.get(&key).copied()
+}
+
+fn report_missed_frame(
+    latches: &mut std::collections::HashMap<(u32, usize), InjectionLatch>,
+    key: (u32, usize),
+    motion: u64,
+    target_motion_frame: f32,
+    rule_fingerprint: u64,
+    frame: f32,
+) -> bool {
+    mark_latch_missed(
+        latches,
+        key,
+        motion,
+        target_motion_frame,
+        rule_fingerprint,
+        frame,
+    )
+}
+
+unsafe fn load_args(
+    agent: &mut smash::lua2cpp::L2CAgentBase,
+    args: &[crate::slight::hitbox_viewer::LuaArg],
+) {
+    agent.agent.clear_lua_stack();
+    for arg in args {
+        let mut value = arg.to_l2c();
+        agent.agent.push_lua_stack(&mut value);
+    }
+}
+
+/// Fire due C4 point-control injections from the live ACMD agent. Work-slot controls replay the
 /// captured runtime handle, which is exact for the live call even though the source editor keeps
 /// the authored Work ID token separately.
-unsafe fn inject_control_tick(lua_state: u64) {
+unsafe fn inject_control(
+    agent: &mut smash::lua2cpp::L2CAgentBase,
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: u64,
+    boundary: CoroutineBoundary,
+    frame: f32,
+    observed_frame: f32,
+) {
     use crate::slight::effect_viewer::control_rules;
     if !control_rules::any_inject() {
         return;
     }
-    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
-        as *mut smash::app::BattleObjectModuleAccessor;
-    if boma.is_null() {
-        return;
-    }
-    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
-    let frame = smash::app::lua_bind::MotionModule::frame(boma);
     let boid = (*boma).battle_object_id;
-    for (idx, injection, work_slot) in control_rules::injections_for(motion) {
+    for (idx, injection, work_slot, rule_fingerprint) in control_rules::injections_for(motion) {
         let key = (boid, idx);
-        let due = frame >= injection.frame;
-        let already = CONTROL_FIRED
-            .lock()
-            .get(&key)
-            .map(|(m, f)| *m == motion && frame >= *f)
-            .unwrap_or(false);
-        if due && !already {
-            let mut agent = smash::lib::L2CAgent::new(lua_state);
-            agent.clear_lua_stack();
-            let mut args = injection.args.clone();
-            if let Some(slot) = work_slot {
-                if injection.func != "EFFECT_DETACH_KIND_WORK" || args.len() != 2 {
-                    crate::slight::diag::note(
-                        "effect control work-slot injection rejected: unexpected command shape",
-                    );
-                    continue;
-                }
-                let handle = smash::app::lua_bind::WorkModule::get_int64(boma, slot);
-                args[0] = crate::slight::hitbox_viewer::LuaArg::Int(handle as i64);
-            }
-            for arg in &args {
-                let mut value = arg.to_l2c();
-                agent.push_lua_stack(&mut value);
-            }
-            {
-                let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
-                dispatch_control(&injection.func, agent.lua_state_agent);
-            }
-            agent.clear_lua_stack();
-            CONTROL_FIRED.lock().insert(key, (motion, frame));
-            crate::slight::diag::note(format!(
-                "injected effect control '{}' (motion {motion:#x} frame {frame:.1})",
-                injection.func
-            ));
-        }
-        if !due {
+        let latch = {
             let mut fired = CONTROL_FIRED.lock();
-            if let Some((m, f)) = fired.get(&key).copied() {
-                if m != motion || frame < f {
-                    fired.remove(&key);
-                }
+            observed_latch(
+                &mut fired,
+                key,
+                motion,
+                injection.frame,
+                rule_fingerprint,
+                frame,
+            )
+        };
+        if frame >= injection.frame + MOTION_FRAME_WIDTH {
+            let report = report_missed_frame(
+                &mut CONTROL_FIRED.lock(),
+                key,
+                motion,
+                injection.frame,
+                rule_fingerprint,
+                frame,
+            );
+            if report {
+                crate::slight::diag::note(format!(
+                    "effect control injection missed exact frame: boundary={boundary} motion {motion:#x} target {target:.1} current {frame:.1} observed {observed_frame:.1} command '{command}' attempts={attempts} confirmation=unconfirmed",
+                    boundary = boundary.label(),
+                    command = injection.func,
+                    target = injection.frame,
+                    attempts = CONTROL_FIRED
+                        .lock()
+                        .get(&key)
+                        .map(|latch| latch.attempts)
+                        .unwrap_or(0),
+                ));
             }
+            continue;
         }
+        if !latch_can_attempt(
+            latch.as_ref(),
+            motion,
+            injection.frame,
+            idx,
+            rule_fingerprint,
+            frame,
+        ) {
+            continue;
+        }
+
+        let mut args = injection.args.clone();
+        if let Some(slot) = work_slot {
+            if injection.func != "EFFECT_DETACH_KIND_WORK" || args.len() != 2 {
+                crate::slight::diag::note(
+                    "effect control work-slot injection rejected: unexpected command shape",
+                );
+                continue;
+            }
+            let handle = smash::app::lua_bind::WorkModule::get_int64(boma, slot);
+            args[0] = crate::slight::hitbox_viewer::LuaArg::Int(handle as i64);
+        }
+        load_args(agent, &args);
+        let confirmed = {
+            let _attempt =
+                InjectionAttemptGuard::new(key, motion, injection.frame, rule_fingerprint);
+            let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
+            let dispatched = dispatch_control(&injection.func, agent.agent.lua_state_agent);
+            if dispatched {
+                note_injected_success();
+            }
+            InjectionAttemptGuard::confirmed()
+        };
+        agent.agent.clear_lua_stack();
+        let attempts = store_latch(
+            &mut CONTROL_FIRED.lock(),
+            key,
+            motion,
+            injection.frame,
+            idx,
+            rule_fingerprint,
+            frame,
+            confirmed,
+            false,
+        );
+        crate::slight::diag::note(format!(
+            "effect control injection '{}' (boundary={boundary} motion {motion:#x} target {target:.1} current {frame:.1} observed {observed_frame:.1} attempt {attempts}/{MAX_ATTEMPTS_PER_FRAME} confirmation={status})",
+            injection.func,
+            boundary = boundary.label(),
+            target = injection.frame,
+            status = if confirmed { "confirmed" } else { "unconfirmed" },
+        ));
     }
 }
 
-/// Fire due effect-retime injections for this agent's current motion (once per playback).
-pub unsafe fn inject_tick(lua_state: u64) {
-    inject_control_tick(lua_state);
+unsafe fn inject_effect(
+    agent: &mut smash::lua2cpp::L2CAgentBase,
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: u64,
+    boundary: CoroutineBoundary,
+    frame: f32,
+    observed_frame: f32,
+) {
     use crate::slight::effect_viewer::spawn_rules;
     if !spawn_rules::any_inject() {
         return;
     }
+    let injections = spawn_rules::injections_for(motion);
+    if injections.is_empty() {
+        return;
+    }
+    let boid = (*boma).battle_object_id;
+
+    for (idx, inj, rule_fingerprint) in injections {
+        let key = (boid, idx);
+        let latch = {
+            let mut fired = EFF_FIRED.lock();
+            observed_latch(&mut fired, key, motion, inj.frame, rule_fingerprint, frame)
+        };
+        if frame >= inj.frame + MOTION_FRAME_WIDTH {
+            let report = report_missed_frame(
+                &mut EFF_FIRED.lock(),
+                key,
+                motion,
+                inj.frame,
+                rule_fingerprint,
+                frame,
+            );
+            if report {
+                crate::slight::diag::note(format!(
+                    "effect injection missed exact frame: boundary={boundary} motion {motion:#x} target {target:.1} current {frame:.1} observed {observed_frame:.1} command '{command}' attempts={attempts} confirmation=unconfirmed",
+                    boundary = boundary.label(),
+                    command = inj.func,
+                    target = inj.frame,
+                    attempts = EFF_FIRED
+                        .lock()
+                        .get(&key)
+                        .map(|latch| latch.attempts)
+                        .unwrap_or(0),
+                ));
+            }
+            continue;
+        }
+        if !latch_can_attempt(
+            latch.as_ref(),
+            motion,
+            inj.frame,
+            idx,
+            rule_fingerprint,
+            frame,
+        ) {
+            continue;
+        }
+
+        load_args(agent, &inj.args);
+        let confirmed = {
+            let _attempt = InjectionAttemptGuard::new(key, motion, inj.frame, rule_fingerprint);
+            // Replays re-enter our own EFFECT hooks — keep them out of pristine capture and
+            // authored suppression, or the editor will observe its own retime as source data.
+            let _guard = crate::slight::hitbox_viewer::InjectGuard::new();
+            let confirmation = dispatch_effect(&inj.func, agent.agent.lua_state_agent);
+            if confirmation == DispatchConfirmation::NativeReturn {
+                note_injected_success();
+            }
+            InjectionAttemptGuard::confirmed()
+        };
+        agent.agent.clear_lua_stack();
+        let attempts = store_latch(
+            &mut EFF_FIRED.lock(),
+            key,
+            motion,
+            inj.frame,
+            idx,
+            rule_fingerprint,
+            frame,
+            confirmed,
+            false,
+        );
+        crate::slight::diag::note(format!(
+            "effect injection '{}' (boundary={boundary} motion {motion:#x} target {target:.1} current {frame:.1} observed {observed_frame:.1} attempt {attempts}/{MAX_ATTEMPTS_PER_FRAME} confirmation={status})",
+            inj.func,
+            boundary = boundary.label(),
+            target = inj.frame,
+            status = if confirmed { "confirmed" } else { "unconfirmed" },
+        ));
+    }
+}
+
+unsafe fn inject_for_lua_state_at_frame(
+    agent: &mut smash::lua2cpp::L2CAgentBase,
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    boundary: CoroutineBoundary,
+    frame_override: Option<f32>,
+) {
+    service_pending_latch_resets();
+    crate::slight::effect_viewer::spawn_rules::service_pending();
+    crate::slight::effect_viewer::control_rules::service_pending();
+    if boma.is_null()
+        || agent.agent.lua_state_agent == 0
+        || crate::slight::hitbox_viewer::is_injecting()
+    {
+        return;
+    }
+    let observed_frame = smash::app::lua_bind::MotionModule::frame(boma);
+    note_acmd_progress(boma, observed_frame);
+    let frame = frame_override.unwrap_or_else(|| injection_frame(boundary, observed_frame));
+    // A post-start/call notification is not a reliable native command context. The explicit
+    // start path passes a frame-zero override before the native body runs; a plain lifecycle
+    // notification must not consume an attempt by itself.
+    if matches!(boundary, CoroutineBoundary::Start | CoroutineBoundary::Call)
+        && frame_override.is_none()
+    {
+        return;
+    }
+    let (motion, observed_motion) = resolve_injection_motion(boma, boundary, observed_frame);
+    if motion != observed_motion {
+        crate::slight::diag::note(format!(
+            "ACMD injection resolved stale motion hash: observed {observed_motion:#x} requested {motion:#x} boundary={}",
+            boundary.label(),
+        ));
+    }
+    inject_control(agent, boma, motion, boundary, frame, observed_frame);
+    inject_effect(agent, boma, motion, boundary, frame, observed_frame);
+}
+
+unsafe fn inject_for_lua_state(
+    agent: &mut smash::lua2cpp::L2CAgentBase,
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    boundary: CoroutineBoundary,
+) {
+    inject_for_lua_state_at_frame(agent, boma, boundary, None);
+}
+
+/// Replay live rules from an ACMD agent rather than a status-line callback. All ACMD agents for a
+/// battle object expose the same module accessor; the replacement only needs the typed Lua stack
+/// and that accessor, so it must not depend on having observed an effect command from this exact
+/// coroutine first. A newly created effect coroutine can otherwise miss script frame one simply
+/// because its first authored effect is later in the function. The latch makes a confirmed
+/// replacement idempotent across the shared ACMD boundaries. Lifecycle-only Start/Call
+/// notifications are deliberately ignored by `inject_for_lua_state`.
+unsafe fn inject_for_acmd(agent: &mut smash::lua2cpp::L2CAgentBase, boundary: CoroutineBoundary) {
+    let boma = agent.agent.module_accessor;
+    inject_for_lua_state(agent, boma, boundary);
+}
+
+unsafe fn inject_for_acmd_at_frame(
+    agent: &mut smash::lua2cpp::L2CAgentBase,
+    boundary: CoroutineBoundary,
+    frame: f32,
+) {
+    let boma = agent.agent.module_accessor;
+    inject_for_lua_state_at_frame(agent, boma, boundary, Some(frame));
+}
+
+/// The `frame` and `wait` primitives are reliable points inside an ACMD coroutine. The native
+/// primitive must return first: only then has the coroutine reached the requested motion frame
+/// and the game has established the command's valid execution context. A temporary L2C agent is
+/// sufficient here: replacement dispatch only uses its Lua stack, while the module accessor comes
+/// from the captured state.
+unsafe fn inject_before_acmd_wait(lua_state: u64, boundary: CoroutineBoundary) {
+    if lua_state == 0 || crate::slight::hitbox_viewer::is_injecting() {
+        return;
+    }
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
         as *mut smash::app::BattleObjectModuleAccessor;
     if boma.is_null() {
         return;
     }
-    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
-    let injections = spawn_rules::injections_for(motion);
-    if injections.is_empty() {
+    let observed_frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let startup = take_acmd_startup(lua_state, boma)
+        && (!observed_frame.is_finite() || observed_frame <= 1.0);
+    let mut agent = smash::lua2cpp::L2CAgentBase {
+        agent: smash::lib::L2CAgent::new(lua_state),
+        unk48: [0; 0x10],
+    };
+    if startup {
+        inject_for_lua_state_at_frame(&mut agent, boma, boundary, Some(0.0));
+    } else {
+        inject_for_lua_state(&mut agent, boma, boundary);
+    }
+}
+
+/// `frame()` carries the script's one-based target even while the native motion accessor is
+/// crossing the first frame boundary. Use that target after the wait returns so script frames
+/// one, two, and three become motion frames zero, one, and two without relying on a transient
+/// startup value from `MotionModule::frame`.
+unsafe fn inject_after_acmd_frame(lua_state: u64, target: f32) {
+    if lua_state == 0 || crate::slight::hitbox_viewer::is_injecting() {
         return;
     }
-    let frame = smash::app::lua_bind::MotionModule::frame(boma);
-    let boid = (*boma).battle_object_id;
-
-    for (idx, inj) in injections {
-        let key = (boid, idx);
-        let due = frame >= inj.frame;
-        let already = {
-            let fired = EFF_FIRED.lock();
-            fired
-                .get(&key)
-                .map(|(m, f)| *m == motion && frame >= *f)
-                .unwrap_or(false)
-        };
-        if due && !already {
-            let mut agent = smash::lib::L2CAgent::new(lua_state);
-            agent.clear_lua_stack();
-            for a in &inj.args {
-                let mut v = a.to_l2c();
-                agent.push_lua_stack(&mut v);
-            }
-            {
-                // Replays re-enter our own EFFECT hooks — keep them out of the pristine
-                // capture, or the editor sees the user's retime as an original spawn.
-                let _g = crate::slight::hitbox_viewer::InjectGuard::new();
-                dispatch_effect(&inj.func, agent.lua_state_agent);
-            }
-            agent.clear_lua_stack();
-            EFF_FIRED.lock().insert(key, (motion, frame));
-            crate::slight::diag::note(format!(
-                "injected effect '{}' (motion {motion:#x} frame {frame:.1})",
-                inj.func
-            ));
-        }
-        if !due {
-            let mut fired = EFF_FIRED.lock();
-            if let Some((m, f)) = fired.get(&key).copied() {
-                if m != motion || frame < f {
-                    fired.remove(&key);
-                }
-            }
-        }
+    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+        as *mut smash::app::BattleObjectModuleAccessor;
+    if boma.is_null() {
+        return;
     }
+    // A startup marker that survived until an absolute wait means the script did not expose a
+    // frame-zero command boundary. Do not reuse it to pretend that the later wait is frame zero;
+    // the pre-start attempt has already covered that exact target.
+    let _ = take_acmd_startup(lua_state, boma);
+    let mut agent = smash::lua2cpp::L2CAgentBase {
+        agent: smash::lib::L2CAgent::new(lua_state),
+        unk48: [0; 0x10],
+    };
+    inject_for_lua_state_at_frame(
+        &mut agent,
+        boma,
+        CoroutineBoundary::Frame,
+        script_frame_to_motion_frame(target),
+    );
+}
+
+/// Record the requested motion before the native transition runs.  On the first ACMD boundary
+/// the module's published `motion_kind` can still be the previous move, so observing it after
+/// `original!()` is too late for a frame-zero replacement.
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::change_motion)]
+unsafe fn hook_motion_change(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: smash::phx::Hash40,
+    arg3: f32,
+    arg4: f32,
+    arg5: bool,
+    arg6: f32,
+    arg7: bool,
+    arg8: bool,
+) -> u64 {
+    remember_motion_hint(boma, motion.hash);
+    original!()(boma, motion, arg3, arg4, arg5, arg6, arg7, arg8)
+}
+
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::change_motion_inherit_frame)]
+unsafe fn hook_motion_change_inherit_frame(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: smash::phx::Hash40,
+    frame: f32,
+    rate: f32,
+    arg5: f32,
+    arg6: bool,
+    arg7: bool,
+) -> u64 {
+    remember_motion_hint(boma, motion.hash);
+    original!()(boma, motion, frame, rate, arg5, arg6, arg7)
+}
+
+#[skyline::hook(
+    replace = smash::app::lua_bind::MotionModule::change_motion_inherit_frame_keep_rate
+)]
+unsafe fn hook_motion_change_inherit_frame_keep_rate(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: smash::phx::Hash40,
+    arg3: f32,
+    arg4: f32,
+    arg5: f32,
+) -> u64 {
+    remember_motion_hint(boma, motion.hash);
+    original!()(boma, motion, arg3, arg4, arg5)
+}
+
+#[skyline::hook(
+    replace = smash::app::lua_bind::MotionModule::change_motion_force_inherit_frame
+)]
+unsafe fn hook_motion_change_force_inherit_frame(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: smash::phx::Hash40,
+    arg3: f32,
+    arg4: f32,
+    arg5: f32,
+) -> u64 {
+    remember_motion_hint(boma, motion.hash);
+    original!()(boma, motion, arg3, arg4, arg5)
+}
+
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::change_motion_kind)]
+unsafe fn hook_motion_change_kind(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    motion: smash::phx::Hash40,
+) -> u64 {
+    remember_motion_hint(boma, motion.hash);
+    original!()(boma, motion)
+}
+
+/// `is_excute` is the boundary immediately before an ACMD block's commands. Some scripts begin
+/// with an effect at frame one and do not call `frame` or `wait` before it, so the startup and
+/// pre-yield hooks alone would observe the request only after the authored call had been
+/// suppressed. Run the same exact-frame injector after the native predicate returns and before
+/// the script executes its command body.
+#[skyline::hook(replace = smash::app::sv_animcmd::is_excute)]
+unsafe fn hook_acmd_is_excute(lua_state: u64) -> bool {
+    let execute = original!()(lua_state);
+    if execute && !crate::slight::hitbox_viewer::is_injecting() {
+        inject_before_acmd_wait(lua_state, CoroutineBoundary::Execute);
+    }
+    execute
+}
+
+/// Inject after an absolute frame wait so a replacement at script frame one (motion frame zero)
+/// is dispatched from the ACMD coroutine itself after the scheduler reaches that exact boundary.
+#[skyline::hook(replace = smash::app::sv_animcmd::frame)]
+unsafe fn hook_acmd_frame(lua_state: u64, target: f32) {
+    original!()(lua_state, target);
+    inject_after_acmd_frame(lua_state, target);
+}
+
+/// Relative waits use the same post-yield boundary as absolute frame calls.
+#[skyline::hook(replace = smash::app::sv_animcmd::wait)]
+unsafe fn hook_acmd_wait(lua_state: u64, target: f32) {
+    original!()(lua_state, target);
+    inject_before_acmd_wait(lua_state, CoroutineBoundary::Wait);
+}
+
+/// `call_coroutine` is retained as a lifecycle hook for the pinned runtime, but it is not a live
+/// dispatch point: its callback runs before the ACMD has necessarily reached a valid command
+/// context, and `inject_for_lua_state` intentionally returns for this boundary.
+#[skyline::hook(replace = smash::lua2cpp::L2CAgentBase_call_coroutine)]
+unsafe fn hook_call_coroutine(
+    agent: *mut smash::lua2cpp::L2CAgentBase,
+    coroutine_index: i32,
+    name: smash::phx::Hash40,
+) -> smash::lib::L2CValue {
+    if !agent.is_null() {
+        begin_acmd_playback((*agent).agent.module_accessor);
+        // Some runtime paths enter the first ACMD slice from `call_coroutine` rather than
+        // `start_coroutine`. The marker is idempotent and lets the first `is_excute`/effect
+        // command use the same frame-zero startup normalization in either ordering.
+        remember_acmd_startup(agent);
+    }
+    let result = original!()(agent, coroutine_index, name);
+    if !agent.is_null() {
+        inject_for_acmd(&mut *agent, CoroutineBoundary::Call);
+    }
+    result
+}
+
+#[skyline::hook(replace = smash::lua2cpp::L2CAgentBase_start_coroutine)]
+unsafe fn hook_start_coroutine(
+    agent: *mut smash::lua2cpp::L2CAgentBase,
+    coroutine_index: i32,
+    name: smash::phx::Hash40,
+    state: u64,
+) -> smash::lib::L2CValue {
+    if !agent.is_null() {
+        begin_acmd_playback((*agent).agent.module_accessor);
+        remember_acmd_startup(agent);
+        // The native start call immediately executes the first ACMD slice. A post-start hook is
+        // therefore already too late for script frame one; use the same initialized agent before
+        // entering the body, then let the startup marker provide one exact-frame retry at the
+        // first `is_excute`/effect/control boundary if the native call did not confirm.
+        inject_for_acmd_at_frame(&mut *agent, CoroutineBoundary::Start, 0.0);
+    }
+    let result = original!()(agent, coroutine_index, name, state);
+    result
+}
+
+#[skyline::hook(replace = smash::lua2cpp::L2CAgentBase_resume_coroutine)]
+unsafe fn hook_resume_coroutine(
+    agent: *mut smash::lua2cpp::L2CAgentBase,
+    coroutine_index: i32,
+    state: u64,
+) -> smash::lib::L2CValue {
+    let result = original!()(agent, coroutine_index, state);
+    if !agent.is_null() {
+        inject_for_acmd(&mut *agent, CoroutineBoundary::Resume);
+    }
+    result
 }
 
 pub fn install() {
     skyline::install_hooks!(
+        hook_motion_change,
+        hook_motion_change_inherit_frame,
+        hook_motion_change_inherit_frame_keep_rate,
+        hook_motion_change_force_inherit_frame,
+        hook_motion_change_kind,
+        hook_acmd_is_excute,
+        hook_acmd_frame,
+        hook_acmd_wait,
+        hook_call_coroutine,
+        hook_start_coroutine,
+        hook_resume_coroutine,
         hook_eff,
         hook_eff_alpha,
         hook_eff_attr,
@@ -2079,6 +3297,10 @@ pub fn install() {
         hook_landing_eff,
         hook_landing_eff_flip,
         hook_down_eff,
+        hook_after_image4_on_arg29,
+        hook_after_image4_on_work_arg29,
+        hook_raw_effect,
+        hook_after_image_off,
         hook_effect_off_kind,
         hook_effect_detach_kind,
         hook_effect_detach_kind_work,
@@ -2103,4 +3325,247 @@ pub fn install() {
         "[SLight] ACMD effect hooks installed (40 spawn/stop/colour/control variants)"
     );
     crate::slight::diag::note("ACMD hooks installed");
+}
+
+#[cfg(test)]
+mod injection_latch_tests {
+    use super::*;
+
+    const RULE_FINGERPRINT: u64 = 0xfeed_beef;
+
+    fn attempt(
+        latches: &mut std::collections::HashMap<(u32, usize), InjectionLatch>,
+        key: (u32, usize),
+        motion: u64,
+        target: f32,
+        frame: f32,
+        confirmed: bool,
+    ) -> u8 {
+        store_latch(
+            latches,
+            key,
+            motion,
+            target,
+            key.1,
+            RULE_FINGERPRINT,
+            frame,
+            confirmed,
+            false,
+        )
+    }
+
+    fn can_attempt(
+        latch: Option<&InjectionLatch>,
+        motion: u64,
+        target: f32,
+        rule_identity: usize,
+        frame: f32,
+    ) -> bool {
+        latch_can_attempt(
+            latch,
+            motion,
+            target,
+            rule_identity,
+            RULE_FINGERPRINT,
+            frame,
+        )
+    }
+
+    #[test]
+    fn second_coroutine_resume_can_confirm_and_then_latch_prevents_duplicates() {
+        let key = (7, 3);
+        let motion = 0x1234;
+        let target = 0.0;
+        let mut latches = std::collections::HashMap::new();
+
+        assert!(can_attempt(None, motion, target, key.1, target));
+        assert_eq!(attempt(&mut latches, key, motion, target, target, false), 1);
+        assert!(can_attempt(
+            latches.get(&key),
+            motion,
+            target,
+            key.1,
+            target
+        ));
+        assert_eq!(attempt(&mut latches, key, motion, target, target, true), 2);
+        assert!(latches.get(&key).is_some_and(|latch| latch.confirmed));
+        assert!(!can_attempt(
+            latches.get(&key),
+            motion,
+            target,
+            key.1,
+            target
+        ));
+    }
+
+    #[test]
+    fn unconfirmed_frame_zero_is_missed_without_a_late_retry() {
+        let key = (8, 4);
+        let motion = 0x5678;
+        let target = 0.0;
+        let mut latches = std::collections::HashMap::new();
+
+        assert_eq!(attempt(&mut latches, key, motion, target, target, false), 1);
+        assert!(can_attempt(
+            latches.get(&key),
+            motion,
+            target,
+            key.1,
+            target
+        ));
+        assert_eq!(attempt(&mut latches, key, motion, target, target, false), 2);
+        assert!(!can_attempt(
+            latches.get(&key),
+            motion,
+            target,
+            key.1,
+            target
+        ));
+
+        assert!(mark_latch_missed(
+            &mut latches,
+            key,
+            motion,
+            target,
+            RULE_FINGERPRINT,
+            target + MOTION_FRAME_WIDTH,
+        ));
+        let latch = latches
+            .get(&key)
+            .expect("missed request remains observable");
+        assert!(latch.missed && !latch.confirmed);
+        assert_eq!(latch.attempts, 2);
+        assert!(!can_attempt(latches.get(&key), motion, target, key.1, 3.0));
+    }
+
+    #[test]
+    fn motion_target_and_rule_changes_clear_the_old_identity() {
+        let key = (9, 5);
+        let mut latches = std::collections::HashMap::new();
+        assert_eq!(attempt(&mut latches, key, 0x1111, 2.0, 2.0, true), 1);
+
+        let changed_target = observed_latch(&mut latches, key, 0x1111, 3.0, RULE_FINGERPRINT, 3.0);
+        assert!(changed_target.is_none());
+        assert!(can_attempt(latches.get(&key), 0x1111, 3.0, key.1, 3.0));
+
+        let changed_motion = observed_latch(&mut latches, key, 0x2222, 3.0, RULE_FINGERPRINT, 3.0);
+        assert!(changed_motion.is_none());
+        assert!(can_attempt(latches.get(&key), 0x2222, 3.0, key.1, 3.0));
+
+        let changed_rule = observed_latch(
+            &mut latches,
+            key,
+            0x2222,
+            3.0,
+            RULE_FINGERPRINT.wrapping_add(1),
+            3.0,
+        );
+        assert!(changed_rule.is_none());
+
+        // A backwards frame is a loop/new playback, even when the motion hash and rule payload
+        // are unchanged.
+        assert_eq!(attempt(&mut latches, key, 0x2222, 3.0, 3.0, true), 1);
+        assert!(observed_latch(&mut latches, key, 0x2222, 3.0, RULE_FINGERPRINT, 0.0,).is_none());
+        assert!(can_attempt(latches.get(&key), 0x2222, 3.0, key.1, 0.0));
+    }
+
+    #[test]
+    fn changed_rule_fingerprint_can_retry_after_confirmation() {
+        let key = (10, 6);
+        let motion = 0x3333;
+        let target = 0.0;
+        let mut latches = std::collections::HashMap::new();
+
+        assert_eq!(attempt(&mut latches, key, motion, target, target, true), 1);
+        assert!(!latch_can_attempt(
+            latches.get(&key),
+            motion,
+            target,
+            key.1,
+            RULE_FINGERPRINT,
+            target
+        ));
+        assert!(latch_can_attempt(
+            latches.get(&key),
+            motion,
+            target,
+            key.1,
+            RULE_FINGERPRINT.wrapping_add(1),
+            target
+        ));
+    }
+
+    #[test]
+    fn exact_motion_frame_window_is_not_shifted_for_low_targets() {
+        assert!(in_requested_motion_frame(0.0, 0.0));
+        assert!(in_requested_motion_frame(1.0, 1.0));
+        assert!(in_requested_motion_frame(2.0, 2.0));
+        assert!(!in_requested_motion_frame(0.5, 0.0));
+        assert!(!in_requested_motion_frame(2.5, 2.0));
+    }
+
+    #[test]
+    fn startup_boundary_exposes_frame_zero_without_shifting_resume_frames() {
+        assert_eq!(injection_frame(CoroutineBoundary::Start, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Call, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Execute, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Effect, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Control, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Frame, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Wait, -1.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Start, 0.0), 0.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Start, 1.0), 1.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Resume, -1.0), -1.0);
+        assert_eq!(injection_frame(CoroutineBoundary::Resume, 0.0), 0.0);
+    }
+
+    #[test]
+    fn script_frame_targets_keep_the_zero_based_motion_conversion() {
+        assert_eq!(script_frame_to_motion_frame(1.0), Some(0.0));
+        assert_eq!(script_frame_to_motion_frame(2.0), Some(1.0));
+        assert_eq!(script_frame_to_motion_frame(3.0), Some(2.0));
+        assert_eq!(script_frame_to_motion_frame(0.0), Some(0.0));
+        assert_eq!(script_frame_to_motion_frame(f32::NAN), None);
+    }
+
+    #[test]
+    fn startup_motion_hint_wins_only_for_a_rule_bearing_new_motion() {
+        let hint = Some(MotionHint { motion: 0x2222 });
+        assert_eq!(
+            choose_motion_hint(0x1111, hint, CoroutineBoundary::Execute, 0.0, true,),
+            0x2222
+        );
+        assert_eq!(
+            choose_motion_hint(0x1111, hint, CoroutineBoundary::Effect, 0.0, true,),
+            0x2222
+        );
+        assert_eq!(
+            choose_motion_hint(0x1111, hint, CoroutineBoundary::Execute, 0.0, false,),
+            0x1111
+        );
+    }
+
+    #[test]
+    fn stale_motion_hint_is_not_used_after_the_low_startup_window() {
+        assert_eq!(
+            choose_motion_hint(
+                0x1111,
+                Some(MotionHint { motion: 0x2222 }),
+                CoroutineBoundary::Resume,
+                2.0,
+                true,
+            ),
+            0x1111
+        );
+        assert_eq!(
+            choose_motion_hint(
+                0x1111,
+                Some(MotionHint { motion: 0x2222 }),
+                CoroutineBoundary::Resume,
+                1.0,
+                true,
+            ),
+            0x2222
+        );
+    }
 }

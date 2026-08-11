@@ -277,6 +277,12 @@ fn extract_inbound(buf: &mut String) {
 /// Server thread → INBOUND. try_lock + SleepThread retry — never parks (parked waiters
 /// never wake in this environment).
 fn inbound_push(payload: String) {
+    // Timing rules are pure shared state. Install them on receipt so the next ACMD coroutine
+    // boundary can see a frame-0 edit; the general parser below remains responsible for all
+    // commands and game-thread-only updates.
+    if crate::rust_extender::debuggable_server::apply_timing_rules_from_network(&payload) {
+        return;
+    }
     loop {
         if let Some(mut q) = INBOUND.try_lock() {
             q.push(payload);

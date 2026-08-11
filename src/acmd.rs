@@ -200,7 +200,8 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
     let mut stmts = Vec::new();
 
     while pos < lines.len() {
-        let line = lines[pos].trim();
+        let (logical_line, lines_consumed) = logical_line_at(lines, pos);
+        let line = logical_line.trim();
 
         // Skip empty lines and closing braces handled by caller
         if line.is_empty() || line == "}" {
@@ -211,7 +212,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // for _ in 0..N { ... }
         if let Some(count) = parse_for_loop_header(line) {
             // Find the matching closing brace
-            let body_start = pos + 1;
+            let body_start = pos + lines_consumed;
             let (body_lines_end, _) = find_block_end(lines, pos);
             let body_slice = &lines[body_start..body_lines_end];
             let (body, _) = parse_stmts(body_slice, 0);
@@ -222,7 +223,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
 
         // if macros::is_excute(agent) { ... }
         if line.contains("is_excute") {
-            let body_start = pos + 1;
+            let body_start = pos + lines_consumed;
             let (body_end, _) = find_block_end(lines, pos);
             let excute_stmts = parse_excute_block(&lines[body_start..body_end]);
             stmts.push(AcmdStmt::Excute(excute_stmts));
@@ -234,7 +235,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         if line.contains("frame(") && !line.contains("is_excute") {
             if let Some(f) = parse_frame_call(line) {
                 stmts.push(AcmdStmt::Frame(f));
-                pos += 1;
+                pos += lines_consumed;
                 continue;
             }
         }
@@ -242,7 +243,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // wait_loop_clear
         if line.contains("wait_loop_clear") {
             stmts.push(AcmdStmt::WaitLoopClear);
-            pos += 1;
+            pos += lines_consumed;
             continue;
         }
 
@@ -250,7 +251,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // before the block and `Raw` fallthroughs below, which is where it used to end up.
         if let Some(rate) = parse_motion_rate_call(line) {
             stmts.push(AcmdStmt::MotionRate(rate));
-            pos += 1;
+            pos += lines_consumed;
             continue;
         }
 
@@ -259,7 +260,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // capture's structure and make source write-back move the call into a different block.
         if let Some(stmt) = parse_ft_start_adjust_motion_frame_call(line) {
             stmts.push(AcmdStmt::Bare(Box::new(stmt)));
-            pos += 1;
+            pos += lines_consumed;
             continue;
         }
 
@@ -267,7 +268,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         if line.contains("wait(") {
             if let Some(w) = parse_wait_call(line) {
                 stmts.push(AcmdStmt::Wait(w));
-                pos += 1;
+                pos += lines_consumed;
                 continue;
             }
         }
@@ -290,7 +291,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // count could not be read. The body is walked, so a `frame()` or a hitbox inside a
         // branch is still seen; the brace is kept, so the function still closes.
         if line.ends_with('{') {
-            let body_start = pos + 1;
+            let body_start = pos + lines_consumed;
             let (body_end, _) = find_block_end(lines, pos);
             let (body, _) = parse_stmts(&lines[body_start..body_end], 0);
             stmts.push(AcmdStmt::RawBlock {
@@ -306,7 +307,15 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // while giving the measured five-argument shape the same event walk as the macros.
         if let Some(expression) = parse_direct_expression_call(line) {
             stmts.push(AcmdStmt::Bare(Box::new(expression)));
-            pos += 1;
+            pos += lines_consumed;
+            continue;
+        }
+
+        // A damage-reaction mode command may also be captured outside `is_excute`. Keep its
+        // authored structure while feeding it into the shared frame evaluator.
+        if let Some(damage) = parse_damage_no_reaction_call(line) {
+            stmts.push(AcmdStmt::Bare(Box::new(damage)));
+            pos += lines_consumed;
             continue;
         }
 
@@ -317,7 +326,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         // hitbox means, which nothing has measured.
         if let Some(sound) = parse_sound_call(line) {
             stmts.push(AcmdStmt::Bare(Box::new(sound)));
-            pos += 1;
+            pos += lines_consumed;
             continue;
         }
 
@@ -325,7 +334,7 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
         if !line.is_empty() {
             stmts.push(AcmdStmt::Raw(line.to_string()));
         }
-        pos += 1;
+        pos += lines_consumed;
     }
 
     (stmts, pos)
@@ -334,7 +343,8 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
 /// Parse the contents of an is_excute block.
 fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
     let mut stmts = Vec::new();
-    for line in lines {
+    for logical_line in logical_lines(lines) {
+        let line = logical_line.as_str();
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -401,6 +411,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             }
         }
         if let Some(stmt) = parse_hurtbox_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
+        if let Some(stmt) = parse_damage_no_reaction_call(line) {
             stmts.push(stmt);
             continue;
         }
@@ -534,6 +548,109 @@ fn find_block_end(lines: &[&str], start: usize) -> (usize, i32) {
     (lines.len().saturating_sub(1), depth)
 }
 
+/// Return the source line at `start`, joined with following lines while its parentheses are
+/// still open.
+///
+/// Rustfmt commonly expands a long ACMD macro into one argument per line. The parser below is
+/// intentionally small and dispatches one statement at a time, so feeding those physical lines
+/// to it separately makes the first `macros::NAME(` line look like a malformed call and leaves
+/// every argument as unrelated raw text. Joining only parenthesized continuations keeps the
+/// existing block walker line-based while letting every call parser see the same token stream it
+/// sees for a one-line call.
+fn logical_line_at(lines: &[&str], start: usize) -> (String, usize) {
+    let mut logical = lines[start].to_string();
+    let mut depth = parenthesis_delta(lines[start]);
+    let mut consumed = 1;
+    while depth > 0 && start + consumed < lines.len() {
+        logical.push('\n');
+        logical.push_str(lines[start + consumed]);
+        depth += parenthesis_delta(lines[start + consumed]);
+        consumed += 1;
+    }
+    (logical, consumed)
+}
+
+/// Join every parenthesized continuation in a block, preserving statement order.
+fn logical_lines(lines: &[&str]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    while pos < lines.len() {
+        let (line, consumed) = logical_line_at(lines, pos);
+        result.push(line);
+        pos += consumed;
+    }
+    result
+}
+
+/// Count parentheses that participate in Rust syntax, ignoring strings and comments.
+fn parenthesis_delta(line: &str) -> i32 {
+    let bytes = line.as_bytes();
+    let mut delta = 0;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    let mut block_comment = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if block_comment {
+            if byte == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_string || in_char {
+            if escaped {
+                escaped = false;
+                i += 1;
+            } else if byte == b'\\' {
+                escaped = true;
+                i += 1;
+            } else if (in_string && byte == b'"') || (in_char && byte == b'\'') {
+                in_string = false;
+                in_char = false;
+                i += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        match byte {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => break,
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                block_comment = true;
+                i += 2;
+            }
+            b'"' => {
+                in_string = true;
+                i += 1;
+            }
+            b'\'' => {
+                // A lifetime has no closing quote, while a character literal does. Treating
+                // both as quoted text is safe for the ACMD source forms this helper sees: a
+                // lifetime never contains parentheses, and a character literal may.
+                in_char = true;
+                i += 1;
+            }
+            b'(' => {
+                delta += 1;
+                i += 1;
+            }
+            b')' => {
+                delta -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    delta
+}
+
 /// The four ACMD categories, in the order a dumped script file writes them.
 ///
 /// Used as the set a function header is matched *against*, not just for: a header names
@@ -637,7 +754,8 @@ pub(crate) fn extract_function(source: &str, prefix: &str) -> Option<String> {
 /// Parse the contents of an is_excute block from an effect_ script.
 fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
     let mut macros = Vec::new();
-    for line in lines {
+    for logical_line in logical_lines(lines) {
+        let line = logical_line.as_str();
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -800,6 +918,12 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                 };
                 if !effect_name.is_empty() {
                     macros.push(EffectMacro::AfterImage {
+                        command: prefix
+                            .trim_end_matches('(')
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(prefix)
+                            .to_string(),
                         effect_name,
                         bone_name,
                         bone_name2,
@@ -830,6 +954,7 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
             if !effect_name.is_empty() {
                 let bone_name2 = slot(TRAIL_JOINT2_SLOT);
                 macros.push(EffectMacro::AfterImage {
+                    command: site.name.clone(),
                     effect_name,
                     bone_name: slot(TRAIL_JOINT_SLOT),
                     // Absent rather than empty when the call is too short to reach slot 8, so
@@ -1051,7 +1176,8 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
     let mut stmts = Vec::new();
 
     while pos < lines.len() {
-        let line = lines[pos].trim();
+        let (logical_line, lines_consumed) = logical_line_at(lines, pos);
+        let line = logical_line.trim();
 
         if line.is_empty() || line == "}" {
             pos += 1;
@@ -1059,7 +1185,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         }
 
         if let Some(count) = parse_for_loop_header(line) {
-            let body_start = pos + 1;
+            let body_start = pos + lines_consumed;
             let (body_lines_end, _) = find_block_end(lines, pos);
             let body_slice = &lines[body_start..body_lines_end];
             let (body, _) = parse_effect_stmts(body_slice, 0);
@@ -1081,7 +1207,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         }
 
         if line.contains("is_excute") {
-            let body_start = pos + 1;
+            let body_start = pos + lines_consumed;
             let (body_end, _) = find_block_end(lines, pos);
             let effect_macros = parse_excute_block_effects(&lines[body_start..body_end]);
             stmts.push(EffectStmt::Excute(effect_macros));
@@ -1098,7 +1224,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         // of an `if`/`else` then resolved as unconditional spawns at the same frame.
         if opens_block(line) {
             let (body_end, _) = find_block_end(lines, pos);
-            let (body, _) = parse_effect_stmts(&lines[pos + 1..body_end], 0);
+            let (body, _) = parse_effect_stmts(&lines[pos + lines_consumed..body_end], 0);
             stmts.push(EffectStmt::Cond {
                 header: line.to_string(),
                 body,
@@ -1110,7 +1236,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         if line.contains("frame(") && !line.contains("is_excute") && !opens_block(line) {
             if let Some(f) = parse_frame_call(line) {
                 stmts.push(EffectStmt::Frame(f));
-                pos += 1;
+                pos += lines_consumed;
                 continue;
             }
         }
@@ -1118,7 +1244,7 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
         if line.contains("wait(") {
             if let Some(w) = parse_wait_call(line) {
                 stmts.push(EffectStmt::Wait(w));
-                pos += 1;
+                pos += lines_consumed;
                 continue;
             }
         }
@@ -1157,52 +1283,296 @@ fn parse_effect_stmts(lines: &[&str], mut pos: usize) -> (Vec<EffectStmt>, usize
             if !effect_macros.is_empty() {
                 stmts.push(EffectStmt::Excute(effect_macros));
             }
-            pos += 1;
+            pos += lines_consumed;
             continue;
         }
 
         if !line.is_empty() {
             stmts.push(EffectStmt::Raw(line.to_string()));
         }
-        pos += 1;
+        pos += lines_consumed;
     }
 
     (stmts, pos)
 }
 
+/// The type of a default argument in an effect spawn's trailing native ABI.
+///
+/// The source spelling is kept beside the kind because export needs the former while live
+/// injection needs the latter. In particular, an axis/attribute token is an integer on the
+/// Lua stack, while the six ordinary `EFFECT` tail values are numbers even when their source
+/// spelling is the same `0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectSpawnTailKind {
+    Number,
+    Bool,
+    Integer,
+}
+
+/// One supported effect spawn family and the safe tail used when an editor command swap changes
+/// its ABI. The common prefix is `agent, graphic[, graphic_flip], bone, position, rotation,
+/// scale`; `tail` contains everything after `scale`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectSpawnLayout {
+    pub name: &'static str,
+    pub flip: bool,
+    pub follows_bone: bool,
+    pub tail: &'static [(&'static str, EffectSpawnTailKind)],
+}
+
+const EFFECT_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("false", EffectSpawnTailKind::Bool),
+];
+const EFFECT_FLIP_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+];
+const EFFECT_ALPHA_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("false", EffectSpawnTailKind::Bool),
+    ("1.0", EffectSpawnTailKind::Number),
+];
+const EFFECT_FLIP_ALPHA_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+    ("1.0", EffectSpawnTailKind::Number),
+];
+const EFFECT_FOLLOW_TAIL: &[(&str, EffectSpawnTailKind)] = &[("false", EffectSpawnTailKind::Bool)];
+const EFFECT_FOLLOW_ALPHA_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("false", EffectSpawnTailKind::Bool),
+    ("1.0", EffectSpawnTailKind::Number),
+];
+const EFFECT_FOLLOW_FLIP_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+];
+const EFFECT_FOLLOW_FLIP_ALPHA_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+    ("1.0", EffectSpawnTailKind::Number),
+];
+const EFFECT_FOLLOW_COLOR_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("false", EffectSpawnTailKind::Bool),
+    ("1.0", EffectSpawnTailKind::Number),
+    ("1.0", EffectSpawnTailKind::Number),
+    ("1.0", EffectSpawnTailKind::Number),
+];
+const EFFECT_FOLLOW_FLIP_COLOR_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+    ("1.0", EffectSpawnTailKind::Number),
+    ("1.0", EffectSpawnTailKind::Number),
+    ("1.0", EffectSpawnTailKind::Number),
+];
+const EFFECT_FOLLOW_FLIP_RND_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+];
+const EFFECT_ATTR_TAIL: &[(&str, EffectSpawnTailKind)] = &[
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("0", EffectSpawnTailKind::Number),
+    ("false", EffectSpawnTailKind::Bool),
+    ("0", EffectSpawnTailKind::Integer),
+];
+
+/// All effect spawn commands exposed by the parser, editor, exporter, and live replay path.
+/// Keep this list synchronized with the plugin's `dispatch_effect` arms and the parser's
+/// measured corpus scope. It is intentionally not a list of every native function: only
+/// families with a verified common editable prefix belong here.
+pub const EFFECT_SPAWN_LAYOUTS: &[EffectSpawnLayout] = &[
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_NO_STOP_FLIP",
+        flip: true,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_FLIP_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_FLIP_ALPHA",
+        flip: true,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_FLIP_ALPHA_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_FLIP_COLOR",
+        flip: true,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_FLIP_COLOR_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_FLIP_RND",
+        flip: true,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_FLIP_RND_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_FLIP",
+        flip: true,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_FLIP_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_NO_SCALE",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_NO_STOP",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_ALPHA",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_ALPHA_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW_COLOR",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_COLOR_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FLW_POS_UNSYNC_VIS",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FLW_POS_NO_STOP",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FLW_UNSYNC_VIS",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FLW_POS",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FOLLOW",
+        flip: false,
+        follows_bone: true,
+        tail: EFFECT_FOLLOW_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "LANDING_EFFECT_FLIP",
+        flip: true,
+        follows_bone: false,
+        tail: EFFECT_FLIP_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "FOOT_EFFECT_FLIP",
+        flip: true,
+        follows_bone: false,
+        tail: EFFECT_FLIP_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FLIP_ALPHA",
+        flip: true,
+        follows_bone: false,
+        tail: EFFECT_FLIP_ALPHA_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_FLIP",
+        flip: true,
+        follows_bone: false,
+        tail: EFFECT_FLIP_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "LANDING_EFFECT",
+        flip: false,
+        follows_bone: false,
+        tail: EFFECT_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "FOOT_EFFECT",
+        flip: false,
+        follows_bone: false,
+        tail: EFFECT_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "DOWN_EFFECT",
+        flip: false,
+        follows_bone: false,
+        tail: EFFECT_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_ALPHA",
+        flip: false,
+        follows_bone: false,
+        tail: EFFECT_ALPHA_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT_ATTR",
+        flip: false,
+        follows_bone: false,
+        tail: EFFECT_ATTR_TAIL,
+    },
+    EffectSpawnLayout {
+        name: "EFFECT",
+        flip: false,
+        follows_bone: false,
+        tail: EFFECT_TAIL,
+    },
+];
+
+/// Look up a supported effect spawn command by its exact native/macro name.
+pub fn effect_spawn_layout(name: &str) -> Option<&'static EffectSpawnLayout> {
+    EFFECT_SPAWN_LAYOUTS
+        .iter()
+        .find(|layout| layout.name == name)
+}
+
 /// Dumped effect spawn macros that share the common graphic/joint/transform prefix.
 /// Returns `(macro name, has second flipped graphic, follows bone)`.
 fn effect_spawn_macro_layout(line: &str) -> Option<(&'static str, bool, bool)> {
-    const LAYOUTS: &[(&str, bool, bool)] = &[
-        ("EFFECT_FOLLOW_NO_STOP_FLIP", true, true),
-        ("EFFECT_FOLLOW_FLIP_ALPHA", true, true),
-        ("EFFECT_FOLLOW_FLIP_COLOR", true, true),
-        ("EFFECT_FOLLOW_FLIP_RND", true, true),
-        ("EFFECT_FOLLOW_FLIP", true, true),
-        ("EFFECT_FOLLOW_NO_SCALE", false, true),
-        ("EFFECT_FOLLOW_NO_STOP", false, true),
-        ("EFFECT_FOLLOW_ALPHA", false, true),
-        ("EFFECT_FOLLOW_COLOR", false, true),
-        ("EFFECT_FLW_POS_UNSYNC_VIS", false, true),
-        ("EFFECT_FLW_POS_NO_STOP", false, true),
-        ("EFFECT_FLW_UNSYNC_VIS", false, true),
-        ("EFFECT_FLW_POS", false, true),
-        ("EFFECT_FOLLOW", false, true),
-        ("LANDING_EFFECT_FLIP", true, false),
-        ("FOOT_EFFECT_FLIP", true, false),
-        ("EFFECT_FLIP_ALPHA", true, false),
-        ("EFFECT_FLIP", true, false),
-        ("LANDING_EFFECT", false, false),
-        ("FOOT_EFFECT", false, false),
-        ("DOWN_EFFECT", false, false),
-        ("EFFECT_ALPHA", false, false),
-        ("EFFECT_ATTR", false, false),
-        ("EFFECT", false, false),
-    ];
-    LAYOUTS
+    EFFECT_SPAWN_LAYOUTS
         .iter()
-        .copied()
-        .find(|(name, _, _)| line.contains(&format!("macros::{name}(")))
+        .find(|layout| line.contains(&format!("macros::{}(", layout.name)))
+        .map(|layout| (layout.name, layout.flip, layout.follows_bone))
 }
 
 /// Parse an effect_ script source into an `EffectScript` IR.
@@ -1740,6 +2110,32 @@ fn parse_attack_fp_call(line: &str) -> Option<crate::data::AttackFpCall> {
     })
 }
 
+/// Parse the source-preserved damage-reaction mode command used for super armor and related
+/// conditions. Only the measured four-argument shape is typed; anything else remains `Raw` so
+/// an unfamiliar damage command cannot lose tokens on export.
+fn parse_damage_no_reaction_call(line: &str) -> Option<ExcuteStmt> {
+    let line = line.trim();
+    let needle = "damage!(";
+    let start = line.strip_prefix(needle).map(|_| needle.len())?;
+    let end = line[start..].rfind(')')? + start;
+    let args = tokenize_args(&line[start..end]);
+    let [agent, command, mode, value] = args.as_slice() else {
+        return None;
+    };
+    if agent.trim() != "agent"
+        || command.trim().trim_start_matches('*') != "MA_MSC_DAMAGE_DAMAGE_NO_REACTION"
+    {
+        return None;
+    }
+    Some(ExcuteStmt::DamageNoReaction(
+        crate::data::DamageNoReactionCall {
+            command: command.trim().to_string(),
+            mode: mode.trim().to_string(),
+            value: value.trim().to_string(),
+        },
+    ))
+}
+
 /// Parse one hurtbox-state or colour-blend line, or `None` if this is not one.
 ///
 /// Every member has exactly one arity in the vanilla archive — `HIT_NODE` 30 calls of
@@ -1767,7 +2163,7 @@ fn parse_hurtbox_call(line: &str) -> Option<ExcuteStmt> {
             return None;
         };
         return Some(ExcuteStmt::HitStatus {
-            target: crate::data::HurtTarget::Bone(extract_hash40_string(bone)?),
+            target: crate::data::HurtTarget::Bone(extract_hash40_value(bone)?),
             status: strip_deref(status),
         });
     }
@@ -2831,6 +3227,29 @@ fn extract_hash40_string(s: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+/// Read either spelling of a Hash40 expression used for a bone argument.
+///
+/// Named bones are preferred in authored source, but a live capture can contain a valid bone
+/// whose name is not present in the loaded skeleton. Keep that hash as an explicit raw value so
+/// the call remains editable and can be emitted without guessing a different bone.
+fn extract_hash40_value(s: &str) -> Option<String> {
+    if let Some(name) = extract_hash40_string(s) {
+        return Some(name);
+    }
+    let raw = s
+        .trim()
+        .strip_prefix("Hash40::new_raw(")?
+        .strip_suffix(')')?
+        .trim()
+        .replace('_', "");
+    let digits = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(&raw);
+    let value = u64::from_str_radix(digits, 16).ok()?;
+    Some(format!("{value:#x}"))
+}
+
 // ── Source code export ────────────────────────────────────────────────────────
 
 /// A generated file path + contents ready to write to disk.
@@ -3103,8 +3522,8 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             // stripped one, so a call written with a bare number stays a bare number.
             crate::data::ExcuteStmt::HitStatus { target, status } => match target {
                 crate::data::HurtTarget::Bone(bone) => format!(
-                    "{indent}macros::HIT_NODE(agent, Hash40::new(\"{}\"), {});",
-                    bone.to_ascii_lowercase(),
+                    "{indent}macros::HIT_NODE(agent, {}, {});",
+                    hash_arg(&bone.to_ascii_lowercase()),
                     emit_status(status)
                 ),
                 crate::data::HurtTarget::Group(group) => format!(
@@ -3119,6 +3538,10 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
             crate::data::ExcuteStmt::HitResetAll => {
                 format!("{indent}macros::HIT_RESET_ALL(agent);")
             }
+            crate::data::ExcuteStmt::DamageNoReaction(call) => format!(
+                "{indent}damage!(agent, {}, {}, {});",
+                call.command, call.mode, call.value
+            ),
             crate::data::ExcuteStmt::ColPri(pri) => {
                 format!("{indent}macros::COL_PRI(agent, {pri});")
             }
@@ -3767,6 +4190,15 @@ fn emit_effect_move_fn(
     tweaks: &std::collections::HashMap<u64, crate::mod_project::LiveTweak>,
     residue: &std::collections::BTreeMap<u32, Vec<String>>,
 ) -> (String, String) {
+    // Saved projects from before timing canonicalization can still reach the preview/emitter
+    // directly. Work from a repaired copy so a stale one-shot end frame can never create an
+    // invented stop or inflate the generated timeline, while leaving the caller's data intact.
+    let canonical_calls: Vec<crate::data::EffectCall> = calls
+        .iter()
+        .cloned()
+        .map(crate::data::EffectCall::normalized_timing)
+        .collect();
+    let calls = canonical_calls.as_slice();
     let fn_name = script_function_name("effect", move_name);
     // A follow effect's end frame is an ACMD event, not an intrinsic particle lifetime.
     // Keep starts and stops in one ordered timeline so a finite `active_end` actually emits
@@ -5165,6 +5597,59 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
 }
 "#;
 
+    const HURT_ARMOR: &str = r#"
+unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_ALWAYS, 0);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_DAMAGE_POWER, 25);
+    }
+    frame(agent.lua_state_agent, 18.0);
+    if macros::is_excute(agent) {
+        damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_NORMAL, 0);
+    }
+}
+"#;
+
+    #[test]
+    fn damage_no_reaction_calls_are_typed_and_round_trip_with_condition_spans() {
+        let script = parse_acmd_script(HURT_ARMOR);
+        let events = script.to_hurtbox_condition_events();
+        assert_eq!(
+            events.iter().map(|event| event.frame).collect::<Vec<_>>(),
+            vec![3, 12, 18]
+        );
+        assert!(matches!(
+            events[0].condition,
+            crate::data::HurtboxCondition::SuperArmor
+        ));
+        assert!(matches!(
+            events[1].condition,
+            crate::data::HurtboxCondition::DamageBasedArmor { threshold } if threshold == 25.0
+        ));
+        assert!(matches!(
+            events[2].condition,
+            crate::data::HurtboxCondition::Normal
+        ));
+        let spans = script.to_hurtbox_conditions();
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[0].active_start, spans[0].active_end), (3, 11));
+        assert_eq!((spans[1].active_start, spans[1].active_end), (12, 17));
+        assert_eq!((spans[2].active_start, spans[2].active_end), (18, 18));
+        assert!(spans[2].condition.is_normal());
+        let exported = export_acmd_source(&script, "kirby", "club_swing_dash");
+        assert!(exported.contains(
+            "damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_ALWAYS, 0);"
+        ));
+        assert_eq!(
+            parse_acmd_script(&exported).to_hurtbox_condition_events(),
+            events
+        );
+    }
+
     /// A hurtbox state is two independent lines in the script and one span on screen. Getting
     /// the join wrong is the whole difference between "the knee is intangible frames 9-19" and
     /// a pair of rows a modder has to diff by eye.
@@ -5376,6 +5861,30 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             parse_acmd_script(&exported).to_hurtboxes(),
             script.to_hurtboxes(),
             "the export must resolve to the same spans as the source"
+        );
+    }
+
+    #[test]
+    fn raw_hurtbox_bone_hash_round_trips_without_a_skeleton_name() {
+        let source = r#"
+unsafe extern "C" fn game_specialairhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 9.0);
+    if macros::is_excute(agent) {
+        macros::HIT_NODE(agent, Hash40::new_raw(0xdead_beef), *HIT_STATUS_XLU);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let (states, _) = script.to_hurtboxes();
+        assert_eq!(
+            states[0].target,
+            crate::data::HurtTarget::Bone("0xdeadbeef".into())
+        );
+        let exported = export_acmd_source(&script, "mario", "special_air_hi");
+        assert!(exported.contains("Hash40::new_raw(0xdeadbeef)"));
+        assert_eq!(
+            parse_acmd_script(&exported).to_hurtboxes(),
+            script.to_hurtboxes()
         );
     }
 
@@ -6378,6 +6887,7 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
                         .collect(),
                 ),
                 raw_line: None,
+                trail_command: None,
                 trail_off: None,
                 trail_bone2: None,
                 rate: None,
@@ -6407,6 +6917,7 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
                 disabled: false,
                 extra_args: Some(vec!["true".into()]),
                 raw_line: None,
+                trail_command: None,
                 trail_off: None,
                 trail_bone2: None,
                 rate: None,
@@ -6561,6 +7072,60 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
             "EFFECT_FOLLOW should set follows_bone=true"
         );
         assert_eq!(calls[0].effect_name, "follow_eff");
+    }
+
+    /// Rustfmt's multiline layout is still one ACMD call. The attached issue-17 example uses
+    /// this form for `EFFECT_FOLLOW`; the importer must not discard the opening line and then
+    /// treat each argument as unrelated source.
+    #[test]
+    fn rustfmt_multiline_effect_calls_import_as_single_statements() {
+        let src = r#"
+unsafe extern "C" fn effect_attackairf(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 25.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(
+            agent,
+            Hash40::new("sys_attack_arc_c"),
+            Hash40::new("top"),
+            3.8,
+            3.0,
+            17.4,
+            25.0,
+            90.0,
+            0.0,
+            1,
+            true,
+        );
+        macros::LAST_EFFECT_SET_COLOR(agent, 1.0, 0.0, 0.0);
+    }
+    frame(agent.lua_state_agent, 37.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(
+            agent,
+            Hash40::new("sys_attack_arc_c"),
+            false,
+            true,
+        );
+    }
+}
+"#;
+
+        let calls = parse_effect_script(src).to_effect_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the multiline spawn must be imported: {calls:#?}"
+        );
+        let call = &calls[0];
+        assert_eq!(call.effect_name, "sys_attack_arc_c");
+        assert_eq!(call.bone_name, "top");
+        assert_eq!(call.offset, [3.8, 3.0, 17.4]);
+        assert_eq!(call.rotation, [0.0, 90.0, 25.0]);
+        assert_eq!(call.scale, 1.0);
+        assert!(call.follows_bone);
+        assert_eq!(call.tint, Some([1.0, 0.0, 0.0]));
+        assert_eq!(call.active_start, 25);
+        assert_eq!(call.active_end, 37);
     }
 
     #[test]
@@ -6745,6 +7310,45 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         assert!(
             emitted.contains("macros::EFFECT_FOLLOW_NO_STOP(agent, Hash40::new(\"sys_smoke\")"),
             "a NO_STOP follow must not be swapped for plain EFFECT_FOLLOW:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn an_effect_command_swap_exports_the_target_family_and_abi() {
+        let mut calls = sample_edits().1;
+        let call = &mut calls[0];
+        call.spawn_func = "EFFECT_FOLLOW_FLIP_ALPHA".into();
+        call.effect_name_alt = Some("sys_attack_arc_alt".into());
+        call.follows_bone = true;
+        call.active_end = 9999;
+        call.extra_args = Some(vec!["false".into(), "0".into(), "1.0".into()]);
+
+        let (_, emitted) = emit_effect_move_fn(
+            &calls,
+            "attack_air_n",
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_FOLLOW_FLIP_ALPHA(agent, Hash40::new(\"sys_attack_arc\"), Hash40::new(\"sys_attack_arc_alt\"), Hash40::new(\"top\")"
+            ),
+            "the selected command and both graphic slots must be exported:\n{emitted}"
+        );
+        assert!(
+            emitted.contains(", 1.2, false, 0, 1.0);"),
+            "the target command must receive its own bool/axis/alpha tail:\n{emitted}"
+        );
+
+        let reparsed = parse_effect_script(&emitted).to_effect_calls();
+        assert_eq!(reparsed[0].spawn_func, "EFFECT_FOLLOW_FLIP_ALPHA");
+        assert_eq!(
+            reparsed[0].effect_name_alt.as_deref(),
+            Some("sys_attack_arc_alt")
+        );
+        assert_eq!(
+            reparsed[0].extra_args.as_deref(),
+            Some(&["false", "0", "1.0"].map(str::to_string)[..])
         );
     }
 
@@ -8452,6 +9056,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             disabled: false,
             extra_args: None,
             raw_line: None,
+            trail_command: None,
             trail_off: None,
             trail_bone2: None,
             rate: None,

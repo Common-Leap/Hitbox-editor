@@ -36,6 +36,7 @@ const FIRST_GAME_FRAME: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrimaryEditorTab {
     Collisions,
+    Hurtboxes,
     MotionState,
     AudioFeedback,
 }
@@ -44,6 +45,7 @@ impl PrimaryEditorTab {
     fn title(self) -> &'static str {
         match self {
             Self::Collisions => "Collisions",
+            Self::Hurtboxes => "Hurtboxes",
             Self::MotionState => "Motion & state",
             Self::AudioFeedback => "Sound & feedback",
         }
@@ -52,7 +54,10 @@ impl PrimaryEditorTab {
     fn description(self) -> &'static str {
         match self {
             Self::Collisions => {
-                "Attack, grab, detection, wind, throw-damage, hurtbox-state, and active-hitbox commands for the selected move."
+                "Attack, grab, detection, wind, throw-damage, and active-hitbox commands for the selected move."
+            }
+            Self::Hurtboxes => {
+                "Parameter-defined hurtbox capsules, intangibility, invincibility, OFF states, and damage-reaction armor for the selected move."
             }
             Self::MotionState => {
                 "Facing, velocity, kinetic, animation-timing, ground/air, and stored script-state commands from the move's game_ script."
@@ -174,6 +179,7 @@ struct MoveEditHistory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelineCategory {
     Collisions,
+    Hurtboxes,
     Effects,
     MotionState,
     AudioFeedback,
@@ -183,6 +189,7 @@ impl TimelineCategory {
     fn title(self) -> &'static str {
         match self {
             Self::Collisions => "Collisions",
+            Self::Hurtboxes => "Hurtboxes",
             Self::Effects => "Visual effects",
             Self::MotionState => "Motion & state",
             Self::AudioFeedback => "Sound & feedback",
@@ -192,7 +199,10 @@ impl TimelineCategory {
     fn description(self) -> &'static str {
         match self {
             Self::Collisions => {
-                "Show or hide attack, grab, detection, wind, throw-damage, hurtbox, and active-hitbox events on the timeline."
+                "Show or hide attack, grab, detection, wind, throw-damage, and active-hitbox events on the timeline."
+            }
+            Self::Hurtboxes => {
+                "Show or hide hurtbox status, intangibility, invincibility, reset, and damage-reaction armor events on the timeline."
             }
             Self::Effects => "Show or hide visual-effect and effect-control events on the timeline.",
             Self::MotionState => {
@@ -223,6 +233,14 @@ mod editor_section_copy_tests {
             assert!(tab.description().split_whitespace().count() >= 8);
             assert!(category.description().split_whitespace().count() >= 8);
         }
+        assert_eq!(PrimaryEditorTab::Hurtboxes.title(), "Hurtboxes");
+        assert!(PrimaryEditorTab::Hurtboxes
+            .description()
+            .contains("damage-reaction armor"));
+        assert_eq!(TimelineCategory::Hurtboxes.title(), "Hurtboxes");
+        assert!(TimelineCategory::Hurtboxes
+            .description()
+            .contains("damage-reaction armor"));
         assert_eq!(TimelineCategory::Effects.title(), "Visual effects");
         assert!(VISUAL_EFFECTS_DESCRIPTION.split_whitespace().count() >= 8);
     }
@@ -426,6 +444,7 @@ struct TimelineRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TimelineFilters {
     collisions: bool,
+    hurtboxes: bool,
     effects: bool,
     motion_state: bool,
     audio_feedback: bool,
@@ -435,6 +454,7 @@ impl Default for TimelineFilters {
     fn default() -> Self {
         Self {
             collisions: true,
+            hurtboxes: true,
             effects: true,
             motion_state: true,
             audio_feedback: true,
@@ -446,6 +466,7 @@ impl TimelineFilters {
     fn shows(self, category: TimelineCategory) -> bool {
         match category {
             TimelineCategory::Collisions => self.collisions,
+            TimelineCategory::Hurtboxes => self.hurtboxes,
             TimelineCategory::Effects => self.effects,
             TimelineCategory::MotionState => self.motion_state,
             TimelineCategory::AudioFeedback => self.audio_feedback,
@@ -809,12 +830,14 @@ fn timeline_frame_extent_with_change_kinetic(
         .flatten()
     });
     let effect_frames = effects.iter().flat_map(|effect| {
-        [
-            Some(effect.active_start),
-            (effect.active_end < 9999).then_some(effect.active_end),
-        ]
-        .into_iter()
-        .flatten()
+        let end = if effect.follows_bone {
+            effect.active_end
+        } else {
+            effect.active_start
+        };
+        [Some(effect.active_start), (end < 9999).then_some(end)]
+            .into_iter()
+            .flatten()
     });
     // Sounds count too, and often decide the answer on their own: a `sound_` script routinely
     // plays a landing thud tens of frames after the last hitbox closed, and clipping the
@@ -1055,10 +1078,43 @@ fn const_combo(
     enum_combo(ui, value, id, label, &names);
 }
 
-/// `HIT_STATUS_XLU` → `XLU`. The prefix is on every entry and carries no information in a
-/// dropdown that only ever offers hit statuses.
-fn hit_status_short(name: &str) -> &str {
-    name.strip_prefix("HIT_STATUS_").unwrap_or(name)
+/// Keep the source token available for diagnostics, but show the semantic state in every
+/// user-facing selector. In particular, `XLU` is spelled out as intangible so it is not
+/// mistaken for a second invincibility mode.
+fn hit_status_label(name: &str) -> String {
+    crate::data::HurtboxStatus::from_acmd_value(name).label()
+}
+
+const DAMAGE_NO_REACTION_MODES: [(&str, &str); 6] = [
+    ("*DAMAGE_NO_REACTION_MODE_NORMAL", "Normal reaction"),
+    ("*DAMAGE_NO_REACTION_MODE_ALWAYS", "Super armor"),
+    (
+        "*DAMAGE_NO_REACTION_MODE_REACTION_VALUE",
+        "Reaction-value armor",
+    ),
+    (
+        "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER",
+        "Damage-based armor",
+    ),
+    (
+        "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT",
+        "Damage-count armor",
+    ),
+    ("*DAMAGE_NO_REACTION_MODE_NONE", "No-reaction mode"),
+];
+
+fn damage_no_reaction_mode_key(mode: &str) -> String {
+    mode.trim().trim_start_matches('*').to_ascii_uppercase()
+}
+
+fn damage_no_reaction_mode_label(mode: &str) -> String {
+    let key = damage_no_reaction_mode_key(mode);
+    DAMAGE_NO_REACTION_MODES
+        .iter()
+        .find_map(|(token, label)| {
+            (damage_no_reaction_mode_key(token) == key).then_some((*label).to_string())
+        })
+        .unwrap_or_else(|| format!("Unknown ({})", mode.trim().trim_start_matches('*')))
 }
 
 /// `FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH` → `CATCH`.
@@ -1532,30 +1588,188 @@ fn carrier_stored_name(op: &crate::mod_project::TransplantOp, own_prefix: Option
 /// misread as spawns while accounting for the alpha/attribute/random, ground-contact, and
 /// no-stop variants emitted by the game's dumped scripts.
 fn effect_capture_layout(func: &str) -> Option<(bool, bool)> {
-    let layout = match func {
-        // (flip layout, follows source bone)
-        "EFFECT" | "EFFECT_ALPHA" | "EFFECT_ATTR" | "DOWN_EFFECT" | "FOOT_EFFECT"
-        | "LANDING_EFFECT" => (false, false),
-        "EFFECT_FLIP" | "EFFECT_FLIP_ALPHA" | "FOOT_EFFECT_FLIP" | "LANDING_EFFECT_FLIP" => {
-            (true, false)
+    let layout = crate::acmd::effect_spawn_layout(func)?;
+    Some((layout.flip, layout.follows_bone))
+}
+
+/// Return the command shown for an effect call, including a stable fallback for project files
+/// created before the exact spawn command was stored.
+fn effect_spawn_command_name(call: &crate::data::EffectCall) -> String {
+    if call.spawn_func.is_empty() {
+        if call.follows_bone {
+            "EFFECT_FOLLOW".into()
+        } else {
+            "EFFECT".into()
         }
-        "EFFECT_FOLLOW"
-        | "EFFECT_FOLLOW_ALPHA"
-        | "EFFECT_FOLLOW_COLOR"
-        | "EFFECT_FOLLOW_NO_SCALE"
-        | "EFFECT_FOLLOW_NO_STOP"
-        | "EFFECT_FLW_POS"
-        | "EFFECT_FLW_POS_NO_STOP"
-        | "EFFECT_FLW_POS_UNSYNC_VIS"
-        | "EFFECT_FLW_UNSYNC_VIS" => (false, true),
-        "EFFECT_FOLLOW_FLIP"
-        | "EFFECT_FOLLOW_FLIP_ALPHA"
-        | "EFFECT_FOLLOW_FLIP_COLOR"
-        | "EFFECT_FOLLOW_FLIP_RND"
-        | "EFFECT_FOLLOW_NO_STOP_FLIP" => (true, true),
-        _ => return None,
+    } else {
+        call.spawn_func.clone()
+    }
+}
+
+/// Apply an editor-side effect command swap while keeping the IR valid for export and live
+/// replay. The common transform survives every swap; flip, follow lifetime, and command-specific
+/// tail arguments are reshaped to the target command's contract.
+fn set_effect_spawn_command(call: &mut crate::data::EffectCall, command: &str) -> bool {
+    let Some(target) = crate::acmd::effect_spawn_layout(command) else {
+        return false;
     };
-    Some(layout)
+    if call.color.is_some()
+        || call.control.is_some()
+        || effect_call_is_trail(call)
+        || effect_spawn_command_name(call) == command
+    {
+        return false;
+    }
+
+    let current_name = effect_spawn_command_name(call);
+    let current = crate::acmd::effect_spawn_layout(&current_name);
+    let old_tail = call.extra_args.take();
+    let keep_tail = current.is_some_and(|current| {
+        old_tail.as_ref().is_some_and(|tail| {
+            tail.len() == current.tail.len() && current.tail.len() == target.tail.len()
+        })
+    });
+
+    // A flip command has a second graphic slot. If the source command had only one graphic,
+    // duplicating the primary is the least surprising safe default and remains editable in the
+    // newly visible Flip effect row.
+    let primary = call.effect_name.clone();
+    call.effect_name_alt = target
+        .flip
+        .then(|| call.effect_name_alt.clone().unwrap_or(primary));
+    call.spawn_func = command.to_string();
+    call.follows_bone = target.follows_bone;
+    call.active_end = if target.follows_bone {
+        current
+            .filter(|layout| layout.follows_bone)
+            .map(|_| call.active_end)
+            .unwrap_or(9999)
+    } else {
+        call.active_start
+    };
+    call.extra_args = if keep_tail {
+        old_tail
+    } else {
+        Some(
+            target
+                .tail
+                .iter()
+                .map(|(source, _)| (*source).to_string())
+                .collect(),
+        )
+    };
+    // This helper is deliberately limited to ordinary spawns, but clearing stale raw identity
+    // makes that invariant explicit if an older project carried inconsistent fields.
+    call.raw_line = None;
+    call.trail_command = None;
+    true
+}
+
+/// Build the typed default tail that live injection must place after a command swap. The source
+/// spelling alone is not enough: the plugin's native dispatcher distinguishes numbers, booleans,
+/// and integer axis/attribute tokens on the Lua stack.
+fn effect_spawn_default_live_tail(command: &str) -> Option<Vec<crate::game_link::LuaArgWire>> {
+    use crate::acmd::EffectSpawnTailKind;
+    use crate::game_link::LuaArgWire as A;
+
+    let layout = crate::acmd::effect_spawn_layout(command)?;
+    Some(
+        layout
+            .tail
+            .iter()
+            .map(|(source, kind)| match kind {
+                EffectSpawnTailKind::Number => A::Num(source.parse::<f32>().unwrap_or(0.0)),
+                EffectSpawnTailKind::Bool => A::Bool(*source == "true"),
+                EffectSpawnTailKind::Integer => A::Int(source.parse::<i64>().unwrap_or(0)),
+            })
+            .collect(),
+    )
+}
+
+/// Rebuild a captured effect call for a potentially different spawn family. The donor's
+/// transform is replaced with the editor values, while its hidden tail is reused only when the
+/// donor and target ABIs have the same verified arity; otherwise the target receives typed safe
+/// defaults. This prevents a command swap from passing (for example) an alpha value where a flip
+/// axis belongs.
+fn retarget_effect_capture_args(
+    call: &crate::data::EffectCall,
+    donor_func: &str,
+    donor_args: &[crate::game_link::LuaArgWire],
+    new_hash: u64,
+) -> Option<(String, Vec<crate::game_link::LuaArgWire>)> {
+    use crate::game_link::LuaArgWire as A;
+
+    let donor_layout = crate::acmd::effect_spawn_layout(donor_func)?;
+    let target_func = if call.spawn_func.is_empty() {
+        donor_func
+    } else {
+        call.spawn_func.as_str()
+    };
+    let target_layout = crate::acmd::effect_spawn_layout(target_func)?;
+    let donor_flip = donor_layout.flip;
+    let target_flip = target_layout.flip;
+    let donor_tail_start = 9 + usize::from(donor_flip);
+    if donor_args.len() < donor_tail_start {
+        return None;
+    }
+
+    let mut args = Vec::with_capacity(9 + usize::from(target_flip) + target_layout.tail.len());
+    args.push(A::Hash(new_hash));
+    if target_flip {
+        args.push(A::Hash(
+            call.effect_name_alt
+                .as_deref()
+                .map(effect_name_hash)
+                .unwrap_or(new_hash),
+        ));
+    }
+    let target_offset = usize::from(target_flip);
+    args.push(A::Hash(hash40::hash40(&call.bone_name.to_lowercase()).0));
+    args.push(A::Num(call.offset[0]));
+    args.push(A::Num(call.offset[1]));
+    args.push(A::Num(call.offset[2]));
+    args.push(A::Num(call.rotation[2])); // ACMD zr
+    args.push(A::Num(call.rotation[1])); // ACMD yr
+    args.push(A::Num(call.rotation[0])); // ACMD xr
+    args.push(A::Num(call.scale));
+    debug_assert_eq!(args.len(), 9 + target_offset);
+
+    let donor_tail_len = donor_args.len() - donor_tail_start;
+    if donor_tail_len == donor_layout.tail.len() && donor_tail_len == target_layout.tail.len() {
+        args.extend_from_slice(&donor_args[donor_tail_start..]);
+    } else {
+        args.extend(effect_spawn_default_live_tail(target_func)?);
+    }
+    Some((target_func.to_string(), args))
+}
+
+/// Trail calls captured from the game have no common EFFECT transform layout. The raw
+/// AFTER_IMAGE3 command is recorded without its command-id argument; the named arg29 forms are
+/// recorded with their complete 29-argument payload.
+fn trail_capture_command(func: &str) -> bool {
+    matches!(
+        func,
+        "AFTER_IMAGE3_ON" | "AFTER_IMAGE4_ON_arg29" | "AFTER_IMAGE4_ON_WORK_arg29"
+    )
+}
+
+fn trail_capture_raw_line(func: &str, args: &[crate::game_link::LuaArgWire]) -> Option<String> {
+    let rendered = args
+        .iter()
+        .map(crate::game_link::LuaArgWire::to_source_arg)
+        .collect::<Option<Vec<_>>>()?
+        .join(", ");
+    if func == "AFTER_IMAGE3_ON" {
+        Some(format!(
+            "effect(*MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON, {rendered});"
+        ))
+    } else {
+        Some(format!("macros::{func}(agent, {rendered});"))
+    }
+}
+
+fn effect_call_is_trail(call: &crate::data::EffectCall) -> bool {
+    call.trail_command.is_some() || call.raw_line.is_some() || call.spawn_func == "AFTER_IMAGE_ON"
 }
 
 /// Runtime fighter kind for an extracted fighter directory name. Live ACMD capture is global;
@@ -1697,9 +1911,26 @@ fn call_sig(c: &crate::data::EffectCall) -> (u64, u64, u64, u32, u64) {
         primary,
         secondary,
         hash40::hash40(&c.spawn_func).0,
-        c.active_start,
+        // Effect timing is one-based. Keep this defensive canonicalization here as well as in
+        // EffectCall::normalize_timing because this signature is used while scrubbing live
+        // capture echoes, before every caller necessarily has rebuilt its full state snapshot.
+        c.active_start.max(FIRST_GAME_FRAME),
         bone,
     )
+}
+
+/// `null` is the game's explicit no-op graphic used by FOOT/LANDING scripts. It is retained in
+/// the source/effect IR and remains a visible, source-backed row, but it has no viewport marker
+/// because drawing one would fabricate geometry. A flip with a real alternate graphic is still a
+/// meaningful visual spawn and therefore is not treated as a sentinel.
+fn is_null_effect_sentinel(call: &crate::data::EffectCall) -> bool {
+    call.control.is_none()
+        && call.color.is_none()
+        && call.effect_name.eq_ignore_ascii_case("null")
+        && call
+            .effect_name_alt
+            .as_deref()
+            .is_none_or(|alternate| alternate.eq_ignore_ascii_case("null"))
 }
 
 fn effect_call_display_name(call: &crate::data::EffectCall) -> String {
@@ -1727,12 +1958,15 @@ fn effect_call_display_name(call: &crate::data::EffectCall) -> String {
     match call
         .effect_name_alt
         .as_deref()
-        .filter(|alternate| *alternate != call.effect_name)
+        .filter(|alternate| !alternate.eq_ignore_ascii_case(&call.effect_name))
     {
-        Some(alternate) if call.effect_name == "null" => {
+        Some(alternate) if call.effect_name.eq_ignore_ascii_case("null") => {
             format!("{alternate} (flip; other side none)")
         }
         Some(alternate) => format!("{} / {alternate}", call.effect_name),
+        None if call.effect_name.eq_ignore_ascii_case("null") => {
+            "No effect (null placeholder)".to_string()
+        }
         None => call.effect_name.clone(),
     }
 }
@@ -1956,6 +2190,18 @@ pub struct VisionaryApp {
     add_kb_base: i32,
     add_kb_scaling: i32,
     selected_hitbox: Option<usize>,
+    /// Parameter hurtbox capsule selected in the viewport/sidebar. This is a parameter-list
+    /// index, not an ACMD site, so it remains stable while status calls are added to a move.
+    selected_hurtbox: Option<usize>,
+    /// Controls for the next per-volume hurtbox range edit.
+    hurtbox_editor_selection: Option<usize>,
+    hurtbox_edit_start: u32,
+    hurtbox_edit_end: u32,
+    hurtbox_edit_status: crate::data::HurtboxStatus,
+    hurtbox_condition_edit_start: u32,
+    hurtbox_condition_edit_end: u32,
+    hurtbox_condition_edit_mode: String,
+    hurtbox_condition_edit_value: String,
     /// Which primary editing surface is open.  Effects remain an independent panel, but the
     /// compact layout uses the same focus value to decide which inspector gets the scarce width.
     primary_tab: PrimaryEditorTab,
@@ -1992,6 +2238,13 @@ pub struct VisionaryApp {
     pending_project_script: Option<crate::acmd_src::ProjectScript>,
     // Cached bone names for dropdown
     bone_names: Vec<String>,
+    /// Session-only parameter-defined hurtboxes for the selected fighter. These never enter
+    /// AppState, project serialization, or edit history.
+    hurtbox_volumes: Vec<crate::data::HurtboxVolume>,
+    hurtbox_warnings: Vec<crate::data::HurtboxLoadWarning>,
+    /// Persistent viewport preference; it remains true across fighters even when a fighter has
+    /// no parameter data, while the checkbox itself is disabled for that fighter.
+    show_hurtboxes: bool,
     show_debug: bool,
     credits: crate::credits::CreditsWindow,
     show_edit_log: bool,
@@ -2301,6 +2554,15 @@ impl VisionaryApp {
             add_kb_base: 50,
             add_kb_scaling: 100,
             selected_hitbox: None,
+            selected_hurtbox: None,
+            hurtbox_editor_selection: None,
+            hurtbox_edit_start: FIRST_GAME_FRAME,
+            hurtbox_edit_end: FIRST_GAME_FRAME,
+            hurtbox_edit_status: crate::data::HurtboxStatus::Normal,
+            hurtbox_condition_edit_start: FIRST_GAME_FRAME,
+            hurtbox_condition_edit_end: FIRST_GAME_FRAME,
+            hurtbox_condition_edit_mode: "*DAMAGE_NO_REACTION_MODE_ALWAYS".into(),
+            hurtbox_condition_edit_value: "0".into(),
             primary_tab: PrimaryEditorTab::Collisions,
             inspector_focus: InspectorFocus::Primary,
             timeline_filters: load_timeline_filters(),
@@ -2319,6 +2581,9 @@ impl VisionaryApp {
             acmd_receiver: None,
             pending_project_script: None,
             bone_names: Vec::new(),
+            hurtbox_volumes: Vec::new(),
+            hurtbox_warnings: Vec::new(),
+            show_hurtboxes: load_hurtbox_visibility(),
             show_debug: false,
             credits: crate::credits::CreditsWindow::default(),
             show_edit_log: false,
@@ -2865,7 +3130,13 @@ impl VisionaryApp {
             self.pending_model_load = None;
             self.current_eff_path = None;
             self.bone_names.clear();
+            self.hurtbox_volumes.clear();
+            self.hurtbox_warnings.clear();
             self.selected_hitbox = None;
+            self.selected_hurtbox = None;
+            self.hurtbox_editor_selection = None;
+            self.hurtbox_condition_edit_start = FIRST_GAME_FRAME;
+            self.hurtbox_condition_edit_end = FIRST_GAME_FRAME;
             self.hitbox_watch = None;
             self.hitbox_dirty_at = None;
             self.acmd_error = None;
@@ -2929,11 +3200,26 @@ impl VisionaryApp {
     fn select_fighter(&mut self, idx: usize) {
         self.state.selected_fighter = Some(idx);
         self.state.selected_move = None;
-        self.state.hitboxes.clear();
+        // A fighter switch is also a move-state boundary.  Clearing only the editable hitboxes
+        // left the previous fighter's ACMD script alive, so a stale WHOLE_HIT/HIT_NODE OFF event
+        // could hide every newly loaded parameter volume until the next move was opened.
+        clear_move_state(&mut self.state);
+        // Clear the old fighter's parameter geometry before any new file or skeleton work. A
+        // missing/malformed mod parameter file must never leave the previous fighter visible.
+        self.hurtbox_volumes.clear();
+        self.hurtbox_warnings.clear();
+        self.selected_hurtbox = None;
+        self.hurtbox_editor_selection = None;
+        self.hurtbox_condition_edit_start = FIRST_GAME_FRAME;
+        self.hurtbox_condition_edit_end = FIRST_GAME_FRAME;
         self.state.current_frame = FIRST_GAME_FRAME;
         self.state.total_frames = 0;
         self.move_list.clear();
         self.move_list_receiver = None;
+        // A fetch from the previous fighter may complete after this selection. Drop it rather
+        // than letting its script repopulate the new fighter's per-move state and hurtbox events.
+        self.acmd_receiver = None;
+        self.pending_project_script = None;
         self.acmd_error = None;
         self.current_anim_path = None;
 
@@ -2984,8 +3270,12 @@ impl VisionaryApp {
         self.bone_names = if loaded_bone_names.is_empty() {
             Vec::new()
         } else {
-            acmd_bone_options(loaded_bone_names)
+            acmd_bone_options(loaded_bone_names.clone())
         };
+        let hurtbox_result =
+            crate::data::load_hurtbox_volumes(&fighter.param_path, &loaded_bone_names);
+        self.hurtbox_volumes = hurtbox_result.volumes;
+        self.hurtbox_warnings = hurtbox_result.warnings;
         self.add_bone = self.add_bone.to_ascii_lowercase();
         self.current_model_dir = Some(model_dir.clone());
 
@@ -3088,6 +3378,10 @@ impl VisionaryApp {
     fn select_move(&mut self, mut move_entry: MoveEntry) {
         self.state.current_frame = FIRST_GAME_FRAME;
         self.selected_hitbox = None;
+        self.selected_hurtbox = None;
+        self.hurtbox_editor_selection = None;
+        self.hurtbox_condition_edit_start = FIRST_GAME_FRAME;
+        self.hurtbox_condition_edit_end = FIRST_GAME_FRAME;
         self.state.selected_effect_call = None;
         self.selected_command = None;
         self.primary_tab = PrimaryEditorTab::Collisions;
@@ -4285,6 +4579,21 @@ impl VisionaryApp {
                 Err(e) => notes.push(e.to_string()),
             }
             refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_hurtbox_conditions(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.hurtbox_conditions_pristine,
+                &self.state.script.to_hurtbox_conditions(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
             // And post-hoc modifiers get a third pass, for the same reason again: they share the
             // function but are counted in their own numbering space and written through their
             // own slots.
@@ -4734,7 +5043,7 @@ impl VisionaryApp {
         files.sort();
         files.dedup();
         let mut status = format!(
-            "Synced {changed} value{} into {} file{}",
+            "Synced {changed} source change{} into {} file{}",
             if changed == 1 { "" } else { "s" },
             files.len(),
             if files.len() == 1 { "" } else { "s" },
@@ -4760,6 +5069,7 @@ impl VisionaryApp {
         let mut edited: Vec<&'static str> = Vec::new();
         if state.hitboxes != state.hitboxes_pristine
             || state.script.to_hurtboxes() != state.hurtboxes_pristine
+            || state.script.to_hurtbox_conditions() != state.hurtbox_conditions_pristine
             || state.script.to_attack_mods() != state.attack_mods_pristine
             || state.script.to_reverse_lr_events() != state.reverse_lr_pristine
             || state.script.to_speed_ex_events() != state.speed_ex_pristine
@@ -5054,7 +5364,12 @@ impl VisionaryApp {
                 self.state.expression_script = expression_script;
                 self.apply_saved_expression_edits_to_current();
                 let effects_only = hitboxes.is_empty() && !effect_script.stmts.is_empty();
-                if hitboxes.is_empty() && !effects_only {
+                // A game script can legitimately contain only hurtbox states, damage-reaction
+                // conditions, motion controls, or other non-attack statements. Treat an empty
+                // collision list as unavailable only when the parser found no game statements
+                // at all; otherwise the same script must remain the source for the sidebar,
+                // timeline, export, and live rules.
+                if hitboxes.is_empty() && !effects_only && script.stmts.is_empty() {
                     self.acmd_error = Some(format!(
                         "No hitboxes found for {}/{}",
                         fighter_name, move_name
@@ -5066,6 +5381,10 @@ impl VisionaryApp {
                     if effects_only {
                         self.acmd_error = Some(format!(
                             "{fighter_name}/{move_name} has effect spawns but no hitboxes"
+                        ));
+                    } else if hitboxes.is_empty() {
+                        self.acmd_error = Some(format!(
+                            "{fighter_name}/{move_name} has no attack hitboxes; non-collision ACMD is still loaded"
                         ));
                     }
                     self.normalize_hitbox_bones(&mut hitboxes);
@@ -6063,6 +6382,9 @@ impl VisionaryApp {
             .get(&fighter.name)
             .map(|m| m.contains_key(&move_name))
             .unwrap_or(false);
+        let hurtbox_states_edited = self.state.script.to_hurtboxes()
+            != self.state.hurtboxes_pristine
+            || self.state.script.to_hurtbox_conditions() != self.state.hurtbox_conditions_pristine;
         let script_points_edited = self.state.script.to_reverse_lr_events()
             != self.state.reverse_lr_pristine
             || self.state.script.to_speed_ex_events() != self.state.speed_ex_pristine
@@ -6101,6 +6423,7 @@ impl VisionaryApp {
                 .to_kinetic_set_consider_ground_friction_events()
                 != self.state.kinetic_set_consider_ground_friction_pristine;
         if self.state.hitboxes == self.state.hitboxes_pristine
+            && !hurtbox_states_edited
             && !script_points_edited
             && !already_logged
         {
@@ -6486,6 +6809,7 @@ impl VisionaryApp {
         ui.horizontal_wrapped(|ui| {
             for tab in [
                 PrimaryEditorTab::Collisions,
+                PrimaryEditorTab::Hurtboxes,
                 PrimaryEditorTab::MotionState,
                 PrimaryEditorTab::AudioFeedback,
             ] {
@@ -6516,7 +6840,15 @@ impl VisionaryApp {
             ui.colored_label(Color32::RED, err);
         }
 
-        if self.show_add_hitbox && matches!(self.primary_tab, PrimaryEditorTab::Collisions) {
+        if matches!(self.primary_tab, PrimaryEditorTab::Hurtboxes) {
+            if self.state.selected_fighter.is_some() {
+                self.draw_hurtbox_toggle(ui);
+            }
+            self.draw_hurtbox_volume_editor(ui);
+            self.draw_hurtbox_section(ui);
+        }
+
+        if matches!(self.primary_tab, PrimaryEditorTab::Collisions) && self.show_add_hitbox {
             ui.group(|ui| {
                 editor_subsection_heading(
                     ui,
@@ -7350,6 +7682,25 @@ impl VisionaryApp {
                                         part_mask_combo(ui, &mut hb.part_mask, "part_mask");
                                         },
                                     );
+                                    editor_collapsing(
+                                        ui,
+                                        "Hit feedback",
+                                        "The collision attribute, hit sound level and type, and attack region used when this attack connects.",
+                                        |ui| {
+                                        collision_attr_combo(
+                                            ui,
+                                            &mut hb.collision_attr,
+                                            "attack_col_attr",
+                                        );
+                                        sound_level_combo(ui, &mut hb.sound_level, "attack_snd_lvl");
+                                        sound_attr_combo(ui, &mut hb.sound_attr, "attack_snd_attr");
+                                        attack_region_combo(
+                                            ui,
+                                            &mut hb.attack_region,
+                                            "attack_region",
+                                        );
+                                        },
+                                    );
                                 }
 
                                 // ── Detection-only fields ────────────────────────────
@@ -7430,7 +7781,6 @@ impl VisionaryApp {
                         }
                     });
             });
-            self.draw_hurtbox_section(ui);
             self.draw_attack_mod_section(ui);
         }
         if matches!(self.primary_tab, PrimaryEditorTab::MotionState) {
@@ -9908,7 +10258,7 @@ impl VisionaryApp {
         }
     }
 
-    /// Intangibility and body-collision priority, below the collision list.
+    /// Intangibility and body-collision priority in the dedicated hurtbox tab.
     ///
     /// Its own section rather than rows in the hitbox list, because these are not collisions:
     /// they change how the fighter *receives* hits, they are per bone rather than per box, and
@@ -9917,27 +10267,364 @@ impl VisionaryApp {
     /// Edits go straight into `state.script`. Hurtbox statements are carried through the script
     /// rather than rebuilt from a list the way collisions are, so the script is the model here
     /// and there is no second copy to keep in step.
-    fn draw_hurtbox_section(&mut self, ui: &mut Ui) {
-        use crate::data::{ExcuteStmt, HurtTarget};
+    fn draw_hurtbox_toggle(&mut self, ui: &mut Ui) {
+        let available = self
+            .hurtbox_volumes
+            .iter()
+            .any(|volume| matches!(volume.shape, crate::data::HurtboxShape::Capsule));
+        let response = ui.add_enabled(
+            available,
+            egui::Checkbox::new(&mut self.show_hurtboxes, "Hurtboxes in viewport"),
+        );
+        if response.changed() {
+            save_hurtbox_visibility(self.show_hurtboxes);
+        }
+        let skipped = self.hurtbox_warnings.len();
+        let tooltip = if available {
+            format!(
+                "Parameter-defined capsules. NORMAL: light gray; INVINCIBLE: cyan; XLU / INTANGIBLE: amber; OFF: hidden. Super armor: violet outline; reaction-value armor: blue; damage-based armor: orange; damage-count armor: pink; unknown: magenta.{}",
+                if skipped > 0 {
+                    format!(
+                        " {skipped} parameter entr{} skipped or unsupported.",
+                        if skipped == 1 { "y was" } else { "ies were" }
+                    )
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            let reason = self
+                .hurtbox_warnings
+                .first()
+                .map(|warning| format!(" {}", warning.reason))
+                .unwrap_or_default();
+            format!(
+                "No valid hurtbox parameter data is available for this fighter.{reason} The saved preference will be kept for another fighter."
+            )
+        };
+        response.on_hover_text(tooltip);
+    }
 
-        let (states, pris) = self.state.script.to_hurtboxes();
-        if states.is_empty() && pris.is_empty() {
+    /// Inspect the selected fighter's real parameter capsules and author a per-volume status
+    /// range. The range is written as ordinary HIT_NO calls in `state.script`, which keeps the
+    /// sidebar, timeline, export, source write-back, and live preview on one schedule.
+    fn draw_hurtbox_volume_editor(&mut self, ui: &mut Ui) {
+        let Some(_move) = self.state.selected_move.as_ref() else {
             return;
+        };
+        let capsule_indices: Vec<usize> = self
+            .hurtbox_volumes
+            .iter()
+            .enumerate()
+            .filter(|(_, volume)| matches!(volume.shape, crate::data::HurtboxShape::Capsule))
+            .map(|(index, _)| index)
+            .collect();
+        if capsule_indices.is_empty() {
+            return;
+        }
+
+        if self.hurtbox_editor_selection != self.selected_hurtbox {
+            self.hurtbox_editor_selection = self.selected_hurtbox;
+            if let Some(index) = self.selected_hurtbox {
+                if let Some(volume) = self.hurtbox_volumes.get(index) {
+                    let frame = self.state.current_frame.max(FIRST_GAME_FRAME);
+                    let events = self.state.script.to_hurtbox_events();
+                    self.hurtbox_edit_status =
+                        crate::data::effective_hurtbox_status(volume, &events, frame);
+                    let target = crate::data::HurtTarget::Group(volume.index as i64);
+                    if let Some(state) =
+                        self.state
+                            .script
+                            .to_hurtboxes()
+                            .0
+                            .into_iter()
+                            .find(|state| {
+                                state.target == target
+                                    && state.active_start <= frame
+                                    && frame <= state.active_end
+                            })
+                    {
+                        self.hurtbox_edit_start = state.active_start;
+                        self.hurtbox_edit_end = if state.active_end < 9999 {
+                            state.active_end
+                        } else {
+                            frame.saturating_add(5)
+                        };
+                        self.hurtbox_edit_status =
+                            crate::data::HurtboxStatus::from_acmd_value(&state.status);
+                    } else {
+                        self.hurtbox_edit_start = frame;
+                        self.hurtbox_edit_end = frame.saturating_add(5);
+                    }
+                }
+            }
         }
 
         ui.separator();
         editor_section_heading_with_badge(
             ui,
-            "Hurtbox states",
-            "HIT_NODE, HIT_NO, WHOLE_HIT, and HIT_RESET_ALL change how a bone, hurtbox group, or the whole fighter receives hits. Each state lasts until another command changes or resets it.",
-            egui::Color32::from_rgb(255, 200, 90),
-            "normal / intangible / invincible",
+            "Parameter hurtboxes",
+            "Select a real capsule from the fighter parameter file, then author the status and the one-based frame range where it applies. Reapplying a range replaces that capsule's previous editor range instead of stacking duplicate HIT_NO commands.",
+            egui::Color32::from_rgb(215, 215, 215),
+            "select · edit · apply range",
         );
+        ui.small(
+            "Workflow: select a capsule, choose its status, enter Start and End frames, then click Apply / replace range. The capsule's parameter default is restored on the following frame.",
+        );
+
+        let events = self.state.script.to_hurtbox_events();
+        let current_frame = self.state.current_frame;
+        egui::ScrollArea::vertical()
+            .id_salt("parameter_hurtbox_list")
+            .max_height(150.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for index in &capsule_indices {
+                    let volume = &self.hurtbox_volumes[*index];
+                    let status = crate::data::effective_hurtbox_status(
+                        volume,
+                        &events,
+                        current_frame,
+                    );
+                    let selected = self.selected_hurtbox == Some(*index);
+                    let label = format!(
+                        "HIT_NO #{} · {} · {} · default {}",
+                        volume.index,
+                        volume.bone_name,
+                        status.label(),
+                        volume.default_status.label()
+                    );
+                    let response = ui.selectable_label(selected, label);
+                    if response.clicked() {
+                        self.selected_hurtbox = Some(*index);
+                    }
+                    response.on_hover_text(format!(
+                        "Parameter list index {} on bone {}. Current status: {}. Default: {}. Click to author a frame range.",
+                        volume.index,
+                        volume.bone_name,
+                        status.label(),
+                        volume.default_status.label()
+                    ));
+                }
+            });
+
+        let Some(index) = self.selected_hurtbox else {
+            ui.weak("Select a capsule above or click one in the viewport.");
+            return;
+        };
+        let Some(volume) = self.hurtbox_volumes.get(index).cloned() else {
+            self.selected_hurtbox = None;
+            return;
+        };
+
+        ui.group(|ui| {
+            ui.label(format!(
+                "Selected HIT_NO #{} · bone {} · default {}",
+                volume.index,
+                volume.bone_name,
+                volume.default_status.label()
+            ));
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Status");
+                egui::ComboBox::from_id_salt("parameter_hurtbox_status")
+                    .selected_text(self.hurtbox_edit_status.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for status in [
+                            crate::data::HurtboxStatus::Normal,
+                            crate::data::HurtboxStatus::Invincible,
+                            crate::data::HurtboxStatus::Xlu,
+                            crate::data::HurtboxStatus::Off,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.hurtbox_edit_status,
+                                status,
+                                status.label(),
+                            );
+                        }
+                    });
+                ui.label("Frames");
+                ui.add(
+                    egui::DragValue::new(&mut self.hurtbox_edit_start)
+                        .range(FIRST_GAME_FRAME..=9999),
+                );
+                ui.label("to");
+                ui.add(
+                    egui::DragValue::new(&mut self.hurtbox_edit_end)
+                        .range(FIRST_GAME_FRAME..=9999),
+                );
+                if ui
+                    .button("Apply / replace range")
+                    .on_hover_text(
+                        "Set this capsule's status from Start through End. Applying again replaces the previous range for this capsule. The parameter default is restored on the next frame.",
+                    )
+                    .clicked()
+                {
+                    let start = self.hurtbox_edit_start.max(FIRST_GAME_FRAME);
+                    let end = self.hurtbox_edit_end.max(start);
+                    let Some(status_token) = self.hurtbox_edit_status.source_token() else {
+                        self.state.status = "Unknown hurtbox statuses cannot be authored safely.".into();
+                        return;
+                    };
+                    let Some(default_token) = volume.default_status.source_token() else {
+                        self.state.status = "This parameter capsule has an unknown default status; its range was not authored.".into();
+                        return;
+                    };
+                    let target = crate::data::HurtTarget::Group(volume.index as i64);
+                    self.state.script.replace_hurtbox_range(
+                        &self.state.hurtboxes_pristine.0,
+                        target,
+                        start,
+                        end,
+                        status_token.to_string(),
+                        default_token.to_string(),
+                    );
+                    self.state.total_frames = self.state.total_frames.max(end);
+                    self.push_hurtbox_rules();
+                    self.state.status = format!(
+                        "HIT_NO #{} set to {} on frames {}–{}; previous editor range replaced and restored to {} on frame {}.",
+                        volume.index,
+                        self.hurtbox_edit_status.label(),
+                        start,
+                        end,
+                        volume.default_status.label(),
+                        end.saturating_add(1)
+                    );
+                }
+            });
+            ui.small(
+                "Known states: NORMAL (ordinary), INVINCIBLE (cannot be hit), XLU / INTANGIBLE (collision disabled), OFF (volume hidden).",
+            );
+        });
+
+        ui.group(|ui| {
+            editor_section_heading_with_badge(
+                ui,
+                "Fighter-wide damage reaction",
+                "Armor and no-reaction modes apply to the fighter as a whole, not only to the selected capsule. Choose a mode and author the one-based range here.",
+                egui::Color32::from_rgb(210, 105, 255),
+                "all capsules",
+            );
+            ui.small("This is separate from the selected capsule's NORMAL / INVINCIBLE / XLU / OFF status.");
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_id_salt("parameter_hurtbox_condition_mode")
+                    .selected_text(damage_no_reaction_mode_label(
+                        &self.hurtbox_condition_edit_mode,
+                    ))
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (token, label) in DAMAGE_NO_REACTION_MODES {
+                            ui.selectable_value(
+                                &mut self.hurtbox_condition_edit_mode,
+                                (*token).to_string(),
+                                label,
+                            );
+                        }
+                    });
+                ui.label("Value");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.hurtbox_condition_edit_value)
+                        .desired_width(55.0),
+                );
+                ui.label("Frames");
+                ui.add(
+                    egui::DragValue::new(&mut self.hurtbox_condition_edit_start)
+                        .range(FIRST_GAME_FRAME..=9999),
+                );
+                ui.label("to");
+                ui.add(
+                    egui::DragValue::new(&mut self.hurtbox_condition_edit_end)
+                        .range(FIRST_GAME_FRAME..=9999),
+                );
+                if ui
+                    .button("Apply / replace armor range")
+                    .on_hover_text(
+                        "Apply the selected damage-reaction mode for this one-based frame range. Applying again replaces the previous editor range; normal reaction is restored on the following frame.",
+                    )
+                    .clicked()
+                {
+                    let start = self
+                        .hurtbox_condition_edit_start
+                        .max(FIRST_GAME_FRAME);
+                    let end = self.hurtbox_condition_edit_end.max(start);
+                    let command = "MA_MSC_DAMAGE_DAMAGE_NO_REACTION".to_string();
+                    let armor = crate::data::DamageNoReactionCall {
+                        command: command.clone(),
+                        mode: self.hurtbox_condition_edit_mode.clone(),
+                        value: self.hurtbox_condition_edit_value.clone(),
+                    };
+                    let normal = crate::data::DamageNoReactionCall {
+                        command,
+                        mode: "*DAMAGE_NO_REACTION_MODE_NORMAL".into(),
+                        value: "0".into(),
+                    };
+                    self.state.script.replace_damage_no_reaction_range(
+                        &self.state.hurtbox_conditions_pristine,
+                        start,
+                        end,
+                        armor,
+                        normal,
+                    );
+                    self.state.total_frames = self.state.total_frames.max(end);
+                    self.push_hurtbox_rules();
+                    self.state.status = format!(
+                        "Damage reaction {} applied on frames {}–{}; previous editor range replaced and normal reaction restored on frame {}.",
+                        damage_no_reaction_mode_label(&self.hurtbox_condition_edit_mode),
+                        start,
+                        end,
+                        end.saturating_add(1)
+                    );
+                }
+            });
+            ui.small("The colored armor outline overlays every active parameter hurtbox during the selected range. Normal reaction is restored automatically on the next frame.");
+        });
+    }
+
+    fn draw_hurtbox_section(&mut self, ui: &mut Ui) {
+        ui.separator();
+        let response = egui::CollapsingHeader::new("Advanced authored hurtbox commands")
+            .id_salt("advanced_hurtbox_commands")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.small(
+                    "Use Parameter hurtboxes above for new capsule ranges. Expand this section only to inspect or edit existing HIT_NODE, HIT_NO, WHOLE_HIT, reset, priority, and damage-reaction source commands.",
+                );
+                self.draw_hurtbox_state_editor(ui);
+            });
+        response.header_response.on_hover_text(
+            "Advanced source-level hurtbox commands. New parameter capsule ranges belong in the editor above so repeated edits replace one range instead of stacking commands.",
+        );
+    }
+
+    fn draw_hurtbox_state_editor(&mut self, ui: &mut Ui) {
+        use crate::data::{DamageNoReactionCall, ExcuteStmt, HurtTarget};
+
+        // Keep the section itself visible even before a move is selected. This makes the
+        // feature discoverable in its tab and explains the one prerequisite instead of making
+        // the heading appear to be missing.
+        if self.state.selected_move.is_none() {
+            ui.weak("Select a move to inspect and edit its hurtbox states.");
+            return;
+        }
+        let (states, pris) = self.state.script.to_hurtboxes();
+        let conditions = self.state.script.to_hurtbox_conditions();
+
+        if states.is_empty() && conditions.is_empty() && pris.is_empty() {
+            if self.state.acmd_source.is_empty() {
+                ui.weak("No hurtbox commands loaded yet — press Fetch ACMD above.");
+            } else {
+                ui.weak(
+                    "This move has no HIT_NODE, HIT_NO, WHOLE_HIT, or damage-reaction commands.",
+                );
+            }
+            return;
+        }
 
         let bone_names = self.bone_names.clone();
         // Collected before the loop so an edit can be applied after it, without holding a
         // mutable borrow of the script across the immutable span list it came from.
         let mut edit: Option<(usize, ExcuteStmt)> = None;
+        let mut condition_edit: Option<(usize, DamageNoReactionCall)> = None;
 
         for state in &states {
             let active = state.active_start <= self.state.current_frame
@@ -9945,17 +10632,18 @@ impl VisionaryApp {
             ui.horizontal(|ui| {
                 // The default state is what a bone is *supposed* to be, so it is drawn quietly:
                 // in a move that toggles four bones on and off, the eight rows are half noise.
-                let color = if state.status == "HIT_STATUS_NORMAL" {
-                    egui::Color32::from_gray(140)
-                } else if active {
-                    egui::Color32::from_rgb(255, 200, 90)
+                let status_kind = crate::data::HurtboxStatus::from_acmd_value(&state.status);
+                let base = hurtbox_palette(status_kind).0;
+                let color = if active {
+                    base
                 } else {
-                    egui::Color32::from_rgb(170, 140, 70)
+                    base.gamma_multiply(0.55)
                 };
                 ui.colored_label(color, if active { "◆" } else { "◇" });
                 ui.label(format!(
-                    "{} [{}-{}]",
+                    "{} · {} [{}-{}]",
                     state.target.label(),
+                    status_kind.label(),
                     state.active_start,
                     state.active_end
                 ));
@@ -9965,7 +10653,7 @@ impl VisionaryApp {
                 let mut changed = false;
 
                 egui::ComboBox::from_id_salt(("hurt_status", state.site))
-                    .selected_text(hit_status_short(&status))
+                    .selected_text(hit_status_label(&status))
                     .width(110.0)
                     .show_ui(ui, |ui| {
                         for (name, _) in crate::param_labels::HIT_STATUS {
@@ -9973,14 +10661,14 @@ impl VisionaryApp {
                                 .selectable_value(
                                     &mut status,
                                     (*name).into(),
-                                    hit_status_short(name),
+                                    hit_status_label(name),
                                 )
                                 .changed();
                         }
                     });
 
                 match &mut target {
-                    HurtTarget::Bone(bone) => {
+                    crate::data::HurtTarget::Bone(bone) => {
                         if bone_names.is_empty() {
                             changed |= ui.text_edit_singleline(bone).changed();
                         } else {
@@ -10014,6 +10702,108 @@ impl VisionaryApp {
             });
         }
 
+        for condition in &conditions {
+            let active = condition.active_start <= self.state.current_frame
+                && self.state.current_frame <= condition.active_end;
+            let color = hurtbox_condition_palette(&condition.condition)
+                .unwrap_or_else(|| egui::Color32::from_gray(140));
+            let source_call = self
+                .state
+                .script
+                .damage_no_reaction_stmt(condition.site)
+                .cloned();
+            ui.horizontal(|ui| {
+                ui.colored_label(color, if active { "◆" } else { "◇" });
+                ui.label(format!(
+                    "{} [{}-{}]",
+                    condition.condition.label(),
+                    condition.active_start,
+                    condition.active_end
+                ));
+
+                let Some(mut call) = source_call else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 100, 180),
+                        "source unavailable",
+                    )
+                    .on_hover_text(
+                        "The condition span could not be mapped back to its source call; no edit was applied.",
+                    );
+                    return;
+                };
+
+                let mut changed = false;
+                let mode_key = damage_no_reaction_mode_key(&call.mode);
+                ui.label("Mode");
+                if DAMAGE_NO_REACTION_MODES
+                    .iter()
+                    .any(|(token, _)| damage_no_reaction_mode_key(token) == mode_key)
+                {
+                    egui::ComboBox::from_id_salt(("hurt_condition_mode", condition.site))
+                        .selected_text(damage_no_reaction_mode_label(&call.mode))
+                        .width(125.0)
+                        .show_ui(ui, |ui| {
+                            for (token, label) in DAMAGE_NO_REACTION_MODES {
+                                changed |= ui
+                                    .selectable_value(&mut call.mode, token.to_string(), label)
+                                    .changed();
+                            }
+                        });
+                } else {
+                    // Keep an unknown mode editable as raw source rather than forcing it into a
+                    // known enum and silently changing a future game-build command.
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut call.mode)
+                                .desired_width(125.0)
+                                .hint_text("raw mode"),
+                        )
+                        .changed();
+                }
+
+                let is_threshold_mode = matches!(
+                    mode_key.as_str(),
+                    "DAMAGE_NO_REACTION_MODE_REACTION_VALUE"
+                        | "DAMAGE_NO_REACTION_MODE_DAMAGE_POWER"
+                        | "DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT"
+                );
+                ui.label(if is_threshold_mode {
+                    "Threshold"
+                } else {
+                    "Value"
+                });
+                if is_threshold_mode {
+                    if let Ok(mut threshold) = call.value.trim().parse::<f32>() {
+                        if threshold.is_finite() {
+                            if ui
+                                .add(egui::DragValue::new(&mut threshold).speed(0.1))
+                                .changed()
+                            {
+                                call.value = threshold.to_string();
+                                changed = true;
+                            }
+                        } else {
+                            changed |= ui.text_edit_singleline(&mut call.value).changed();
+                        }
+                    } else {
+                        changed |= ui.text_edit_singleline(&mut call.value).changed();
+                    }
+                } else {
+                    // The normal and always modes conventionally use zero, but retain an
+                    // editable value field so nonstandard build-specific payloads round-trip.
+                    changed |= ui.text_edit_singleline(&mut call.value).changed();
+                }
+
+                if changed {
+                    condition_edit = Some((condition.site, call));
+                }
+            })
+            .response
+            .on_hover_text(
+                "A fighter-wide damage-reaction condition. Select normal reaction, super armor, reaction-value armor, damage-based armor, damage-count armor, or the explicit no-reaction mode and edit its value; unknown modes remain raw and editable. The colored outline is drawn over every active parameter hurtbox; the underlying fill still shows normal, invincible, or intangible status.",
+            );
+        }
+
         for pri in &pris {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(150, 200, 255), "▮");
@@ -10039,6 +10829,15 @@ impl VisionaryApp {
         if let Some((site, replacement)) = edit {
             if let Some(stmt) = self.state.script.hurt_stmt_mut(site) {
                 *stmt = replacement;
+                self.push_hurtbox_rules();
+            }
+        }
+        if let Some((site, replacement)) = condition_edit {
+            if let Some(call) = self.state.script.damage_no_reaction_stmt_mut(site) {
+                *call = replacement;
+                // The source/export script and the live armor rule store are updated from the
+                // same typed call, so the viewport, generated project, and running game retain
+                // one condition schedule.
                 self.push_hurtbox_rules();
             }
         }
@@ -10122,7 +10921,9 @@ impl VisionaryApp {
                             let effect = &self.state.effects[i];
                             ui.horizontal(|ui| {
                                 // Orange = follows bone, yellow = one-shot, gray = disabled
-                                let dot_color = if effect.disabled {
+                                let dot_color = if is_null_effect_sentinel(effect) {
+                                    egui::Color32::from_gray(125)
+                                } else if effect.disabled {
                                     egui::Color32::DARK_GRAY
                                 } else if effect.control.is_some() {
                                     egui::Color32::from_rgb(190, 120, 255)
@@ -10140,7 +10941,12 @@ impl VisionaryApp {
                                 }
                                 if ui
                                     .selectable_label(selected, text)
-                                    .on_hover_text(if effect.control.is_some() {
+                                    .on_hover_text(if is_null_effect_sentinel(effect) {
+                                        format!(
+                                            "{} · explicit null no-op retained from source; it has no graphic to render",
+                                            effect.spawn_func
+                                        )
+                                    } else if effect.control.is_some() {
                                         format!(
                                             "{} · event at frame {}",
                                             effect.spawn_func, effect.active_start
@@ -10175,6 +10981,7 @@ impl VisionaryApp {
                 )
                 .clicked();
             if add_color {
+                self.pending_capture = None;
                 let call = crate::data::EffectCall {
                     effect_name: String::new(),
                     effect_name_alt: None,
@@ -10192,6 +10999,7 @@ impl VisionaryApp {
                     disabled: false,
                     extra_args: None,
                     raw_line: None,
+                    trail_command: None,
                     trail_off: None,
                     trail_bone2: None,
                     rate: None,
@@ -10230,6 +11038,7 @@ impl VisionaryApp {
             }
 
             if ui.small_button("＋ Add effect call").clicked() {
+                self.pending_capture = None;
                 let call = crate::data::EffectCall {
                     effect_name: "sys_hit_elec".into(),
                     effect_name_alt: None,
@@ -10245,6 +11054,7 @@ impl VisionaryApp {
                     // No originating macro — exports emit the plain EFFECT_FOLLOW form.
                     extra_args: None,
                     raw_line: None,
+                    trail_command: None,
                     trail_off: None,
                     trail_bone2: None,
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
@@ -10318,7 +11128,7 @@ impl VisionaryApp {
                     // A trail is placed by the joints it names — its call has no position,
                     // rotation, or scale arguments at all. Offering those fields let the user
                     // drag values that no export and no write-back could ever put anywhere.
-                    let is_trail = ec.raw_line.is_some();
+                    let is_trail = effect_call_is_trail(ec);
                     // A colour command tints the model or the screen. It has no graphic, joint,
                     // or transform, so the rows above the colour are suppressed rather than
                     // shown holding the empty strings and zeroes it stores for them.
@@ -10392,15 +11202,7 @@ impl VisionaryApp {
                             });
                             // Owned, because the colour arm below writes the picked command back
                             // into the very field this reads.
-                            let spawn_command = if ec.spawn_func.is_empty() {
-                                if ec.follows_bone {
-                                    "EFFECT_FOLLOW (legacy)".to_string()
-                                } else {
-                                    "EFFECT (legacy)".to_string()
-                                }
-                            } else {
-                                ec.spawn_func.clone()
-                            };
+                            let spawn_command = effect_spawn_command_name(ec);
                             ui.horizontal(|ui| {
                                 // The colour commands differ in which arguments they take, so
                                 // picking one is a change of command rather than of value —
@@ -10450,13 +11252,40 @@ impl VisionaryApp {
                                             "A point command on the effect timeline. It does not
                                              start or end an effect spawn.",
                                         );
-                                } else {
+                                } else if is_trail {
                                     ui.label(egui::RichText::new(spawn_command).monospace())
                                         .on_hover_text(
-                                            "The exact ACMD function this spawn came from. Its \
-                                             alpha, attribute, contact, random, flip, and no-stop \
-                                             arguments are preserved both when the spawn is \
-                                             replayed live and when the mod is exported.",
+                                            "A sword-trail command. Trails have a different native \
+                                             argument layout and cannot be swapped with an effect \
+                                             spawn family here.",
+                                        );
+                                } else {
+                                    let mut command = spawn_command.clone();
+                                    egui::ComboBox::from_id_salt("effect_spawn_command")
+                                        .selected_text(&command)
+                                        .width(220.0)
+                                        .show_ui(ui, |ui| {
+                                            for layout in crate::acmd::EFFECT_SPAWN_LAYOUTS {
+                                                ui.selectable_value(
+                                                    &mut command,
+                                                    layout.name.to_string(),
+                                                    layout.name,
+                                                );
+                                            }
+                                        });
+                                    if command != spawn_command
+                                        && set_effect_spawn_command(ec, &command)
+                                    {
+                                        changed = true;
+                                        respawn_needed = true;
+                                    }
+                                    ui.label("swap")
+                                        .on_hover_text(
+                                            "Choose any supported ACMD effect spawn family. The \
+                                             transform is kept; flip graphics, follow lifetime, \
+                                             and variant-specific arguments are reshaped with safe \
+                                             defaults. The export and live preview use the selected \
+                                             command. Source sync reports this structural change.",
                                         );
                                 }
                                 // A flipped spawn carries a second graphic that has no field of
@@ -11207,14 +12036,32 @@ impl VisionaryApp {
                             // One-shot effects have no meaningful "end" (they play their own
                             // lifetime), so only follow effects show an end frame — otherwise the
                             // row showed confusing "30-30" or "30-9999" ranges.
+                            ec.normalize_timing();
                             ui.label(if is_control { "Event frame" } else { "Spawn frame" });
                             ui.horizontal(|ui| {
-                                changed |=
-                                    ui.add(egui::DragValue::new(&mut ec.active_start)).changed();
+                                let start_changed = ui
+                                    .add(
+                                        egui::DragValue::new(&mut ec.active_start)
+                                            .range(FIRST_GAME_FRAME..=u32::MAX),
+                                    )
+                                    .changed();
+                                if start_changed {
+                                    ec.active_start = ec.active_start.max(FIRST_GAME_FRAME);
+                                    ec.normalize_timing();
+                                }
+                                changed |= start_changed;
                                 if ec.follows_bone {
                                     ui.label("→ until");
-                                    changed |=
-                                        ui.add(egui::DragValue::new(&mut ec.active_end)).changed();
+                                    let end_changed = ui
+                                        .add(
+                                            egui::DragValue::new(&mut ec.active_end)
+                                                .range(FIRST_GAME_FRAME..=u32::MAX),
+                                        )
+                                        .changed();
+                                    if end_changed {
+                                        ec.active_end = ec.active_end.max(FIRST_GAME_FRAME);
+                                    }
+                                    changed |= end_changed;
                                 } else {
                                     ui.label(
                                         egui::RichText::new("(one-shot)")
@@ -11364,8 +12211,9 @@ impl VisionaryApp {
                 let mut duplicate: Option<crate::data::EffectCall> = None;
                 ui.horizontal(|ui| {
                     if pristine.is_some() && ui.small_button("Reset to original").clicked() {
+                        self.pending_capture = None;
                         if let Some(p) = &pristine {
-                            self.state.effects[i] = p.clone();
+                            self.state.effects[i] = p.clone().normalized_timing();
                         }
                         if let Some(mv) = self.current_move_key() {
                             if let Some(edits) = self.state.effect_call_edits.get_mut(&mv) {
@@ -11386,8 +12234,10 @@ impl VisionaryApp {
                     }
                 });
                 if let Some(mut call) = duplicate {
+                    self.pending_capture = None;
                     // A duplicate is a brand-new (authored) call, never a modify of pristine.
                     call.disabled = false;
+                    call.normalize_timing();
                     self.state.effects.push(call.clone());
                     let new_idx = self.state.effects.len() - 1;
                     if let Some(mv) = self.current_move_key() {
@@ -11736,6 +12586,7 @@ impl VisionaryApp {
             key,
             snapshot.expression_script_edit.as_deref(),
         );
+        self.normalize_effect_call_storage();
         self.hitbox_watch = Some((key.to_string(), self.state.hitboxes.clone()));
         self.hitbox_dirty_at = None;
         self.refresh_current_live_rules();
@@ -12098,6 +12949,9 @@ impl VisionaryApp {
     }
 
     fn apply_effect_call_edits_to_current(&mut self) {
+        for call in &mut self.state.effects_pristine {
+            call.normalize_timing();
+        }
         self.state.effects = self.state.effects_pristine.clone();
         let Some(mv) = self.current_move_key() else {
             return;
@@ -12109,16 +12963,45 @@ impl VisionaryApp {
             match &edit.op {
                 crate::data::EffectCallOp::Modify(call) => {
                     if let Some(slot) = self.state.effects.get_mut(edit.index) {
-                        *slot = call.clone();
+                        *slot = call.clone().normalized_timing();
                     }
                 }
                 crate::data::EffectCallOp::Add(call) => {
-                    self.state.effects.push(call.clone());
+                    self.state.effects.push(call.clone().normalized_timing());
                 }
                 crate::data::EffectCallOp::Remove => {
                     if let Some(slot) = self.state.effects.get_mut(edit.index) {
                         slot.disabled = true;
                     }
+                }
+            }
+        }
+    }
+
+    /// Repair legacy one-shot ranges in every persisted effect snapshot before it is saved or
+    /// reapplied. This is intentionally a data-boundary operation rather than a project-schema
+    /// migration: old JSON remains readable, and the next save writes the canonical values.
+    fn normalize_effect_call_storage(&mut self) {
+        for call in &mut self.state.effects {
+            call.normalize_timing();
+        }
+        for call in &mut self.state.effects_pristine {
+            call.normalize_timing();
+        }
+        for calls in self.state.effect_call_full.values_mut() {
+            for call in calls {
+                call.normalize_timing();
+            }
+        }
+        for edits in self.state.effect_call_edits.values_mut() {
+            for edit in edits {
+                match &mut edit.op {
+                    crate::data::EffectCallOp::Modify(call)
+                    | crate::data::EffectCallOp::Add(call) => call.normalize_timing(),
+                    crate::data::EffectCallOp::Remove => {}
+                }
+                if let Some(pristine) = &mut edit.pristine {
+                    pristine.normalize_timing();
                 }
             }
         }
@@ -12148,6 +13031,8 @@ impl VisionaryApp {
             self.state.hitboxes_pristine = record.hitboxes_pristine;
         }
         let source_reverse = self.state.script.to_reverse_lr_events();
+        let source_hurtboxes = self.state.script.to_hurtboxes();
+        let source_hurtbox_conditions = self.state.script.to_hurtbox_conditions();
         let source_speed_ex = self.state.script.to_speed_ex_events();
         let source_speed = self.state.script.to_speed_events();
         let source_add_speed_no_limit = self.state.script.to_add_speed_no_limit_events();
@@ -12182,6 +13067,11 @@ impl VisionaryApp {
         // baseline already loaded from the current move when one exists. A live-only move has
         // no source baseline, so its saved script is its own baseline until a fresh capture.
         if had_source_script {
+            // The saved record is the edited script, but the source script remains the live
+            // baseline. Preserve its hurtbox spans so newly authored HIT_NO ranges can be
+            // represented as live injections instead of being mistaken for pristine calls.
+            self.state.hurtboxes_pristine = source_hurtboxes;
+            self.state.hurtbox_conditions_pristine = source_hurtbox_conditions;
             self.state.reverse_lr_pristine = source_reverse;
             self.state.speed_ex_pristine = source_speed_ex;
             self.state.speed_pristine = source_speed;
@@ -12235,6 +13125,7 @@ impl VisionaryApp {
 
     fn build_project(&mut self) -> crate::mod_project::ModProjectFile {
         use crate::mod_project::ModProjectFile;
+        self.normalize_effect_call_storage();
         self.sync_eff_mods_from_editor();
         let mut project = ModProjectFile {
             version: crate::mod_project::PROJECT_VERSION,
@@ -12736,9 +13627,11 @@ impl VisionaryApp {
         }
 
         // Re-apply to what's currently loaded and push it live.
+        self.normalize_effect_call_storage();
         self.apply_saved_hitbox_edits_to_current();
         self.apply_effect_call_edits_to_current();
         self.push_hitbox_rules();
+        self.push_hurtbox_rules();
         self.push_reverse_lr_rules();
         self.push_speed_rules();
         self.push_speed_ex_rules();
@@ -13332,7 +14225,13 @@ impl VisionaryApp {
                     && self.state.hitboxes.is_empty()
                     && self.state.effects.is_empty();
                 let live_unedited = self.state.acmd_source == "Live capture"
-                    && self.state.hitboxes == self.state.hitboxes_pristine;
+                    && self.state.hitboxes == self.state.hitboxes_pristine
+                    // Effect timing edits are live state too. The old check only compared
+                    // hitboxes, so playing a move after changing an effect could auto-adopt a
+                    // fresh capture and make the effect panel appear to revert to its source
+                    // timing. Explicit Live fetch still works; automatic settling is only for
+                    // an actually untouched live snapshot.
+                    && self.state.effects == self.state.effects_pristine;
                 if empty || live_unedited {
                     self.pending_capture = Some(PendingCapture {
                         motion,
@@ -13442,7 +14341,20 @@ impl VisionaryApp {
         // "Capture has no ATTACK/EFFECT lines". That is the move-list filter's mistake again: a
         // guard that was an accurate summary when it was written, and became a silent drop when
         // a new family arrived.
-        let hurt = Self::script_from_captures(&captures, &bone_rev);
+        // The live stream also contains direct module observations. Those hooks receive only a
+        // fighter boma, motion, and frame; they do not know whether a `WorkModule::on_flag` or
+        // `KineticModule::*` call came from `game_`, status code, an article, or an unrelated
+        // runtime transition. Keep the raw capture available for matching edits against a
+        // fetched source, but do not promote those unscoped observations into a capture-only
+        // editable script. Otherwise live fetch fills the editor with opaque runtime flags that
+        // are not source ACMD and were never present in the GitHub function.
+        let unscoped_live_observation_count = captures
+            .iter()
+            .filter(|line| Self::is_unscoped_live_script_func(&line.func))
+            .count();
+        let hurt = Self::live_script_from_captures(&captures, &bone_rev);
+        let typed_hurt = Self::typed_hurtbox_script_from_captures(&captures, &bone_rev);
+        let captured_typed_hurt_count = Self::top_level_hurtbox_statements(&typed_hurt).len();
         let captured_sounds = Self::sound_script_from_captures(&captures, &self.state.labels);
         let n_snd = captured_sounds.to_sound_events().len();
         let captured_expressions = Self::expression_script_from_captures(&captures);
@@ -13510,6 +14422,7 @@ impl VisionaryApp {
         // point is to distinguish "the capture did not contain any" from "it contained some and
         // they were refused below".
         let n_hurt = hurt.to_hurtboxes().0.len();
+        let n_hurt_conditions = hurt.to_hurtbox_conditions().len();
         let n_mod = hurt.to_attack_mods().len();
         let n_rate = hurt.motion_rate_sites().len();
         let n_work_module_inc_int = hurt.to_work_module_inc_int_events().len();
@@ -13523,8 +14436,50 @@ impl VisionaryApp {
         // would drop every raw line the export carries verbatim. An empty script is the case
         // this is for: a move captured live has no file anywhere.
         let script_kept = !self.state.script.stmts.is_empty();
+        // Direct WorkModule/Kinetic hooks run on the fighter module, not on a category-tagged
+        // ACMD function. When a GitHub/project body is loaded but has no parsed game statements
+        // (for example an effect-only body), accepting those lines would turn unrelated runtime
+        // status flags into source ACMD. The capture-only script above already filters those
+        // observations; this gate additionally keeps a loaded source authoritative and reports
+        // the limitation below.
+        let can_adopt_live_script = Self::live_capture_can_replace_script(
+            script_kept,
+            &self.state.acmd_source,
+            &self.state.loaded_body,
+        );
+        let mut live_script_refused = false;
+        let mut live_typed_hurt_adopted = false;
+        let mut live_typed_hurt_merge_refused = false;
         if !script_kept && !hurt.stmts.is_empty() {
-            self.state.set_script(hurt);
+            if !can_adopt_live_script {
+                if typed_hurt.stmts.is_empty() {
+                    live_script_refused = true;
+                } else {
+                    // Typed HIT_NODE/HIT_NO/WHOLE_HIT/DAMAGE_NO_REACTION calls have a
+                    // category and argument contract of their own. Adopt just that safe subset
+                    // from an effect-only fetched body, while leaving unscoped direct module
+                    // observations out of the source.
+                    self.state.set_script(typed_hurt);
+                    live_typed_hurt_adopted = true;
+                    live_script_refused = true;
+                }
+            } else {
+                self.state.set_script(hurt);
+            }
+        } else if script_kept && !typed_hurt.stmts.is_empty() {
+            // A fetched game_ script may contain attacks but omit special hurtbox calls because
+            // the source mirror is incomplete. Merge only a flat, unambiguous typed subset so
+            // the live fetch does not replace the rest of the source or promote direct flags.
+            match Self::merge_typed_hurtbox_capture(&mut self.state.script, &typed_hurt) {
+                Ok(added) if added > 0 => {
+                    self.state.hurtboxes_pristine = self.state.script.to_hurtboxes();
+                    self.state.hurtbox_conditions_pristine =
+                        self.state.script.to_hurtbox_conditions();
+                    live_typed_hurt_adopted = true;
+                }
+                Ok(_) => {}
+                Err(()) => live_typed_hurt_merge_refused = true,
+            }
         }
         // Guarded on the *sound* script rather than on `state.script`, because the two are
         // fetched independently: a move can have a real `game_` function and no `sound_` one,
@@ -13539,11 +14494,14 @@ impl VisionaryApp {
             self.apply_effect_call_edits_to_current();
             self.push_effect_rules();
         }
-        self.state.acmd_source = "Live capture".into();
+        if can_adopt_live_script {
+            self.state.acmd_source = "Live capture".into();
+        }
         self.acmd_error = None;
         if self.apply_saved_hitbox_edits_to_current() {
             self.push_hitbox_rules();
         }
+        self.push_hurtbox_rules();
         self.push_reverse_lr_rules();
         self.push_speed_rules();
         self.push_speed_ex_rules();
@@ -13627,8 +14585,8 @@ impl VisionaryApp {
         // the game not run any, or did the editor not read them", and hiding it to keep the line
         // short is what made this invisible.
         let mut status = format!(
-            "Loaded {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) + {n_expr} \
-             expression call(s) + {n_hurt} hurtbox state(s) + {n_mod} tuning call(s) + {n_rate} \
+            "Captured {n_hb} hitbox(es) + {n_fx} effect call(s) + {n_snd} sound(s) + {n_expr} \
+             expression call(s) + {n_hurt} hurtbox state(s) + {n_hurt_conditions} damage-reaction condition(s) + {n_mod} tuning call(s) + {n_rate} \
              rate call(s) + {n_reverse_lr} facing reversal(s) + {n_speed} direct-speed point(s) \
              + {n_speed_ex} reserve-speed point(s) \
              + {n_add_speed_no_limit} speed-addition point(s) + {n_correct} correction point(s) \
@@ -13642,11 +14600,13 @@ impl VisionaryApp {
              + {n_motion_module_set_rate} direct MotionModule::set_rate point(s) \
              + {n_motion_module_set_helper_calculation} direct MotionModule::set_helper_calculation point(s) \
              + {n_motion_module_set_rate_partial} direct MotionModule::set_rate_partial point(s) \
-             + {n_work_module_inc_int} WorkModule increment point(s) + {n_work_module_set} WorkModule value-set point(s) from live game capture"
+             + {n_work_flag} WorkModule flag observation(s) + {n_work_transition_term} transition-term observation(s) \
+             + {n_work_module_inc_int} WorkModule increment observation(s) + {n_work_module_set} WorkModule value-set observation(s) from live game capture"
         );
         // The refusal above is silent otherwise, and it is the one that explains a capture whose
         // script-borne families are all present in the count and absent from the panel.
         if script_kept
+            && !live_typed_hurt_adopted
             && (n_hurt
                 + n_mod
                 + n_rate
@@ -13667,13 +14627,30 @@ impl VisionaryApp {
                 + n_motion_module_set_rate
                 + n_motion_module_set_helper_calculation
                 + n_motion_module_set_rate_partial
+                + n_work_flag
+                + n_work_transition_term
                 + n_work_module_inc_int
                 + n_work_module_set)
                 > 0
         {
             status.push_str(
-                " — kept the loaded script, so its hurtboxes, tuning, rates, partial rates, helper-calculation, WorkModule value-set and movement points are the script's, \
+                " — kept the loaded script, so its hurtboxes, tuning, rates, partial rates, helper-calculation, WorkModule flags, transition terms, value-set and movement points are the script's, \
                  not the capture's",
+            );
+        }
+        if live_script_refused {
+            status.push_str(
+                " — the loaded source has no parsed game script; runtime WorkModule/movement calls were not adopted because the live hook cannot identify their ACMD function",
+            );
+        }
+        if live_typed_hurt_adopted {
+            status.push_str(&format!(
+                " — adopted {captured_typed_hurt_count} typed special-hurtbox call(s) from the live capture; unscoped runtime flags remain source-only"
+            ));
+        }
+        if live_typed_hurt_merge_refused {
+            status.push_str(
+                " — typed special-hurtbox capture was not merged because the fetched game script has branches, loops, waits, rate timing, or raw statements",
             );
         }
         if let Some(note) = self.capture_vs_script_offset() {
@@ -13684,7 +14661,26 @@ impl VisionaryApp {
             status.push_str(" — ");
             status.push_str(&note);
         }
+        if unscoped_live_observation_count > 0 {
+            status.push_str(&format!(
+                " — omitted {unscoped_live_observation_count} unscoped direct-module observation(s) from the live script"
+            ));
+        }
         self.state.status = status;
+    }
+
+    /// A live script may replace the current script only when there is no parsed script and no
+    /// loaded source body whose ACMD category is unknown to the capture wire. Direct module hooks
+    /// carry fighter/motion/frame, but not whether a call came from `game_`, `effect_`, status
+    /// code, or another runtime path; an effect-only source therefore cannot safely be filled
+    /// with every WorkModule flag seen on the fighter. Capture-only adoption separately filters
+    /// those direct observations before this gate is consulted.
+    fn live_capture_can_replace_script(
+        script_kept: bool,
+        _source_label: &str,
+        loaded_body: &str,
+    ) -> bool {
+        !script_kept && loaded_body.trim().is_empty()
     }
 
     /// Compare the just-loaded live capture against the GitHub script for the same move and
@@ -14200,6 +15196,7 @@ impl VisionaryApp {
                     .collect::<Option<Vec<_>>>()
             }),
             raw_line: None,
+            trail_command: None,
             trail_off: None,
             trail_bone2: None,
             // A spawn call carries none of the seven modifiers of its own — each arrives as its
@@ -14220,6 +15217,66 @@ impl VisionaryApp {
             // every conditional — the branch not taken produced no call to capture. So there is
             // no guard to record, and recording one would be worse than recording none: it
             // would re-gate a spawn that this capture proves already ran.
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        })
+    }
+
+    /// AFTER_IMAGE capture -> an open trail call. The capture keeps the original typed payload
+    /// in `raw_line` for export and uses `trail_command` to retain which native dispatcher must
+    /// be replayed when a trail is retimed.
+    fn trail_call_from_capture(
+        func: &str,
+        args: &[crate::game_link::LuaArgWire],
+        frame: f32,
+        bone_rev: &HashMap<u64, String>,
+        eff_rev: &HashMap<u64, String>,
+    ) -> Option<crate::data::EffectCall> {
+        if !trail_capture_command(func) || args.len() < 9 {
+            return None;
+        }
+        let effect_hash = args.first().and_then(|arg| arg.as_hash())?;
+        let bone_hash = args.get(3).and_then(|arg| arg.as_hash())?;
+        let bone2_hash = args.get(7).and_then(|arg| arg.as_hash());
+        let start = Self::motion_to_script_frame(frame);
+        Some(crate::data::EffectCall {
+            effect_name: eff_rev
+                .get(&effect_hash)
+                .cloned()
+                .unwrap_or_else(|| format!("{effect_hash:#x}")),
+            effect_name_alt: None,
+            spawn_func: "AFTER_IMAGE_ON".into(),
+            bone_name: bone_rev
+                .get(&bone_hash)
+                .cloned()
+                .unwrap_or_else(|| format!("{bone_hash:#x}")),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: true,
+            active_start: start,
+            active_end: 9999,
+            disabled: false,
+            extra_args: None,
+            raw_line: trail_capture_raw_line(func, args),
+            trail_command: Some(func.to_string()),
+            trail_off: None,
+            trail_bone2: bone2_hash.and_then(|hash| {
+                bone_rev
+                    .get(&hash)
+                    .cloned()
+                    .or_else(|| Some(format!("{hash:#x}")))
+            }),
+            rate: None,
+            work_int: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            control: None,
             guard: None,
             leading: Vec::new(),
             trailing: Vec::new(),
@@ -14272,6 +15329,7 @@ impl VisionaryApp {
             disabled: false,
             extra_args: None,
             raw_line: None,
+            trail_command: None,
             trail_off: None,
             trail_bone2: None,
             rate: None,
@@ -14340,6 +15398,7 @@ impl VisionaryApp {
             disabled: false,
             extra_args: None,
             raw_line: None,
+            trail_command: None,
             trail_off: None,
             trail_bone2: None,
             rate: None,
@@ -14508,6 +15567,160 @@ impl VisionaryApp {
         hitboxes
     }
 
+    /// The capture stream is shared by every ACMD category. These are the typed hurtbox calls
+    /// that are safe to adopt even when the fetched source is an effect-only body: unlike direct
+    /// WorkModule/Kinetic observations, their macro name and argument shape identify the family
+    /// that emitted them.
+    fn is_typed_hurtbox_capture_func(func: &str) -> bool {
+        matches!(
+            func,
+            "HIT_NODE"
+                | "HIT_NO"
+                | "WHOLE_HIT"
+                | "HIT_RESET_ALL"
+                | "COL_PRI"
+                | "COL_NORMAL"
+                | "DAMAGE_NO_REACTION"
+        )
+    }
+
+    /// Direct module hooks have no ACMD-category provenance in the capture wire. Their values
+    /// are still retained in the session capture store so a GitHub/project source call can use
+    /// them as a live donor for a deliberate edit, but a capture-only live fetch must not turn
+    /// them into source statements. `::` is the capture naming boundary: typed ACMD primitives
+    /// (`HIT_NODE`, `FT_MOTION_RATE`, `ATK_POWER`, and so on) use their macro name, while the
+    /// unscoped WorkModule/KineticModule/MotionModule and other direct bindings retain their
+    /// qualified Rust name.
+    fn is_unscoped_live_script_func(func: &str) -> bool {
+        func.contains("::")
+    }
+
+    fn live_script_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+        bone_rev: &HashMap<u64, String>,
+    ) -> crate::data::AcmdScript {
+        let scoped: Vec<_> = captures
+            .iter()
+            .filter(|line| !Self::is_unscoped_live_script_func(&line.func))
+            .cloned()
+            .collect();
+        Self::script_from_captures(&scoped, bone_rev)
+    }
+
+    fn typed_hurtbox_script_from_captures(
+        captures: &[crate::game_link::CaptureLine],
+        bone_rev: &HashMap<u64, String>,
+    ) -> crate::data::AcmdScript {
+        let typed: Vec<_> = captures
+            .iter()
+            .filter(|line| Self::is_typed_hurtbox_capture_func(&line.func))
+            .cloned()
+            .collect();
+        Self::script_from_captures(&typed, bone_rev)
+    }
+
+    /// Top-level typed statements are the only shape safe to merge into an already fetched
+    /// game script. A branch, loop, wait, motion-rate change, or raw statement can change which
+    /// observed call belongs to which source path, so live fetch reports it instead of guessing.
+    fn flat_hurtbox_merge_allowed(script: &crate::data::AcmdScript) -> bool {
+        script.stmts.iter().all(|stmt| match stmt {
+            crate::data::AcmdStmt::Frame(_) => true,
+            crate::data::AcmdStmt::Excute(inner) => inner
+                .iter()
+                .all(|statement| !matches!(statement, crate::data::ExcuteStmt::Raw(_))),
+            _ => false,
+        })
+    }
+
+    fn safe_hurtbox_statement(stmt: &crate::data::ExcuteStmt) -> bool {
+        matches!(
+            stmt,
+            crate::data::ExcuteStmt::HitStatus { .. }
+                | crate::data::ExcuteStmt::HitResetAll
+                | crate::data::ExcuteStmt::ColPri(_)
+                | crate::data::ExcuteStmt::ColNormal
+                | crate::data::ExcuteStmt::DamageNoReaction(_)
+        )
+    }
+
+    fn top_level_hurtbox_statements(
+        script: &crate::data::AcmdScript,
+    ) -> Vec<(u32, crate::data::ExcuteStmt)> {
+        let mut frame = FIRST_GAME_FRAME;
+        let mut out = Vec::new();
+        for stmt in &script.stmts {
+            match stmt {
+                crate::data::AcmdStmt::Frame(value) => {
+                    frame = crate::data::script_frame(*value);
+                }
+                crate::data::AcmdStmt::Excute(inner) => {
+                    out.extend(
+                        inner
+                            .iter()
+                            .filter(|statement| Self::safe_hurtbox_statement(statement))
+                            .cloned()
+                            .map(|statement| (frame, statement)),
+                    );
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn same_hurtbox_statement(
+        left: &crate::data::ExcuteStmt,
+        right: &crate::data::ExcuteStmt,
+    ) -> bool {
+        use crate::data::ExcuteStmt;
+        match (left, right) {
+            (
+                ExcuteStmt::HitStatus {
+                    target: left_target,
+                    status: left_status,
+                },
+                ExcuteStmt::HitStatus {
+                    target: right_target,
+                    status: right_status,
+                },
+            ) => left_target == right_target && left_status == right_status,
+            (ExcuteStmt::HitResetAll, ExcuteStmt::HitResetAll) => true,
+            (ExcuteStmt::ColPri(left), ExcuteStmt::ColPri(right)) => left == right,
+            (ExcuteStmt::ColNormal, ExcuteStmt::ColNormal) => true,
+            (ExcuteStmt::DamageNoReaction(left), ExcuteStmt::DamageNoReaction(right)) => {
+                left == right
+            }
+            _ => false,
+        }
+    }
+
+    /// Merge only newly observed typed hurtbox calls into a flat fetched game script. This keeps
+    /// attacks and unrelated source statements intact while making a live-only HIT_NODE/HIT_NO
+    /// line available to the same editor, export, and live-rule paths as a parsed source call.
+    /// Returns `Err(())` for an ambiguous source shape.
+    fn merge_typed_hurtbox_capture(
+        source: &mut crate::data::AcmdScript,
+        captured: &crate::data::AcmdScript,
+    ) -> Result<usize, ()> {
+        if !Self::flat_hurtbox_merge_allowed(source) || !Self::flat_hurtbox_merge_allowed(captured)
+        {
+            return Err(());
+        }
+        let mut existing = Self::top_level_hurtbox_statements(source);
+        let mut added = 0;
+        for (frame, statement) in Self::top_level_hurtbox_statements(captured) {
+            if existing.iter().any(|(existing_frame, existing_stmt)| {
+                *existing_frame == frame && Self::same_hurtbox_statement(existing_stmt, &statement)
+            }) {
+                continue;
+            }
+            source.insert_hurtbox_statement_at_frame(frame, statement.clone());
+            existing.push((frame, statement));
+            added += 1;
+        }
+        Ok(added)
+    }
+
     /// Rebuild a script's non-collision statements from a live capture.
     ///
     /// These are not resolved into spans here the way hitboxes are, because a span is derived
@@ -14558,13 +15771,21 @@ impl VisionaryApp {
                 )
             };
             match line.func.as_str() {
-                "HIT_NODE" => Some(ExcuteStmt::HitStatus {
-                    // A bone whose name this dump does not know cannot be written back as a
-                    // `Hash40::new("…")`, so the call is dropped rather than exported against
-                    // the wrong bone.
-                    target: HurtTarget::Bone(bone_rev.get(&line.args.first()?.as_hash()?)?.clone()),
-                    status: status(1)?,
-                }),
+                "HIT_NODE" => {
+                    let hash = line.args.first()?.as_hash()?;
+                    Some(ExcuteStmt::HitStatus {
+                        // A live dump can contain a real bone that is absent from the loaded
+                        // skeleton. Preserve its hash rather than dropping the special hurtbox
+                        // or inventing a name for a different bone.
+                        target: HurtTarget::Bone(
+                            bone_rev
+                                .get(&hash)
+                                .cloned()
+                                .unwrap_or_else(|| format!("{hash:#x}")),
+                        ),
+                        status: status(1)?,
+                    })
+                }
                 "HIT_NO" => Some(ExcuteStmt::HitStatus {
                     target: HurtTarget::Group(line.args.first()?.as_i64()?),
                     status: status(1)?,
@@ -14573,6 +15794,23 @@ impl VisionaryApp {
                     target: HurtTarget::Whole,
                     status: status(0)?,
                 }),
+                "DAMAGE_NO_REACTION" if line.args.len() == 3 => {
+                    let command = line.args.first()?.as_i64()?;
+                    (command == 0).then_some(())?;
+                    let mode = crate::param_labels::const_name(
+                        crate::param_labels::DAMAGE_NO_REACTION_MODE,
+                        line.args.get(1)?.as_i64()?,
+                    )
+                    .map(|name| format!("*{name}"))
+                    .or_else(|| line.args.get(1)?.to_source_arg())?;
+                    Some(ExcuteStmt::DamageNoReaction(
+                        crate::data::DamageNoReactionCall {
+                            command: "*MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+                            mode,
+                            value: line.args.get(2)?.as_f32()?.to_string(),
+                        },
+                    ))
+                }
                 "COL_PRI" => Some(ExcuteStmt::ColPri(line.args.first()?.as_i64()?)),
                 "HIT_RESET_ALL" => Some(ExcuteStmt::HitResetAll),
                 "COL_NORMAL" => Some(ExcuteStmt::ColNormal),
@@ -15022,29 +16260,38 @@ impl VisionaryApp {
 
         let mut effects: Vec<crate::data::EffectCall> = Vec::new();
         // The spawn a `LAST_EFFECT_SET_*` line binds to, mirroring the rule the parser
-        // applies to a script. Cleared by every line that pushes no spawn — including a spawn
-        // that was captured but dropped as a `null` sentinel or failed to parse — so a
-        // modifier can never quietly land on some earlier effect that merely happens to be
-        // last.
+        // applies to a script. Cleared by every line that pushes no spawn — including an
+        // explicit `null` no-op (which is retained in the visible call list but cannot own a
+        // modifier) or a failed parse — so a modifier can never quietly land on some earlier
+        // effect that merely happens to be last.
         let mut anchor: Option<usize> = None;
         for (_, line) in ordered {
+            if trail_capture_command(&line.func) {
+                if let Some(trail) = Self::trail_call_from_capture(
+                    &line.func, &line.args, line.frame, bone_rev, eff_rev,
+                ) {
+                    effects.push(trail);
+                }
+                // A trail is not the last regular effect for LAST_EFFECT_SET_* binding.
+                anchor = None;
+                continue;
+            }
             if effect_capture_layout(&line.func).is_some() {
                 let mut pushed = false;
                 if let Some(effect) = Self::effect_call_from_capture(
                     &line.func, &line.args, line.frame, bone_rev, eff_rev,
                 ) {
                     // `null` is an explicit no-effect sentinel used by FOOT/LANDING scripts.
-                    // Keep a FLIP call when its alternate side is real, but do not present a
-                    // no-op as an editable smoke/effect spawn.
-                    let primary_null = effect.effect_name == "null";
+                    // Keep it in the call list for source/live parity. A FLIP call whose
+                    // alternate side is real is a visual spawn; a plain null remains visible
+                    // as a clearly labeled no-op but cannot own a LAST_EFFECT_SET_* modifier.
+                    let primary_null = effect.effect_name.eq_ignore_ascii_case("null");
                     let alternate_real = effect
                         .effect_name_alt
                         .as_deref()
-                        .is_some_and(|name| name != "null");
-                    if !primary_null || alternate_real {
-                        effects.push(effect);
-                        pushed = true;
-                    }
+                        .is_some_and(|name| !name.eq_ignore_ascii_case("null"));
+                    effects.push(effect);
+                    pushed = !primary_null || alternate_real;
                 }
                 anchor = pushed.then(|| effects.len() - 1);
                 continue;
@@ -15130,6 +16377,21 @@ impl VisionaryApp {
                 }
                 continue;
             }
+            if line.func == "AFTER_IMAGE_OFF" {
+                let stop_frame = Self::motion_to_script_frame(line.frame);
+                let trail_off = line.args.first().and_then(|arg| arg.as_f32());
+                if let Some(trail) = effects.iter_mut().rev().find(|effect| {
+                    effect.active_end == 9999
+                        && (effect.trail_command.is_some()
+                            || effect.raw_line.is_some()
+                            || effect.spawn_func == "AFTER_IMAGE_ON")
+                }) {
+                    trail.active_end = stop_frame.max(trail.active_start);
+                    trail.trail_off = trail_off;
+                }
+                anchor = None;
+                continue;
+            }
             // A colour command produces an entry in this list but is not a spawn, so it ends a
             // modifier's binding rather than becoming its anchor — the same rule the script
             // parser applies to the `FLASH` line above a `LAST_EFFECT_SET_RATE`.
@@ -15152,7 +16414,11 @@ impl VisionaryApp {
             let stop_frame = Self::motion_to_script_frame(line.frame);
             // EffectModule::kill_kind terminates every live instance of the kind.
             for effect in effects.iter_mut().filter(|effect| {
-                effect.active_end == 9999 && effect_name_hash(&effect.effect_name) == stop_hash
+                effect.active_end == 9999
+                    && effect.trail_command.is_none()
+                    && effect.raw_line.is_none()
+                    && effect.spawn_func != "AFTER_IMAGE_ON"
+                    && effect_name_hash(&effect.effect_name) == stop_hash
             }) {
                 effect.active_end = stop_frame.max(effect.active_start);
             }
@@ -15400,8 +16666,132 @@ impl VisionaryApp {
     /// These share the hitbox rule store under their own key. The plugin takes one full list per
     /// send, so keeping them in the same store is what stops a hurtbox edit from wiping the
     /// move's hitbox rules on its way out.
+    fn hurtbox_target_key(target: &crate::data::HurtTarget) -> u64 {
+        match target {
+            crate::data::HurtTarget::Bone(bone) => effect_name_hash(bone),
+            crate::data::HurtTarget::Group(group) => *group as u64,
+            crate::data::HurtTarget::Whole => crate::game_link::HURT_KEY_WHOLE,
+        }
+    }
+
+    fn hurtbox_injection_rule(
+        motion: u64,
+        state: &crate::data::HurtboxState,
+    ) -> Option<crate::game_link::HitboxRuleWire> {
+        let status =
+            crate::param_labels::encode_const(crate::param_labels::HIT_STATUS, &state.status)?;
+        let (target_key, args) = match &state.target {
+            crate::data::HurtTarget::Bone(bone) => (
+                effect_name_hash(bone),
+                vec![
+                    crate::game_link::LuaArgWire::Hash(effect_name_hash(bone)),
+                    crate::game_link::LuaArgWire::Int(status),
+                ],
+            ),
+            crate::data::HurtTarget::Group(group) => (
+                *group as u64,
+                vec![
+                    crate::game_link::LuaArgWire::Int(*group),
+                    crate::game_link::LuaArgWire::Int(status),
+                ],
+            ),
+            crate::data::HurtTarget::Whole => (
+                crate::game_link::HURT_KEY_WHOLE,
+                vec![crate::game_link::LuaArgWire::Int(status)],
+            ),
+        };
+        Some(crate::game_link::HitboxRuleWire {
+            motion,
+            category: crate::game_link::CAT_HURT,
+            hitbox_id: Some(target_key),
+            suppress: false,
+            frame_start: None,
+            frame_end: None,
+            overrides: None,
+            inject: Some(crate::game_link::InjectRuleWire {
+                frame: Self::script_to_motion_frame(state.active_start),
+                args,
+                command: Some(state.target.macro_name().to_string()),
+            }),
+            func: Some(state.target.macro_name().to_string()),
+        })
+    }
+
+    fn priority_injection_rule(
+        motion: u64,
+        state: &crate::data::ColPriState,
+    ) -> crate::game_link::HitboxRuleWire {
+        crate::game_link::HitboxRuleWire {
+            motion,
+            category: crate::game_link::CAT_HURT,
+            hitbox_id: Some(crate::game_link::HURT_KEY_COL_PRI),
+            suppress: false,
+            frame_start: None,
+            frame_end: None,
+            overrides: None,
+            inject: Some(crate::game_link::InjectRuleWire {
+                frame: Self::script_to_motion_frame(state.active_start),
+                args: vec![crate::game_link::LuaArgWire::Int(state.pri)],
+                command: Some("COL_PRI".into()),
+            }),
+            func: Some("COL_PRI".into()),
+        }
+    }
+
+    fn retimed_priority_rules_for(
+        motion: u64,
+        was: &crate::data::ColPriState,
+        now: &crate::data::ColPriState,
+    ) -> Vec<crate::game_link::HitboxRuleWire> {
+        let (frame_start, frame_end) = Self::rule_frame_window(was.active_start);
+        vec![
+            crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_HURT,
+                hitbox_id: Some(crate::game_link::HURT_KEY_COL_PRI),
+                suppress: true,
+                frame_start,
+                frame_end,
+                overrides: None,
+                inject: None,
+                func: Some("COL_PRI".into()),
+            },
+            Self::priority_injection_rule(motion, now),
+        ]
+    }
+
+    /// Build the atomic live replacement for an existing special-hurtbox call. Returning the
+    /// whole pair makes it impossible for a caller to suppress the old command without also
+    /// having a valid typed replacement.
+    fn retimed_hurtbox_rules_for(
+        motion: u64,
+        was: &crate::data::HurtboxState,
+        now: &crate::data::HurtboxState,
+    ) -> Option<Vec<crate::game_link::HitboxRuleWire>> {
+        let retimed = was.active_start != now.active_start;
+        let shape_changed = was.target.macro_name() != now.target.macro_name();
+        if !retimed && !shape_changed {
+            return None;
+        }
+        let replacement = Self::hurtbox_injection_rule(motion, now)?;
+        let (frame_start, frame_end) = Self::rule_frame_window(was.active_start);
+        Some(vec![
+            crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_HURT,
+                hitbox_id: Some(Self::hurtbox_target_key(&was.target)),
+                suppress: true,
+                frame_start,
+                frame_end,
+                overrides: None,
+                inject: None,
+                func: Some(was.target.macro_name().into()),
+            },
+            replacement,
+        ])
+    }
+
     fn push_hurtbox_rules(&mut self) {
-        use crate::data::HurtTarget;
         let Some(mv_key) = self.current_move_key() else {
             return;
         };
@@ -15410,55 +16800,143 @@ impl VisionaryApp {
         };
         let (was_states, was_pris) = self.state.hurtboxes_pristine.clone();
         let (states, pris) = self.state.script.to_hurtboxes();
+        let was_conditions = self.state.hurtbox_conditions_pristine.clone();
+        let conditions = self.state.script.to_hurtbox_conditions();
         let mut rules: Vec<crate::game_link::HitboxRuleWire> = Vec::new();
 
-        let rule = |target_key: u64, frame: u32, overrides: crate::game_link::HbOverridesWire| {
+        let rule = |target_key: u64,
+                    frame: u32,
+                    func: &'static str,
+                    overrides: crate::game_link::HbOverridesWire| {
             let (frame_start, frame_end) = Self::rule_frame_window(frame);
             crate::game_link::HitboxRuleWire {
                 motion,
-                category: 3,
+                category: crate::game_link::CAT_HURT,
                 hitbox_id: Some(target_key),
                 suppress: false,
                 frame_start,
                 frame_end,
                 overrides: Some(overrides),
                 inject: None,
-                func: None,
+                func: Some(func.into()),
             }
         };
 
-        for now in &states {
-            let Some(was) = was_states.iter().find(|s| s.site == now.site) else {
-                // No baseline for this site means the span list changed shape under us. The
-                // export path can add a call; this one cannot, so it says nothing rather than
-                // guessing at a rule that would fire on the wrong line.
+        let condition_wire = |condition: &crate::data::HurtboxCondition| {
+            let mode = |token: &str, value: f32| {
+                crate::param_labels::encode_const(
+                    crate::param_labels::DAMAGE_NO_REACTION_MODE,
+                    token,
+                )
+                .map(|mode| (mode, value))
+            };
+            match condition {
+                crate::data::HurtboxCondition::Normal => {
+                    mode("DAMAGE_NO_REACTION_MODE_NORMAL", 0.0)
+                }
+                crate::data::HurtboxCondition::SuperArmor => {
+                    mode("DAMAGE_NO_REACTION_MODE_ALWAYS", 0.0)
+                }
+                crate::data::HurtboxCondition::ReactionValueArmor { threshold } => threshold
+                    .is_finite()
+                    .then(|| mode("DAMAGE_NO_REACTION_MODE_REACTION_VALUE", *threshold))
+                    .flatten(),
+                crate::data::HurtboxCondition::DamageBasedArmor { threshold } => threshold
+                    .is_finite()
+                    .then(|| mode("DAMAGE_NO_REACTION_MODE_DAMAGE_POWER", *threshold))
+                    .flatten(),
+                crate::data::HurtboxCondition::DamagePowerCount { threshold } => threshold
+                    .is_finite()
+                    .then(|| mode("DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT", *threshold))
+                    .flatten(),
+                crate::data::HurtboxCondition::NoReactionMode => {
+                    mode("DAMAGE_NO_REACTION_MODE_NONE", 0.0)
+                }
+                crate::data::HurtboxCondition::Unknown { .. } => None,
+            }
+        };
+
+        let injected_condition = |state: &crate::data::HurtboxConditionState| {
+            let (mode, value) = condition_wire(&state.condition)?;
+            Some(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_HURT,
+                hitbox_id: Some(crate::game_link::HURT_KEY_DAMAGE_REACTION),
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(crate::game_link::InjectRuleWire {
+                    frame: Self::script_to_motion_frame(state.active_start),
+                    args: vec![
+                        crate::game_link::LuaArgWire::Int(0),
+                        crate::game_link::LuaArgWire::Int(mode),
+                        crate::game_link::LuaArgWire::Num(value),
+                    ],
+                    command: Some("DAMAGE_NO_REACTION".into()),
+                }),
+                func: Some("DAMAGE_NO_REACTION".into()),
+            })
+        };
+
+        let state_matches = crate::data::match_hurtbox_states(&was_states, &states);
+        for (state_index, now) in states.iter().enumerate() {
+            let Some(source_index) = state_matches[state_index] else {
+                // A per-volume range adds a pair of HIT_NO calls. The plugin can inject those
+                // same calls at their one-based frames, so a new schedule is live immediately.
+                if let Some(rule) = Self::hurtbox_injection_rule(motion, now) {
+                    rules.push(rule);
+                } else {
+                    self.state.status =
+                        "A hurtbox edit uses an unknown status and was kept to export/source only."
+                            .into();
+                }
                 continue;
             };
+            let was = &was_states[source_index];
             if was == now {
                 continue;
             }
             // The rule has to match the call the GAME makes, which is still the pristine
             // target — matching on the edited one would never fire.
-            let key = match &was.target {
-                HurtTarget::Bone(bone) => effect_name_hash(bone),
-                HurtTarget::Group(n) => *n as u64,
-                HurtTarget::Whole => crate::game_link::HURT_KEY_WHOLE,
-            };
+            let key = Self::hurtbox_target_key(&was.target);
+
+            // A changed start frame cannot be handled by an argument override: the source
+            // command still runs at its pristine frame.  A target-shape change has the same
+            // property even when the frame is unchanged (`HIT_NODE` and `HIT_NO` have different
+            // Lua argument types, and `WHOLE_HIT` has no target slot).  Suppress the exact old
+            // command and inject the edited command atomically at its new frame.
+            if was.active_start != now.active_start
+                || was.target.macro_name() != now.target.macro_name()
+            {
+                if let Some(replacement) = Self::retimed_hurtbox_rules_for(motion, was, now) {
+                    rules.extend(replacement);
+                } else {
+                    self.state.status =
+                        "A retimed hurtbox uses an unknown status and was kept to export/source only."
+                            .into();
+                }
+                continue;
+            }
+
             // A `WHOLE_HIT` has no target argument to rewrite, so it never carries one. Sending
             // it would be worse than useless: the plugin writes the target into slot 0, which for
             // this macro is the status.
             let hit_target = (was.target != now.target)
                 .then(|| match &now.target {
-                    HurtTarget::Bone(bone) => {
+                    crate::data::HurtTarget::Bone(bone) => {
                         Some(crate::game_link::LuaArgWire::Hash(effect_name_hash(bone)))
                     }
-                    HurtTarget::Group(n) => Some(crate::game_link::LuaArgWire::Int(*n)),
-                    HurtTarget::Whole => None,
+                    crate::data::HurtTarget::Group(n) => {
+                        Some(crate::game_link::LuaArgWire::Int(*n))
+                    }
+                    crate::data::HurtTarget::Whole => None,
                 })
                 .flatten();
             rules.push(rule(
                 key,
                 was.active_start,
+                was.target.macro_name(),
                 crate::game_link::HbOverridesWire {
                     hit_status: (was.status != now.status)
                         .then(|| {
@@ -15474,10 +16952,76 @@ impl VisionaryApp {
             ));
         }
 
-        for now in &pris {
-            let Some(was) = was_pris.iter().find(|p| p.site == now.site) else {
+        // Damage-reaction conditions use the same live category but their own sentinel key and
+        // two mode/value slots. A retime suppresses the old authored call and injects the edited
+        // call at its new frame; an ordinary mode/value edit is a scoped override of the source
+        // call the game still executes.
+        let condition_matches = crate::data::match_hurtbox_conditions(&was_conditions, &conditions);
+        for (condition_index, now) in conditions.iter().enumerate() {
+            let Some(source_index) = condition_matches[condition_index] else {
+                if let Some(rule) = injected_condition(now) {
+                    rules.push(rule);
+                } else {
+                    self.state.status =
+                        "An unknown damage-reaction mode was kept to export/source only.".into();
+                }
                 continue;
             };
+            let was = &was_conditions[source_index];
+            if was == now {
+                continue;
+            }
+            let Some((mode, value)) = condition_wire(&now.condition) else {
+                self.state.status =
+                    "An unknown damage-reaction mode was kept to export/source only.".into();
+                continue;
+            };
+            if was.active_start != now.active_start {
+                let (frame_start, frame_end) = Self::rule_frame_window(was.active_start);
+                rules.push(crate::game_link::HitboxRuleWire {
+                    motion,
+                    category: crate::game_link::CAT_HURT,
+                    hitbox_id: Some(crate::game_link::HURT_KEY_DAMAGE_REACTION),
+                    suppress: true,
+                    frame_start,
+                    frame_end,
+                    overrides: None,
+                    inject: None,
+                    func: Some("DAMAGE_NO_REACTION".into()),
+                });
+                if let Some(rule) = injected_condition(now) {
+                    rules.push(rule);
+                }
+                continue;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(was.active_start);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_HURT,
+                hitbox_id: Some(crate::game_link::HURT_KEY_DAMAGE_REACTION),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(crate::game_link::HbOverridesWire {
+                    hurt_condition_mode: Some(mode),
+                    hurt_condition_value: Some(value),
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some("DAMAGE_NO_REACTION".into()),
+            });
+        }
+
+        let priority_matches = crate::data::match_col_pri_states(&was_pris, &pris);
+        for (priority_index, now) in pris.iter().enumerate() {
+            let Some(source_index) = priority_matches[priority_index] else {
+                continue;
+            };
+            let was = &was_pris[source_index];
+            if was.active_start != now.active_start {
+                rules.extend(Self::retimed_priority_rules_for(motion, was, now));
+                continue;
+            }
             if was.pri == now.pri {
                 continue;
             }
@@ -15486,6 +17030,7 @@ impl VisionaryApp {
             rules.push(rule(
                 crate::game_link::HURT_KEY_COL_PRI,
                 was.active_start,
+                "COL_PRI",
                 crate::game_link::HbOverridesWire {
                     col_pri: Some(now.pri),
                     ..Default::default()
@@ -18843,6 +20388,8 @@ impl VisionaryApp {
             hit_status: None,
             hit_target: None,
             col_pri: None,
+            hurt_condition_mode: None,
+            hurt_condition_value: None,
             // Nor is post-hoc tuning: `ATK_POWER` names a hitbox but is its own call at its own
             // frame, so `push_attack_mod_rules` builds those and this override leaves them be.
             atk_mod_id: None,
@@ -21868,7 +23415,7 @@ impl VisionaryApp {
                     if let Some(mname) = u.move_key.split_once('/').map(|(_, m)| m) {
                         let motion = hash40::hash40(&mname.to_lowercase()).0;
                         if let Some(inject) =
-                            self.build_effect_inject(&call, Some(motion), donor_hash)
+                            self.build_effect_inject(&call, Some(motion), donor_hash, 0)
                         {
                             let (fs, fe) = Self::rule_frame_window(call.active_start);
                             let (fs, fe) = (fs.unwrap_or_default(), fe.unwrap_or_default());
@@ -21879,6 +23426,7 @@ impl VisionaryApp {
                             store.push(crate::game_link::SpawnRuleWire {
                                 eff_hash: donor_hash,
                                 suppress: true,
+                                stop_func: None,
                                 motion: Some(motion),
                                 frame_start: Some(fs),
                                 frame_end: Some(fe),
@@ -21894,10 +23442,12 @@ impl VisionaryApp {
                                 color: None,
                                 transition: None,
                                 inject: None,
+                                color_inject: None,
                             });
                             store.push(crate::game_link::SpawnRuleWire {
                                 eff_hash: effect_name_hash(&call.effect_name),
                                 suppress: false,
+                                stop_func: None,
                                 motion: Some(motion),
                                 frame_start: None,
                                 frame_end: None,
@@ -21913,6 +23463,7 @@ impl VisionaryApp {
                                 color: None,
                                 transition: None,
                                 inject: Some(inject),
+                                color_inject: None,
                             });
                         }
                     }
@@ -21942,14 +23493,28 @@ impl VisionaryApp {
     /// Record (or update) the Modify edit for effect call `i` in the current move.
     /// Added calls keep their `Add` record updated instead.
     fn record_effect_call_edit(&mut self, i: usize) {
+        // A live capture may have been armed before the user touched this call. Letting that
+        // older playback settle after the edit would rebuild the pristine effect list from the
+        // old timing and make the newly pushed retime appear to snap back to its source frame.
+        // The next explicit/automatic capture can arm again only from an unedited snapshot.
+        self.pending_capture = None;
         let Some(mv) = self.current_move_key() else {
             return;
         };
-        let Some(call) = self.state.effects.get(i).cloned() else {
+        let Some(mut call) = self.state.effects.get(i).cloned() else {
             return;
         };
+        call.normalize_timing();
+        if let Some(current) = self.state.effects.get_mut(i) {
+            current.normalize_timing();
+        }
         let is_added = i >= self.state.effects_pristine.len();
-        let pristine_call = self.state.effects_pristine.get(i).cloned();
+        let pristine_call = self
+            .state
+            .effects_pristine
+            .get(i)
+            .cloned()
+            .map(crate::data::EffectCall::normalized_timing);
         let edits = self.state.effect_call_edits.entry(mv.clone()).or_default();
         if let Some(existing) = edits.iter_mut().find(|e| e.index == i) {
             existing.op = if is_added {
@@ -21980,6 +23545,7 @@ impl VisionaryApp {
         if i >= self.state.effects.len() {
             return;
         }
+        self.pending_capture = None;
         let Some(mv) = self.current_move_key() else {
             return;
         };
@@ -22030,8 +23596,17 @@ impl VisionaryApp {
             return;
         };
         let motion = self.current_motion_hash();
-        let effects = self.state.effects.clone();
-        let pristines = self.state.effects_pristine.clone();
+        let mut effects = self.state.effects.clone();
+        for effect in &mut effects {
+            effect.normalize_timing();
+        }
+        let pristines: Vec<_> = self
+            .state
+            .effects_pristine
+            .iter()
+            .cloned()
+            .map(crate::data::EffectCall::normalized_timing)
+            .collect();
         let mut rules: Vec<crate::game_link::SpawnRuleWire> = Vec::new();
         let mut missing_capture = false;
         let mut unsupported_work_int = false;
@@ -22049,6 +23624,9 @@ impl VisionaryApp {
             let orig_hash = pristine
                 .map(|p| effect_name_hash(&p.effect_name))
                 .unwrap_or(hash);
+            let donor_occurrence = pristine
+                .map(|p| Self::effect_spawn_occurrence(&pristines, i, p))
+                .unwrap_or(0);
             let window = Self::rule_frame_window(spawn_frame);
             // C4 controls are point commands, not effect kinds. Their live rules use a
             // separate control channel; never key the spawn matcher on their empty effect name.
@@ -22059,8 +23637,128 @@ impl VisionaryApp {
             // to it — and `effect_name_hash("")` would key every one of them to the same
             // meaningless hash. It gets one rule, keyed on its command instead.
             if ec.color.is_some() {
-                if let Some(rule) = Self::build_color_rule(ec, pristine, motion, window) {
-                    rules.push(rule);
+                rules.extend(Self::build_color_rules(ec, pristine, motion, window));
+                continue;
+            }
+            if effect_call_is_trail(ec) {
+                if ec.disabled {
+                    rules.push(crate::game_link::SpawnRuleWire {
+                        eff_hash: orig_hash,
+                        suppress: true,
+                        stop_func: None,
+                        motion,
+                        frame_start: window.0,
+                        frame_end: window.1,
+                        pos: None,
+                        rot: None,
+                        scale: None,
+                        rate: None,
+                        camera_offset: None,
+                        tint: None,
+                        particle_tint: None,
+                        alpha: None,
+                        scale_w: None,
+                        color: None,
+                        transition: None,
+                        inject: None,
+                        color_inject: None,
+                    });
+                    continue;
+                }
+                let end_changed = pristine
+                    .map(|p| p.active_end != ec.active_end)
+                    .unwrap_or(true);
+                // A newly finite end, or a changed end, needs an injected replacement stop. If
+                // the edited start now lies after the old end, the pristine stop would run before
+                // the replacement starts, so the replacement also needs its own stop.
+                if ec.active_end != 9999 && (end_changed || ec.active_start > ec.active_end) {
+                    rules.push(crate::game_link::SpawnRuleWire {
+                        eff_hash: hash,
+                        suppress: false,
+                        stop_func: None,
+                        motion,
+                        frame_start: None,
+                        frame_end: None,
+                        pos: None,
+                        rot: None,
+                        scale: None,
+                        rate: None,
+                        camera_offset: None,
+                        tint: None,
+                        particle_tint: None,
+                        alpha: None,
+                        scale_w: None,
+                        color: None,
+                        transition: None,
+                        inject: Some(Self::build_effect_stop_inject(ec)),
+                        color_inject: None,
+                    });
+                }
+                // When the finite pristine stop no longer represents the edited timeline, block
+                // that authored AFTER_IMAGE_OFF before it can terminate the replacement trail.
+                if end_changed {
+                    if let Some(old) = pristine.filter(|p| p.active_end != 9999) {
+                        rules.push(Self::build_effect_stop_suppression(old, motion));
+                    }
+                }
+                let start_changed = pristine
+                    .map(|p| {
+                        p.active_start != ec.active_start
+                            || p.effect_name != ec.effect_name
+                            || p.bone_name != ec.bone_name
+                            || p.trail_bone2 != ec.trail_bone2
+                            || p.trail_command != ec.trail_command
+                    })
+                    .unwrap_or(true);
+                if start_changed {
+                    if let Some(inject) =
+                        self.build_effect_inject(ec, motion, orig_hash, donor_occurrence)
+                    {
+                        rules.push(crate::game_link::SpawnRuleWire {
+                            eff_hash: orig_hash,
+                            suppress: true,
+                            stop_func: None,
+                            motion,
+                            frame_start: window.0,
+                            frame_end: window.1,
+                            pos: None,
+                            rot: None,
+                            scale: None,
+                            rate: None,
+                            camera_offset: None,
+                            tint: None,
+                            particle_tint: None,
+                            alpha: None,
+                            scale_w: None,
+                            color: None,
+                            transition: None,
+                            inject: None,
+                            color_inject: None,
+                        });
+                        rules.push(crate::game_link::SpawnRuleWire {
+                            eff_hash: hash,
+                            suppress: false,
+                            stop_func: None,
+                            motion,
+                            frame_start: None,
+                            frame_end: None,
+                            pos: None,
+                            rot: None,
+                            scale: None,
+                            rate: None,
+                            camera_offset: None,
+                            tint: None,
+                            particle_tint: None,
+                            alpha: None,
+                            scale_w: None,
+                            color: None,
+                            transition: None,
+                            inject: Some(inject),
+                            color_inject: None,
+                        });
+                    } else {
+                        missing_capture = true;
+                    }
                 }
                 continue;
             }
@@ -22068,6 +23766,7 @@ impl VisionaryApp {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: orig_hash,
                     suppress: true,
+                    stop_func: None,
                     motion,
                     frame_start: window.0,
                     frame_end: window.1,
@@ -22083,6 +23782,7 @@ impl VisionaryApp {
                     color: None,
                     transition: None,
                     inject: None,
+                    color_inject: None,
                 });
                 continue;
             }
@@ -22090,10 +23790,14 @@ impl VisionaryApp {
             // Schedule the same EFFECT_OFF_KIND that exported ACMD emits. This dispatches
             // through the plugin's normal kill-kind hook, which redirects transplanted kinds
             // from the fighter to their hidden carrier owner.
+            let end_changed = pristine
+                .map(|p| p.active_end != ec.active_end)
+                .unwrap_or(true);
             if ec.follows_bone && ec.active_end != 9999 {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
+                    stop_func: None,
                     motion,
                     frame_start: None,
                     frame_end: None,
@@ -22109,7 +23813,16 @@ impl VisionaryApp {
                     color: None,
                     transition: None,
                     inject: Some(Self::build_effect_stop_inject(ec)),
+                    color_inject: None,
                 });
+            }
+            // If the finite pristine stop no longer represents the edited follow, suppress it
+            // before the replacement stop is injected. A stop rule is separate from a spawn rule
+            // even when both use the same effect hash.
+            if end_changed && pristine.is_some_and(|p| p.follows_bone && p.active_end != 9999) {
+                if let Some(old) = pristine {
+                    rules.push(Self::build_effect_stop_suppression(old, motion));
+                }
             }
             // Swap and/or retime: the effect NAME or FRAME changed → suppress the original
             // spawn and inject the new effect at the new frame (transform baked in). The
@@ -22134,10 +23847,13 @@ impl VisionaryApp {
                 unsupported_work_int = true;
             }
             if retimed || swapped {
-                if let Some(inject) = self.build_effect_inject(ec, motion, orig_hash) {
+                if let Some(inject) =
+                    self.build_effect_inject(ec, motion, orig_hash, donor_occurrence)
+                {
                     rules.push(crate::game_link::SpawnRuleWire {
                         eff_hash: orig_hash,
                         suppress: true,
+                        stop_func: None,
                         motion,
                         frame_start: window.0,
                         frame_end: window.1,
@@ -22153,10 +23869,12 @@ impl VisionaryApp {
                         color: None,
                         transition: None,
                         inject: None,
+                        color_inject: None,
                     });
                     rules.push(crate::game_link::SpawnRuleWire {
                         eff_hash: hash,
                         suppress: false,
+                        stop_func: None,
                         motion,
                         frame_start: None,
                         frame_end: None,
@@ -22179,6 +23897,7 @@ impl VisionaryApp {
                         color: None,
                         transition: None,
                         inject: Some(inject),
+                        color_inject: None,
                     });
                     continue;
                 }
@@ -22218,6 +23937,7 @@ impl VisionaryApp {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
+                    stop_func: None,
                     motion,
                     frame_start: window.0,
                     frame_end: window.1,
@@ -22233,6 +23953,7 @@ impl VisionaryApp {
                     color: None,
                     transition: None,
                     inject: None,
+                    color_inject: None,
                 });
             }
         }
@@ -22521,78 +24242,221 @@ impl VisionaryApp {
     /// swapping the graphic to `ec`'s (possibly different) effect and baking in the spawn's
     /// edited bone/offset/rotation/scale + new frame. Handles retime, effect-swap, or both.
     /// None when the original effect hasn't been captured live yet.
+    fn effect_spawn_occurrence(
+        pristines: &[crate::data::EffectCall],
+        index: usize,
+        target: &crate::data::EffectCall,
+    ) -> usize {
+        let target_hash = effect_name_hash(&target.effect_name);
+        let target_is_trail = effect_call_is_trail(target);
+        pristines
+            .iter()
+            .take(index)
+            .filter(|call| {
+                !call.disabled
+                    && call.control.is_none()
+                    && call.color.is_none()
+                    && effect_call_is_trail(call) == target_is_trail
+                    && effect_name_hash(&call.effect_name) == target_hash
+            })
+            .count()
+    }
+
     fn build_effect_inject(
         &self,
         ec: &crate::data::EffectCall,
         motion: Option<u64>,
         donor_hash: u64,
+        donor_occurrence: usize,
+    ) -> Option<crate::game_link::SpawnInjectWire> {
+        let motion = motion?;
+        let captures = self.captures_for_selected_fighter(motion);
+        Self::build_effect_inject_from_captures(ec, &captures, donor_hash, donor_occurrence)
+    }
+
+    fn build_effect_inject_from_captures(
+        ec: &crate::data::EffectCall,
+        captures: &[crate::game_link::CaptureLine],
+        donor_hash: u64,
+        donor_occurrence: usize,
     ) -> Option<crate::game_link::SpawnInjectWire> {
         use crate::game_link::LuaArgWire as A;
-        let motion = motion?;
         let new_hash = effect_name_hash(&ec.effect_name);
-        let captures = self.captures_for_selected_fighter(motion);
-        let donor = captures.iter().find(|c| {
-            effect_capture_layout(&c.func).is_some()
-                && c.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
-        })?;
-        let (flip, _) = effect_capture_layout(&donor.func)?;
-        let off = usize::from(flip);
-        let mut args = donor.args.clone();
-        // Vec layout (0-based, +off for flip): 0 gfx (0/1 for FLIP: gfxL/gfxR), 1 bone,
-        // 2..4 pos xyz, 5..7 rot zr,yr,xr, 8 size.
-        if args.len() < 9 + off {
-            return None;
+        if effect_call_is_trail(ec) {
+            let donor = captures
+                .iter()
+                .filter(|capture| {
+                    trail_capture_command(&capture.func)
+                        && capture.args.first().and_then(|arg| arg.as_hash()) == Some(donor_hash)
+                })
+                .nth(donor_occurrence)?;
+            let command = ec
+                .trail_command
+                .as_deref()
+                .filter(|command| trail_capture_command(command))
+                .unwrap_or(&donor.func);
+            let mut args = donor.args.clone();
+            // Texture and the two edge joints are the only trail fields Visionary exposes.
+            // Reuse every other typed slot from the capture, including the raw command's
+            // version-specific tail. WORK-form trails use integer Work IDs in slot 0 and are
+            // therefore not guessed into a texture hash.
+            if matches!(args.first(), Some(A::Hash(_))) {
+                args[0] = A::Hash(new_hash);
+            }
+            if let Some(bone) = args.get_mut(3) {
+                *bone = A::Hash(hash40::hash40(&ec.bone_name.to_lowercase()).0);
+            }
+            if let Some(bone2) = ec.trail_bone2.as_deref() {
+                if let Some(slot) = args.get_mut(7) {
+                    *slot = A::Hash(hash40::hash40(&bone2.to_lowercase()).0);
+                }
+            }
+            if command == "AFTER_IMAGE3_ON" {
+                args.insert(0, A::Int(crate::data::RAW_TRAIL_COMMAND_ID));
+            }
+            return Some(crate::game_link::SpawnInjectWire {
+                frame: Self::script_to_motion_frame(ec.active_start),
+                func: command.to_string(),
+                args,
+            });
         }
-        // Swap each graphic independently for FLIP variants. One side is often `null`, so
-        // collapsing both slots to the primary name changes the move's facing-dependent VFX.
-        args[0] = A::Hash(new_hash);
-        if flip {
-            args[1] = A::Hash(
-                ec.effect_name_alt
-                    .as_deref()
-                    .map(effect_name_hash)
-                    .unwrap_or(new_hash),
-            );
-        }
-        args[1 + off] = A::Hash(hash40::hash40(&ec.bone_name.to_lowercase()).0);
-        args[2 + off] = A::Num(ec.offset[0]);
-        args[3 + off] = A::Num(ec.offset[1]);
-        args[4 + off] = A::Num(ec.offset[2]);
-        args[5 + off] = A::Num(ec.rotation[2]); // zr
-        args[6 + off] = A::Num(ec.rotation[1]); // yr
-        args[7 + off] = A::Num(ec.rotation[0]); // xr
-        args[8 + off] = A::Num(ec.scale);
+        let donor = captures
+            .iter()
+            .filter(|c| {
+                crate::acmd::effect_spawn_layout(&c.func).is_some()
+                    && c.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
+            })
+            .nth(donor_occurrence)?;
+        let (func, args) = retarget_effect_capture_args(ec, &donor.func, &donor.args, new_hash)?;
         Some(crate::game_link::SpawnInjectWire {
             frame: Self::script_to_motion_frame(ec.active_start),
-            // Existing captures carry the exact trailing args for this command. Preserve that
-            // command unless an authored call explicitly supplies another compatible type.
-            func: if ec.spawn_func.is_empty() {
-                donor.func.clone()
-            } else {
-                ec.spawn_func.clone()
-            },
+            func,
             args,
         })
     }
 
-    /// The one live rule a colour command needs, or `None` if it is unchanged.
+    /// Live rules for a colour command, or an empty list if it is unchanged.
     ///
     /// Keyed on hash40 of the lowercased command name rather than an effect kind, matching the
-    /// plugin's `color_for`. Retiming and switching commands are both left to the export: the
-    /// live path can rewrite a command's arguments where the script already calls it, but it
-    /// has nothing to inject a call the script never makes — and unlike a spawn there is no
-    /// captured argument list to replay one from.
-    fn build_color_rule(
+    /// plugin's `color_for`. A retime suppresses the pristine command and injects the edited
+    /// command with its typed argument contract at the new frame.
+    fn build_color_rules(
         ec: &crate::data::EffectCall,
         pristine: Option<&crate::data::EffectCall>,
         motion: Option<u64>,
         window: (Option<f32>, Option<f32>),
-    ) -> Option<crate::game_link::SpawnRuleWire> {
+    ) -> Vec<crate::game_link::SpawnRuleWire> {
         let command = pristine.map(|p| &p.spawn_func).unwrap_or(&ec.spawn_func);
         let eff_hash = hash40::hash40(&command.to_lowercase()).0;
         let base = crate::game_link::SpawnRuleWire {
             eff_hash,
-            suppress: false,
+            suppress: pristine.is_some(),
+            stop_func: None,
+            motion,
+            frame_start: pristine.is_some().then_some(window.0).flatten(),
+            frame_end: pristine.is_some().then_some(window.1).flatten(),
+            pos: None,
+            rot: None,
+            scale: None,
+            rate: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            transition: None,
+            inject: None,
+            color_inject: None,
+        };
+        if ec.disabled {
+            return pristine
+                .is_some()
+                .then_some(crate::game_link::SpawnRuleWire { ..base })
+                .into_iter()
+                .collect();
+        }
+        // Only what the user actually changed is sent, so an untouched command keeps the
+        // script's own arguments — the same rule the transform and rate paths follow.
+        let was = pristine.and_then(|p| p.color.as_ref());
+        let Some(now) = ec.color.as_ref() else {
+            return Vec::new();
+        };
+        let color = (was.map(|w| w.rgba) != Some(now.rgba))
+            .then_some(now.rgba)
+            .flatten();
+        let transition = (was.map(|w| w.transition) != Some(now.transition))
+            .then_some(now.transition)
+            .flatten();
+        let retimed = pristine
+            .map(|p| p.active_start != ec.active_start)
+            .unwrap_or(true);
+        let command_changed = pristine
+            .map(|p| p.spawn_func != ec.spawn_func)
+            .unwrap_or(true);
+        if retimed || command_changed {
+            let Some(inject) = Self::build_color_inject(ec) else {
+                return vec![crate::game_link::SpawnRuleWire {
+                    suppress: true,
+                    ..base
+                }];
+            };
+            return vec![crate::game_link::SpawnRuleWire {
+                color_inject: Some(inject),
+                ..base
+            }];
+        }
+        (color.is_some() || transition.is_some())
+            .then_some(crate::game_link::SpawnRuleWire {
+                suppress: false,
+                frame_start: window.0,
+                frame_end: window.1,
+                color,
+                transition,
+                ..base
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn build_color_inject(
+        ec: &crate::data::EffectCall,
+    ) -> Option<crate::game_link::SpawnInjectWire> {
+        use crate::game_link::LuaArgWire as A;
+        let (has_transition, has_rgba) = crate::data::color_command_layout(&ec.spawn_func)?;
+        let color = ec.color.as_ref()?;
+        let mut args = Vec::new();
+        if has_transition {
+            args.push(A::Num(color.transition?));
+        }
+        if has_rgba {
+            args.extend(color.rgba?.into_iter().map(A::Num));
+        }
+        Some(crate::game_link::SpawnInjectWire {
+            frame: Self::script_to_motion_frame(ec.active_start),
+            func: ec.spawn_func.clone(),
+            args,
+        })
+    }
+
+    /// Suppress the finite pristine lifetime command when an edited follow or trail moves its
+    /// end. Start suppression is keyed by the graphic hash, but a stop is a different semantic
+    /// event: `EFFECT_OFF_KIND` names the effect while `AFTER_IMAGE_OFF` has no texture argument
+    /// at all. The optional wire command keeps those rules isolated from same-hash spawn rules.
+    fn build_effect_stop_suppression(
+        pristine: &crate::data::EffectCall,
+        motion: Option<u64>,
+    ) -> crate::game_link::SpawnRuleWire {
+        let (eff_hash, stop_func) = if effect_call_is_trail(pristine) {
+            (hash40::hash40("after_image_off").0, "AFTER_IMAGE_OFF")
+        } else {
+            (effect_name_hash(&pristine.effect_name), "EFFECT_OFF_KIND")
+        };
+        let window = Self::rule_frame_window(pristine.active_end.max(pristine.active_start));
+        crate::game_link::SpawnRuleWire {
+            eff_hash,
+            suppress: true,
+            stop_func: Some(stop_func.into()),
             motion,
             frame_start: window.0,
             frame_end: window.1,
@@ -22608,32 +24472,21 @@ impl VisionaryApp {
             color: None,
             transition: None,
             inject: None,
-        };
-        if ec.disabled {
-            return Some(crate::game_link::SpawnRuleWire {
-                suppress: true,
-                ..base
-            });
+            color_inject: None,
         }
-        // Only what the user actually changed is sent, so an untouched command keeps the
-        // script's own arguments — the same rule the transform and rate paths follow.
-        let was = pristine.and_then(|p| p.color.as_ref());
-        let now = ec.color.as_ref()?;
-        let color = (was.map(|w| w.rgba) != Some(now.rgba))
-            .then_some(now.rgba)
-            .flatten();
-        let transition = (was.map(|w| w.transition) != Some(now.transition))
-            .then_some(now.transition)
-            .flatten();
-        (color.is_some() || transition.is_some()).then_some(crate::game_link::SpawnRuleWire {
-            color,
-            transition,
-            ..base
-        })
     }
 
     fn build_effect_stop_inject(ec: &crate::data::EffectCall) -> crate::game_link::SpawnInjectWire {
         use crate::game_link::LuaArgWire as A;
+        if effect_call_is_trail(ec) {
+            return crate::game_link::SpawnInjectWire {
+                frame: Self::script_to_motion_frame(ec.active_end.max(ec.active_start)),
+                func: "AFTER_IMAGE_OFF".into(),
+                args: vec![A::Num(
+                    ec.trail_off.unwrap_or(crate::data::TRAIL_OFF_DEFAULT),
+                )],
+            };
+        }
         crate::game_link::SpawnInjectWire {
             frame: Self::script_to_motion_frame(ec.active_end.max(ec.active_start)),
             func: "EFFECT_OFF_KIND".into(),
@@ -22646,42 +24499,67 @@ impl VisionaryApp {
     }
 
     fn timeline_total_frames(&self) -> u32 {
-        self.state
-            .total_frames
-            .max(timeline_frame_extent_with_change_kinetic(
-                &self.state.hitboxes,
-                &self.state.effects,
-                &self.state.sounds,
-                &self.state.expressions,
-                &self.state.script.to_reverse_lr_events(),
-                &self.state.script.to_speed_ex_events(),
-                &self.state.script.to_speed_events(),
-                &self.state.script.to_add_speed_no_limit_events(),
-                &self.state.script.to_correct_events(),
-                &self.state.script.to_ft_catch_stop_events(),
-                &self.state.script.to_ft_start_adjust_motion_frame_events(),
-                &self.state.script.to_clr_speed_events(),
-                &self.state.script.to_set_air_events(),
-                &self.state.script.to_change_kinetic_events(),
-                &self.state.script.to_kinetic_energy_events(),
-                &self.state.script.to_kinetic_add_speed_events(),
-                &self.state.script.to_kinetic_clear_speed_all_events(),
-                &self
-                    .state
+        let collision_extent =
+            self.state
+                .total_frames
+                .max(timeline_frame_extent_with_change_kinetic(
+                    &self.state.hitboxes,
+                    &self.state.effects,
+                    &self.state.sounds,
+                    &self.state.expressions,
+                    &self.state.script.to_reverse_lr_events(),
+                    &self.state.script.to_speed_ex_events(),
+                    &self.state.script.to_speed_events(),
+                    &self.state.script.to_add_speed_no_limit_events(),
+                    &self.state.script.to_correct_events(),
+                    &self.state.script.to_ft_catch_stop_events(),
+                    &self.state.script.to_ft_start_adjust_motion_frame_events(),
+                    &self.state.script.to_clr_speed_events(),
+                    &self.state.script.to_set_air_events(),
+                    &self.state.script.to_change_kinetic_events(),
+                    &self.state.script.to_kinetic_energy_events(),
+                    &self.state.script.to_kinetic_add_speed_events(),
+                    &self.state.script.to_kinetic_clear_speed_all_events(),
+                    &self
+                        .state
+                        .script
+                        .to_kinetic_set_consider_ground_friction_events(),
+                    &self.state.script.to_motion_module_set_rate_events(),
+                    &self
+                        .state
+                        .script
+                        .to_motion_module_set_helper_calculation_events(),
+                    &self.state.script.to_motion_module_set_rate_partial_events(),
+                    &self.state.script.to_work_flag_events(),
+                    &self.state.script.to_work_transition_term_events(),
+                    &self.state.script.to_work_module_inc_int_events(),
+                    &self.state.script.to_work_module_set_events(),
+                ));
+        let (hurt_states, priorities) = self.state.script.to_hurtboxes();
+        let condition_states = self.state.script.to_hurtbox_conditions();
+        let hurtbox_extent = hurt_states
+            .iter()
+            .filter_map(|state| (state.active_end < 9999).then_some(state.active_end))
+            .chain(
+                priorities
+                    .iter()
+                    .filter_map(|state| (state.active_end < 9999).then_some(state.active_end)),
+            )
+            .chain(
+                condition_states
+                    .iter()
+                    .filter_map(|state| (state.active_end < 9999).then_some(state.active_end)),
+            )
+            .chain(
+                self.state
                     .script
-                    .to_kinetic_set_consider_ground_friction_events(),
-                &self.state.script.to_motion_module_set_rate_events(),
-                &self
-                    .state
-                    .script
-                    .to_motion_module_set_helper_calculation_events(),
-                &self.state.script.to_motion_module_set_rate_partial_events(),
-                &self.state.script.to_work_flag_events(),
-                &self.state.script.to_work_transition_term_events(),
-                &self.state.script.to_work_module_inc_int_events(),
-                &self.state.script.to_work_module_set_events(),
-            ))
-            .max(FIRST_GAME_FRAME)
+                    .to_hurtbox_condition_events()
+                    .into_iter()
+                    .map(|event| event.frame),
+            )
+            .max()
+            .unwrap_or(0);
+        collision_extent.max(hurtbox_extent).max(FIRST_GAME_FRAME)
     }
 
     fn command_row(
@@ -22733,14 +24611,34 @@ impl VisionaryApp {
             .into_iter()
             .filter(|state| state.status != "HIT_STATUS_NORMAL")
         {
+            let status_kind = crate::data::HurtboxStatus::from_acmd_value(&state.status);
             Self::command_row(
                 &mut rows,
                 "hurtbox",
                 state.site,
                 state.active_start,
-                format!("Hurtbox {}", state.target.label()),
-                TimelineCategory::Collisions,
-                Color32::from_rgb(255, 185, 100),
+                format!(
+                    "Hurtbox {} · {}",
+                    state.target.label(),
+                    hit_status_label(&state.status)
+                ),
+                TimelineCategory::Hurtboxes,
+                hurtbox_timeline_color(status_kind),
+            );
+            if let Some(row) = rows.last_mut() {
+                row.end = state.active_end.min(total);
+            }
+        }
+        for state in self.state.script.to_hurtbox_conditions() {
+            Self::command_row(
+                &mut rows,
+                "hurtbox_condition",
+                state.site,
+                state.active_start,
+                format!("Hurtbox {}", state.condition.label()),
+                TimelineCategory::Hurtboxes,
+                hurtbox_condition_palette(&state.condition)
+                    .unwrap_or_else(|| Color32::from_rgb(170, 170, 170)),
             );
             if let Some(row) = rows.last_mut() {
                 row.end = state.active_end.min(total);
@@ -22753,7 +24651,7 @@ impl VisionaryApp {
                 state.site,
                 state.active_start,
                 format!("Collision priority {}", state.pri),
-                TimelineCategory::Collisions,
+                TimelineCategory::Hurtboxes,
                 Color32::from_rgb(235, 160, 240),
             );
             if let Some(row) = rows.last_mut() {
@@ -22786,7 +24684,9 @@ impl VisionaryApp {
                         .min(total)
                 },
                 seek_frame: effect.active_start,
-                color: if effect.disabled {
+                color: if is_null_effect_sentinel(effect) {
+                    Color32::from_gray(125)
+                } else if effect.disabled {
                     Color32::from_gray(110)
                 } else if effect.follows_bone {
                     Color32::from_rgb(255, 165, 0)
@@ -23005,11 +24905,40 @@ impl VisionaryApp {
             }
             TimelineSelection::Command { family, site } => {
                 self.selected_command = Some((family.clone(), *site));
-                self.primary_tab = match row.category {
-                    TimelineCategory::Collisions => PrimaryEditorTab::Collisions,
-                    TimelineCategory::MotionState => PrimaryEditorTab::MotionState,
-                    TimelineCategory::AudioFeedback => PrimaryEditorTab::AudioFeedback,
-                    TimelineCategory::Effects => self.primary_tab,
+                if family == "hurtbox" {
+                    if let Some(state) = self
+                        .state
+                        .script
+                        .to_hurtboxes()
+                        .0
+                        .into_iter()
+                        .find(|state| state.site == *site)
+                    {
+                        self.selected_hurtbox = match state.target {
+                            crate::data::HurtTarget::Group(group) => self
+                                .hurtbox_volumes
+                                .iter()
+                                .position(|volume| volume.index as i64 == group),
+                            crate::data::HurtTarget::Bone(ref bone) => self
+                                .hurtbox_volumes
+                                .iter()
+                                .position(|volume| volume.bone_name.eq_ignore_ascii_case(bone)),
+                            crate::data::HurtTarget::Whole => None,
+                        };
+                    }
+                }
+                let is_hurtbox_family =
+                    matches!(family.as_str(), "hurtbox" | "hurtbox_condition" | "col_pri");
+                self.primary_tab = if is_hurtbox_family {
+                    PrimaryEditorTab::Hurtboxes
+                } else {
+                    match row.category {
+                        TimelineCategory::Collisions => PrimaryEditorTab::Collisions,
+                        TimelineCategory::Hurtboxes => PrimaryEditorTab::Hurtboxes,
+                        TimelineCategory::MotionState => PrimaryEditorTab::MotionState,
+                        TimelineCategory::AudioFeedback => PrimaryEditorTab::AudioFeedback,
+                        TimelineCategory::Effects => self.primary_tab,
+                    }
                 };
                 self.inspector_focus = InspectorFocus::Primary;
             }
@@ -23036,6 +24965,7 @@ impl VisionaryApp {
             ui.separator();
             for category in [
                 TimelineCategory::Collisions,
+                TimelineCategory::Hurtboxes,
                 TimelineCategory::Effects,
                 TimelineCategory::MotionState,
                 TimelineCategory::AudioFeedback,
@@ -23048,6 +24978,7 @@ impl VisionaryApp {
                 {
                     match category {
                         TimelineCategory::Collisions => self.timeline_filters.collisions = !shown,
+                        TimelineCategory::Hurtboxes => self.timeline_filters.hurtboxes = !shown,
                         TimelineCategory::Effects => self.timeline_filters.effects = !shown,
                         TimelineCategory::MotionState => {
                             self.timeline_filters.motion_state = !shown
@@ -23457,7 +25388,9 @@ impl VisionaryApp {
                 let end_x = frame_end_to_x(end_frame)
                     .max(start_x + 3.0)
                     .min(rect.right());
-                let base = if e.disabled {
+                let base = if is_null_effect_sentinel(e) {
+                    egui::Color32::from_rgb(125, 125, 125)
+                } else if e.disabled {
                     egui::Color32::from_rgb(110, 110, 110)
                 } else if e.follows_bone {
                     egui::Color32::from_rgb(255, 165, 0)
@@ -23506,11 +25439,9 @@ impl VisionaryApp {
                     .max(start_x + 3.0)
                     .min(rect.right());
                 // Fully gone reads as more than partly gone, so `OFF` is the strongest colour.
-                let base = match state.status.as_str() {
-                    "HIT_STATUS_OFF" => egui::Color32::from_rgb(255, 90, 90),
-                    "HIT_STATUS_INVINCIBLE" => egui::Color32::from_rgb(120, 220, 255),
-                    _ => egui::Color32::from_rgb(255, 200, 90),
-                };
+                let base = hurtbox_timeline_color(crate::data::HurtboxStatus::from_acmd_value(
+                    &state.status,
+                ));
                 painter.rect_filled(
                     egui::Rect::from_min_max(egui::pos2(start_x, y_top), egui::pos2(end_x, y_bot)),
                     1.0,
@@ -24668,9 +26599,10 @@ impl eframe::App for VisionaryApp {
                             egui::Button::new("Sync Edits Into Source"),
                         )
                         .on_hover_text(
-                            "Write this move's edited hitbox and spawn values back into your \
-                             own linked ACMD project, leaving the macros you called and your \
-                             formatting untouched. Link a project in Windows → ACMD Source.",
+                            "Write this move's edited hitbox/effect values and bounded, isolated \
+                             effect timing blocks back into your own linked ACMD project. Branches, \
+                             loops, collisions, and ambiguous stop pairings are reported instead \
+                             of guessed. Link a project in Windows → ACMD Source.",
                         )
                         .clicked()
                     {
@@ -25475,6 +27407,107 @@ impl eframe::App for VisionaryApp {
                             }
                         }
 
+                        // Parameter-defined hurtboxes sit underneath editable collision geometry,
+                        // so attacks, grabs, wind areas, and effect markers remain easy to select.
+                        if self.show_hurtboxes
+                            && self.hurtbox_volumes.iter().any(|volume| {
+                                matches!(volume.shape, crate::data::HurtboxShape::Capsule)
+                            })
+                        {
+                            let events = self.state.script.to_hurtbox_events();
+                            let condition_events = self.state.script.to_hurtbox_condition_events();
+                            let condition = crate::data::effective_hurtbox_condition(
+                                &condition_events,
+                                frame_num,
+                            );
+                            for (volume_index, status) in hurtbox_render_descriptors(
+                                &self.hurtbox_volumes,
+                                &events,
+                                frame_num,
+                                true,
+                            ) {
+                                let volume = &self.hurtbox_volumes[volume_index];
+                                let (stroke_color, fill) = hurtbox_palette(status);
+                                let Some(bone_mat) = bone_matrices
+                                    .get(&volume.bone_name)
+                                    .or_else(|| {
+                                        bone_matrices.get(&volume.bone_name.to_ascii_lowercase())
+                                    })
+                                    .copied()
+                                else {
+                                    // The loader already counted unresolved parameter bones; a
+                                    // second guard keeps a partial renderer map from drawing at
+                                    // identity if a model changes underneath the session.
+                                    continue;
+                                };
+                                let [world_start, world_end] =
+                                    hurtbox_world_endpoints(volume, bone_mat);
+                                let world_radius = hurtbox_world_radius(volume, bone_mat);
+                                let selected = self.selected_hurtbox == Some(volume_index);
+                                if selected {
+                                    let _ = draw_projected_capsule(
+                                        ui.painter(),
+                                        rs,
+                                        rect,
+                                        ProjectedCapsule {
+                                            world_start,
+                                            world_end: Some(world_end),
+                                            world_radius: world_radius + 0.04,
+                                            stroke: egui::Stroke::new(2.5, Color32::WHITE),
+                                            fill: Color32::TRANSPARENT,
+                                        },
+                                    );
+                                }
+                                if let Some(condition_color) = hurtbox_condition_palette(&condition)
+                                {
+                                    // Armor is a second, fighter-wide layer. Draw it first so
+                                    // the status fill and its cyan/amber distinction remain
+                                    // readable underneath the special-condition outline.
+                                    let _ = draw_projected_capsule(
+                                        ui.painter(),
+                                        rs,
+                                        rect,
+                                        ProjectedCapsule {
+                                            world_start,
+                                            world_end: Some(world_end),
+                                            world_radius: world_radius + 0.015,
+                                            stroke: egui::Stroke::new(2.75, condition_color),
+                                            fill: Color32::TRANSPARENT,
+                                        },
+                                    );
+                                }
+                                let _ = draw_projected_capsule(
+                                    ui.painter(),
+                                    rs,
+                                    rect,
+                                    ProjectedCapsule {
+                                        world_start,
+                                        world_end: Some(world_end),
+                                        world_radius,
+                                        stroke: egui::Stroke::new(1.25, stroke_color),
+                                        fill,
+                                    },
+                                );
+                                if selected {
+                                    if let Some(label_pos) =
+                                        rs.world_to_screen((world_start + world_end) * 0.5, rect)
+                                    {
+                                        ui.painter().text(
+                                            label_pos + egui::vec2(5.0, -5.0),
+                                            egui::Align2::LEFT_BOTTOM,
+                                            format!(
+                                                "HIT_NO #{} · {}",
+                                                volume.index,
+                                                status.label()
+                                            ),
+                                            egui::FontId::monospace(10.0),
+                                            Color32::WHITE,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         for hb in &self.state.hitboxes {
                             // `ATTACK_ABS` has no volume and no bone to hang one on. Its size
                             // and offsets are zero because the call has no such arguments, so
@@ -25634,64 +27667,30 @@ impl eframe::App for VisionaryApp {
                                 .map(|world_end| (world_pos + world_end) * 0.5)
                                 .unwrap_or(world_pos);
 
-                            if let Some(world_end) = capsule_world_end {
-                                let sp1 = rs.world_to_screen(world_pos, rect);
-                                let sp2 = rs.world_to_screen(world_end, rect);
-                                let r1 = rs
+                            let label_pos = draw_projected_capsule(
+                                ui.painter(),
+                                rs,
+                                rect,
+                                ProjectedCapsule {
+                                    world_start: world_pos,
+                                    world_end: capsule_world_end,
+                                    world_radius: hb.size,
+                                    stroke,
+                                    fill,
+                                },
+                            );
+                            if let Some(label_pos) = label_pos {
+                                let label_radius = rs
                                     .world_radius_to_screen(world_pos, hb.size, rect)
                                     .unwrap_or(hb.size * 4.0)
                                     .max(4.0);
-                                let r2 = rs
-                                    .world_radius_to_screen(world_end, hb.size, rect)
-                                    .unwrap_or(hb.size * 4.0)
-                                    .max(4.0);
-
-                                if let (Some(p1), Some(p2)) = (sp1, sp2) {
-                                    let dir = (p2 - p1).normalized();
-                                    let perp = egui::vec2(-dir.y, dir.x);
-                                    ui.painter()
-                                        .line_segment([p1 + perp * r1, p2 + perp * r2], stroke);
-                                    ui.painter()
-                                        .line_segment([p1 - perp * r1, p2 - perp * r2], stroke);
-                                    ui.painter().add(egui::Shape::convex_polygon(
-                                        vec![
-                                            p1 + perp * r1,
-                                            p2 + perp * r2,
-                                            p2 - perp * r2,
-                                            p1 - perp * r1,
-                                        ],
-                                        fill,
-                                        egui::Stroke::NONE,
-                                    ));
-                                    ui.painter().circle(p1, r1, fill, stroke);
-                                    ui.painter().circle(p2, r2, fill, stroke);
-                                    let label_pos = p1 + (p2 - p1) * 0.5;
-                                    ui.painter().text(
-                                        label_pos + egui::vec2(r1.max(r2) + 2.0, 0.0),
-                                        egui::Align2::LEFT_CENTER,
-                                        format!("#{} {:.0}", hb.id, hb.damage),
-                                        egui::FontId::monospace(11.0),
-                                        color,
-                                    );
-                                } else if let Some(p) = sp1.or(sp2) {
-                                    let r = r1.max(r2);
-                                    ui.painter().circle(p, r, fill, stroke);
-                                }
-                            } else {
-                                if let Some(screen_pos) = rs.world_to_screen(world_pos, rect) {
-                                    let screen_radius = rs
-                                        .world_radius_to_screen(world_pos, hb.size, rect)
-                                        .unwrap_or(hb.size * 4.0)
-                                        .max(4.0);
-                                    ui.painter().circle(screen_pos, screen_radius, fill, stroke);
-                                    ui.painter().text(
-                                        screen_pos + egui::vec2(screen_radius + 2.0, 0.0),
-                                        egui::Align2::LEFT_CENTER,
-                                        format!("#{} {:.0}", hb.id, hb.damage),
-                                        egui::FontId::monospace(11.0),
-                                        color,
-                                    );
-                                }
+                                ui.painter().text(
+                                    label_pos + egui::vec2(label_radius + 2.0, 0.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("#{} {:.0}", hb.id, hb.damage),
+                                    egui::FontId::monospace(11.0),
+                                    color,
+                                );
                             }
 
                             if hb.category == 0 {
@@ -25798,9 +27797,61 @@ impl eframe::App for VisionaryApp {
                             }
                         }
 
+                        // A hurtbox click is intentionally lower priority than effect and
+                        // editable collision picks, because those overlays are drawn above the
+                        // parameter geometry and must remain easy to select.
+                        let mut best_hurtbox_pick: Option<(usize, f32)> = None;
+                        if let Some(cp) = click_pos {
+                            if self.show_hurtboxes {
+                                let events = self.state.script.to_hurtbox_events();
+                                for (volume_index, _status) in hurtbox_render_descriptors(
+                                    &self.hurtbox_volumes,
+                                    &events,
+                                    frame_num,
+                                    true,
+                                ) {
+                                    let volume = &self.hurtbox_volumes[volume_index];
+                                    let Some(bone_mat) = bone_matrices
+                                        .get(&volume.bone_name)
+                                        .or_else(|| {
+                                            bone_matrices
+                                                .get(&volume.bone_name.to_ascii_lowercase())
+                                        })
+                                        .copied()
+                                    else {
+                                        continue;
+                                    };
+                                    let [start, end] = hurtbox_world_endpoints(volume, bone_mat);
+                                    let center = (start + end) * 0.5;
+                                    let Some(screen_pos) = rs.world_to_screen(center, rect) else {
+                                        continue;
+                                    };
+                                    let radius = rs
+                                        .world_radius_to_screen(
+                                            center,
+                                            hurtbox_world_radius(volume, bone_mat),
+                                            rect,
+                                        )
+                                        .unwrap_or(volume.radius * 4.0)
+                                        .clamp(8.0, 140.0);
+                                    let distance = cp.distance(screen_pos);
+                                    if distance <= radius
+                                        && best_hurtbox_pick
+                                            .map(|(_, best)| distance < best)
+                                            .unwrap_or(true)
+                                    {
+                                        best_hurtbox_pick = Some((volume_index, distance));
+                                    }
+                                }
+                            }
+                        }
+
                         // Effect spawn markers: blue circles at bone position + script offset.
                         let mut best_pick: Option<(usize, f32)> = None;
                         for (i, ec) in self.state.effects.iter().enumerate() {
+                            if is_null_effect_sentinel(ec) {
+                                continue;
+                            }
                             if ec.disabled {
                                 continue;
                             }
@@ -25878,6 +27929,12 @@ impl eframe::App for VisionaryApp {
                             self.state.selected_effect_call = None;
                             self.primary_tab = PrimaryEditorTab::Collisions;
                             self.inspector_focus = InspectorFocus::Primary;
+                        } else if let Some((i, _)) = best_hurtbox_pick {
+                            self.selected_hurtbox = Some(i);
+                            self.selected_hitbox = None;
+                            self.state.selected_effect_call = None;
+                            self.primary_tab = PrimaryEditorTab::Hurtboxes;
+                            self.inspector_focus = InspectorFocus::Primary;
                         }
                     }
                 }
@@ -25916,6 +27973,294 @@ impl eframe::App for VisionaryApp {
 impl Hitbox {
     fn active_frames_empty(&self) -> bool {
         self.active_end == 9999
+    }
+}
+
+fn hurtbox_palette(status: crate::data::HurtboxStatus) -> (Color32, Color32) {
+    match status {
+        crate::data::HurtboxStatus::Normal => (
+            Color32::from_rgb(215, 215, 215),
+            Color32::from_rgba_unmultiplied(215, 215, 215, 32),
+        ),
+        // Match the timeline's established cyan and amber values.
+        crate::data::HurtboxStatus::Invincible => (
+            Color32::from_rgb(120, 220, 255),
+            Color32::from_rgba_unmultiplied(120, 220, 255, 38),
+        ),
+        crate::data::HurtboxStatus::Xlu => (
+            Color32::from_rgb(255, 200, 90),
+            Color32::from_rgba_unmultiplied(255, 200, 90, 38),
+        ),
+        crate::data::HurtboxStatus::Unknown(_) => {
+            (Color32::from_rgb(255, 0, 255), Color32::TRANSPARENT)
+        }
+        crate::data::HurtboxStatus::Off => (Color32::TRANSPARENT, Color32::TRANSPARENT),
+    }
+}
+
+/// Timeline lanes still need a visible swatch for `OFF`, even though the corresponding viewport
+/// capsule is intentionally not drawn. Keeping this separate from the viewport palette makes the
+/// label and the hidden geometry agree without turning an off volume back into a visible shape.
+fn hurtbox_timeline_color(status: crate::data::HurtboxStatus) -> Color32 {
+    match status {
+        crate::data::HurtboxStatus::Off => Color32::from_rgb(255, 100, 100),
+        _ => hurtbox_palette(status).0,
+    }
+}
+
+/// A second outline layer for fighter-wide damage-reaction conditions. The fill remains the
+/// hurtbox-status color, so XLU/invincible and armor can be read at the same time.
+fn hurtbox_condition_palette(condition: &crate::data::HurtboxCondition) -> Option<Color32> {
+    match condition {
+        crate::data::HurtboxCondition::Normal => None,
+        crate::data::HurtboxCondition::SuperArmor => Some(Color32::from_rgb(210, 105, 255)),
+        crate::data::HurtboxCondition::ReactionValueArmor { .. } => {
+            Some(Color32::from_rgb(120, 170, 255))
+        }
+        crate::data::HurtboxCondition::DamageBasedArmor { .. } => {
+            Some(Color32::from_rgb(255, 135, 65))
+        }
+        crate::data::HurtboxCondition::DamagePowerCount { .. } => {
+            Some(Color32::from_rgb(255, 95, 145))
+        }
+        crate::data::HurtboxCondition::NoReactionMode => Some(Color32::from_rgb(195, 95, 255)),
+        crate::data::HurtboxCondition::Unknown { .. } => Some(Color32::from_rgb(255, 0, 255)),
+    }
+}
+
+fn hurtbox_render_descriptors(
+    volumes: &[crate::data::HurtboxVolume],
+    events: &[crate::data::HurtboxEvent],
+    frame: u32,
+    enabled: bool,
+) -> Vec<(usize, crate::data::HurtboxStatus)> {
+    if !enabled {
+        return Vec::new();
+    }
+    volumes
+        .iter()
+        .enumerate()
+        .filter(|(_, volume)| matches!(volume.shape, crate::data::HurtboxShape::Capsule))
+        .filter_map(|(index, volume)| {
+            let status = crate::data::effective_hurtbox_status(volume, events, frame);
+            (status != crate::data::HurtboxStatus::Off).then_some((index, status))
+        })
+        .collect()
+}
+
+fn hurtbox_world_endpoints(
+    volume: &crate::data::HurtboxVolume,
+    bone_matrix: glam::Mat4,
+) -> [glam::Vec3; 2] {
+    [
+        bone_matrix.transform_point3(glam::Vec3::from_array(volume.endpoint1)),
+        bone_matrix.transform_point3(glam::Vec3::from_array(volume.endpoint2)),
+    ]
+}
+
+fn hurtbox_world_radius(volume: &crate::data::HurtboxVolume, bone_matrix: glam::Mat4) -> f32 {
+    let scale = [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z]
+        .into_iter()
+        .map(|axis| bone_matrix.transform_vector3(axis).length())
+        .fold(0.0, f32::max);
+    (volume.radius * scale).max(0.0)
+}
+
+fn projected_capsule_direction(delta: egui::Vec2) -> Option<egui::Vec2> {
+    let length_sq = delta.length_sq();
+    (length_sq > f32::EPSILON).then(|| delta / length_sq.sqrt())
+}
+
+struct ProjectedCapsule {
+    world_start: glam::Vec3,
+    world_end: Option<glam::Vec3>,
+    world_radius: f32,
+    stroke: egui::Stroke,
+    fill: Color32,
+}
+
+/// Draw a projected sphere/capsule for both editable collisions and parameter hurtboxes.
+///
+/// Projection is intentionally kept in the egui overlay. Endpoint projection is allowed outside
+/// the viewport so a capsule crossing an edge remains visible after egui clips the finished
+/// shape. Equal projected endpoints are a sphere, avoiding a zero-length tangent vector.
+fn draw_projected_capsule(
+    painter: &egui::Painter,
+    rs: &HitboxRenderState,
+    viewport: egui::Rect,
+    capsule: ProjectedCapsule,
+) -> Option<egui::Pos2> {
+    let painter = painter.with_clip_rect(viewport);
+    let radius = if capsule.world_radius.is_finite() {
+        capsule.world_radius.max(0.0)
+    } else {
+        return None;
+    };
+    let start = rs.world_to_screen(capsule.world_start, viewport);
+    let end = capsule
+        .world_end
+        .and_then(|point| rs.world_to_screen(point, viewport));
+    let screen_radius = |point: glam::Vec3| {
+        rs.world_radius_to_screen(point, radius, viewport)
+            .filter(|value| value.is_finite())
+            .unwrap_or(radius * 4.0)
+            .max(2.0)
+    };
+
+    match (start, end) {
+        (Some(p1), Some(p2)) => {
+            let delta = p2 - p1;
+            if let Some(dir) = projected_capsule_direction(delta) {
+                let r1 = screen_radius(capsule.world_start);
+                let r2 = capsule.world_end.map(screen_radius).unwrap_or(r1);
+                let perp = egui::vec2(-dir.y, dir.x);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        p1 + perp * r1,
+                        p2 + perp * r2,
+                        p2 - perp * r2,
+                        p1 - perp * r1,
+                    ],
+                    capsule.fill,
+                    egui::Stroke::NONE,
+                ));
+                painter.line_segment([p1 + perp * r1, p2 + perp * r2], capsule.stroke);
+                painter.line_segment([p1 - perp * r1, p2 - perp * r2], capsule.stroke);
+                painter.circle(p1, r1, capsule.fill, capsule.stroke);
+                painter.circle(p2, r2, capsule.fill, capsule.stroke);
+            } else {
+                let r1 = screen_radius(capsule.world_start);
+                let r2 = capsule.world_end.map(screen_radius).unwrap_or(r1);
+                painter.circle(p1, r1.max(r2), capsule.fill, capsule.stroke);
+            }
+            Some((p1 + p2.to_vec2()) * 0.5)
+        }
+        (Some(point), None) => {
+            painter.circle(
+                point,
+                screen_radius(capsule.world_start),
+                capsule.fill,
+                capsule.stroke,
+            );
+            Some(point)
+        }
+        (None, Some(point)) => {
+            let end_world = capsule.world_end.unwrap_or(capsule.world_start);
+            painter.circle(
+                point,
+                screen_radius(end_world),
+                capsule.fill,
+                capsule.stroke,
+            );
+            Some(point)
+        }
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod hurtbox_viewport_tests {
+    use super::*;
+
+    #[test]
+    fn parameter_endpoints_use_complete_bone_transform() {
+        let volume = crate::data::HurtboxVolume {
+            index: 0,
+            bone_name: "arm".into(),
+            bone_hash: hash40::hash40("arm").0,
+            endpoint1: [0.0, 0.0, 0.0],
+            endpoint2: [1.0, 0.0, 0.0],
+            radius: 1.0,
+            default_status: crate::data::HurtboxStatus::Normal,
+            shape: crate::data::HurtboxShape::Capsule,
+        };
+        let matrix = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(2.0),
+            glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            glam::Vec3::new(10.0, 3.0, -2.0),
+        );
+        let [start, end] = hurtbox_world_endpoints(&volume, matrix);
+        assert!((start - glam::Vec3::new(10.0, 3.0, -2.0)).length() < 1e-5);
+        assert!((end - glam::Vec3::new(10.0, 5.0, -2.0)).length() < 1e-5);
+        assert!((hurtbox_world_radius(&volume, matrix) - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn projected_capsule_treats_coincident_endpoints_as_a_sphere() {
+        assert!(projected_capsule_direction(egui::Vec2::ZERO).is_none());
+        let direction = projected_capsule_direction(egui::vec2(3.0, 4.0)).unwrap();
+        assert!((direction.length() - 1.0).abs() < 1e-6);
+        assert!(direction.x.is_finite() && direction.y.is_finite());
+    }
+
+    #[test]
+    fn hurtbox_palette_matches_timeline_and_unknown_is_outline_only() {
+        assert_eq!(
+            hurtbox_palette(crate::data::HurtboxStatus::Invincible).0,
+            Color32::from_rgb(120, 220, 255)
+        );
+        assert_eq!(
+            hurtbox_palette(crate::data::HurtboxStatus::Xlu).0,
+            Color32::from_rgb(255, 200, 90)
+        );
+        assert_eq!(
+            hurtbox_palette(crate::data::HurtboxStatus::Unknown(7)).1,
+            Color32::TRANSPARENT
+        );
+        assert_eq!(
+            hurtbox_condition_palette(&crate::data::HurtboxCondition::SuperArmor),
+            Some(Color32::from_rgb(210, 105, 255))
+        );
+        assert_eq!(
+            hurtbox_condition_palette(&crate::data::HurtboxCondition::DamageBasedArmor {
+                threshold: 25.0,
+            }),
+            Some(Color32::from_rgb(255, 135, 65))
+        );
+        assert_eq!(
+            hurtbox_condition_palette(&crate::data::HurtboxCondition::Normal),
+            None
+        );
+    }
+
+    #[test]
+    fn hurtbox_render_descriptors_respect_toggle_shape_and_effective_off() {
+        let volumes = vec![
+            crate::data::HurtboxVolume {
+                index: 0,
+                bone_name: "hip".into(),
+                bone_hash: hash40::hash40("hip").0,
+                endpoint1: [0.0; 3],
+                endpoint2: [1.0, 0.0, 0.0],
+                radius: 1.0,
+                default_status: crate::data::HurtboxStatus::Normal,
+                shape: crate::data::HurtboxShape::Capsule,
+            },
+            crate::data::HurtboxVolume {
+                index: 1,
+                bone_name: "hip".into(),
+                bone_hash: hash40::hash40("hip").0,
+                endpoint1: [0.0; 3],
+                endpoint2: [1.0, 0.0, 0.0],
+                radius: 1.0,
+                default_status: crate::data::HurtboxStatus::Off,
+                shape: crate::data::HurtboxShape::Capsule,
+            },
+        ];
+        assert!(hurtbox_render_descriptors(&volumes, &[], 1, false).is_empty());
+        let descriptors = hurtbox_render_descriptors(&volumes, &[], 1, true);
+        assert_eq!(descriptors, vec![(0, crate::data::HurtboxStatus::Normal)]);
+    }
+
+    #[test]
+    fn hurtbox_visibility_config_is_versioned_and_defaults_off_safely() {
+        assert_eq!(encode_hurtbox_visibility(false), "v1,0");
+        assert_eq!(encode_hurtbox_visibility(true), "v1,1");
+        assert!(!parse_hurtbox_visibility(""));
+        assert!(!parse_hurtbox_visibility("v2,1"));
+        assert!(!parse_hurtbox_visibility("v1,yes"));
+        assert!(!parse_hurtbox_visibility("v1,1,extra"));
+        assert!(parse_hurtbox_visibility("v1,1\n"));
     }
 }
 
@@ -26079,6 +28424,7 @@ fn rebuild_script_from_hitboxes(
                 // user's may, and dragging a hitbox must not silence their move.
                 ExcuteStmt::HitStatus { .. }
                 | ExcuteStmt::HitResetAll
+                | ExcuteStmt::DamageNoReaction(_)
                 | ExcuteStmt::ColPri(_)
                 | ExcuteStmt::ColNormal
                 | ExcuteStmt::AttackMod { .. }
@@ -27465,7 +29811,8 @@ fn save_timeline_filters(filters: TimelineFilters) {
         let _ = std::fs::create_dir_all(parent);
     }
     let body = format!(
-        "v1,{},{},{},{}",
+        "v2,{},{},{},{},{}",
+        u8::from(filters.hurtboxes),
         u8::from(filters.collisions),
         u8::from(filters.effects),
         u8::from(filters.motion_state),
@@ -27481,21 +29828,62 @@ fn load_timeline_filters() -> TimelineFilters {
     let Ok(body) = std::fs::read_to_string(dest) else {
         return TimelineFilters::default();
     };
-    let values: Vec<bool> = body
-        .trim()
-        .split(',')
-        .skip(1)
-        .map(|value| value == "1")
-        .collect();
-    if values.len() != 4 {
-        return TimelineFilters::default();
+    let mut fields = body.trim().split(',');
+    let version = fields.next().unwrap_or_default();
+    let values: Vec<bool> = fields.map(|value| value == "1").collect();
+    match (version, values.as_slice()) {
+        // Preserve existing timeline preferences when upgrading from the four-category format;
+        // hurtboxes are a new independent lane and start visible.
+        ("v1", [collisions, effects, motion_state, audio_feedback]) => TimelineFilters {
+            collisions: *collisions,
+            hurtboxes: true,
+            effects: *effects,
+            motion_state: *motion_state,
+            audio_feedback: *audio_feedback,
+        },
+        ("v2", [hurtboxes, collisions, effects, motion_state, audio_feedback]) => TimelineFilters {
+            collisions: *collisions,
+            hurtboxes: *hurtboxes,
+            effects: *effects,
+            motion_state: *motion_state,
+            audio_feedback: *audio_feedback,
+        },
+        _ => TimelineFilters::default(),
     }
-    TimelineFilters {
-        collisions: values[0],
-        effects: values[1],
-        motion_state: values[2],
-        audio_feedback: values[3],
+}
+
+/// Persist the viewport hurtbox preference independently from project data. Versioning the tiny
+/// file lets a future format change fall back safely rather than interpreting arbitrary text as
+/// an enabled overlay.
+fn save_hurtbox_visibility(visible: bool) {
+    let Some(dest) = config_path("editor_viewport_hurtboxes") else {
+        return;
+    };
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
+    let _ = std::fs::write(dest, encode_hurtbox_visibility(visible));
+}
+
+fn load_hurtbox_visibility() -> bool {
+    let Some(dest) = config_path("editor_viewport_hurtboxes") else {
+        return false;
+    };
+    std::fs::read_to_string(dest)
+        .ok()
+        .is_some_and(|body| parse_hurtbox_visibility(&body))
+}
+
+fn encode_hurtbox_visibility(visible: bool) -> String {
+    format!("v1,{}", u8::from(visible))
+}
+
+fn parse_hurtbox_visibility(body: &str) -> bool {
+    let mut fields = body.trim().split(',');
+    if fields.next() != Some("v1") {
+        return false;
+    }
+    matches!(fields.next(), Some("1")) && fields.next().is_none()
 }
 
 fn config_path(key: &str) -> Option<std::path::PathBuf> {
@@ -27782,6 +30170,7 @@ mod editor_timeline_filter_tests {
     fn filters_start_with_every_editor_category_visible() {
         let filters = TimelineFilters::default();
         assert!(filters.shows(TimelineCategory::Collisions));
+        assert!(filters.shows(TimelineCategory::Hurtboxes));
         assert!(filters.shows(TimelineCategory::Effects));
         assert!(filters.shows(TimelineCategory::MotionState));
         assert!(filters.shows(TimelineCategory::AudioFeedback));
@@ -27794,6 +30183,7 @@ mod editor_timeline_filter_tests {
             ..TimelineFilters::default()
         };
         assert!(filters.shows(TimelineCategory::Collisions));
+        assert!(filters.shows(TimelineCategory::Hurtboxes));
         assert!(!filters.shows(TimelineCategory::Effects));
         assert!(filters.shows(TimelineCategory::MotionState));
         assert!(filters.shows(TimelineCategory::AudioFeedback));
@@ -28180,6 +30570,12 @@ mod live_effect_capture_tests {
             A::Num(6.0),
             A::Num(0.75),
         ]);
+        if func == "EFFECT_FOLLOW_FLIP" {
+            // EFFECT_FOLLOW_FLIP has a complete 12-argument macro contract. Keep the trailing
+            // bool/axis in the donor so retiming proves that replay does not silently fall back
+            // to a shorter, incompatible call for any fighter.
+            args.extend([A::Bool(true), A::Int(1)]);
+        }
         CaptureLine {
             kind: 6,
             motion: hash40::hash40("attack_air_n").0,
@@ -29357,12 +31753,46 @@ mod live_effect_capture_tests {
         );
         assert_eq!((pris[0].pri, pris[0].active_end), (200, 20));
 
+        let typed = VisionaryApp::typed_hurtbox_script_from_captures(&captures, &bone_rev);
+        assert_eq!(typed.to_hurtboxes().1[0].pri, 200);
+
         // And it must survive an export, which is what "editable" has to mean here.
         let exported = crate::acmd::export_acmd_source(&script, "dolly", "special_air_hi");
         assert!(
             exported.contains(r#"macros::HIT_NODE(agent, Hash40::new("kneer"), *HIT_STATUS_XLU);"#),
             "{exported}"
         );
+    }
+
+    #[test]
+    fn a_captured_damage_reaction_line_comes_back_as_an_editable_condition() {
+        let line = |frame: f32, mode: i64, value: f32| CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_n").0,
+            frame,
+            func: "DAMAGE_NO_REACTION".into(),
+            args: vec![A::Int(0), A::Int(mode), A::Num(value)],
+            run: 1,
+        };
+        let script = VisionaryApp::script_from_captures(
+            &[line(2.0, 1, 0.0), line(8.0, 0, 0.0)],
+            &HashMap::new(),
+        );
+        let conditions = script.to_hurtbox_conditions();
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            conditions[0].condition,
+            crate::data::HurtboxCondition::SuperArmor
+        ));
+        assert_eq!(
+            (conditions[0].active_start, conditions[0].active_end),
+            (3, 8)
+        );
+        assert!(conditions[1].condition.is_normal());
+        let exported = crate::acmd::export_acmd_source(&script, "mario", "attack_n");
+        assert!(exported.contains(
+            "damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_ALWAYS, 0);"
+        ));
     }
 
     /// A captured `WHOLE_HIT` reads its status from slot 0, where the targeted pair keeps a
@@ -29647,10 +32077,10 @@ mod live_effect_capture_tests {
         );
     }
 
-    /// A bone this dump cannot name would export as the wrong bone or as a raw hash, so the
-    /// call is dropped instead. Silence beats a call that says something false.
+    /// A bone this dump cannot name is still a valid captured target. Preserve its raw hash so
+    /// special hurtboxes remain visible, editable, and exportable without guessing a name.
     #[test]
-    fn a_captured_bone_with_no_known_name_is_dropped_rather_than_guessed() {
+    fn a_captured_bone_with_no_known_name_is_preserved_as_a_raw_hash() {
         let captures = vec![CaptureLine {
             kind: 6,
             motion: hash40::hash40("special_air_hi").0,
@@ -29660,7 +32090,16 @@ mod live_effect_capture_tests {
             run: 1,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
-        assert!(script.to_hurtboxes().0.is_empty());
+        let (states, _) = script.to_hurtboxes();
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[0].target,
+            crate::data::HurtTarget::Bone("0xdeadbeef".into())
+        );
+        assert!(
+            crate::acmd::export_acmd_source(&script, "mario", "special_air_hi")
+                .contains("Hash40::new_raw(0xdeadbeef)")
+        );
     }
 
     /// A captured `FT_MOTION_RATE` reaches the script as a typed, **top-level** statement.
@@ -30908,6 +33347,341 @@ mod live_effect_capture_tests {
     }
 
     #[test]
+    fn live_script_does_not_promote_unscoped_flags_over_an_effect_only_source() {
+        let effect_only = r#"unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 1.0);
+    if macros::is_excute(agent) {
+        macros::FLASH(agent, 1.0, 1.0, 1.0, 1.0);
+    }
+}
+        "#;
+        assert!(!VisionaryApp::live_capture_can_replace_script(
+            false,
+            "GitHub",
+            effect_only
+        ));
+        assert!(VisionaryApp::live_capture_can_replace_script(false, "", ""));
+        assert!(!VisionaryApp::live_capture_can_replace_script(
+            false,
+            "Live capture",
+            effect_only
+        ));
+        assert!(!VisionaryApp::live_capture_can_replace_script(
+            true,
+            "GitHub",
+            effect_only
+        ));
+    }
+
+    #[test]
+    fn live_fetch_keeps_typed_special_hurtboxes_when_the_source_is_effect_only() {
+        let bone = hash40::hash40("kneer").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "HIT_NODE".into(),
+                args: vec![A::Hash(bone), A::Int(2)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "WorkModule::on_flag".into(),
+                args: vec![A::Int(0x1234)],
+                run: 1,
+            },
+        ];
+        let bones = HashMap::from([(bone, "kneer".to_string())]);
+        let typed = VisionaryApp::typed_hurtbox_script_from_captures(&captures, &bones);
+
+        assert_eq!(typed.to_hurtboxes().0.len(), 1);
+        assert_eq!(typed.to_work_flag_events().len(), 0);
+        assert!(
+            !VisionaryApp::live_capture_can_replace_script(false, "GitHub", "effect body"),
+            "the unscoped direct-module policy remains in force"
+        );
+
+        let mut game = crate::data::AcmdScript {
+            stmts: vec![crate::data::AcmdStmt::Frame(1.0)],
+        };
+        let added = VisionaryApp::merge_typed_hurtbox_capture(&mut game, &typed)
+            .expect("a flat fetched game script is safe to extend");
+        assert_eq!(added, 1);
+        assert_eq!(
+            game.to_hurtboxes().0[0].target,
+            crate::data::HurtTarget::Bone("kneer".into())
+        );
+    }
+
+    #[test]
+    fn capture_only_live_script_omits_unscoped_module_observations() {
+        let bone = hash40::hash40("kneer").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "HIT_NODE".into(),
+                args: vec![A::Hash(bone), A::Int(2)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "WorkModule::off_flag".into(),
+                args: vec![A::Int(553648140)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "WorkModule::enable_transition_term".into(),
+                args: vec![A::Int(503316593)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "WorkModule::inc_int".into(),
+                args: vec![A::Int(285212678)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "KineticModule::change_kinetic".into(),
+                args: vec![A::Int(7)],
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("special_air_hi").0,
+                frame: 4.0,
+                func: "FT_MOTION_RATE".into(),
+                args: vec![A::Num(1.0)],
+                run: 1,
+            },
+        ];
+        let bones = HashMap::from([(bone, "kneer".to_string())]);
+        let script = VisionaryApp::live_script_from_captures(&captures, &bones);
+
+        assert_eq!(script.to_hurtboxes().0.len(), 1);
+        assert!(script.to_work_flag_events().is_empty());
+        assert!(script.to_work_transition_term_events().is_empty());
+        assert!(script.to_work_module_inc_int_events().is_empty());
+        assert!(script.to_change_kinetic_events().is_empty());
+        assert_eq!(script.motion_rate_sites().len(), 1);
+    }
+
+    #[test]
+    fn retimed_effect_injection_uses_the_matching_repeated_donor() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let first = spawn("EFFECT_FOLLOW", 4.0, effect);
+        let second = spawn("EFFECT_FOLLOW", 8.0, effect);
+        let captures = vec![first.clone(), second.clone()];
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 2);
+
+        let mut edited = calls[1].clone();
+        edited.active_start = 12;
+        let inject = VisionaryApp::build_effect_inject_from_captures(&edited, &captures, effect, 1)
+            .expect("the second repeated effect has a captured donor");
+        assert_eq!(inject.frame, 11.0);
+        assert_eq!(inject.func, "EFFECT_FOLLOW");
+        assert_eq!(inject.args[2], A::Num(1.0));
+        assert_eq!(inject.args[3], A::Num(2.0));
+        assert_eq!(inject.args[4], A::Num(3.0));
+    }
+
+    #[test]
+    fn retimed_effect_injection_preserves_exact_low_script_frames() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let capture = spawn("EFFECT_FOLLOW", 5.0, effect);
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let calls = VisionaryApp::effect_calls_from_captures(
+            std::slice::from_ref(&capture),
+            &bones,
+            &effects,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].active_start, 6);
+
+        // The pristine suppression window stays at the authored motion frame while the
+        // replacement keeps the exact requested script-to-motion conversion, including motion
+        // frames zero and one. This is the desktop half of the low-frame Main/Post regression.
+        let pristine_window = VisionaryApp::rule_frame_window(calls[0].active_start);
+        assert_eq!(pristine_window, (Some(4.5), Some(5.5)));
+        for (script_frame, motion_frame) in [(3, 2.0), (2, 1.0), (1, 0.0)] {
+            let mut edited = calls[0].clone();
+            edited.active_start = script_frame;
+            let inject = VisionaryApp::build_effect_inject_from_captures(
+                &edited,
+                std::slice::from_ref(&capture),
+                effect,
+                0,
+            )
+            .expect("the captured donor supplies the replacement arguments");
+            assert_eq!(inject.frame, motion_frame, "script frame {script_frame}");
+            assert_eq!(
+                VisionaryApp::rule_frame_window(calls[0].active_start),
+                pristine_window,
+                "script frame {script_frame} must not move suppression"
+            );
+        }
+    }
+
+    #[test]
+    fn retimed_effect_families_replay_at_motion_frame_zero() {
+        let effect = hash40::hash40("moon_explosion").0;
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "moon_explosion".to_string())]);
+
+        // These are the three layout classes used by the low-frame replacement path: ordinary
+        // one-shots, bone-following effects, and the complete flip/follow contract. The runtime
+        // hook is shared by every fighter and every effect name; the test deliberately has no
+        // fighter or move identity in it.
+        for func in ["EFFECT", "EFFECT_FOLLOW", "EFFECT_FOLLOW_FLIP"] {
+            let capture = spawn(func, 4.0, effect);
+            let calls = VisionaryApp::effect_calls_from_captures(
+                std::slice::from_ref(&capture),
+                &bones,
+                &effects,
+            );
+            assert_eq!(calls.len(), 1, "{func}");
+            assert_eq!(calls[0].spawn_func, func);
+            assert_eq!(calls[0].active_start, 5, "{func}");
+
+            let mut edited = calls[0].clone();
+            edited.active_start = 1;
+            let inject = VisionaryApp::build_effect_inject_from_captures(
+                &edited,
+                std::slice::from_ref(&capture),
+                effect,
+                0,
+            )
+            .unwrap_or_else(|| panic!("captured {func} must be replayable"));
+            assert_eq!(inject.frame, 0.0, "{func}");
+            assert_eq!(inject.func, func);
+            assert_eq!(inject.args[0], A::Hash(effect), "{func}");
+            if func == "EFFECT_FOLLOW_FLIP" {
+                assert_eq!(inject.args[1], A::Hash(effect));
+                assert_eq!(inject.args[2], A::Hash(hash40::hash40("top").0));
+                assert_eq!(inject.args[10], A::Bool(true));
+                assert_eq!(inject.args[11], A::Int(1));
+            }
+        }
+    }
+
+    #[test]
+    fn retimed_special_hurtbox_suppresses_the_old_call_and_injects_the_new_one() {
+        let motion = hash40::hash40("special_air_hi").0;
+        let was = crate::data::HurtboxState {
+            target: crate::data::HurtTarget::Bone("kneer".into()),
+            status: "HIT_STATUS_XLU".into(),
+            active_start: 5,
+            active_end: 12,
+            site: 0,
+        };
+        let now = crate::data::HurtboxState {
+            active_start: 9,
+            ..was.clone()
+        };
+        let rules = VisionaryApp::retimed_hurtbox_rules_for(motion, &was, &now)
+            .expect("a changed start produces a live replacement pair");
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].suppress);
+        assert_eq!(rules[0].func.as_deref(), Some("HIT_NODE"));
+        assert_eq!(rules[0].frame_start, Some(3.5));
+        let inject = rules[1].inject.as_ref().expect("new status call");
+        assert_eq!(inject.frame, 8.0);
+        assert_eq!(inject.command.as_deref(), Some("HIT_NODE"));
+        assert_eq!(inject.args[0], A::Hash(hash40::hash40("kneer").0));
+        assert_eq!(inject.args[1], A::Int(2));
+    }
+
+    #[test]
+    fn retimed_collision_priority_uses_the_typed_hurtbox_dispatcher() {
+        let motion = hash40::hash40("special_air_hi").0;
+        let was = crate::data::ColPriState {
+            pri: 200,
+            active_start: 5,
+            active_end: 12,
+            site: 0,
+        };
+        let now = crate::data::ColPriState {
+            pri: 180,
+            active_start: 9,
+            ..was.clone()
+        };
+        let rules = VisionaryApp::retimed_priority_rules_for(motion, &was, &now);
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].suppress);
+        assert_eq!(rules[0].func.as_deref(), Some("COL_PRI"));
+        let inject = rules[1].inject.as_ref().expect("new priority call");
+        assert_eq!(inject.command.as_deref(), Some("COL_PRI"));
+        assert_eq!(inject.frame, 8.0);
+        assert_eq!(inject.args, vec![A::Int(180)]);
+    }
+
+    #[test]
+    fn changing_hurtbox_macro_shape_uses_typed_injection_instead_of_rewriting_slots() {
+        let motion = hash40::hash40("special_air_hi").0;
+        let was = crate::data::HurtboxState {
+            target: crate::data::HurtTarget::Bone("kneer".into()),
+            status: "HIT_STATUS_XLU".into(),
+            active_start: 5,
+            active_end: 12,
+            site: 0,
+        };
+        let now = crate::data::HurtboxState {
+            target: crate::data::HurtTarget::Whole,
+            ..was.clone()
+        };
+        let rules = VisionaryApp::retimed_hurtbox_rules_for(motion, &was, &now)
+            .expect("HIT_NODE to WHOLE_HIT needs a typed replacement");
+        assert_eq!(rules[0].func.as_deref(), Some("HIT_NODE"));
+        let inject = rules[1].inject.as_ref().unwrap();
+        assert_eq!(inject.command.as_deref(), Some("WHOLE_HIT"));
+        assert_eq!(inject.args, vec![A::Int(2)]);
+    }
+
+    #[test]
+    fn edited_follow_end_has_a_stop_injection_at_the_new_frame() {
+        let effect = hash40::hash40("moon_explosion").0;
+        let captures = vec![
+            spawn("EFFECT_FOLLOW", 4.0, effect),
+            CaptureLine {
+                kind: 6,
+                motion: hash40::hash40("attack_air_n").0,
+                frame: 10.0,
+                func: "EFFECT_OFF_KIND".into(),
+                args: vec![A::Hash(effect), A::Bool(false), A::Bool(true)],
+                run: 1,
+            },
+        ];
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "moon_explosion".to_string())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 1);
+        let mut edited = calls[0].clone();
+        edited.active_end = 16;
+        let stop = VisionaryApp::build_effect_stop_inject(&edited);
+        assert_eq!(stop.func, "EFFECT_OFF_KIND");
+        assert_eq!(stop.frame, 15.0);
+        assert_eq!(stop.args[0], A::Hash(effect));
+    }
+
+    #[test]
     fn work_module_flag_live_rules_key_the_pristine_numeric_flag_and_operation() {
         let motion = hash40::hash40("attack_air_n").0;
         let captures = vec![CaptureLine {
@@ -31730,29 +34504,22 @@ mod live_effect_capture_tests {
 
     #[test]
     fn live_effect_layout_accounts_for_dumped_spawn_families() {
-        for func in [
-            "EFFECT",
-            "EFFECT_ALPHA",
-            "EFFECT_ATTR",
-            "EFFECT_FLIP_ALPHA",
-            "EFFECT_FOLLOW",
-            "EFFECT_FOLLOW_ALPHA",
-            "EFFECT_FOLLOW_COLOR",
-            "EFFECT_FOLLOW_NO_SCALE",
-            "EFFECT_FOLLOW_NO_STOP",
-            "EFFECT_FOLLOW_NO_STOP_FLIP",
-            "EFFECT_FOLLOW_FLIP_RND",
-            "EFFECT_FLW_POS",
-            "EFFECT_FLW_POS_NO_STOP",
-            "DOWN_EFFECT",
-            "FOOT_EFFECT",
-            "FOOT_EFFECT_FLIP",
-            "LANDING_EFFECT",
-            "LANDING_EFFECT_FLIP",
-        ] {
+        for layout in crate::acmd::EFFECT_SPAWN_LAYOUTS {
+            let func = layout.name;
             assert!(
                 effect_capture_layout(func).is_some(),
                 "{func} must be reconstructed as an effect spawn"
+            );
+            assert!(
+                crate::acmd::is_effect_spawn_macro(func),
+                "{func} must be recognized by the source parser"
+            );
+            assert_eq!(
+                effect_spawn_default_live_tail(func)
+                    .expect("every selectable command needs live defaults")
+                    .len(),
+                layout.tail.len(),
+                "{func} source and live tail profiles must agree"
             );
         }
         assert!(effect_capture_layout("EFFECT_OFF_KIND").is_none());
@@ -31763,7 +34530,101 @@ mod live_effect_capture_tests {
     }
 
     #[test]
-    fn live_flip_effect_keeps_both_graphics_and_null_noops_are_hidden() {
+    fn swapping_effect_families_rebuilds_flip_slots_and_native_tail() {
+        let old = hash40::hash40("old_effect").0;
+        let new = hash40::hash40("new_effect").0;
+        let target = crate::data::EffectCall {
+            effect_name: "new_effect".into(),
+            effect_name_alt: Some("new_effect_alt".into()),
+            spawn_func: "EFFECT_FOLLOW_FLIP_ALPHA".into(),
+            bone_name: "haver".into(),
+            offset: [10.0, 11.0, 12.0],
+            rotation: [13.0, 14.0, 15.0],
+            scale: 1.25,
+            follows_bone: true,
+            active_start: 7,
+            active_end: 9999,
+            disabled: false,
+            extra_args: None,
+            raw_line: None,
+            trail_command: None,
+            trail_off: None,
+            trail_bone2: None,
+            rate: None,
+            work_int: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            control: None,
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        };
+        let donor = spawn("EFFECT", 5.0, old);
+        let (func, args) = retarget_effect_capture_args(&target, &donor.func, &donor.args, new)
+            .expect("the shared layout must retarget an ordinary spawn");
+        assert_eq!(func, "EFFECT_FOLLOW_FLIP_ALPHA");
+        assert_eq!(args[0], A::Hash(new));
+        assert_eq!(
+            args[1],
+            A::Hash(hash40::hash40("new_effect_alt").0),
+            "a target flip command needs its second graphic slot"
+        );
+        assert_eq!(args[2], A::Hash(hash40::hash40("haver").0));
+        assert_eq!(&args[10..], &[A::Bool(false), A::Int(0), A::Num(1.0)]);
+
+        let mut edited = target.clone();
+        edited.spawn_func = "EFFECT".into();
+        edited.effect_name_alt = None;
+        edited.follows_bone = false;
+        edited.active_end = edited.active_start;
+        edited.extra_args = Some(
+            vec!["0".into(); 6]
+                .into_iter()
+                .chain(["false".into()])
+                .collect(),
+        );
+        assert!(set_effect_spawn_command(
+            &mut edited,
+            "EFFECT_FOLLOW_FLIP_ALPHA"
+        ));
+        assert_eq!(edited.effect_name_alt.as_deref(), Some("new_effect"));
+        assert!(edited.follows_bone);
+        assert_eq!(edited.active_end, 9999);
+        assert_eq!(
+            edited.extra_args.as_deref(),
+            Some(&["false", "0", "1.0"].map(str::to_string)[..])
+        );
+
+        let reverse = crate::data::EffectCall {
+            spawn_func: "EFFECT".into(),
+            effect_name: "new_effect".into(),
+            effect_name_alt: None,
+            follows_bone: false,
+            active_start: 7,
+            active_end: 7,
+            ..target
+        };
+        let flip_donor = spawn("EFFECT_FOLLOW_FLIP", 5.0, old);
+        let (func, args) =
+            retarget_effect_capture_args(&reverse, &flip_donor.func, &flip_donor.args, new)
+                .expect("a flip donor must retarget to a one-graphic spawn");
+        assert_eq!(func, "EFFECT");
+        assert_eq!(
+            args.len(),
+            16,
+            "EFFECT has nine prefix plus seven tail args"
+        );
+        assert_eq!(args[1], A::Hash(hash40::hash40("haver").0));
+        assert_eq!(args[9], A::Num(0.0));
+        assert_eq!(args[15], A::Bool(false));
+    }
+
+    #[test]
+    fn live_flip_effect_keeps_both_graphics_and_null_noops_are_visible() {
         let null = hash40::hash40("null").0;
         let smoke = hash40::hash40("sys_dash_smoke").0;
         let mut flip = spawn("LANDING_EFFECT_FLIP", 4.0, null);
@@ -31773,13 +34634,63 @@ mod live_effect_capture_tests {
         let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
         let effects = HashMap::from([(null, "null".into()), (smoke, "sys_dash_smoke".into())]);
         let calls = VisionaryApp::effect_calls_from_captures(&[flip, no_op], &bones, &effects);
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].effect_name, "null");
         assert_eq!(calls[0].effect_name_alt.as_deref(), Some("sys_dash_smoke"));
         assert_eq!(calls[0].spawn_func, "LANDING_EFFECT_FLIP");
         assert_eq!(
             effect_call_display_name(&calls[0]),
             "sys_dash_smoke (flip; other side none)"
+        );
+        assert_eq!(calls[1].effect_name, "null");
+        assert_eq!(
+            effect_call_display_name(&calls[1]),
+            "No effect (null placeholder)"
+        );
+    }
+
+    #[test]
+    fn source_null_effects_are_labeled_but_flips_with_a_real_side_remain_visible() {
+        let mut no_op = crate::data::EffectCall {
+            effect_name: "null".into(),
+            effect_name_alt: None,
+            spawn_func: "FOOT_EFFECT".into(),
+            bone_name: "top".into(),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: false,
+            active_start: 1,
+            active_end: 1,
+            disabled: false,
+            extra_args: None,
+            raw_line: None,
+            trail_command: None,
+            trail_off: None,
+            trail_bone2: None,
+            rate: None,
+            work_int: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            control: None,
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        };
+        assert!(is_null_effect_sentinel(&no_op));
+        assert_eq!(
+            effect_call_display_name(&no_op),
+            "No effect (null placeholder)"
+        );
+        no_op.effect_name_alt = Some("sys_attack_speedline".into());
+        assert!(!is_null_effect_sentinel(&no_op));
+        assert_eq!(
+            effect_call_display_name(&no_op),
+            "sys_attack_speedline (flip; other side none)"
         );
     }
 
@@ -31805,8 +34716,8 @@ mod live_effect_capture_tests {
             rate(5.0, 2.0),
             spawn("EFFECT_FOLLOW_ALPHA", 5.0, line),
             rate(5.0, 1.5),
-            // A `null` spawn is dropped as a no-op, so the rate beneath it has no spawn of its
-            // own — and must NOT fall through onto sys_attack_line above.
+            // A `null` spawn remains visible as a no-op, but the rate beneath it has no spawn
+            // anchor of its own and must NOT fall through onto sys_attack_line above.
             spawn("FOOT_EFFECT", 9.0, null),
             rate(9.0, 0.25),
         ];
@@ -31818,7 +34729,7 @@ mod live_effect_capture_tests {
             (null, "null".into()),
         ]);
         let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert_eq!(calls[0].effect_name, "sys_atk_smoke");
         assert_eq!(calls[0].rate, Some(2.0));
         assert_eq!(calls[1].effect_name, "sys_attack_line");
@@ -31827,6 +34738,8 @@ mod live_effect_capture_tests {
             Some(1.5),
             "the orphaned 0.25 must not have overwritten this"
         );
+        assert_eq!(calls[2].effect_name, "null");
+        assert_eq!(calls[2].rate, None);
     }
 
     #[test]
@@ -31998,6 +34911,163 @@ mod live_effect_capture_tests {
             ],
             "a capture drops `agent`, so every slot shifts down by one — reading the length as \
              the red channel is what getting that wrong looks like"
+        );
+    }
+
+    #[test]
+    fn retimed_colour_rules_suppress_the_old_call_and_inject_typed_arguments() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::FLASH(agent, 1.0, 0.2, 0.3, 0.4);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine.len(), 1);
+        let mut edited = pristine[0].clone();
+        edited.active_start = 1;
+        edited.active_end = 9999;
+        edited.color.as_mut().unwrap().rgba = Some([0.9, 0.8, 0.7, 0.6]);
+        let motion = hash40::hash40("attack_air_n").0;
+        let rules = VisionaryApp::build_color_rules(
+            &edited,
+            Some(&pristine[0]),
+            Some(motion),
+            VisionaryApp::rule_frame_window(pristine[0].active_start),
+        );
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].suppress);
+        assert_eq!(rules[0].eff_hash, hash40::hash40("flash").0);
+        let inject = rules[0]
+            .color_inject
+            .as_ref()
+            .expect("a retimed colour call needs a typed injection");
+        assert_eq!(inject.frame, 0.0);
+        assert_eq!(inject.func, "FLASH");
+        assert_eq!(
+            inject.args,
+            vec![A::Num(0.9), A::Num(0.8), A::Num(0.7), A::Num(0.6)]
+        );
+    }
+
+    #[test]
+    fn retimed_follow_end_suppresses_the_pristine_stop_and_keeps_frame_space() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("moon_explosion"), Hash40::new("top"), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, true);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("moon_explosion"), false, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine.len(), 1);
+        assert_eq!(pristine[0].active_start, 5);
+        assert_eq!(pristine[0].active_end, 12);
+
+        let motion = hash40::hash40("attack_air_n").0;
+        let rule = VisionaryApp::build_effect_stop_suppression(&pristine[0], Some(motion));
+        assert_eq!(rule.stop_func.as_deref(), Some("EFFECT_OFF_KIND"));
+        assert!(rule.suppress);
+        assert_eq!(rule.eff_hash, hash40::hash40("moon_explosion").0);
+        assert_eq!((rule.frame_start, rule.frame_end), (Some(10.5), Some(11.5)));
+    }
+
+    #[test]
+    fn captured_raw_and_named_trails_keep_identity_payload_and_paired_stop() {
+        let texture = hash40::hash40("tex_blade_trail").0;
+        let bone = hash40::hash40("haver").0;
+        let mut raw_args = vec![
+            A::Hash(texture),
+            A::Hash(texture),
+            A::Int(12),
+            A::Hash(bone),
+            A::Num(0.0),
+            A::Num(3.0),
+            A::Num(0.25),
+            A::Hash(bone),
+            A::Num(0.0),
+            A::Num(26.0),
+            A::Num(0.5),
+            A::Bool(true),
+            A::Hash(hash40::hash40("null").0),
+            A::Hash(bone),
+        ];
+        raw_args.extend(std::iter::repeat_n(A::Int(0), 12));
+        assert_eq!(raw_args.len(), 26);
+        let mut named_args = raw_args.clone();
+        named_args.extend(std::iter::repeat_n(A::Int(0), 3));
+        let motion = hash40::hash40("special_hi2").0;
+        let captures = vec![
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 4.0,
+                func: "AFTER_IMAGE3_ON".into(),
+                args: raw_args,
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 7.0,
+                func: "AFTER_IMAGE4_ON_arg29".into(),
+                args: named_args,
+                run: 1,
+            },
+            CaptureLine {
+                kind: 6,
+                motion,
+                frame: 15.0,
+                func: "AFTER_IMAGE_OFF".into(),
+                args: vec![A::Int(3)],
+                run: 1,
+            },
+        ];
+        let bones = HashMap::from([(bone, "haver".into())]);
+        let effects = HashMap::from([(texture, "tex_blade_trail".into())]);
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].trail_command.as_deref(), Some("AFTER_IMAGE3_ON"));
+        assert_eq!(
+            calls[1].trail_command.as_deref(),
+            Some("AFTER_IMAGE4_ON_arg29")
+        );
+        assert!(calls.iter().all(|call| call.raw_line.is_some()));
+        // Motion frame 15 is script frame 16; one stop closes only the most recent open trail,
+        // matching source parsing, while the earlier raw trail remains open.
+        assert_eq!(calls[0].active_end, 9999);
+        assert_eq!(calls[1].active_end, 16);
+        assert_eq!(calls[1].trail_off, Some(3.0));
+        let mut retimed = calls[0].clone();
+        retimed.active_start = 1;
+        let inject =
+            VisionaryApp::build_effect_inject_from_captures(&retimed, &captures, texture, 0)
+                .expect("a captured raw trail must be replayable at frame one");
+        assert_eq!(inject.frame, 0.0);
+        assert_eq!(inject.func, "AFTER_IMAGE3_ON");
+        assert_eq!(
+            inject.args.first(),
+            Some(&A::Int(crate::data::RAW_TRAIL_COMMAND_ID))
+        );
+        assert!(calls[0]
+            .raw_line
+            .as_deref()
+            .is_some_and(|line| line.contains("MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON")));
+        assert!(calls[1]
+            .raw_line
+            .as_deref()
+            .is_some_and(|line| line.contains("AFTER_IMAGE4_ON_arg29")));
+        let trail_stop = VisionaryApp::build_effect_stop_suppression(&calls[1], Some(motion));
+        assert_eq!(trail_stop.stop_func.as_deref(), Some("AFTER_IMAGE_OFF"));
+        assert_eq!(
+            trail_stop.eff_hash,
+            hash40::hash40("after_image_off").0,
+            "trail stop matching is command-keyed because AFTER_IMAGE_OFF has no texture argument"
         );
     }
 

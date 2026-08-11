@@ -309,6 +309,20 @@ pub const HIT_STATUS: ConstTable = &[
     ("HIT_STATUS_OFF", 0x3),
 ];
 
+/// `DAMAGE_NO_REACTION_MODE_*` values used by `damage!(…, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, …)`.
+///
+/// This small table is local and versioned with the editor, so armor live-preview does not rely
+/// on the optional network label download. The value slot remains a float because the game uses
+/// it for reaction-value and damage-power thresholds.
+pub const DAMAGE_NO_REACTION_MODE: ConstTable = &[
+    ("DAMAGE_NO_REACTION_MODE_NORMAL", 0x0),
+    ("DAMAGE_NO_REACTION_MODE_ALWAYS", 0x1),
+    ("DAMAGE_NO_REACTION_MODE_REACTION_VALUE", 0x2),
+    ("DAMAGE_NO_REACTION_MODE_DAMAGE_POWER", 0x3),
+    ("DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT", 0x4),
+    ("DAMAGE_NO_REACTION_MODE_NONE", -1),
+];
+
 /// `ATTACK_SOUND_LEVEL_*` — hit SFX loudness tier.
 pub const SOUND_LEVEL: ConstTable = &[
     ("ATTACK_SOUND_LEVEL_S", 0x0),

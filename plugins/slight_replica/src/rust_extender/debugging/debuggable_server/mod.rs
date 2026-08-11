@@ -208,6 +208,34 @@ pub fn poll_tcp_edits() -> Vec<ParsedEdit> {
     out
 }
 
+/// Apply the two timing-rule lists as soon as the socket thread receives them. These setters
+/// only replace lock-protected data and reset injection latches; they do not touch any game
+/// module or Lua state, so they can safely apply before the first ACMD boundary. A contended
+/// setter stages the complete list for the next boundary instead of dropping it; false is
+/// reserved for malformed or unrelated payloads that the normal parser should handle.
+pub fn apply_timing_rules_from_network(raw: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    if let Some(rules) = value.get("spawn_rules") {
+        let Ok(rules) = serde_json::from_value::<
+            Vec<crate::slight::effect_viewer::spawn_rules::SpawnRule>,
+        >(rules.clone()) else {
+            return false;
+        };
+        return crate::slight::effect_viewer::spawn_rules::set_rules(rules);
+    }
+    if let Some(rules) = value.get("effect_control_rules") {
+        let Ok(rules) = serde_json::from_value::<
+            Vec<crate::slight::effect_viewer::control_rules::ControlRule>,
+        >(rules.clone()) else {
+            return false;
+        };
+        return crate::slight::effect_viewer::control_rules::set_rules(rules);
+    }
+    false
+}
+
 fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
 
@@ -378,7 +406,9 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         match serde_json::from_value::<Vec<crate::slight::effect_viewer::spawn_rules::SpawnRule>>(
             rules_v.clone(),
         ) {
-            Ok(rules) => crate::slight::effect_viewer::spawn_rules::set_rules(rules),
+            Ok(rules) => {
+                let _ = crate::slight::effect_viewer::spawn_rules::set_rules(rules);
+            }
             Err(e) => crate::slight::diag::note(format!("spawn_rules parse error: {e}")),
         }
         return None;
@@ -389,7 +419,9 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         match serde_json::from_value::<Vec<crate::slight::effect_viewer::control_rules::ControlRule>>(
             rules_v.clone(),
         ) {
-            Ok(rules) => crate::slight::effect_viewer::control_rules::set_rules(rules),
+            Ok(rules) => {
+                let _ = crate::slight::effect_viewer::control_rules::set_rules(rules);
+            }
             Err(e) => crate::slight::diag::note(format!("effect_control_rules parse error: {e}")),
         }
         return None;

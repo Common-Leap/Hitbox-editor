@@ -1054,6 +1054,512 @@ pub enum HurtTarget {
     Whole,
 }
 
+/// The state a parameter-defined hurtbox has while the fighter is receiving hits.
+///
+/// `Unknown` deliberately retains the raw value. Parameter files can contain values from a
+/// newer game build, and drawing those as a known state would make the preview look authoritative
+/// when it is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum HurtboxStatus {
+    Normal,
+    Invincible,
+    Xlu,
+    Off,
+    Unknown(u64),
+}
+
+impl HurtboxStatus {
+    /// Stable user-facing spelling used by the sidebar, timeline, tooltips, and diagnostics.
+    /// Keeping this next to the decoder prevents one surface from calling the same state
+    /// "intangible" while another calls it "XLU".
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Normal => "NORMAL".to_string(),
+            Self::Invincible => "INVINCIBLE".to_string(),
+            Self::Xlu => "XLU (INTANGIBLE)".to_string(),
+            Self::Off => "OFF".to_string(),
+            Self::Unknown(raw) => format!("UNKNOWN ({raw:#x})"),
+        }
+    }
+
+    /// Canonical ACMD token for a known status. Unknown values stay unavailable rather than
+    /// being guessed into one of the four engine states.
+    pub(crate) fn source_token(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => Some("HIT_STATUS_NORMAL"),
+            Self::Invincible => Some("HIT_STATUS_INVINCIBLE"),
+            Self::Xlu => Some("HIT_STATUS_XLU"),
+            Self::Off => Some("HIT_STATUS_OFF"),
+            Self::Unknown(_) => None,
+        }
+    }
+
+    /// Decode the four status constants used by ACMD and retain unfamiliar numeric values.
+    pub(crate) fn from_acmd_value(raw: &str) -> Self {
+        let trimmed = raw.trim().trim_start_matches('*');
+        let value = crate::param_labels::const_value(crate::param_labels::HIT_STATUS, trimmed)
+            .or_else(|| {
+                let upper = trimmed.to_ascii_uppercase();
+                crate::param_labels::const_value(crate::param_labels::HIT_STATUS, &upper)
+            })
+            .or_else(|| crate::param_labels::parse_raw_value(trimmed));
+        if let Some(value) = value {
+            return Self::from_raw(value as u64);
+        }
+
+        // A symbolic value that is not in the local table is still useful in diagnostics. Hash
+        // the authored spelling rather than guessing one of the four known states.
+        Self::Unknown(hash40::hash40(trimmed).0)
+    }
+
+    fn from_raw(raw: u64) -> Self {
+        match raw {
+            0 => Self::Normal,
+            1 => Self::Invincible,
+            2 => Self::Xlu,
+            3 => Self::Off,
+            value => Self::Unknown(value),
+        }
+    }
+
+    fn from_param_hash(raw: u64) -> Self {
+        // Parameter files use lower-case hash40 names. Keep the numeric forms as a defensive
+        // fallback for synthetic/converted fixtures and future dumps.
+        for (name, status) in [
+            ("hit_status_normal", Self::Normal),
+            ("hit_status_invincible", Self::Invincible),
+            ("hit_status_xlu", Self::Xlu),
+            ("hit_status_off", Self::Off),
+        ] {
+            if raw == hash40::hash40(name).0 || raw == hash40::hash40(&name.to_ascii_uppercase()).0
+            {
+                return status;
+            }
+        }
+        Self::from_raw(raw)
+    }
+}
+
+/// The shape tag stored beside a parameter hurtbox. Only capsules are currently safe to render;
+/// unknown tags are retained so a diagnostic can explain why an entry was not drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum HurtboxShape {
+    Capsule,
+    Unknown(u64),
+}
+
+/// One parameter-defined hurtbox capsule.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HurtboxVolume {
+    /// The position in `hit_data`; this is the target used by `HIT_NO`.
+    pub(crate) index: usize,
+    /// The selected skeleton's canonical bone spelling.
+    pub(crate) bone_name: String,
+    /// The original `node_id` hash from the parameter file.
+    pub(crate) bone_hash: u64,
+    /// Bone-local endpoints from `offset1_*` and `offset2_*`.
+    pub(crate) endpoint1: [f32; 3],
+    pub(crate) endpoint2: [f32; 3],
+    pub(crate) radius: f32,
+    pub(crate) default_status: HurtboxStatus,
+    pub(crate) shape: HurtboxShape,
+}
+
+/// A diagnostic produced while reading one fighter's parameter file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HurtboxLoadWarning {
+    /// The `hit_data` list position, when the warning belongs to an entry.
+    pub(crate) index: Option<usize>,
+    pub(crate) reason: String,
+}
+
+/// Result of loading a fighter's parameter-defined hurtboxes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct HurtboxLoadResult {
+    pub(crate) volumes: Vec<HurtboxVolume>,
+    pub(crate) warnings: Vec<HurtboxLoadWarning>,
+}
+
+/// One ordered state change from the ACMD evaluator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HurtboxEvent {
+    Set {
+        frame: u32,
+        sequence: usize,
+        target: HurtTarget,
+        status: HurtboxStatus,
+    },
+    ResetAll {
+        frame: u32,
+        sequence: usize,
+    },
+}
+
+/// A damage-reaction condition that applies to the fighter's hurtboxes as a whole.
+///
+/// These are deliberately separate from [`HurtboxStatus`]. `HIT_NODE`/`WHOLE_HIT` change the
+/// status of one or more parameter-defined volumes, while `DAMAGE_NO_REACTION` changes how
+/// damage is reacted to without changing the volumes' geometry. Keeping the two layers separate
+/// lets the viewport show, for example, an intangible capsule with a super-armor accent instead
+/// of replacing one meaningful state with the other.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HurtboxCondition {
+    Normal,
+    /// `DAMAGE_NO_REACTION_MODE_ALWAYS` — commonly called super armor/no-reaction.
+    SuperArmor,
+    /// `DAMAGE_NO_REACTION_MODE_REACTION_VALUE` with its authored reaction-value threshold.
+    ReactionValueArmor {
+        threshold: f32,
+    },
+    /// `DAMAGE_NO_REACTION_MODE_DAMAGE_POWER` with its authored damage threshold.
+    DamageBasedArmor {
+        threshold: f32,
+    },
+    /// `DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT` with its authored hit-count threshold.
+    DamagePowerCount {
+        threshold: f32,
+    },
+    /// `DAMAGE_NO_REACTION_MODE_NONE` — an explicit engine mode distinct from normal reaction.
+    NoReactionMode,
+    /// A newer or unrecognised no-reaction mode. Keep the authored tokens for diagnostics rather
+    /// than guessing one of the known armor modes.
+    Unknown {
+        mode: String,
+        value: String,
+    },
+}
+
+impl HurtboxCondition {
+    pub(crate) fn from_damage_no_reaction(mode: &str, value: &str) -> Self {
+        let mode = mode.trim().trim_start_matches('*');
+        match mode.to_ascii_uppercase().as_str() {
+            "DAMAGE_NO_REACTION_MODE_NORMAL" => Self::Normal,
+            "DAMAGE_NO_REACTION_MODE_ALWAYS" => Self::SuperArmor,
+            "DAMAGE_NO_REACTION_MODE_REACTION_VALUE" => value
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|threshold| threshold.is_finite() && *threshold >= 0.0)
+                .map(|threshold| Self::ReactionValueArmor { threshold })
+                .unwrap_or_else(|| Self::Unknown {
+                    mode: mode.to_string(),
+                    value: value.trim().to_string(),
+                }),
+            "DAMAGE_NO_REACTION_MODE_DAMAGE_POWER" => value
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|threshold| threshold.is_finite() && *threshold >= 0.0)
+                .map(|threshold| Self::DamageBasedArmor { threshold })
+                .unwrap_or_else(|| Self::Unknown {
+                    mode: mode.to_string(),
+                    value: value.trim().to_string(),
+                }),
+            "DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT" => value
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|threshold| threshold.is_finite() && *threshold >= 0.0)
+                .map(|threshold| Self::DamagePowerCount { threshold })
+                .unwrap_or_else(|| Self::Unknown {
+                    mode: mode.to_string(),
+                    value: value.trim().to_string(),
+                }),
+            "DAMAGE_NO_REACTION_MODE_NONE" => Self::NoReactionMode,
+            _ => Self::Unknown {
+                mode: mode.to_string(),
+                value: value.trim().to_string(),
+            },
+        }
+    }
+
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Normal => "normal reaction".to_string(),
+            Self::SuperArmor => "super armor (no reaction)".to_string(),
+            Self::ReactionValueArmor { threshold } => {
+                format!("reaction-value armor (threshold {threshold})")
+            }
+            Self::DamageBasedArmor { threshold } => {
+                format!("damage-based armor (power {threshold})")
+            }
+            Self::DamagePowerCount { threshold } => {
+                format!("damage-count armor (count {threshold})")
+            }
+            Self::NoReactionMode => "no-reaction mode".to_string(),
+            Self::Unknown { mode, value } => format!("unknown no-reaction mode {mode} ({value})"),
+        }
+    }
+
+    pub(crate) fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
+}
+
+/// One ordered damage-reaction condition change from the ACMD evaluator.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HurtboxConditionEvent {
+    pub(crate) frame: u32,
+    pub(crate) sequence: usize,
+    pub(crate) condition: HurtboxCondition,
+}
+
+fn param_hash(key: &str) -> u64 {
+    hash40::hash40(key).0
+}
+
+fn param_field<'a>(param: &'a prc::ParamStruct, key: &str) -> Option<&'a prc::ParamKind> {
+    let key = param_hash(key);
+    param
+        .0
+        .iter()
+        .find_map(|(hash, value)| (hash.0 == key).then_some(value))
+}
+
+fn param_number(value: &prc::ParamKind) -> Option<f32> {
+    match value {
+        prc::ParamKind::I8(value) => Some(*value as f32),
+        prc::ParamKind::U8(value) => Some(*value as f32),
+        prc::ParamKind::I16(value) => Some(*value as f32),
+        prc::ParamKind::U16(value) => Some(*value as f32),
+        prc::ParamKind::I32(value) => Some(*value as f32),
+        prc::ParamKind::U32(value) => Some(*value as f32),
+        prc::ParamKind::Float(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn param_raw_u64(value: &prc::ParamKind) -> Option<u64> {
+    match value {
+        prc::ParamKind::Hash(value) => Some(value.0),
+        prc::ParamKind::I8(value) => (*value >= 0).then_some(*value as u64),
+        prc::ParamKind::U8(value) => Some(*value as u64),
+        prc::ParamKind::I16(value) => (*value >= 0).then_some(*value as u64),
+        prc::ParamKind::U16(value) => Some(*value as u64),
+        prc::ParamKind::I32(value) => (*value >= 0).then_some(*value as u64),
+        prc::ParamKind::U32(value) => Some(*value as u64),
+        _ => None,
+    }
+}
+
+/// Read a fighter's `hit_data` list without consulting the optional parameter-label download.
+///
+/// Valid entries are kept when neighboring entries are malformed. A missing file, missing list,
+/// or malformed entry is represented by a warning and an empty/partial result rather than an
+/// error that would prevent the model or ACMD from loading.
+pub(crate) fn load_hurtbox_volumes(
+    param_path: &std::path::Path,
+    skeleton_bones: &[String],
+) -> HurtboxLoadResult {
+    let mut result = HurtboxLoadResult::default();
+    let param = match prc::open(param_path) {
+        Ok(param) => param,
+        Err(error) => {
+            result.warnings.push(HurtboxLoadWarning {
+                index: None,
+                reason: format!("parameter file unavailable: {error}"),
+            });
+            return result;
+        }
+    };
+
+    let Some(hit_data) = param_field(&param, "hit_data") else {
+        result.warnings.push(HurtboxLoadWarning {
+            index: None,
+            reason: "parameter file has no hit_data list".to_string(),
+        });
+        return result;
+    };
+    let prc::ParamKind::List(hit_data) = hit_data else {
+        result.warnings.push(HurtboxLoadWarning {
+            index: None,
+            reason: "hit_data is not a parameter list".to_string(),
+        });
+        return result;
+    };
+
+    let mut bones_by_hash = HashMap::new();
+    for bone in skeleton_bones {
+        bones_by_hash
+            .entry(hash40::hash40(bone).0)
+            .or_insert_with(|| bone.clone());
+        bones_by_hash
+            .entry(hash40::hash40(&bone.to_ascii_lowercase()).0)
+            .or_insert_with(|| bone.clone());
+        bones_by_hash
+            .entry(hash40::hash40(&bone.to_ascii_uppercase()).0)
+            .or_insert_with(|| bone.clone());
+    }
+
+    for (index, entry) in hit_data.0.iter().enumerate() {
+        let prc::ParamKind::Struct(entry) = entry else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "hit_data entry is not a struct".to_string(),
+            });
+            continue;
+        };
+        let field = |name: &str| param_field(entry, name);
+        let Some(node_id) = field("node_id").and_then(param_raw_u64) else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "missing or non-hash node_id".to_string(),
+            });
+            continue;
+        };
+        let Some(bone_name) = bones_by_hash.get(&node_id).cloned() else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: format!("unresolved bone hash {node_id:#x}"),
+            });
+            continue;
+        };
+
+        let names = [
+            "offset1_x",
+            "offset1_y",
+            "offset1_z",
+            "offset2_x",
+            "offset2_y",
+            "offset2_z",
+        ];
+        let Some(values) = names
+            .map(|name| field(name).and_then(param_number))
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "missing or non-numeric endpoint field".to_string(),
+            });
+            continue;
+        };
+        if values.iter().any(|value| !value.is_finite()) {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "endpoint contains a non-finite value".to_string(),
+            });
+            continue;
+        }
+        let Some(radius) = field("size").and_then(param_number) else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "missing or non-numeric size".to_string(),
+            });
+            continue;
+        };
+        if !radius.is_finite() || radius < 0.0 {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "size must be finite and non-negative".to_string(),
+            });
+            continue;
+        }
+        let Some(shape_raw) = field("check_type").and_then(param_raw_u64) else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: "missing or non-numeric check_type".to_string(),
+            });
+            continue;
+        };
+        let shape = if [
+            param_hash("collision_shape_type_capsule"),
+            param_hash("capsule"),
+        ]
+        .contains(&shape_raw)
+        {
+            HurtboxShape::Capsule
+        } else {
+            result.warnings.push(HurtboxLoadWarning {
+                index: Some(index),
+                reason: format!("unsupported hurtbox shape {shape_raw:#x}; not drawn"),
+            });
+            HurtboxShape::Unknown(shape_raw)
+        };
+        let default_status = field("status")
+            .and_then(param_raw_u64)
+            .map(HurtboxStatus::from_param_hash)
+            .unwrap_or_else(|| {
+                result.warnings.push(HurtboxLoadWarning {
+                    index: Some(index),
+                    reason: "missing or non-numeric status; using unknown".to_string(),
+                });
+                HurtboxStatus::Unknown(0)
+            });
+
+        result.volumes.push(HurtboxVolume {
+            index,
+            bone_name,
+            bone_hash: node_id,
+            endpoint1: [values[0], values[1], values[2]],
+            endpoint2: [values[3], values[4], values[5]],
+            radius,
+            default_status,
+            shape,
+        });
+    }
+
+    result
+}
+
+/// Resolve a parameter volume's state at a one-based game frame.
+pub(crate) fn effective_hurtbox_status(
+    volume: &HurtboxVolume,
+    events: &[HurtboxEvent],
+    requested_frame: u32,
+) -> HurtboxStatus {
+    let mut ordered: Vec<&HurtboxEvent> = events
+        .iter()
+        .filter(|event| match event {
+            HurtboxEvent::Set { frame, .. } | HurtboxEvent::ResetAll { frame, .. } => {
+                *frame <= requested_frame
+            }
+        })
+        .collect();
+    ordered.sort_by_key(|event| match event {
+        HurtboxEvent::Set { sequence, .. } | HurtboxEvent::ResetAll { sequence, .. } => *sequence,
+    });
+
+    let mut status = volume.default_status;
+    for event in ordered {
+        match event {
+            HurtboxEvent::Set {
+                target,
+                status: next,
+                ..
+            } if hurt_target_matches_volume(target, volume) => status = *next,
+            HurtboxEvent::ResetAll { .. } => status = volume.default_status,
+            _ => {}
+        }
+    }
+    status
+}
+
+/// Resolve the fighter-wide damage-reaction condition at a one-based game frame.
+pub(crate) fn effective_hurtbox_condition(
+    events: &[HurtboxConditionEvent],
+    requested_frame: u32,
+) -> HurtboxCondition {
+    let mut condition = HurtboxCondition::Normal;
+    let mut ordered: Vec<&HurtboxConditionEvent> = events
+        .iter()
+        .filter(|event| event.frame <= requested_frame)
+        .collect();
+    ordered.sort_by_key(|event| event.sequence);
+    for event in ordered {
+        condition = event.condition.clone();
+    }
+    condition
+}
+
+fn hurt_target_matches_volume(target: &HurtTarget, volume: &HurtboxVolume) -> bool {
+    match target {
+        HurtTarget::Bone(bone) => volume.bone_name.eq_ignore_ascii_case(bone),
+        HurtTarget::Group(group) => *group == volume.index as i64,
+        HurtTarget::Whole => true,
+    }
+}
+
 impl HurtTarget {
     /// The macro that writes this target. Each target type has exactly one.
     pub fn macro_name(&self) -> &'static str {
@@ -1099,6 +1605,121 @@ pub struct HurtboxState {
     pub active_end: u32,
     /// Which hurtbox statement in the script this span came from — see [`site`](Self::site).
     pub site: usize,
+}
+
+/// One resolved stretch or point command of a fighter-wide damage-reaction condition.
+///
+/// Normal-reaction calls are retained as one-frame rows so the sidebar can edit every authored
+/// `DAMAGE_NO_REACTION` command, including the command that restores reaction after armor.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HurtboxConditionState {
+    pub(crate) condition: HurtboxCondition,
+    pub(crate) active_start: u32,
+    pub(crate) active_end: u32,
+    pub(crate) site: usize,
+}
+
+/// Pair the current hurtbox spans with the spans from the source script.
+///
+/// `site` is a source ordinal, not a persistent identity: inserting a `HIT_NO` before an
+/// existing call shifts every later ordinal. Value edits have the opposite problem — the target
+/// or status no longer compares equal even though the source statement is the same. Matching
+/// therefore prefers an unchanged value, then the stable frame, and finally the source ordinal
+/// for a retimed point. The result is used by source write-back and live-rule diffing so an edit
+/// never turns into a duplicate command merely because another range was authored earlier in
+/// the move.
+pub(crate) fn match_hurtbox_states(
+    source: &[HurtboxState],
+    edited: &[HurtboxState],
+) -> Vec<Option<usize>> {
+    let mut matched = vec![None; edited.len()];
+    let mut used = vec![false; source.len()];
+    for pass in 0..4 {
+        for (edited_index, now) in edited.iter().enumerate() {
+            if matched[edited_index].is_some() {
+                continue;
+            }
+            let candidate = source.iter().enumerate().find(|(source_index, before)| {
+                !used[*source_index]
+                    && match pass {
+                        0 => {
+                            before.target == now.target
+                                && before.status == now.status
+                                && before.active_start == now.active_start
+                        }
+                        1 => before.target == now.target && before.active_start == now.active_start,
+                        2 => before.active_start == now.active_start,
+                        _ => before.site == now.site,
+                    }
+            });
+            if let Some((source_index, _)) = candidate {
+                matched[edited_index] = Some(source_index);
+                used[source_index] = true;
+            }
+        }
+    }
+    matched
+}
+
+/// The condition counterpart to [`match_hurtbox_states`].
+pub(crate) fn match_hurtbox_conditions(
+    source: &[HurtboxConditionState],
+    edited: &[HurtboxConditionState],
+) -> Vec<Option<usize>> {
+    let mut matched = vec![None; edited.len()];
+    let mut used = vec![false; source.len()];
+    for pass in 0..3 {
+        for (edited_index, now) in edited.iter().enumerate() {
+            if matched[edited_index].is_some() {
+                continue;
+            }
+            let candidate = source.iter().enumerate().find(|(source_index, before)| {
+                !used[*source_index]
+                    && match pass {
+                        0 => {
+                            before.condition == now.condition
+                                && before.active_start == now.active_start
+                        }
+                        1 => before.active_start == now.active_start,
+                        _ => before.site == now.site,
+                    }
+            });
+            if let Some((source_index, _)) = candidate {
+                matched[edited_index] = Some(source_index);
+                used[source_index] = true;
+            }
+        }
+    }
+    matched
+}
+
+/// Pair collision-priority spans after hurtbox insertion shifted their shared source ordinals.
+pub(crate) fn match_col_pri_states(
+    source: &[ColPriState],
+    edited: &[ColPriState],
+) -> Vec<Option<usize>> {
+    let mut matched = vec![None; edited.len()];
+    let mut used = vec![false; source.len()];
+    for pass in 0..3 {
+        for (edited_index, now) in edited.iter().enumerate() {
+            if matched[edited_index].is_some() {
+                continue;
+            }
+            let candidate = source.iter().enumerate().find(|(source_index, before)| {
+                !used[*source_index]
+                    && match pass {
+                        0 => before.pri == now.pri && before.active_start == now.active_start,
+                        1 => before.active_start == now.active_start,
+                        _ => before.site == now.site,
+                    }
+            });
+            if let Some((source_index, _)) = candidate {
+                matched[edited_index] = Some(source_index);
+                used[source_index] = true;
+            }
+        }
+    }
+    matched
 }
 
 /// One resolved stretch of non-default colour-blend priority (`COL_PRI` … `COL_NORMAL`).
@@ -1183,6 +1804,23 @@ pub struct AttackModState {
 /// counter would make every hurtbox site shift the moment a script gained an `ATK_POWER`.
 pub type AttackModSite = usize;
 
+/// The source-preserved `damage!(…, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, …)` call.
+///
+/// The command, mode, and value remain tokens instead of being reduced to an enum so an
+/// unrecognised game-build mode can be displayed and exported without silently changing it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DamageNoReactionCall {
+    pub(crate) command: String,
+    pub(crate) mode: String,
+    pub(crate) value: String,
+}
+
+impl DamageNoReactionCall {
+    pub(crate) fn condition(&self) -> HurtboxCondition {
+        HurtboxCondition::from_damage_no_reaction(&self.mode, &self.value)
+    }
+}
+
 /// One statement inside an is_excute block.
 // AttackCall is intentionally inline: ATTACK statements dominate these short-lived syntax
 // trees, so boxing every normal statement would add allocations to optimize the rare Raw case.
@@ -1220,6 +1858,10 @@ pub enum ExcuteStmt {
     },
     /// `HIT_RESET_ALL` — return every bone and group to its default state at once.
     HitResetAll,
+    /// `damage!(agent, MA_MSC_DAMAGE_DAMAGE_NO_REACTION, mode, value)` — a fighter-wide damage
+    /// reaction condition such as super armor. It is not a hurtbox status and therefore has its
+    /// own evaluator events and viewport accent.
+    DamageNoReaction(DamageNoReactionCall),
     /// `COL_PRI` — which colour blend wins while several are applied, not a hurtbox state.
     ///
     /// `lua_const` calls it `MA_MSC_CMD_COLOR_BLEND_COL_PRI`, one of six
@@ -2236,6 +2878,39 @@ impl AcmdScript {
         (hurt.states, hurt.pris)
     }
 
+    /// Flatten hurtbox status calls into ordered one-based frame events.
+    ///
+    /// This uses the same evaluator as hitboxes and the timeline, so `frame`, `wait`, branches,
+    /// and finite loops retain their existing interpretation. `sequence` is the execution order
+    /// after loop unrolling and is intentionally separate from the source edit site.
+    pub(crate) fn to_hurtbox_events(&self) -> Vec<HurtboxEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut hurt = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
+        hurt.events
+    }
+
+    /// Flatten fighter-wide damage-reaction calls into ordered one-based frame events.
+    pub(crate) fn to_hurtbox_condition_events(&self) -> Vec<HurtboxConditionEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut hurt = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
+        hurt.condition_events
+    }
+
+    /// Flatten fighter-wide damage-reaction calls into visible condition spans and reset points.
+    pub(crate) fn to_hurtbox_conditions(&self) -> Vec<HurtboxConditionState> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut hurt = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut hurt);
+        for state in hurt.conditions.iter_mut() {
+            if state.active_end == u32::MAX {
+                state.active_end = 9999;
+            }
+        }
+        hurt.conditions
+    }
+
     /// Flatten the script into post-hoc hitbox modifiers, each at the frame it runs on.
     ///
     /// No end-frame pass like the two above: these are point events. See [`AttackModState`].
@@ -2495,6 +3170,186 @@ impl AcmdScript {
             }
             None
         }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Remove the hurtbox statement at a source ordinal.
+    ///
+    /// The per-volume range editor uses this only for statements that were added after the
+    /// source baseline. Removing in descending site order keeps the remaining source ordinals
+    /// stable while a pair of old range endpoints is replaced.
+    pub fn remove_hurtbox(&mut self, site: HurtSite) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: HurtSite, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        for inner_index in 0..inner.len() {
+                            if !is_hurt_stmt(&inner[inner_index]) {
+                                continue;
+                            }
+                            if *seen == site {
+                                inner.remove(inner_index);
+                                if inner.is_empty() {
+                                    stmts.remove(index);
+                                }
+                                return true;
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if is_hurt_stmt(inner) => {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Read the source-preserved `DAMAGE_NO_REACTION` call at a condition span's site.
+    ///
+    /// Condition sites use their own ordinal, independent of the `HIT_NODE`/`HIT_NO` sites,
+    /// and the evaluator counts both wrapped and bare calls. Keeping the lookup rule here means
+    /// the sidebar can edit the exact source call that produced a repeated loop span without
+    /// rebuilding or losing the authored mode/value tokens.
+    pub(crate) fn damage_no_reaction_stmt(&self, site: usize) -> Option<&DamageNoReactionCall> {
+        fn walk<'a>(
+            stmts: &'a [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a DamageNoReactionCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for statement in inner {
+                            if let ExcuteStmt::DamageNoReaction(call) = statement {
+                                if *seen == site {
+                                    return Some(call);
+                                }
+                                *seen += 1;
+                            }
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::DamageNoReaction(call) = inner.as_ref() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&self.stmts, site, &mut 0)
+    }
+
+    /// Mutable counterpart to [`Self::damage_no_reaction_stmt`], used by the hurtbox sidebar.
+    pub(crate) fn damage_no_reaction_stmt_mut(
+        &mut self,
+        site: usize,
+    ) -> Option<&mut DamageNoReactionCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut DamageNoReactionCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for statement in inner {
+                            if let ExcuteStmt::DamageNoReaction(call) = statement {
+                                if *seen == site {
+                                    return Some(call);
+                                }
+                                *seen += 1;
+                            }
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::DamageNoReaction(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Remove a source-preserved `DAMAGE_NO_REACTION` call at its condition ordinal.
+    pub(crate) fn remove_damage_no_reaction(&mut self, site: usize) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        for inner_index in 0..inner.len() {
+                            if !matches!(inner[inner_index], ExcuteStmt::DamageNoReaction(_)) {
+                                continue;
+                            }
+                            if *seen == site {
+                                inner.remove(inner_index);
+                                if inner.is_empty() {
+                                    stmts.remove(index);
+                                }
+                                return true;
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner)
+                        if matches!(inner.as_ref(), ExcuteStmt::DamageNoReaction(_)) =>
+                    {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
         walk(&mut self.stmts, site, &mut 0)
     }
 
@@ -3698,6 +4553,176 @@ impl AcmdScript {
             .insert(insert_at + 1, AcmdStmt::Excute(vec![ExcuteStmt::ReverseLr]));
         true
     }
+
+    /// Insert one unconditional hurtbox status call at a top-level one-based game frame.
+    ///
+    /// Per-volume editor ranges are represented as ordinary `HIT_NO` calls in the script, so
+    /// export, source write-back, timeline evaluation, and live rules all consume the same IR.
+    /// A new execute block is created only when the requested frame does not already have one;
+    /// existing source blocks retain their ordering and surrounding comments.
+    pub fn insert_hurtbox_at_frame(
+        &mut self,
+        frame: u32,
+        target: HurtTarget,
+        status: String,
+    ) -> bool {
+        let target_frame = frame.max(1) as f32;
+        let statement = ExcuteStmt::HitStatus { target, status };
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(statement);
+                return true;
+            }
+            self.stmts
+                .insert(index + 1, AcmdStmt::Excute(vec![statement]));
+            return true;
+        }
+
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target_frame))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target_frame));
+        self.stmts
+            .insert(insert_at + 1, AcmdStmt::Excute(vec![statement]));
+        true
+    }
+
+    /// Insert one of the safe, typed hurtbox-family statements at a top-level frame.
+    ///
+    /// Live capture adoption uses this for `HIT_RESET_ALL` and `COL_PRI` as well as targeted
+    /// status calls. Keeping the insertion primitive here means those calls join an existing
+    /// `is_excute` block without manufacturing a second block or flattening a source branch.
+    pub(crate) fn insert_hurtbox_statement_at_frame(
+        &mut self,
+        frame: u32,
+        statement: ExcuteStmt,
+    ) -> bool {
+        let target_frame = frame.max(1) as f32;
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(statement);
+                return true;
+            }
+            self.stmts
+                .insert(index + 1, AcmdStmt::Excute(vec![statement]));
+            return true;
+        }
+
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target_frame))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target_frame));
+        self.stmts
+            .insert(insert_at + 1, AcmdStmt::Excute(vec![statement]));
+        true
+    }
+
+    /// Replace the extra endpoints previously authored by the parameter-hurtbox range editor,
+    /// then insert the requested start and restore calls. Source-authored hurtbox states are
+    /// matched against `baseline` and left untouched; only current spans with no baseline match
+    /// are removed. This makes changing a range idempotent instead of stacking overlapping
+    /// `HIT_NO` pairs that fight over the same capsule.
+    pub fn replace_hurtbox_range(
+        &mut self,
+        baseline: &[HurtboxState],
+        target: HurtTarget,
+        start: u32,
+        end: u32,
+        status: String,
+        default_status: String,
+    ) -> bool {
+        let current = self.to_hurtboxes().0;
+        let matches = match_hurtbox_states(baseline, &current);
+        let mut added_sites: Vec<HurtSite> = current
+            .iter()
+            .enumerate()
+            .filter(|(index, state)| state.target == target && matches[*index].is_none())
+            .map(|(_, state)| state.site)
+            .collect();
+        added_sites.sort_unstable_by(|left, right| right.cmp(left));
+        added_sites.dedup();
+        for site in added_sites {
+            self.remove_hurtbox(site);
+        }
+
+        self.insert_hurtbox_at_frame(start, target.clone(), status);
+        self.insert_hurtbox_at_frame(end.saturating_add(1), target, default_status);
+        true
+    }
+
+    /// Insert a fighter-wide damage-reaction command at a top-level frame. The caller normally
+    /// pairs an armor command with a normal-reaction command on the frame after its range.
+    pub(crate) fn insert_damage_no_reaction_at_frame(
+        &mut self,
+        frame: u32,
+        call: DamageNoReactionCall,
+    ) -> bool {
+        let target_frame = frame.max(1) as f32;
+        let statement = ExcuteStmt::DamageNoReaction(call);
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(statement);
+                return true;
+            }
+            self.stmts
+                .insert(index + 1, AcmdStmt::Excute(vec![statement]));
+            return true;
+        }
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target_frame))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target_frame));
+        self.stmts
+            .insert(insert_at + 1, AcmdStmt::Excute(vec![statement]));
+        true
+    }
+
+    /// Replace the extra damage-reaction range endpoints authored by the sidebar while keeping
+    /// source-authored condition calls intact.
+    pub(crate) fn replace_damage_no_reaction_range(
+        &mut self,
+        baseline: &[HurtboxConditionState],
+        start: u32,
+        end: u32,
+        armor: DamageNoReactionCall,
+        normal: DamageNoReactionCall,
+    ) -> bool {
+        let current = self.to_hurtbox_conditions();
+        let matches = match_hurtbox_conditions(baseline, &current);
+        let mut added_sites: Vec<usize> = current
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| matches[*index].is_none())
+            .map(|(_, state)| state.site)
+            .collect();
+        added_sites.sort_unstable_by(|left, right| right.cmp(left));
+        added_sites.dedup();
+        for site in added_sites {
+            self.remove_damage_no_reaction(site);
+        }
+
+        self.insert_damage_no_reaction_at_frame(start, armor);
+        self.insert_damage_no_reaction_at_frame(end.saturating_add(1), normal);
+        true
+    }
 }
 
 /// Everything but hitboxes that one walk of a script resolves.
@@ -3708,7 +4733,10 @@ impl AcmdScript {
 #[derive(Default)]
 struct WalkAccum {
     states: Vec<HurtboxState>,
+    conditions: Vec<HurtboxConditionState>,
     pris: Vec<ColPriState>,
+    events: Vec<HurtboxEvent>,
+    condition_events: Vec<HurtboxConditionEvent>,
     mods: Vec<AttackModState>,
     sounds: Vec<SoundEvent>,
     expressions: Vec<ExpressionEvent>,
@@ -3740,6 +4768,9 @@ struct WalkAccum {
     /// every iteration of a looped `HIT_NODE` is the same line in the file, so all of them must
     /// come back with the same site or an edit would land on whichever iteration was clicked.
     next_site: usize,
+    /// Site for the next damage-reaction condition statement. Kept separate from hurtbox target
+    /// sites because the condition panel is read-only and must not shift editable HIT_NODE sites.
+    next_condition_site: usize,
     /// Site for the next attack-modifier statement, counted separately — see [`AttackModSite`].
     next_mod_site: usize,
     /// Site for the next sound call, counted separately again — see [`SoundEvent::site`].
@@ -3821,6 +4852,27 @@ fn count_hurt_stmts(stmts: &[AcmdStmt]) -> usize {
         .map(|stmt| match stmt {
             AcmdStmt::Excute(inner) => inner.iter().filter(|s| is_hurt_stmt(s)).count(),
             AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => count_hurt_stmts(body),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Damage-reaction condition statements in a subtree, counted in source order for loop site
+/// resolution. This numbering is intentionally independent of editable HIT_NODE sites.
+fn count_condition_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|statement| matches!(statement, ExcuteStmt::DamageNoReaction(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => {
+                usize::from(matches!(inner.as_ref(), ExcuteStmt::DamageNoReaction(_)))
+            }
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_condition_stmts(body)
+            }
             _ => 0,
         })
         .sum()
@@ -4344,6 +5396,12 @@ impl WalkAccum {
         site
     }
 
+    fn take_condition_site(&mut self) -> usize {
+        let site = self.next_condition_site;
+        self.next_condition_site += 1;
+        site
+    }
+
     /// End every open span on `target` at `frame - 1`, then open a new one.
     ///
     /// `.max(active_start)` for the reason the id-scoped hitbox clear does it: a state set and
@@ -4376,6 +5434,32 @@ impl WalkAccum {
         for open in self.states.iter_mut().filter(|s| s.active_end == u32::MAX) {
             open.active_end = end.max(open.active_start);
         }
+    }
+
+    fn set_condition(&mut self, condition: HurtboxCondition, frame: u32, site: usize) {
+        let end = frame.saturating_sub(1);
+        for open in self
+            .conditions
+            .iter_mut()
+            .filter(|state| state.active_end == u32::MAX)
+        {
+            open.active_end = end.max(open.active_start);
+        }
+        if condition.is_normal() {
+            self.conditions.push(HurtboxConditionState {
+                condition,
+                active_start: frame,
+                active_end: frame,
+                site,
+            });
+            return;
+        }
+        self.conditions.push(HurtboxConditionState {
+            condition,
+            active_start: frame,
+            active_end: u32::MAX,
+            site,
+        });
     }
 
     fn set_pri(&mut self, pri: i64, frame: u32, site: usize) {
@@ -4705,11 +5789,34 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
         }
         ExcuteStmt::HitStatus { target, status } => {
             let site = hurt.take_site();
-            hurt.set_status(target, status, script_frame(frame), site);
+            let frame = script_frame(frame);
+            hurt.set_status(target, status, frame, site);
+            hurt.events.push(HurtboxEvent::Set {
+                frame,
+                sequence: hurt.events.len(),
+                target: target.clone(),
+                status: HurtboxStatus::from_acmd_value(status),
+            });
         }
         ExcuteStmt::HitResetAll => {
             hurt.take_site();
-            hurt.reset_all(script_frame(frame));
+            let frame = script_frame(frame);
+            hurt.reset_all(frame);
+            hurt.events.push(HurtboxEvent::ResetAll {
+                frame,
+                sequence: hurt.events.len(),
+            });
+        }
+        ExcuteStmt::DamageNoReaction(call) => {
+            let site = hurt.take_condition_site();
+            let frame = script_frame(frame);
+            let condition = call.condition();
+            hurt.set_condition(condition.clone(), frame, site);
+            hurt.condition_events.push(HurtboxConditionEvent {
+                frame,
+                sequence: hurt.condition_events.len(),
+                condition,
+            });
         }
         ExcuteStmt::ColPri(pri) => {
             let site = hurt.take_site();
@@ -4945,6 +6052,7 @@ fn eval_stmts(
                 // Rewind the site cursor for every iteration so all of them agree, then step it
                 // over the body once regardless of how many iterations actually ran.
                 let site_at_entry = hurt.next_site;
+                let condition_site_at_entry = hurt.next_condition_site;
                 let mod_site_at_entry = hurt.next_mod_site;
                 let sound_site_at_entry = hurt.next_sound_site;
                 let expression_site_at_entry = hurt.next_expression_site;
@@ -4975,6 +6083,7 @@ fn eval_stmts(
                 let work_module_set_site_at_entry = hurt.next_work_module_set_site;
                 for _ in 0..*count {
                     hurt.next_site = site_at_entry;
+                    hurt.next_condition_site = condition_site_at_entry;
                     hurt.next_mod_site = mod_site_at_entry;
                     hurt.next_sound_site = sound_site_at_entry;
                     hurt.next_expression_site = expression_site_at_entry;
@@ -5006,6 +6115,7 @@ fn eval_stmts(
                     frame = eval_stmts(body, frame, hitboxes, hurt);
                 }
                 hurt.next_site = site_at_entry + count_hurt_stmts(body);
+                hurt.next_condition_site = condition_site_at_entry + count_condition_stmts(body);
                 hurt.next_mod_site = mod_site_at_entry + count_attack_mod_stmts(body);
                 hurt.next_sound_site = sound_site_at_entry + count_sound_stmts(body);
                 hurt.next_expression_site = expression_site_at_entry + count_expression_stmts(body);
@@ -5247,6 +6357,8 @@ pub struct AppState {
     /// through [`script`](Self::script) rather than rebuilt from a list, so the script itself is
     /// the edited model and the current spans are always `script.to_hurtboxes()`.
     pub hurtboxes_pristine: (Vec<HurtboxState>, Vec<ColPriState>),
+    /// Fighter-wide damage-reaction spans as loaded, for source/live diffing.
+    pub(crate) hurtbox_conditions_pristine: Vec<HurtboxConditionState>,
     /// Post-hoc hitbox modifiers as loaded, on the same terms as `hurtboxes_pristine`: the
     /// script is the edited model, so the current list is always `script.to_attack_mods()`.
     pub attack_mods_pristine: Vec<AttackModState>,
@@ -5390,6 +6502,7 @@ impl Default for AppState {
             expression_motion_module_set_rate_partial_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
+            hurtbox_conditions_pristine: Vec::new(),
             attack_mods_pristine: Vec::new(),
             reverse_lr_pristine: Vec::new(),
             speed_ex_pristine: Vec::new(),
@@ -5436,6 +6549,7 @@ impl AppState {
     /// source syncing diff a move's hurtboxes against a different move's.
     pub fn set_script(&mut self, script: AcmdScript) {
         self.hurtboxes_pristine = script.to_hurtboxes();
+        self.hurtbox_conditions_pristine = script.to_hurtbox_conditions();
         self.attack_mods_pristine = script.to_attack_mods();
         self.reverse_lr_pristine = script.to_reverse_lr_events();
         self.speed_ex_pristine = script.to_speed_ex_events();
@@ -5928,6 +7042,10 @@ pub enum EffectMacro {
     },
     /// AFTER_IMAGE4_ON / AFTER_IMAGE_ON — sword/weapon trail effects.
     AfterImage {
+        /// Exact trail command family (`AFTER_IMAGE3_ON`, `AFTER_IMAGE4_ON_arg29`, ...).
+        /// Older serialized scripts omitted this and use the legacy raw line instead.
+        #[serde(default)]
+        command: String,
         effect_name: String,
         bone_name: String,
         /// The trail's second edge joint. See [`EffectCall::trail_bone2`] for why it is
@@ -6082,6 +7200,11 @@ pub fn is_color_command(name: &str) -> bool {
 pub const RAW_TRAIL_COMMANDS: &[(&str, &str)] =
     &[("MA_MSC_CMD_EFFECT_AFTER_IMAGE3_ON", "AFTER_IMAGE3_ON")];
 
+/// Version-pinned native command id used by the raw AFTER_IMAGE3 dispatcher. The raw command
+/// carries this as its first Lua argument; keeping it beside the command table prevents a live
+/// injection from inventing an unavailable wrapper macro.
+pub const RAW_TRAIL_COMMAND_ID: i64 = 0x2720;
+
 /// The trail site name for a raw command id, accepting it with or without the leading `*`.
 pub fn raw_trail_command(id: &str) -> Option<&'static str> {
     let id = id.trim().trim_start_matches('*').trim();
@@ -6179,6 +7302,10 @@ pub struct EffectCall {
     /// AFTER_IMAGE trail macros); exports re-emit this line as-is.
     #[serde(default)]
     pub raw_line: Option<String>,
+    /// Exact native/macro identity for a trail command. Optional for projects saved before
+    /// live trail capture was added; `raw_line` remains the source spelling and fallback.
+    #[serde(default)]
+    pub trail_command: Option<String>,
     /// The argument of the `AFTER_IMAGE_OFF` that closed this trail, when a script wrote one.
     ///
     /// `None` means the editor is ending the trail itself — a retimed or newly-added one — and
@@ -6301,6 +7428,32 @@ pub struct EffectCall {
     pub trailing: Vec<String>,
 }
 
+impl EffectCall {
+    /// Keep the lifetime representation canonical for point events.
+    ///
+    /// Graphic one-shots, colour commands, and effect controls do not have an ACMD close event;
+    /// their editor range is a single event frame. Older project files could retain a stale
+    /// `active_end` after the start frame was edited, which made the verifier compare a lifetime
+    /// that could never be emitted. Following effects and trails keep their independently
+    /// computed close frame (or the open-ended `9999` sentinel).
+    pub(crate) fn normalize_timing(&mut self) {
+        // ACMD/source frames and the editor timeline are one-based. MotionModule's frame zero
+        // is the runtime representation of script frame one, not another editable ACMD frame.
+        // Keeping zero in an EffectCall made live retime/capture matching ambiguous: an injected
+        // frame zero was captured back as script frame one, so the editor could retain the
+        // original-looking call and subsequent timing edits appeared to snap back.
+        self.active_start = self.active_start.max(1);
+        if !self.follows_bone {
+            self.active_end = self.active_start;
+        }
+    }
+
+    pub(crate) fn normalized_timing(mut self) -> Self {
+        self.normalize_timing();
+        self
+    }
+}
+
 fn default_effect_spawn_func() -> String {
     String::new()
 }
@@ -6367,6 +7520,9 @@ impl EffectScript {
         let mut walk = EffectWalk::default();
         let end = eval_effect_stmts(&self.stmts, 0.0, &mut calls, &mut walk);
         walk.end_frame(end);
+        for call in &mut calls {
+            call.normalize_timing();
+        }
         (calls, walk.frame_residue)
     }
 }
@@ -6472,7 +7628,7 @@ pub(crate) fn motion_to_script_frame(frame: f32) -> u32 {
 
 /// Convert a one-based game/ACMD frame to the zero-based motion and animation frame index.
 pub(crate) fn script_to_motion_frame(frame: u32) -> f32 {
-    frame.saturating_sub(1) as f32
+    frame.max(1).saturating_sub(1) as f32
 }
 
 fn eval_effect_stmts(
@@ -6561,6 +7717,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: Some(extra_args.clone()),
                                 raw_line: None,
+                                trail_command: None,
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
@@ -6589,6 +7746,7 @@ fn eval_effect_stmts(
                             anchor = None;
                         }
                         EffectMacro::AfterImage {
+                            command,
                             effect_name,
                             bone_name,
                             bone_name2,
@@ -6609,6 +7767,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
+                                trail_command: (!command.is_empty()).then(|| command.clone()),
                                 trail_off: None,
                                 trail_bone2: bone_name2.clone(),
                                 rate: None,
@@ -6770,6 +7929,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: None,
+                                trail_command: None,
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
@@ -6807,6 +7967,7 @@ fn eval_effect_stmts(
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: None,
+                                trail_command: None,
                                 trail_off: None,
                                 trail_bone2: None,
                                 rate: None,
@@ -7027,6 +8188,143 @@ mod tests {
                 ReverseLrEvent { frame: 8, site: 1 },
             ]
         );
+    }
+
+    #[test]
+    fn hurtbox_status_labels_are_explicit_and_unknown_values_are_not_guessed() {
+        assert_eq!(HurtboxStatus::Normal.label(), "NORMAL");
+        assert_eq!(HurtboxStatus::Invincible.label(), "INVINCIBLE");
+        assert_eq!(HurtboxStatus::Xlu.label(), "XLU (INTANGIBLE)");
+        assert_eq!(HurtboxStatus::Off.label(), "OFF");
+        assert_eq!(HurtboxStatus::Unknown(7).label(), "UNKNOWN (0x7)");
+        assert_eq!(HurtboxStatus::Unknown(7).source_token(), None);
+    }
+
+    #[test]
+    fn inserted_hurtbox_range_round_trips_through_the_same_evaluator() {
+        let mut script = AcmdScript::default();
+        script.insert_hurtbox_at_frame(4, HurtTarget::Group(12), "HIT_STATUS_XLU".into());
+        script.insert_hurtbox_at_frame(8, HurtTarget::Group(12), "HIT_STATUS_OFF".into());
+        let events = script.to_hurtbox_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            HurtboxEvent::Set {
+                frame: 4,
+                target: HurtTarget::Group(12),
+                status: HurtboxStatus::Xlu,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            HurtboxEvent::Set {
+                frame: 8,
+                target: HurtTarget::Group(12),
+                status: HurtboxStatus::Off,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replacing_hurtbox_range_removes_previous_editor_endpoints() {
+        let mut script = AcmdScript::default();
+        let baseline = script.to_hurtboxes().0;
+        script.replace_hurtbox_range(
+            &baseline,
+            HurtTarget::Group(12),
+            4,
+            8,
+            "HIT_STATUS_XLU".into(),
+            "HIT_STATUS_NORMAL".into(),
+        );
+        script.replace_hurtbox_range(
+            &baseline,
+            HurtTarget::Group(12),
+            4,
+            12,
+            "HIT_STATUS_INVINCIBLE".into(),
+            "HIT_STATUS_NORMAL".into(),
+        );
+
+        let events = script.to_hurtbox_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            HurtboxEvent::Set {
+                frame: 4,
+                target: HurtTarget::Group(12),
+                status: HurtboxStatus::Invincible,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            HurtboxEvent::Set {
+                frame: 13,
+                target: HurtTarget::Group(12),
+                status: HurtboxStatus::Normal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replacing_hurtbox_range_keeps_source_authored_states() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(2.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::HitStatus {
+                    target: HurtTarget::Group(12),
+                    status: "HIT_STATUS_XLU".into(),
+                }]),
+            ],
+        };
+        let baseline = script.to_hurtboxes().0;
+        script.replace_hurtbox_range(
+            &baseline,
+            HurtTarget::Group(12),
+            4,
+            8,
+            "HIT_STATUS_INVINCIBLE".into(),
+            "HIT_STATUS_NORMAL".into(),
+        );
+        script.replace_hurtbox_range(
+            &baseline,
+            HurtTarget::Group(12),
+            4,
+            10,
+            "HIT_STATUS_OFF".into(),
+            "HIT_STATUS_NORMAL".into(),
+        );
+
+        let events = script.to_hurtbox_events();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            events[0],
+            HurtboxEvent::Set {
+                frame: 2,
+                status: HurtboxStatus::Xlu,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            HurtboxEvent::Set {
+                frame: 4,
+                status: HurtboxStatus::Off,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[2],
+            HurtboxEvent::Set {
+                frame: 11,
+                status: HurtboxStatus::Normal,
+                ..
+            }
+        ));
     }
 
     /// A script with no rate call must map every frame to itself — so callers can use
@@ -7356,6 +8654,75 @@ mod tests {
     }
 
     #[test]
+    fn effect_timing_normalization_repairs_point_events_but_keeps_follow_stops() {
+        let mut one_shot = EffectCall {
+            effect_name: "flash".into(),
+            effect_name_alt: None,
+            spawn_func: "EFFECT".into(),
+            bone_name: "top".into(),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: false,
+            active_start: 17,
+            active_end: 9999,
+            disabled: false,
+            extra_args: None,
+            raw_line: None,
+            trail_command: None,
+            trail_off: None,
+            trail_bone2: None,
+            rate: None,
+            work_int: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            control: None,
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        };
+        one_shot.normalize_timing();
+        assert_eq!(one_shot.active_end, 17);
+
+        let mut zero_frame = one_shot.clone();
+        zero_frame.active_start = 0;
+        zero_frame.active_end = 9999;
+        zero_frame.normalize_timing();
+        assert_eq!(
+            (zero_frame.active_start, zero_frame.active_end),
+            (1, 1),
+            "frame zero is the runtime representation of the first one-based script frame"
+        );
+
+        let mut follow = one_shot.clone();
+        follow.follows_bone = true;
+        follow.active_end = 23;
+        follow.normalize_timing();
+        assert_eq!(follow.active_end, 23);
+
+        let mut colour = one_shot.clone();
+        colour.color = Some(ColorCall {
+            transition: Some(4.0),
+            rgba: Some([1.0, 0.0, 0.0, 1.0]),
+        });
+        colour.active_start = 31;
+        colour.active_end = 2;
+        colour.normalize_timing();
+        assert_eq!((colour.active_start, colour.active_end), (31, 31));
+
+        let json = serde_json::to_string(&one_shot).unwrap();
+        let mut legacy: EffectCall = serde_json::from_str(&json).unwrap();
+        legacy.active_start = 42;
+        legacy.active_end = 9999;
+        legacy.normalize_timing();
+        assert_eq!((legacy.active_start, legacy.active_end), (42, 42));
+    }
+
+    #[test]
     fn set_speed_ex_is_a_timed_point_with_an_editable_source_site() {
         let mut script = AcmdScript {
             stmts: vec![
@@ -7470,5 +8837,530 @@ mod tests {
         assert_eq!(script.to_speed_ex_events()[0].site, 0);
         script.set_speed_stmt_mut(1).unwrap().speed_x = 3.5;
         assert_eq!(script.to_speed_events()[1].call.speed_x, 3.5);
+    }
+
+    fn parameter_entry(
+        node: &str,
+        status: &str,
+        radius: f32,
+        endpoints: [[f32; 3]; 2],
+    ) -> prc::ParamKind {
+        let mut fields = Vec::new();
+        for (name, value) in [
+            ("offset1_x", endpoints[0][0]),
+            ("offset1_y", endpoints[0][1]),
+            ("offset1_z", endpoints[0][2]),
+            ("offset2_x", endpoints[1][0]),
+            ("offset2_y", endpoints[1][1]),
+            ("offset2_z", endpoints[1][2]),
+            ("size", radius),
+        ] {
+            fields.push((hash40::hash40(name), prc::ParamKind::Float(value)));
+        }
+        fields.push((
+            hash40::hash40("node_id"),
+            prc::ParamKind::Hash(hash40::hash40(node)),
+        ));
+        fields.push((
+            hash40::hash40("status"),
+            prc::ParamKind::Hash(hash40::hash40(status)),
+        ));
+        fields.push((
+            hash40::hash40("check_type"),
+            prc::ParamKind::Hash(hash40::hash40("collision_shape_type_capsule")),
+        ));
+        prc::ParamKind::Struct(prc::ParamStruct(fields))
+    }
+
+    fn parameter_file(entries: Vec<prc::ParamKind>) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temporary parameter file");
+        let root = prc::ParamStruct(vec![(
+            hash40::hash40("hit_data"),
+            prc::ParamKind::List(prc::ParamList(entries)),
+        )]);
+        prc::save(file.path(), &root).expect("write synthetic parameter file");
+        file
+    }
+
+    fn sample_volume(index: usize, bone: &str, default_status: HurtboxStatus) -> HurtboxVolume {
+        HurtboxVolume {
+            index,
+            bone_name: bone.to_string(),
+            bone_hash: hash40::hash40(&bone.to_ascii_lowercase()).0,
+            endpoint1: [0.0, 0.0, 0.0],
+            endpoint2: [1.0, 0.0, 0.0],
+            radius: 1.0,
+            default_status,
+            shape: HurtboxShape::Capsule,
+        }
+    }
+
+    #[test]
+    fn parameter_loader_keeps_list_index_fields_defaults_and_mixed_case_bones() {
+        let file = parameter_file(vec![
+            prc::ParamKind::Float(1.0),
+            parameter_entry(
+                "arml",
+                "hit_status_off",
+                2.5,
+                [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            ),
+        ]);
+        let result = load_hurtbox_volumes(file.path(), &["ArmL".to_string()]);
+        assert_eq!(result.volumes.len(), 1);
+        let volume = &result.volumes[0];
+        assert_eq!(volume.index, 1);
+        assert_eq!(volume.bone_name, "ArmL");
+        assert_eq!(volume.bone_hash, hash40::hash40("arml").0);
+        assert_eq!(volume.endpoint1, [1.0, 2.0, 3.0]);
+        assert_eq!(volume.endpoint2, [4.0, 5.0, 6.0]);
+        assert_eq!(volume.radius, 2.5);
+        assert_eq!(volume.default_status, HurtboxStatus::Off);
+    }
+
+    #[test]
+    fn parameter_loader_skips_bad_entries_without_losing_valid_neighbors() {
+        let mut bad = parameter_entry(
+            "hip",
+            "hit_status_normal",
+            -1.0,
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        );
+        if let prc::ParamKind::Struct(ref mut fields) = bad {
+            let value = fields
+                .0
+                .iter_mut()
+                .find(|(key, _)| key.0 == hash40::hash40("offset1_x").0)
+                .map(|(_, value)| value)
+                .expect("synthetic offset field");
+            *value = prc::ParamKind::Float(f32::NAN);
+        }
+        let file = parameter_file(vec![
+            parameter_entry(
+                "hip",
+                "hit_status_normal",
+                1.0,
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            ),
+            bad,
+            parameter_entry(
+                "missing_bone",
+                "hit_status_normal",
+                1.0,
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            ),
+        ]);
+        let result = load_hurtbox_volumes(file.path(), &["hip".to_string()]);
+        assert_eq!(result.volumes.len(), 1);
+        assert_eq!(result.volumes[0].index, 0);
+        assert!(result.warnings.len() >= 2);
+    }
+
+    #[test]
+    fn parameter_loader_reports_missing_file_and_missing_list() {
+        let missing = load_hurtbox_volumes(
+            std::path::Path::new("/definitely/not/a/visionary/parameter.prc"),
+            &[],
+        );
+        assert!(missing.volumes.is_empty());
+        assert_eq!(missing.warnings.len(), 1);
+
+        let file = tempfile::NamedTempFile::new().expect("temporary parameter file");
+        prc::save(file.path(), &prc::ParamStruct::default()).expect("write empty parameter file");
+        let absent = load_hurtbox_volumes(file.path(), &[]);
+        assert!(absent.volumes.is_empty());
+        assert!(absent.warnings[0].reason.contains("hit_data"));
+    }
+
+    #[test]
+    fn parameter_loader_retains_unknown_shape_and_status_for_diagnostics() {
+        let mut entry = parameter_entry(
+            "hip",
+            "hit_status_normal",
+            1.0,
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        );
+        if let prc::ParamKind::Struct(ref mut fields) = entry {
+            for (key, value) in &mut fields.0 {
+                if key.0 == hash40::hash40("check_type").0 {
+                    *value = prc::ParamKind::Hash(hash40::hash40("future_shape"));
+                } else if key.0 == hash40::hash40("status").0 {
+                    *value = prc::ParamKind::Hash(hash40::hash40("future_status"));
+                }
+            }
+        }
+        let file = parameter_file(vec![entry]);
+        let result = load_hurtbox_volumes(file.path(), &["hip".to_string()]);
+        assert_eq!(result.volumes.len(), 1);
+        assert_eq!(
+            result.volumes[0].shape,
+            HurtboxShape::Unknown(hash40::hash40("future_shape").0)
+        );
+        assert_eq!(
+            result.volumes[0].default_status,
+            HurtboxStatus::Unknown(hash40::hash40("future_status").0)
+        );
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn hurtbox_events_apply_scope_order_defaults_and_reset() {
+        let volumes = [
+            sample_volume(0, "Hip", HurtboxStatus::Normal),
+            sample_volume(1, "Hip", HurtboxStatus::Off),
+            sample_volume(2, "Arm", HurtboxStatus::Normal),
+        ];
+        let script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(2.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::HitStatus {
+                    target: HurtTarget::Whole,
+                    status: "*HIT_STATUS_XLU".into(),
+                }]),
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::HitStatus {
+                    target: HurtTarget::Group(0),
+                    status: "*HIT_STATUS_INVINCIBLE".into(),
+                }]),
+                AcmdStmt::Frame(4.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::HitResetAll]),
+            ],
+        };
+        let events = script.to_hurtbox_events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            effective_hurtbox_status(&volumes[0], &events, 1),
+            HurtboxStatus::Normal
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[0], &events, 2),
+            HurtboxStatus::Xlu
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[0], &events, 3),
+            HurtboxStatus::Invincible
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[1], &events, 3),
+            HurtboxStatus::Xlu
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[2], &events, 3),
+            HurtboxStatus::Xlu
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[1], &events, 4),
+            HurtboxStatus::Off
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[2], &events, 4),
+            HurtboxStatus::Normal
+        );
+
+        let bone_event = vec![HurtboxEvent::Set {
+            frame: 1,
+            sequence: 0,
+            target: HurtTarget::Bone("hIp".into()),
+            status: HurtboxStatus::Invincible,
+        }];
+        assert_eq!(
+            effective_hurtbox_status(&volumes[0], &bone_event, 1),
+            HurtboxStatus::Invincible
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[1], &bone_event, 1),
+            HurtboxStatus::Invincible
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volumes[2], &bone_event, 1),
+            HurtboxStatus::Normal
+        );
+    }
+
+    #[test]
+    fn hurtbox_events_keep_same_frame_execution_order_and_loop_repetitions() {
+        let script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(2.0),
+                AcmdStmt::Loop {
+                    count: 2,
+                    body: vec![
+                        AcmdStmt::Excute(vec![ExcuteStmt::HitStatus {
+                            target: HurtTarget::Group(0),
+                            status: "HIT_STATUS_INVINCIBLE".into(),
+                        }]),
+                        AcmdStmt::Wait(1.0),
+                        AcmdStmt::Excute(vec![ExcuteStmt::HitStatus {
+                            target: HurtTarget::Group(0),
+                            status: "HIT_STATUS_NORMAL".into(),
+                        }]),
+                    ],
+                },
+            ],
+        };
+        let events = script.to_hurtbox_events();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| match event {
+                    HurtboxEvent::Set {
+                        frame, sequence, ..
+                    }
+                    | HurtboxEvent::ResetAll { frame, sequence } => (*frame, *sequence),
+                })
+                .collect::<Vec<_>>(),
+            vec![(2, 0), (3, 1), (3, 2), (4, 3)]
+        );
+        let volume = sample_volume(0, "Hip", HurtboxStatus::Normal);
+        assert_eq!(
+            effective_hurtbox_status(&volume, &events, 3),
+            HurtboxStatus::Invincible
+        );
+        assert_eq!(
+            effective_hurtbox_status(&volume, &events, 4),
+            HurtboxStatus::Normal
+        );
+    }
+
+    #[test]
+    fn unknown_status_and_targets_do_not_change_unrelated_volumes() {
+        let volume = sample_volume(2, "Hip", HurtboxStatus::Normal);
+        let events = vec![HurtboxEvent::Set {
+            frame: 1,
+            sequence: 0,
+            target: HurtTarget::Group(99),
+            status: HurtboxStatus::Unknown(0xdead),
+        }];
+        assert_eq!(
+            effective_hurtbox_status(&volume, &events, 10),
+            HurtboxStatus::Normal
+        );
+        assert_eq!(
+            HurtboxStatus::from_acmd_value("123"),
+            HurtboxStatus::Unknown(123)
+        );
+        assert_eq!(
+            HurtboxStatus::from_acmd_value("1.0"),
+            HurtboxStatus::Invincible
+        );
+    }
+
+    #[test]
+    fn damage_reaction_conditions_follow_frames_loops_and_reset() {
+        let script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(2.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::DamageNoReaction(DamageNoReactionCall {
+                    command: "*MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+                    mode: "*DAMAGE_NO_REACTION_MODE_ALWAYS".into(),
+                    value: "0".into(),
+                })]),
+                AcmdStmt::Wait(2.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::DamageNoReaction(DamageNoReactionCall {
+                    command: "*MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+                    mode: "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER".into(),
+                    value: "25".into(),
+                })]),
+                AcmdStmt::Wait(1.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::DamageNoReaction(DamageNoReactionCall {
+                    command: "*MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+                    mode: "*DAMAGE_NO_REACTION_MODE_NORMAL".into(),
+                    value: "0".into(),
+                })]),
+            ],
+        };
+        let events = script.to_hurtbox_condition_events();
+        assert_eq!(
+            events.iter().map(|event| event.frame).collect::<Vec<_>>(),
+            vec![2, 4, 5]
+        );
+        assert!(matches!(
+            effective_hurtbox_condition(&events, 1),
+            HurtboxCondition::Normal
+        ));
+        assert!(matches!(
+            effective_hurtbox_condition(&events, 2),
+            HurtboxCondition::SuperArmor
+        ));
+        assert!(matches!(
+            effective_hurtbox_condition(&events, 4),
+            HurtboxCondition::DamageBasedArmor { threshold } if threshold == 25.0
+        ));
+        assert!(matches!(
+            effective_hurtbox_condition(&events, 5),
+            HurtboxCondition::Normal
+        ));
+        let spans = script.to_hurtbox_conditions();
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[0].active_start, spans[0].active_end), (2, 3));
+        assert_eq!((spans[1].active_start, spans[1].active_end), (4, 4));
+        assert_eq!((spans[2].active_start, spans[2].active_end), (5, 5));
+        assert!(spans[2].condition.is_normal());
+    }
+
+    #[test]
+    fn replacing_damage_reaction_range_removes_previous_editor_endpoints() {
+        let mut script = AcmdScript::default();
+        let baseline = script.to_hurtbox_conditions();
+        let make_call = |mode: &str, value: &str| DamageNoReactionCall {
+            command: "MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+            mode: mode.into(),
+            value: value.into(),
+        };
+        script.replace_damage_no_reaction_range(
+            &baseline,
+            2,
+            5,
+            make_call("*DAMAGE_NO_REACTION_MODE_ALWAYS", "0"),
+            make_call("*DAMAGE_NO_REACTION_MODE_NORMAL", "0"),
+        );
+        script.replace_damage_no_reaction_range(
+            &baseline,
+            2,
+            9,
+            make_call("*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER", "20"),
+            make_call("*DAMAGE_NO_REACTION_MODE_NORMAL", "0"),
+        );
+
+        let events = script.to_hurtbox_condition_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].condition,
+            HurtboxCondition::DamageBasedArmor { threshold } if threshold == 20.0
+        ));
+        assert!(matches!(events[1].condition, HurtboxCondition::Normal));
+        assert_eq!(events[0].frame, 2);
+        assert_eq!(events[1].frame, 10);
+    }
+
+    #[test]
+    fn unknown_damage_reaction_modes_are_safe_diagnostics() {
+        assert!(matches!(
+            HurtboxCondition::from_damage_no_reaction(
+                "*DAMAGE_NO_REACTION_MODE_REACTION_VALUE",
+                "12"
+            ),
+            HurtboxCondition::ReactionValueArmor { threshold } if threshold == 12.0
+        ));
+        assert!(matches!(
+            HurtboxCondition::from_damage_no_reaction(
+                "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT",
+                "3"
+            ),
+            HurtboxCondition::DamagePowerCount { threshold } if threshold == 3.0
+        ));
+        assert!(matches!(
+            HurtboxCondition::from_damage_no_reaction("*DAMAGE_NO_REACTION_MODE_NONE", "0"),
+            HurtboxCondition::NoReactionMode
+        ));
+        let condition =
+            HurtboxCondition::from_damage_no_reaction("*DAMAGE_NO_REACTION_MODE_FUTURE", "opaque");
+        assert!(matches!(
+            condition,
+            HurtboxCondition::Unknown { ref mode, ref value }
+                if mode == "DAMAGE_NO_REACTION_MODE_FUTURE" && value == "opaque"
+        ));
+    }
+
+    #[test]
+    fn damage_reaction_statement_sites_round_trip_sidebar_edits() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Bare(Box::new(ExcuteStmt::DamageNoReaction(
+                    DamageNoReactionCall {
+                        command: "*MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+                        mode: "*DAMAGE_NO_REACTION_MODE_ALWAYS".into(),
+                        value: "0".into(),
+                    },
+                ))),
+                AcmdStmt::Loop {
+                    count: 2,
+                    body: vec![AcmdStmt::Excute(vec![ExcuteStmt::DamageNoReaction(
+                        DamageNoReactionCall {
+                            command: "*MA_MSC_DAMAGE_DAMAGE_NO_REACTION".into(),
+                            mode: "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER".into(),
+                            value: "10".into(),
+                        },
+                    )])],
+                },
+            ],
+        };
+
+        assert_eq!(
+            script
+                .damage_no_reaction_stmt(0)
+                .map(|call| (&call.mode, &call.value)),
+            Some((
+                &"*DAMAGE_NO_REACTION_MODE_ALWAYS".to_string(),
+                &"0".to_string()
+            ))
+        );
+        let call = script
+            .damage_no_reaction_stmt_mut(1)
+            .expect("loop body condition should have site 1");
+        call.mode = "*DAMAGE_NO_REACTION_MODE_NORMAL".into();
+        call.value = "0".into();
+        assert!(matches!(
+            script.to_hurtbox_condition_events().as_slice(),
+            [
+                HurtboxConditionEvent {
+                    condition: HurtboxCondition::SuperArmor,
+                    ..
+                },
+                HurtboxConditionEvent {
+                    condition: HurtboxCondition::Normal,
+                    ..
+                },
+                HurtboxConditionEvent {
+                    condition: HurtboxCondition::Normal,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn optional_parameter_corpus_audit_is_data_root_scoped() {
+        let Some(root) = std::env::var_os("VISIONARY_DATA_ROOT").map(PathBuf::from) else {
+            return;
+        };
+        let fighter_root = root.join("fighter");
+        let Ok(fighters) = std::fs::read_dir(fighter_root) else {
+            return;
+        };
+        let mut files = 0usize;
+        let mut entries = 0usize;
+        for fighter in fighters.flatten() {
+            let dir = fighter.path();
+            let param_dir = dir.join("param");
+            let path = [
+                param_dir.join("vl.prc"),
+                param_dir.join("fighter_param.prc"),
+            ]
+            .into_iter()
+            .find(|path| path.exists());
+            let Some(path) = path else { continue };
+            let skeleton = dir
+                .join("model")
+                .join("body")
+                .join("c00")
+                .join("model.nusktb");
+            let bones = ssbh_data::skel_data::SkelData::from_file(skeleton)
+                .map(|skel| {
+                    skel.bones
+                        .into_iter()
+                        .map(|bone| bone.name)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let result = load_hurtbox_volumes(&path, &bones);
+            files += 1;
+            entries += result.volumes.len();
+        }
+        eprintln!("hurtbox corpus audit: {files} parameter files, {entries} entries");
+        assert!(
+            files > 0,
+            "VISIONARY_DATA_ROOT contained no parameter files"
+        );
     }
 }

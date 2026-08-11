@@ -89,6 +89,11 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
         let mut effect_moves: Vec<_> = edits.effect_calls_full.iter().collect();
         effect_moves.sort_by(|a, b| a.0.cmp(b.0));
         for (move_name, calls) in effect_moves {
+            let calls = calls
+                .iter()
+                .cloned()
+                .map(crate::data::EffectCall::normalized_timing)
+                .collect::<Vec<_>>();
             exported_effect_names.extend(
                 calls
                     .iter()
@@ -97,7 +102,7 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
             effect_edits.push((
                 fighter.clone(),
                 move_name.clone(),
-                calls.clone(),
+                calls,
                 edits
                     .effect_frame_residue
                     .get(move_name)

@@ -740,11 +740,19 @@ fn check_effect_fidelity(
 ) {
     // The emitter groups spawns by frame, so the read-back order is the timeline order rather
     // than the editor's list order. Sort both the same way before pairing them up.
-    let mut specified: Vec<&EffectCall> = calls.iter().filter(|call| !call.disabled).collect();
+    let mut specified: Vec<EffectCall> = calls
+        .iter()
+        .filter(|call| !call.disabled)
+        .cloned()
+        .map(EffectCall::normalized_timing)
+        .collect();
     let exported = crate::acmd::parse_effect_script(emitted).to_effect_calls();
-    let mut exported: Vec<&EffectCall> = exported.iter().collect();
-    specified.sort_by_key(|call| effect_order(call));
-    exported.sort_by_key(|call| effect_order(call));
+    let mut exported: Vec<EffectCall> = exported
+        .into_iter()
+        .map(EffectCall::normalized_timing)
+        .collect();
+    specified.sort_by_key(effect_order);
+    exported.sort_by_key(effect_order);
 
     if specified.len() != exported.len() {
         report.blocker(
@@ -1239,7 +1247,12 @@ fn check_excute_values(subject: &str, stmt: &ExcuteStmt, report: &mut Report) {
 }
 
 fn check_effect_values(subject: &str, calls: &[EffectCall], report: &mut Report) {
-    for call in calls.iter().filter(|call| !call.disabled) {
+    for call in calls
+        .iter()
+        .filter(|call| !call.disabled)
+        .cloned()
+        .map(EffectCall::normalized_timing)
+    {
         // A colour command has no graphic to name it, so it is labelled by its command.
         let label = match &call.color {
             Some(_) => format!("{} on frame {}", call.spawn_func, call.active_start),
@@ -1601,6 +1614,40 @@ mod tests {
             .map(|f| f.to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn a_retimed_one_shot_with_a_legacy_stale_end_verifies_cleanly() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_flash"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        // This is the legacy shape that used to block verification after a start edit.
+        edited[0].active_end = pristine[0].active_start;
+        let emitted = crate::acmd::preview_effect_fn(
+            &edited,
+            "test",
+            &[],
+            &std::collections::BTreeMap::new(),
+        );
+        let mut report = Report::default();
+        verify_effect_move(
+            "test",
+            &edited,
+            &emitted,
+            &[],
+            None,
+            &std::collections::BTreeMap::new(),
+            &mut report,
+        );
+        assert!(!report.has_blockers(), "{}", messages(&report));
+        assert!(emitted.contains("frame(agent.lua_state_agent, 8.0);"));
     }
 
     /// The property the whole module exists for, checked against every script the app has ever

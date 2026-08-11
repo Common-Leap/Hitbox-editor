@@ -75,9 +75,12 @@ selected export root for future sessions.
 The main window keeps editing tasks in one focused inspector. Select a move in
 the Fighters list, then use the tabs beside the viewport:
 
-- **Collisions** contains attacks, grabs, wind, hurtbox, and collision-priority
-  data. Common values are shown first; **Hit behavior**, **Valid targets**, and
-  other less-used fields stay in clearly named collapsible sections.
+- **Collisions** contains attacks, grabs, wind, throw-damage, and active-hitbox
+  data. Common values are shown first; **Hit behavior**, **Valid targets**, **Hit
+  feedback**, and other less-used fields stay in clearly named collapsible sections.
+- **Hurtboxes** contains parameter-defined capsules, `HIT_NODE`/`HIT_NO`/
+  `WHOLE_HIT` state changes, invincibility and intangibility ranges, and
+  damage-reaction armor settings.
 - **Motion & state** contains facing, velocity, kinetic, animation-timing,
   ground/air, and stored script-state commands.
 - **Sound & feedback** contains move sounds, camera shake, controller rumble,
@@ -91,10 +94,12 @@ matters. Hover any section name to see what it controls, including engine terms
 such as **Work flags** and **kinetic energy**.
 
 The timeline below the viewport is a shared view of every loaded category.
-Click a row or its bar to select the item and seek to its first game frame;
-click empty space to scrub. Category filters are manual and remembered between
-sessions. Game frames are one-based, matching the frame numbers used by the
-editor and the source scripts.
+Collision and hurtbox events have separate **Collisions** and **Hurtboxes**
+filters, so you can hide one without hiding the other. Click a row or its bar
+to select the item and seek to its first game frame; click empty space to scrub.
+Category filters are manual and remembered between sessions. Game frames are
+one-based, matching the frame numbers used by the editor and the source
+scripts.
 
 Edits preview immediately. **Undo** and **Redo** apply to the current move and
 remain available when you switch moves during the session. **Restore move**
@@ -242,13 +247,22 @@ editing that hitbox rewrites it where it is.
 The timing checks are skipped for a script carrying branches of its own, or an
 `FT_MOTION_RATE`. Those decide at runtime what runs and when, the editor does
 not model them, and a warning that guesses is worse than no warning at all.
-Everything else is checked either way.
+Everything else is checked either way. Effect timing can be synced into source
+when the call sits in a flat, isolated frame block; ambiguous layouts are
+reported instead of guessed.
 
-Write-back rewrites argument *values* only: the macros you called, your
-comments, and your formatting all stay exactly as written. Every property the
-hitbox and effect panels expose is covered — the masks, the sound and collision
+Write-back rewrites argument *values* and bounded, unambiguous effect timing
+blocks: the macros you called, your comments, and your formatting all stay
+exactly as written. A one-shot moves its start block; a following effect or
+trail moves its uniquely paired finite stop as well. Every property the hitbox
+and effect panels expose is covered — the masks, the sound and collision
 attributes, the flags, the capsule endpoints — so an edit either lands in the
 file or is named in the report under the editor. It is never dropped quietly.
+
+Live effect retiming uses the same one-based script frames as the editor,
+including frame 1. A timing edit received after its requested frame is reported
+as missed for the current playback; the authored effect remains visible and the
+exact replacement is applied on the next playback instead of appearing late.
 
 Grab boxes are read and written as the `CATCH` calls they are, so a grab in your
 script shows up on the timeline and can be retuned like any other collision. The
@@ -327,7 +341,8 @@ a fighter-specific kind such as Terry's final smash. Two of these often sit in
 one block naming the same id and differing only in that, so they are matched on
 the kind and never on the id.
 
-Intangibility is the **Hurtbox states** section under **Collision entries**. `HIT_NODE`
+Intangibility is available in the **Hurtboxes** tab. The **Advanced authored hurtbox commands**
+section contains the source-level state list. `HIT_NODE`
 and `HIT_NO` set how one bone or one numbered hurtbox group receives hits, and
 `WHOLE_HIT` sets every bone at once — shown as **all bones**, with no target to
 pick because the macro has none. The game holds that setting until something
@@ -353,6 +368,46 @@ fighter's colour blend against the others applied at the same moment — it is a
 things, so one is never used to close the other. It appears among the hurtboxes
 because that is where a `game_` script's statements are edited; in an `effect_`
 script the pair is edited with the colour commands below.
+
+The **Hurtboxes** tab in the right sidebar contains the **Hurtboxes in viewport** checkbox and shows the selected
+fighter's real parameter-defined capsules. It is off by default and remembers
+your preference between sessions and fighters. The overlay uses unambiguous
+state names and colors: **NORMAL** is light gray, **INVINCIBLE** is cyan,
+**XLU / INTANGIBLE** is amber, and **OFF** is hidden. Super armor is violet,
+reaction-value armor blue, damage-based armor orange, and damage-count armor
+pink; unknown modes use a magenta outline. The underlying hurtbox color remains
+visible so both conditions can be read at once. A fighter or mod without
+readable parameter data cannot provide this overlay, and any skipped or
+unresolved parameter entries are reported in the checkbox tooltip rather than
+replaced with guessed geometry.
+
+The **Parameter hurtboxes** list in this tab lets you select an individual
+capsule by its `HIT_NO` parameter-list index and bone. Choose **NORMAL**,
+**INVINCIBLE**, **XLU / INTANGIBLE**, or **OFF**, enter one-based start and end
+frames, and select **Apply / replace range**. The editor writes a targeted
+`HIT_NO` at the start and restores that capsule's own parameter default on the
+following frame. Applying another range to the same capsule replaces the
+previous editor range instead of stacking duplicate commands. The same schedule
+drives the viewport, timeline, project/export output, linked source write-back,
+and live preview. Expand **Advanced authored hurtbox commands** only when you
+need to edit existing `HIT_NODE`, `HIT_NO`, `WHOLE_HIT`, reset, priority, or
+damage-reaction source commands; unknown values stay visible instead of being
+guessed.
+
+Effect calls that use the game's explicit `null` graphic remain in the effect
+list and timeline as **No effect (null placeholder)** entries. They have no
+viewport marker because the source call does not spawn a graphic; selecting the
+entry still lets you inspect or replace its source values.
+
+The **Hurtboxes** tab also edits fighter-wide damage-reaction conditions. Use the
+**Fighter-wide damage reaction** controls to choose normal reaction, super armor,
+reaction-value armor, damage-based armor, damage-count armor, or the explicit
+no-reaction mode, enter its value when applicable, and select **Apply / replace
+armor range**. Applying another range replaces the previous editor range, and
+normal reaction is restored automatically on the following frame. These
+conditions use distinct outlines (violet, blue, orange, pink, or magenta for an
+unknown mode) over the selected hurtbox colors, and the schedule is preserved in
+the project, generated export, linked source, and live preview.
 
 **Active hitbox changes** is the section below that, for the two commands that retune a
 hitbox which is *already out*. `ATK_POWER` re-sets a box's damage and
@@ -508,6 +563,15 @@ both halves are editable. Changing values writes them into your source; switchin
 which command a call is changes how many arguments it takes, so that lands in an
 export and is reported when syncing.
 
+Spawn commands have the same flexibility. Select **Spawn command** on an effect event to move
+between the supported `EFFECT`, follow, flip, alpha, colour, attribute, contact, random, and
+no-stop families. The editor keeps the graphic transform, adds or removes the second flip
+graphic as needed, updates the event lifetime, and supplies safe defaults for the target
+command's private arguments. Compatible hidden tail values are retained when the two commands
+share the same verified argument shape. The selected command is used by both live preview and
+the generated ACMD export; **Sync Edits Into Source** reports the command swap because changing
+an ACMD macro's structure is outside its positional value-only write-back boundary.
+
 Three of them take no arguments at all — `COL_NORMAL`, `BURN_COLOR_NORMAL` and
 `START_INFO_FLASH_EYE` are resets, and there is nothing in them to change. They
 still appear in the list, because where a reset sits is the whole of what it
@@ -527,13 +591,14 @@ matters because a `LAST_EFFECT_SET_COLOR` recolours whatever spawned last — mo
 even a little, it lands on the wrong effect. The effect panel shows these under
 **Kept as written**.
 
-Anything that cannot be written as a value change to an existing argument is
-reported instead of guessed at: a spawn you added or removed, a graphic you
-renamed, a retimed call, one iteration of a `for` loop edited on its own, or a
-sword trail's position — a trail is drawn between the joints it names and has no
-transform arguments at all. **Sync Edits Into Source**, in the **Mod** menu,
-applies the same write-back to the file directly, for when the source window is
-not open.
+Anything that cannot be written as a value change to an existing argument or a
+safe timing-block move is reported instead of guessed at: a spawn you added or
+removed, a graphic you renamed, a branch or loop, a frame collision, an
+ambiguous or missing stop pairing, structural stop creation/removal, or a sword
+trail's transform — a trail is drawn between the joints it names and has no
+transform arguments. **Sync Edits Into Source**, in the **Mod** menu, applies
+the same write-back to the file directly, for when the source window is not
+open.
 
 A category your project does not have yet is created the first time you edit it.
 Most projects define only what they change — a hitbox mod has a `game_` function

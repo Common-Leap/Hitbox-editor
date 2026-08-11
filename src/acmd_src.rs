@@ -8,11 +8,12 @@
 //! makes the editor read what they wrote.
 //!
 //! The write-back direction is deliberately narrow. It rewrites argument VALUES in place and
-//! nothing else: the macro a line calls, the order of statements, the comments, and the
-//! whitespace all survive untouched, because the point is to retune numbers that were
-//! already dialled in by hand — not to regenerate someone's code from the editor's model of
-//! it. Anything that would need the code restructured is refused and reported, not guessed
-//! at. For "throw the original away and emit a fresh project", `mod_export` already exists.
+//! moves only bounded, isolated effect timing blocks: the macro a line calls, the comments, and
+//! the whitespace all survive untouched, because the point is to retune code that was already
+//! dialled in by hand — not to regenerate someone's source from the editor's model of it.
+//! Branches, loops, ambiguous blocks, and structural stop creation/removal are refused and
+//! reported, not guessed at. For "throw the original away and emit a fresh project",
+//! `mod_export` already exists.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1105,7 +1106,7 @@ fn registration_statement(text: &str, script: &str, function: &str) -> Option<Bi
 /// What a sync did, and what it declined to do.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct SyncReport {
-    /// Argument values rewritten.
+    /// Source changes made: value replacements plus safely moved effect start/stop blocks.
     pub changed: usize,
     /// Files whose contents actually differ afterwards.
     pub files: Vec<PathBuf>,
@@ -1216,6 +1217,711 @@ fn format_float(value: f32) -> String {
     text
 }
 
+#[derive(Debug, Clone)]
+struct EffectSourceBlock {
+    range: Range<usize>,
+    frame_arg: Range<usize>,
+    frame: u32,
+    execute_body: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct EffectTimingMove {
+    call_index: usize,
+    new_start: u32,
+    new_end: u32,
+    move_start: bool,
+    move_end: bool,
+}
+
+fn effect_source_is_flat(stmts: &[crate::data::EffectStmt]) -> bool {
+    stmts.iter().all(|stmt| match stmt {
+        crate::data::EffectStmt::Frame(_) => true,
+        crate::data::EffectStmt::Excute(macros) => macros
+            .iter()
+            .all(|macro_stmt| !matches!(macro_stmt, crate::data::EffectMacro::Raw(_))),
+        crate::data::EffectStmt::Wait(_)
+        | crate::data::EffectStmt::Loop { .. }
+        | crate::data::EffectStmt::Cond { .. }
+        | crate::data::EffectStmt::Raw(_) => false,
+    })
+}
+
+fn all_effect_source_sites(text: &str) -> Vec<MacroSite> {
+    let mut sites = scan_macro_sites(text, 0..text.len());
+    sites.extend(scan_named_sites(
+        text,
+        "visionary_last_effect_set_scale_w",
+        0..text.len(),
+    ));
+    sites.sort_by_key(|site| site.span.start);
+    sites
+}
+
+fn line_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
+    source_line_ranges(text)
+        .into_iter()
+        .find(|range| range.start <= offset && offset < range.end)
+}
+
+fn enclosing_effect_execute(text: &str, site_start: usize) -> Option<(usize, usize)> {
+    let mut cursor = site_start;
+    while let Some(relative) = text[..cursor].rfind("macros::is_excute") {
+        let at = relative;
+        let line = line_range_at(text, at)?;
+        let open = text[at..line.end].find('{').map(|offset| at + offset)?;
+        let close = matching_brace(text, open)?;
+        if open < site_start && site_start <= close {
+            return Some((open, close));
+        }
+        cursor = at;
+    }
+    None
+}
+
+fn source_frame_block(text: &str, site: &MacroSite) -> Option<EffectSourceBlock> {
+    let frames = scan_named_sites(text, "frame", 0..text.len());
+    let frame_site = frames
+        .iter()
+        .rev()
+        .find(|frame| frame.span.end <= site.span.start)?;
+    let frame_line = line_range_at(text, frame_site.span.start)?;
+    let frame_text = text.get(frame_line.clone())?.trim();
+    if !frame_text.starts_with("frame(") {
+        return None;
+    }
+    let frame_value = frame_site
+        .args
+        .get(1)
+        .and_then(|span| text.get(span.clone()))?
+        .trim()
+        .parse::<f32>()
+        .ok()?;
+    let (open, close) = enclosing_effect_execute(text, site.span.start)?;
+    let execute_line = line_range_at(text, open)?;
+    // A timing move carries the frame statement and its execute block together. Comments and
+    // whitespace between them are safe; executable text there would be an unowned side effect.
+    let between = &text[frame_line.end..execute_line.start];
+    if between.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with("//") && !line.starts_with("/*")
+    }) {
+        return None;
+    }
+    let block_end = line_range_at(text, close)
+        .map(|line| line.end)
+        .unwrap_or(close + 1);
+    let block_end = block_end.min(text.len());
+    Some(EffectSourceBlock {
+        range: frame_line.start..block_end,
+        frame_arg: frame_site.args.get(1)?.clone(),
+        frame: crate::data::script_frame(frame_value),
+        execute_body: open + 1..close,
+    })
+}
+
+fn site_inside(range: &Range<usize>, site: &MacroSite) -> bool {
+    range.start <= site.span.start && site.span.end <= range.end
+}
+
+fn effect_block_has_only(
+    text: &str,
+    block: &EffectSourceBlock,
+    target: &MacroSite,
+    all_sites: &[MacroSite],
+    allow_modifiers: bool,
+) -> bool {
+    let contained: Vec<&MacroSite> = all_sites
+        .iter()
+        .filter(|site| site_inside(&block.execute_body, site))
+        .collect();
+    if contained
+        .iter()
+        .filter(|site| site.span == target.span)
+        .count()
+        != 1
+    {
+        return false;
+    }
+    if contained.iter().any(|site| {
+        if site.span == target.span {
+            return false;
+        }
+        allow_modifiers && MODIFIER_COMMANDS.contains(&site.name.as_str())
+    }) {
+        // All non-target sites must be recognized direct modifiers. The expression is written
+        // this way so a future command added to the scanner cannot become movable by accident.
+        if contained.iter().any(|site| {
+            site.span != target.span && !MODIFIER_COMMANDS.contains(&site.name.as_str())
+        }) {
+            return false;
+        }
+    } else if contained.iter().any(|site| site.span != target.span) {
+        return false;
+    }
+
+    let mut body = text[block.execute_body.clone()].to_string();
+    for site in contained {
+        if site.span == target.span
+            || (allow_modifiers && MODIFIER_COMMANDS.contains(&site.name.as_str()))
+        {
+            if allow_modifiers && site.span != target.span && site.span.start < target.span.end {
+                // A recognized modifier before the call is not attached to this call by the
+                // parser's last-effect rule. Moving it with the call would silently change
+                // which effect it targets, so treat the block as ambiguous.
+                return false;
+            }
+            let start = site.span.start - block.execute_body.start;
+            let mut end = site.span.end - block.execute_body.start;
+            if text
+                .get(site.span.end..)
+                .is_some_and(|tail| tail.starts_with(';'))
+            {
+                end += 1;
+            }
+            if start < body.len() && end <= body.len() && start < end {
+                body.replace_range(start..end, &" ".repeat(end - start));
+            }
+        }
+    }
+    // Keep comments attached to the moved block, but reject any executable residue the editor
+    // cannot identify as belonging to this call.
+    body.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with("/*")
+            || line.starts_with('*')
+            || line.ends_with("*/")
+    })
+}
+
+fn source_frame_blocks(text: &str) -> Vec<EffectSourceBlock> {
+    let frames = scan_named_sites(text, "frame", 0..text.len());
+    frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, site)| {
+            let line = line_range_at(text, site.span.start)?;
+            let value = site
+                .args
+                .get(1)
+                .and_then(|span| text.get(span.clone()))?
+                .trim()
+                .parse::<f32>()
+                .ok()?;
+            // A frame block ends at the next frame statement. Never search past that
+            // boundary: otherwise a frame with no execute block can accidentally claim the
+            // next frame's execute body and become a false collision/move anchor.
+            let limit = frames
+                .get(index + 1)
+                .map(|next| next.span.start)
+                .unwrap_or(text.len());
+            let execute = text[site.span.end..limit]
+                .find("if macros::is_excute")
+                .map(|offset| site.span.end + offset)?;
+            let execute_line = line_range_at(text, execute)?;
+            if execute_line.start < line.end {
+                return None;
+            }
+            let open = text[execute..execute_line.end]
+                .find('{')
+                .map(|offset| execute + offset)?;
+            let close = matching_brace(text, open)?;
+            if close >= limit {
+                return None;
+            }
+            Some(EffectSourceBlock {
+                range: line.start..line_range_at(text, close).map_or(close + 1, |r| r.end),
+                frame_arg: site.args.get(1)?.clone(),
+                frame: crate::data::script_frame(value),
+                execute_body: open + 1..close,
+            })
+        })
+        .collect()
+}
+
+fn source_hash_name(text: &str, span: Option<&Range<usize>>) -> Option<String> {
+    let value = text.get(span?.clone())?.trim();
+    let value = value.strip_prefix("Hash40::new(\"")?.strip_suffix("\")")?;
+    Some(value.to_ascii_lowercase())
+}
+
+fn effect_stop_block(
+    text: &str,
+    call_index: usize,
+    call: &crate::data::EffectCall,
+    call_site: &MacroSite,
+    call_sites: &[Option<MacroSite>],
+    calls: &[crate::data::EffectCall],
+    all_sites: &[MacroSite],
+) -> Option<EffectSourceBlock> {
+    let is_trail = call.trail_command.is_some()
+        || call.spawn_func == "AFTER_IMAGE_ON"
+        || call.raw_line.is_some();
+    let stop_name = if is_trail {
+        "AFTER_IMAGE_OFF"
+    } else {
+        "EFFECT_OFF_KIND"
+    };
+    let candidates: Vec<(MacroSite, EffectSourceBlock)> = all_sites
+        .iter()
+        .filter(|site| site.name == stop_name && site.span.start > call_site.span.end)
+        .filter_map(|site| {
+            if !is_trail
+                && source_hash_name(text, site.args.get(1)).as_deref()
+                    != Some(call.effect_name.to_ascii_lowercase().as_str())
+            {
+                return None;
+            }
+            let block = source_frame_block(text, site)?;
+            (block.frame == call.active_end).then_some((site.clone(), block))
+        })
+        .filter(|(site, block)| effect_block_has_only(text, block, site, all_sites, false))
+        .collect();
+    if candidates.len() != 1 {
+        return None;
+    }
+    let (stop_site, stop_block) = &candidates[0];
+    let paired = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, other)| {
+            let site = call_sites.get(index)?.as_ref()?;
+            Some((other, site))
+        })
+        .filter(|(other, site)| {
+            site.span.start < stop_site.span.start
+                && other.active_end == call.active_end
+                && if is_trail {
+                    other.trail_command.is_some()
+                        || other.spawn_func == "AFTER_IMAGE_ON"
+                        || other.raw_line.is_some()
+                } else {
+                    other.follows_bone && other.effect_name.eq_ignore_ascii_case(&call.effect_name)
+                }
+        })
+        .count();
+    if paired != 1 || calls.get(call_index).is_none() {
+        return None;
+    }
+    Some(stop_block.clone())
+}
+
+fn plan_effect_timing_moves(
+    text: &str,
+    label: &str,
+    script: &crate::data::EffectScript,
+    pristine: &[crate::data::EffectCall],
+    edited: &[crate::data::EffectCall],
+    ordinals: &[usize],
+    sites: &[MacroSite],
+) -> (Vec<EffectTimingMove>, Vec<String>) {
+    let mut moves = Vec::new();
+    let mut skipped = Vec::new();
+    let timing_indices: Vec<usize> = pristine
+        .iter()
+        .zip(edited)
+        .enumerate()
+        .filter(|(_, (before, after))| {
+            before.active_start != after.active_start
+                || (before.follows_bone && before.active_end != after.active_end)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if timing_indices.is_empty() {
+        return (moves, skipped);
+    }
+    if !effect_source_is_flat(&script.stmts) {
+        return (
+            moves,
+            timing_indices
+                .into_iter()
+                .map(|index| {
+                    format!(
+                        "{label}: effect #{} has timing changes inside a branch, loop, wait, or opaque source statement",
+                        index + 1
+                    )
+                })
+                .collect(),
+        );
+    }
+    let all_sites = all_effect_source_sites(text);
+    let frame_blocks = source_frame_blocks(text);
+    let call_blocks: Vec<Option<EffectSourceBlock>> = ordinals
+        .iter()
+        .map(|ordinal| {
+            sites
+                .get(*ordinal)
+                .and_then(|site| source_frame_block(text, site))
+        })
+        .collect();
+    let call_sites: Vec<Option<MacroSite>> = ordinals
+        .iter()
+        .map(|ordinal| sites.get(*ordinal).cloned())
+        .collect();
+    let mut proposed_frames: HashMap<u32, usize> = HashMap::new();
+
+    for index in timing_indices {
+        let before = &pristine[index];
+        let after = &edited[index];
+        let Some(site) = sites.get(*ordinals.get(index).unwrap_or(&usize::MAX)) else {
+            skipped.push(format!(
+                "{label}: effect #{} has no uniquely identifiable source call",
+                index + 1
+            ));
+            continue;
+        };
+        let Some(start_block) = call_blocks.get(index).and_then(Clone::clone) else {
+            skipped.push(format!(
+                "{label}: `{}` effect #{} is not an isolated top-level frame block",
+                site.name,
+                index + 1
+            ));
+            continue;
+        };
+        if !effect_block_has_only(text, &start_block, site, &all_sites, true) {
+            skipped.push(format!(
+                "{label}: `{}` effect #{} shares its frame block with unrelated source lines",
+                site.name,
+                index + 1
+            ));
+            continue;
+        }
+        let move_start = before.active_start != after.active_start;
+        let move_end = before.follows_bone && before.active_end != after.active_end;
+        if after.active_end < after.active_start {
+            skipped.push(format!(
+                "{label}: `{}` effect #{} would end before it starts",
+                site.name,
+                index + 1
+            ));
+            continue;
+        }
+        let stop_block = if move_end {
+            if !before.follows_bone || before.active_end == 9999 || after.active_end == 9999 {
+                skipped.push(format!(
+                    "{label}: `{}` effect #{} would require creating or removing a stop command",
+                    site.name,
+                    index + 1
+                ));
+                continue;
+            }
+            effect_stop_block(text, index, before, site, &call_sites, pristine, &all_sites)
+        } else {
+            None
+        };
+        if move_end && stop_block.is_none() {
+            skipped.push(format!(
+                "{label}: `{}` effect #{} has no unique paired stop block",
+                site.name,
+                index + 1
+            ));
+            continue;
+        }
+        if move_start && start_block.frame == after.active_start {
+            // A stale editor record can report a timing difference after the source already
+            // contains the requested frame. Treat that as settled instead of moving text.
+            continue;
+        }
+        if move_start {
+            if frame_blocks
+                .iter()
+                .any(|block| block.frame == after.active_start && block.range != start_block.range)
+            {
+                skipped.push(format!(
+                    "{label}: `{}` effect #{} targets an occupied frame block",
+                    site.name,
+                    index + 1
+                ));
+                continue;
+            }
+            if proposed_frames.insert(after.active_start, index).is_some() {
+                skipped.push(format!(
+                    "{label}: multiple effect calls target frame {} and cannot be ordered safely",
+                    after.active_start
+                ));
+                continue;
+            }
+        }
+        if let Some(block) = &stop_block {
+            if frame_blocks.iter().any(|candidate| {
+                candidate.frame == after.active_end && candidate.range != block.range
+            }) {
+                skipped.push(format!(
+                    "{label}: `{}` effect #{} targets an occupied stop frame block",
+                    site.name,
+                    index + 1
+                ));
+                continue;
+            }
+            if proposed_frames.insert(after.active_end, index).is_some() {
+                skipped.push(format!(
+                    "{label}: multiple effect stops target frame {} and cannot be ordered safely",
+                    after.active_end
+                ));
+                continue;
+            }
+        }
+        moves.push(EffectTimingMove {
+            call_index: index,
+            new_start: after.active_start,
+            new_end: after.active_end,
+            move_start,
+            move_end,
+        });
+    }
+    (moves, skipped)
+}
+
+fn apply_effect_timing_moves(
+    text: &str,
+    moves: &[EffectTimingMove],
+    calls: &[crate::data::EffectCall],
+    ordinals: &[usize],
+    sites: &[MacroSite],
+    value_edits: &[Replacement],
+) -> Option<String> {
+    if moves.is_empty() {
+        return Some(apply(text, value_edits.to_vec()));
+    }
+    let all_sites = all_effect_source_sites(text);
+    let call_sites: Vec<Option<MacroSite>> = ordinals
+        .iter()
+        .map(|ordinal| sites.get(*ordinal).cloned())
+        .collect();
+    let mut chunks: Vec<(Range<usize>, String, u32)> = Vec::new();
+    for move_plan in moves {
+        let site = call_sites.get(move_plan.call_index)?.as_ref()?;
+        let start_block = source_frame_block(text, site)?;
+        if !effect_block_has_only(text, &start_block, site, &all_sites, true) {
+            return None;
+        }
+        let mut start_edits: Vec<Replacement> = value_edits
+            .iter()
+            .filter(|edit| {
+                start_block.range.start <= edit.span.start && edit.span.end <= start_block.range.end
+            })
+            .map(|edit| Replacement {
+                span: edit.span.start - start_block.range.start
+                    ..edit.span.end - start_block.range.start,
+                value: edit.value.clone(),
+            })
+            .collect();
+        start_edits.push(Replacement {
+            span: start_block.frame_arg.start - start_block.range.start
+                ..start_block.frame_arg.end - start_block.range.start,
+            value: format_float(move_plan.new_start as f32),
+        });
+        let start_chunk = apply(text[start_block.range.clone()].as_ref(), start_edits);
+        chunks.push((start_block.range, start_chunk, move_plan.new_start));
+        if move_plan.move_end {
+            let stop = effect_stop_block(
+                text,
+                move_plan.call_index,
+                calls.get(move_plan.call_index)?,
+                site,
+                &call_sites,
+                calls,
+                &all_sites,
+            )?;
+            let mut stop_edits: Vec<Replacement> = value_edits
+                .iter()
+                .filter(|edit| {
+                    stop.range.start <= edit.span.start && edit.span.end <= stop.range.end
+                })
+                .map(|edit| Replacement {
+                    span: edit.span.start - stop.range.start..edit.span.end - stop.range.start,
+                    value: edit.value.clone(),
+                })
+                .collect();
+            stop_edits.push(Replacement {
+                span: stop.frame_arg.start - stop.range.start
+                    ..stop.frame_arg.end - stop.range.start,
+                value: format_float(move_plan.new_end as f32),
+            });
+            let stop_chunk = apply(text[stop.range.clone()].as_ref(), stop_edits);
+            chunks.push((stop.range, stop_chunk, move_plan.new_end));
+        }
+    }
+    if chunks.iter().enumerate().any(|(i, (left, _, _))| {
+        chunks
+            .iter()
+            .skip(i + 1)
+            .any(|(right, _, _)| left.start < right.end && right.start < left.end)
+    }) {
+        return None;
+    }
+
+    let frame_blocks = source_frame_blocks(text);
+    let moved_ranges: Vec<Range<usize>> =
+        chunks.iter().map(|(range, _, _)| range.clone()).collect();
+    let retained_value_edits: Vec<Replacement> = value_edits
+        .iter()
+        .filter(|edit| {
+            !moved_ranges
+                .iter()
+                .any(|range| range.start <= edit.span.start && edit.span.end <= range.end)
+        })
+        .cloned()
+        .collect();
+    let mut insertions: HashMap<usize, Vec<(u32, String)>> = HashMap::new();
+    for (range, chunk, frame) in &chunks {
+        let anchor = frame_blocks
+            .iter()
+            .filter(|block| {
+                !moved_ranges.iter().any(|moved| moved == &block.range) && block.frame > *frame
+            })
+            .min_by_key(|block| block.frame)
+            .map(|block| block.range.start)
+            .or_else(|| {
+                frame_blocks
+                    .iter()
+                    .filter(|block| !moved_ranges.iter().any(|moved| moved == &block.range))
+                    .map(|block| block.range.end)
+                    .max()
+            })
+            // Moving the only block in a function has no surviving frame block to anchor
+            // against. Insert it immediately before the function's closing brace rather than
+            // appending it after the function, which would produce invalid Rust.
+            .or_else(|| text.rfind('}'))
+            .unwrap_or(text.len());
+        insertions
+            .entry(anchor)
+            .or_default()
+            .push((*frame, chunk.clone()));
+        let _ = range;
+    }
+    for chunks_at_anchor in insertions.values_mut() {
+        chunks_at_anchor.sort_by_key(|(frame, _)| *frame);
+    }
+
+    let mut anchors: Vec<usize> = insertions.keys().copied().collect();
+    anchors.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for anchor in anchors {
+        if anchor < cursor {
+            continue;
+        }
+        append_effect_text_without_ranges(
+            &mut out,
+            text,
+            cursor..anchor,
+            &moved_ranges,
+            &retained_value_edits,
+        );
+        for (_, chunk) in &insertions[&anchor] {
+            out.push_str(chunk);
+        }
+        cursor = anchor;
+    }
+    append_effect_text_without_ranges(
+        &mut out,
+        text,
+        cursor..text.len(),
+        &moved_ranges,
+        &retained_value_edits,
+    );
+    Some(out)
+}
+
+fn append_effect_text_without_ranges(
+    out: &mut String,
+    text: &str,
+    range: Range<usize>,
+    removed: &[Range<usize>],
+    edits: &[Replacement],
+) {
+    let mut cursor = range.start;
+    let mut removed_ranges: Vec<_> = removed
+        .iter()
+        .filter(|span| span.start < range.end && span.end > range.start)
+        .collect();
+    removed_ranges.sort_by_key(|span| span.start);
+    for span in removed_ranges {
+        if span.start > cursor {
+            append_effect_text_with_edits(out, text, cursor..span.start.min(range.end), edits);
+        }
+        cursor = cursor.max(span.end);
+    }
+    if cursor < range.end {
+        append_effect_text_with_edits(out, text, cursor..range.end, edits);
+    }
+}
+
+fn append_effect_text_with_edits(
+    out: &mut String,
+    text: &str,
+    range: Range<usize>,
+    edits: &[Replacement],
+) {
+    let mut applicable: Vec<&Replacement> = edits
+        .iter()
+        .filter(|edit| range.start <= edit.span.start && edit.span.end <= range.end)
+        .collect();
+    applicable.sort_by_key(|edit| edit.span.start);
+    let mut cursor = range.start;
+    for edit in applicable {
+        if edit.span.start < cursor {
+            continue;
+        }
+        out.push_str(&text[cursor..edit.span.start]);
+        out.push_str(&edit.value);
+        cursor = edit.span.end;
+    }
+    out.push_str(&text[cursor..range.end]);
+}
+
+/// Compare effect calls as an unordered semantic set after a source rewrite.
+///
+/// Moving a frame block changes source order, so a positional comparison would reject a valid
+/// retime as soon as it crosses another call. The serialized call is a convenient complete
+/// fingerprint here: it includes the typed arguments, modifiers, guards, and preserved raw
+/// identity without introducing a second list of fields that can drift from `EffectCall`.
+fn effect_call_set_signature(calls: &[crate::data::EffectCall]) -> Vec<String> {
+    let mut signatures: Vec<String> = calls
+        .iter()
+        .cloned()
+        .map(crate::data::EffectCall::normalized_timing)
+        .map(canonicalize_effect_call_for_source)
+        .map(|call| serde_json::to_string(&call).unwrap_or_else(|_| format!("{call:?}")))
+        .collect();
+    signatures.sort();
+    signatures
+}
+
+fn source_compare_float(value: f32) -> f32 {
+    if value.is_finite() {
+        format!("{value:.4}").parse().unwrap_or(value)
+    } else {
+        value
+    }
+}
+
+fn canonicalize_effect_call_for_source(
+    mut call: crate::data::EffectCall,
+) -> crate::data::EffectCall {
+    call.offset = call.offset.map(source_compare_float);
+    call.rotation = call.rotation.map(source_compare_float);
+    call.scale = source_compare_float(call.scale);
+    call.rate = call.rate.map(source_compare_float);
+    call.camera_offset = call.camera_offset.map(source_compare_float);
+    call.tint = call.tint.map(|values| values.map(source_compare_float));
+    call.particle_tint = call
+        .particle_tint
+        .map(|values| values.map(source_compare_float));
+    call.alpha = call.alpha.map(source_compare_float);
+    call.scale_w = call
+        .scale_w
+        .map(|values| values.into_iter().map(source_compare_float).collect());
+    if let Some(color) = call.color.as_mut() {
+        color.transition = color.transition.map(source_compare_float);
+        color.rgba = color.rgba.map(|values| values.map(source_compare_float));
+    }
+    call
+}
+
 /// Rewrite one `effect_*` function's source with the editor's edited transform values.
 ///
 /// Pure: `text` is the function on its own, and the result is that function rewritten. This
@@ -1223,17 +1929,28 @@ fn format_float(value: f32) -> String {
 /// back into the project file, and the source editor window, which is already holding exactly
 /// this text and simply swaps it.
 ///
-/// Only position, rotation, and scale move. A call that was added, removed, renamed, retimed,
-/// or pointed at a different joint cannot be expressed as a value change to an existing line,
-/// so it lands in `skipped` rather than being approximated.
+/// Position, rotation, modifier values, and bounded timing moves are written when the source
+/// structure identifies exactly one safe block. Additions, removals, renames, ambiguous blocks,
+/// and stop creation/removal remain reported rather than approximated.
 pub fn rewrite_effect_calls(
     text: &str,
     label: &str,
     pristine: &[crate::data::EffectCall],
     edited: &[crate::data::EffectCall],
 ) -> Result<(String, SyncReport)> {
-    let ordinals = crate::acmd::parse_effect_script(text).call_macro_ordinals();
+    let script = crate::acmd::parse_effect_script(text);
+    let ordinals = script.call_macro_ordinals();
     let (sites, modifier_sites) = spawn_and_modifier_sites(text);
+    let pristine: Vec<crate::data::EffectCall> = pristine
+        .iter()
+        .cloned()
+        .map(crate::data::EffectCall::normalized_timing)
+        .collect();
+    let edited: Vec<crate::data::EffectCall> = edited
+        .iter()
+        .cloned()
+        .map(crate::data::EffectCall::normalized_timing)
+        .collect();
 
     let mut report = SyncReport::default();
     if ordinals.len() != pristine.len() {
@@ -1243,6 +1960,23 @@ pub fn rewrite_effect_calls(
             pristine.len(),
             ordinals.len()
         );
+    }
+
+    let (mut timing_moves, timing_skipped) =
+        plan_effect_timing_moves(text, label, &script, &pristine, &edited, &ordinals, &sites);
+    report.skipped.extend(timing_skipped);
+    // Timing moves are only valid for a one-to-one list whose call identity stays the same.
+    // Otherwise a rename/disable/add/remove could still carry a previously approved block move
+    // through the value-writing pass and leave a partial structural edit in the source.
+    if edited.len() != pristine.len() {
+        timing_moves.clear();
+    } else {
+        timing_moves.retain(|timing| {
+            pristine
+                .get(timing.call_index)
+                .zip(edited.get(timing.call_index))
+                .is_some_and(|(before, after)| structural_identity_matches(before, after))
+        });
     }
 
     // A macro inside a `for` produces one call per iteration off ONE line of text. Only sync
@@ -1282,24 +2016,38 @@ pub fn rewrite_effect_calls(
         }
         if differs
             .iter()
-            .any(|i| !identity_matches(&pristine[*i], &edited[*i]))
+            .any(|i| !structural_identity_matches(&pristine[*i], &edited[*i]))
         {
             report.skipped.push(format!(
-                "{label}: `{}` changed graphic, joint, timing, or enablement — source syncing \
-                 only rewrites transform values",
+                "{label}: `{}` changed graphic, joint, spawn command, timing, or enablement — source syncing \
+                 will not make this structural change; it writes values and unambiguous timing blocks",
                 macro_site.name
             ));
             continue;
+        }
+        let timing_changed = differs.iter().any(|i| {
+            pristine[*i].active_start != edited[*i].active_start
+                || (pristine[*i].follows_bone && pristine[*i].active_end != edited[*i].active_end)
+        });
+        let timing_written = differs
+            .iter()
+            .all(|i| timing_moves.iter().any(|timing| timing.call_index == *i));
+        if timing_changed && !timing_written {
+            // The planning pass already supplied the precise refusal reason. Continue through
+            // the value writers so a safe transform edit on the same call is not lost merely
+            // because its source timing block was ambiguous.
         }
         // A trail carries textures and per-frame trail parameters, and no transform at all —
         // its joints are arguments 4 onward. Applying the spawn layout here overwrote the
         // user's own trail settings with position values and reported it as a clean success.
         if is_trail_macro(&macro_site.name) {
-            report.skipped.push(format!(
-                "{label}: `{}` has no position, rotation, or scale arguments to write — a \
-                 trail is placed by the joints it names, not by a transform",
-                macro_site.name
-            ));
+            if !timing_written {
+                report.skipped.push(format!(
+                    "{label}: `{}` has no position, rotation, or scale arguments to write — a \
+                     trail is placed by the joints it names, not by a transform",
+                    macro_site.name
+                ));
+            }
             continue;
         }
         let target = &edited[differs[0]];
@@ -1428,8 +2176,40 @@ pub fn rewrite_effect_calls(
         );
     }
 
-    report.changed = edits.len();
-    Ok((apply(text, edits), report))
+    let value_count = edits.len();
+    let valued = apply(text, edits.clone());
+    let moved =
+        apply_effect_timing_moves(text, &timing_moves, &pristine, &ordinals, &sites, &edits);
+    let (updated, moved_count) = match moved {
+        Some(updated) => {
+            let count = timing_moves
+                .iter()
+                .map(|timing| usize::from(timing.move_start) + usize::from(timing.move_end))
+                .sum();
+            (updated, count)
+        }
+        None => {
+            report.skipped.push(format!(
+                "{label}: the approved timing blocks could not be applied as one source edit"
+            ));
+            (valued.clone(), 0)
+        }
+    };
+    report.changed = value_count + moved_count;
+    if report.skipped.is_empty() {
+        let reparsed = crate::acmd::parse_effect_script(&updated).to_effect_calls();
+        if effect_call_set_signature(&reparsed) != effect_call_set_signature(&edited) {
+            // Do not return a source move that failed its own semantic read-back. Value edits are
+            // still safe to keep, but the timing operation is refused as one batch so a future
+            // parser/source-shape change cannot leave only half of a retime on disk.
+            report.skipped.push(format!(
+                "{label}: the rewritten effect source did not reparse to the edited call set; timing changes were not applied"
+            ));
+            report.changed = value_count;
+            return Ok((valued, report));
+        }
+    }
+    Ok((updated, report))
 }
 
 /// Sync edited effect calls for one move back into the project source on disk.
@@ -1812,12 +2592,13 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
         && a.control == b.control
 }
 
-/// Everything a value rewrite CANNOT change about a call.
+/// Everything a value rewrite or a bounded timing move CANNOT change about a call.
 ///
-/// `active_end` belongs here with `active_start`: a follow effect's end frame is the
-/// `EFFECT_OFF_KIND` that closes it, so moving it means moving a different call in a
-/// different frame block, not retuning an argument.
-fn identity_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
+/// The exact spawn command is structural: changing it can change the native tail ABI, whether a
+/// second graphic exists, and whether the effect has a lifetime. The editor/export/live paths
+/// support that change, while linked-source sync reports it rather than rewriting a macro into a
+/// different signature by positional guesswork.
+fn structural_identity_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -> bool {
     let same_control_kind = match (&a.control, &b.control) {
         (Some(left), Some(right)) => left.command_name() == right.command_name(),
         (None, None) => true,
@@ -1830,8 +2611,7 @@ fn identity_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) ->
         // A trail's second edge is a joint like the first, and no transform rewrite reaches it.
         && a.trail_bone2 == b.trail_bone2
         && a.spawn_func == b.spawn_func
-        && a.active_start == b.active_start
-        && a.active_end == b.active_end
+        && a.trail_command == b.trail_command
         && a.disabled == b.disabled
 }
 
@@ -3224,11 +4004,16 @@ pub fn rewrite_hurtboxes(
         found
     };
 
-    for (before, now) in pristine.0.iter().zip(edited.0.iter()) {
+    let state_matches = crate::data::match_hurtbox_states(&pristine.0, &edited.0);
+    for (edited_index, now) in edited.0.iter().enumerate() {
+        let Some(source_index) = state_matches[edited_index] else {
+            continue;
+        };
+        let before = &pristine.0[source_index];
         if before == now {
             continue;
         }
-        let Some(site) = site_for(now.site, &mut report) else {
+        let Some(site) = site_for(before.site, &mut report) else {
             continue;
         };
         if before.active_start != now.active_start {
@@ -3258,7 +4043,7 @@ pub fn rewrite_hurtboxes(
                     edits.extend(text_edit(
                         text,
                         span,
-                        &format!("Hash40::new(\"{}\")", is.to_ascii_lowercase()),
+                        &crate::acmd::hash_arg(&is.to_ascii_lowercase()),
                     ));
                 }
             }
@@ -3288,11 +4073,16 @@ pub fn rewrite_hurtboxes(
         }
     }
 
-    for (before, now) in pristine.1.iter().zip(edited.1.iter()) {
+    let priority_matches = crate::data::match_col_pri_states(&pristine.1, &edited.1);
+    for (edited_index, now) in edited.1.iter().enumerate() {
+        let Some(source_index) = priority_matches[edited_index] else {
+            continue;
+        };
+        let before = &pristine.1[source_index];
         if before == now {
             continue;
         }
-        let Some(site) = site_for(now.site, &mut report) else {
+        let Some(site) = site_for(before.site, &mut report) else {
             continue;
         };
         if before.active_start != now.active_start {
@@ -3308,15 +4098,197 @@ pub fn rewrite_hurtboxes(
         }
     }
 
+    let value_edit_count = edits.len();
+    let mut updated = apply(text, edits);
+    // A parameter-range edit adds one `HIT_NO` at the range start and one at the restoring
+    // frame. Those calls have no source site to retune, so place them into the nearest flat
+    // frame block. Matching by target/status/start avoids treating an unchanged source span as
+    // a new call when the evaluator's site ordinals shifted after an insertion. Branch/loop
+    // placement is intentionally still conservative: the generated export remains authoritative
+    // and the report explains why a hand-written source was left alone.
+    // Only a schedule whose cardinality grew can contain newly authored calls.  A value edit
+    // (changing a bone, group, or status) deliberately has no exact value match in `pristine`,
+    // but it is still the same source statement and must be retuned in place rather than
+    // duplicated.  The length guard keeps those ordinary edits out of the insertion path.  The
+    // exact triple then identifies the additional states while allowing all unchanged source
+    // states to remain byte-for-byte stable.
+    for (edited_index, now) in edited.0.iter().enumerate() {
+        if state_matches[edited_index].is_some() {
+            continue;
+        }
+        if insert_hurt_line(&mut updated, now.active_start, &now.target, &now.status) {
+            report.changed += 1;
+        }
+    }
+
     if pristine.0.len() != edited.0.len() || pristine.1.len() != edited.1.len() {
         report.skipped.push(format!(
-            "{label}: hurtbox states were added or removed — source syncing only retunes \
-             existing calls, so use an export to land that"
+            "{label}: the hurtbox schedule changed shape; newly authored ranges were inserted \
+             where the source was structurally unambiguous, while the generated export remains \
+             the complete representation"
         ));
     }
 
-    report.changed = edits.len();
-    Ok((apply(text, edits), report))
+    report.changed += value_edit_count;
+    Ok((updated, report))
+}
+
+/// The source-level `damage!` calls that set fighter-wide damage reaction.
+///
+/// `damage!` is a macro rather than a `macros::…` call, so it needs the named-call scanner. The
+/// four arguments are `agent`, the MSC command, the mode, and the value. Keeping the command
+/// check here is important: a different `damage!` command has the same argument count but a
+/// different meaning and must not be rewritten as armor.
+fn damage_no_reaction_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(text, "damage!", 0..text.len())
+        .into_iter()
+        .filter(|site| {
+            site.args.len() == 4
+                && site.arg(text, 1).is_some_and(|command| {
+                    command.trim().trim_start_matches('*') == "MA_MSC_DAMAGE_DAMAGE_NO_REACTION"
+                })
+        })
+        .collect()
+}
+
+fn damage_no_reaction_tokens(condition: &crate::data::HurtboxCondition) -> (String, String) {
+    match condition {
+        crate::data::HurtboxCondition::Normal => {
+            ("*DAMAGE_NO_REACTION_MODE_NORMAL".into(), "0".into())
+        }
+        crate::data::HurtboxCondition::SuperArmor => {
+            ("*DAMAGE_NO_REACTION_MODE_ALWAYS".into(), "0".into())
+        }
+        crate::data::HurtboxCondition::ReactionValueArmor { threshold } => (
+            "*DAMAGE_NO_REACTION_MODE_REACTION_VALUE".into(),
+            threshold.to_string(),
+        ),
+        crate::data::HurtboxCondition::DamageBasedArmor { threshold } => (
+            "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER".into(),
+            threshold.to_string(),
+        ),
+        crate::data::HurtboxCondition::DamagePowerCount { threshold } => (
+            "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT".into(),
+            threshold.to_string(),
+        ),
+        crate::data::HurtboxCondition::NoReactionMode => {
+            ("*DAMAGE_NO_REACTION_MODE_NONE".into(), "0".into())
+        }
+        crate::data::HurtboxCondition::Unknown { mode, value } => {
+            let raw = mode.trim();
+            let mode =
+                if raw.starts_with('*') || raw.parse::<i64>().is_ok() || raw.starts_with("0x") {
+                    mode.clone()
+                } else {
+                    format!("*{mode}")
+                };
+            (mode, value.clone())
+        }
+    }
+}
+
+/// Rewrite the mode/value of existing fighter-wide damage-reaction calls and add new flat-frame
+/// calls for newly authored armor ranges.
+///
+/// Frames remain structural source locations. A retimed existing call is therefore reported and
+/// left in place, while a newly authored range is inserted into an existing execute block (or as
+/// a small top-level frame block) using the same conservative helper as hurtbox-state insertion.
+pub(crate) fn rewrite_hurtbox_conditions(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::HurtboxConditionState],
+    edited: &[crate::data::HurtboxConditionState],
+) -> Result<(String, SyncReport)> {
+    let sites = damage_no_reaction_sites(text);
+    let mut report = SyncReport::default();
+    let mut edits = Vec::new();
+
+    let condition_matches = crate::data::match_hurtbox_conditions(pristine, edited);
+    for (edited_index, now) in edited.iter().enumerate() {
+        let Some(source_index) = condition_matches[edited_index] else {
+            continue;
+        };
+        let before = &pristine[source_index];
+        if before == now {
+            continue;
+        }
+        let Some(site) = sites.get(before.site) else {
+            report.skipped.push(format!(
+                "{label}: a damage-reaction condition has no matching source call — source syncing only retunes existing calls"
+            ));
+            continue;
+        };
+        if before.active_start != now.active_start {
+            report.skipped.push(format!(
+                "{label}: {} was retimed from frame {} to {} — its frame is the source block, so source syncing cannot move it",
+                before.condition.label(),
+                before.active_start,
+                now.active_start
+            ));
+        }
+        if site.args.len() != 4 {
+            report.skipped.push(format!(
+                "{label}: damage-reaction call on frame {} has an unsupported argument shape",
+                before.active_start
+            ));
+            continue;
+        }
+        let (mode, value) = damage_no_reaction_tokens(&now.condition);
+        if let Some(span) = site.args.get(2) {
+            if let Some(edit) = text_edit(text, span, &mode) {
+                edits.push(edit);
+            }
+        }
+        if let Some(span) = site.args.get(3) {
+            if let Some(edit) = text_edit(text, span, &value) {
+                edits.push(edit);
+            }
+        }
+    }
+
+    // The evaluator exposes one state per authored call, including normal restoration points.
+    // Site identity distinguishes a value edit to an existing call from a newly authored range;
+    // matching condition text here would mistake a changed super-armor mode for an insertion.
+    let mut replacement_spans = Vec::new();
+    for edit in &edits {
+        if !replacement_spans.iter().any(|span| span == &edit.span) {
+            replacement_spans.push(edit.span.clone());
+        }
+    }
+    let value_edit_count = replacement_spans.len();
+    let mut updated = apply(text, edits);
+    for (edited_index, now) in edited.iter().enumerate() {
+        if condition_matches[edited_index].is_some() {
+            continue;
+        }
+        if insert_damage_no_reaction_line(&mut updated, now.active_start, &now.condition) {
+            report.changed += 1;
+        }
+    }
+
+    if pristine.len() != edited.len() {
+        report.skipped.push(format!(
+            "{label}: the damage-reaction schedule changed shape; newly authored ranges were inserted where the source was structurally unambiguous"
+        ));
+    }
+    // Added calls were counted above. Existing value replacements are counted by distinct source
+    // spans so a looped event cannot report the same source line twice.
+    report.changed += value_edit_count;
+    Ok((updated, report))
+}
+
+/// Sync edited fighter-wide damage-reaction conditions into the project's `game_` source.
+pub(crate) fn sync_hurtbox_conditions(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::HurtboxConditionState],
+    edited: &[crate::data::HurtboxConditionState],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_hurtbox_conditions(body, &format!("{fighter}/{move_name}"), pristine, edited)
+    })
 }
 
 // ── Attack modifier write-back ───────────────────────────────────────────────
@@ -6329,6 +7301,186 @@ fn insert_reverse_line(text: &mut String, frame: u32) -> bool {
     true
 }
 
+/// Insert one targeted hurtbox state into a flat source frame block. This is deliberately the
+/// same conservative shape as `insert_reverse_line`: existing comments/branches stay untouched,
+/// while a new top-level frame gets a small execute block that every smashline project accepts.
+fn insert_hurt_line(
+    text: &mut String,
+    frame: u32,
+    target: &crate::data::HurtTarget,
+    status: &str,
+) -> bool {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let call = match target {
+        crate::data::HurtTarget::Bone(bone) => format!(
+            "macros::HIT_NODE(agent, {}, {});",
+            crate::acmd::hash_arg(&bone.to_ascii_lowercase()),
+            crate::acmd::emit_status(status)
+        ),
+        crate::data::HurtTarget::Group(group) => format!(
+            "macros::HIT_NO(agent, {group}, {});",
+            crate::acmd::emit_status(status)
+        ),
+        crate::data::HurtTarget::Whole => format!(
+            "macros::WHOLE_HIT(agent, {});",
+            crate::acmd::emit_status(status)
+        ),
+    };
+    let ranges = source_line_ranges(text);
+    let frame_index = ranges.iter().position(|range| {
+        frame_literal(&text[range.clone()])
+            .is_some_and(|value| value.round().max(1.0) as u32 == frame)
+    });
+
+    if let Some(frame_index) = frame_index {
+        let frame_range = ranges[frame_index].clone();
+        for range in ranges.iter().skip(frame_index + 1) {
+            if frame_literal(&text[range.clone()]).is_some() {
+                break;
+            }
+            let line = &text[range.clone()];
+            if line.contains("if macros::is_excute") && line.contains('{') {
+                let open = range.start + line.find('{').unwrap();
+                if let Some(close) = matching_brace(text, open) {
+                    let body_indent = ranges
+                        .iter()
+                        .skip(frame_index + 1)
+                        .find(|body| {
+                            body.start > open && body.start < close && {
+                                let body_text = &text[body.start..body.end];
+                                !body_text.trim().is_empty() && !body_text.trim().starts_with('}')
+                            }
+                        })
+                        .map(|body| line_indent(text, body).to_string())
+                        .unwrap_or_else(|| format!("{}    ", line_indent(text, range)));
+                    text.insert_str(close, &format!("{body_indent}{call}{newline}"));
+                    return true;
+                }
+            }
+        }
+        let indent = line_indent(text, &frame_range);
+        let block = format!(
+            "{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+        );
+        text.insert_str(frame_range.end, &block);
+        return true;
+    }
+
+    let insert_at = ranges
+        .iter()
+        .find(|range| {
+            frame_literal(&text[range.start..range.end]).is_some_and(|value| value > frame as f32)
+        })
+        .map(|range| range.start)
+        .or_else(|| text.rfind('}'))
+        .unwrap_or(text.len());
+    let indent = ranges
+        .iter()
+        .find(|range| frame_literal(&text[range.start..range.end]).is_some())
+        .map(|range| line_indent(text, range).to_string())
+        .unwrap_or_else(|| "    ".into());
+    let block = format!(
+        "{indent}frame(agent.lua_state_agent, {frame}.0);{newline}{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+    );
+    text.insert_str(insert_at, &block);
+    true
+}
+
+fn insert_damage_no_reaction_line(
+    text: &mut String,
+    frame: u32,
+    condition: &crate::data::HurtboxCondition,
+) -> bool {
+    let (mode, value) = match condition {
+        crate::data::HurtboxCondition::Normal => (
+            "*DAMAGE_NO_REACTION_MODE_NORMAL".to_string(),
+            "0".to_string(),
+        ),
+        crate::data::HurtboxCondition::SuperArmor => (
+            "*DAMAGE_NO_REACTION_MODE_ALWAYS".to_string(),
+            "0".to_string(),
+        ),
+        crate::data::HurtboxCondition::ReactionValueArmor { threshold } => (
+            "*DAMAGE_NO_REACTION_MODE_REACTION_VALUE".to_string(),
+            threshold.to_string(),
+        ),
+        crate::data::HurtboxCondition::DamageBasedArmor { threshold } => (
+            "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER".to_string(),
+            threshold.to_string(),
+        ),
+        crate::data::HurtboxCondition::DamagePowerCount { threshold } => (
+            "*DAMAGE_NO_REACTION_MODE_DAMAGE_POWER_COUNT".to_string(),
+            threshold.to_string(),
+        ),
+        crate::data::HurtboxCondition::NoReactionMode => {
+            ("*DAMAGE_NO_REACTION_MODE_NONE".to_string(), "0".to_string())
+        }
+        crate::data::HurtboxCondition::Unknown { mode, value } => (mode.clone(), value.clone()),
+    };
+    let call = format!("damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, {mode}, {value});");
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let ranges = source_line_ranges(text);
+    let frame_index = ranges.iter().position(|range| {
+        frame_literal(&text[range.clone()])
+            .is_some_and(|value| value.round().max(1.0) as u32 == frame)
+    });
+    if let Some(frame_index) = frame_index {
+        let frame_range = ranges[frame_index].clone();
+        for range in ranges.iter().skip(frame_index + 1) {
+            if frame_literal(&text[range.clone()]).is_some() {
+                break;
+            }
+            let line = &text[range.clone()];
+            if line.contains("if macros::is_excute") && line.contains('{') {
+                let open = range.start + line.find('{').unwrap();
+                if let Some(close) = matching_brace(text, open) {
+                    let body_indent = ranges
+                        .iter()
+                        .skip(frame_index + 1)
+                        .find(|body| {
+                            body.start > open && body.start < close && {
+                                let body_text = &text[body.start..body.end];
+                                !body_text.trim().is_empty() && !body_text.trim().starts_with('}')
+                            }
+                        })
+                        .map(|body| line_indent(text, body).to_string())
+                        .unwrap_or_else(|| format!("{}    ", line_indent(text, range)));
+                    text.insert_str(close, &format!("{body_indent}{call}{newline}"));
+                    return true;
+                }
+            }
+        }
+        let indent = line_indent(text, &frame_range);
+        text.insert_str(
+            frame_range.end,
+            &format!(
+                "{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+            ),
+        );
+        return true;
+    }
+    let insert_at = ranges
+        .iter()
+        .find(|range| {
+            frame_literal(&text[range.start..range.end]).is_some_and(|value| value > frame as f32)
+        })
+        .map(|range| range.start)
+        .or_else(|| text.rfind('}'))
+        .unwrap_or(text.len());
+    let indent = ranges
+        .iter()
+        .find(|range| frame_literal(&text[range.start..range.end]).is_some())
+        .map(|range| line_indent(text, range).to_string())
+        .unwrap_or_else(|| "    ".into());
+    text.insert_str(
+        insert_at,
+        &format!(
+            "{indent}frame(agent.lua_state_agent, {frame}.0);{newline}{indent}if macros::is_excute(agent) {{{newline}{indent}    {call}{newline}{indent}}}{newline}"
+        ),
+    );
+    true
+}
+
 /// Rewrite `REVERSE_LR` presence and frame placement in a user's own `game_` source.
 ///
 /// This is the one structural source rewrite in the first E1 slice. It is deliberately limited
@@ -7765,6 +8917,24 @@ visionary_set_speed(agent, 9, 10);
             sync_effect_calls(&index, "mario", "attack_air_n", &pristine, &edited).unwrap();
         assert_eq!(report.skipped.len(), 1, "{report:?}");
 
+        // Changing the spawn family is structural as well: the target may have a different
+        // number/type of tail arguments and may add or remove the flip/follow slots. Export and
+        // live replay support it, but source sync must report it rather than rewrite by position.
+        let mut edited = pristine.clone();
+        edited[0].spawn_func = "EFFECT_FOLLOW".into();
+        edited[0].effect_name_alt = None;
+        edited[0].follows_bone = true;
+        edited[0].active_end = 9999;
+        let report =
+            sync_effect_calls(&index, "mario", "attack_air_n", &pristine, &edited).unwrap();
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|message| message.contains("spawn command")),
+            "{report:?}"
+        );
+
         // Adding a call is reported, and does not silently drop the report either.
         let mut edited = pristine.clone();
         edited.push(pristine[0].clone());
@@ -7925,7 +9095,8 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(report.changed, 0);
         assert_eq!(report.skipped.len(), 1, "{report:?}");
         assert!(
-            report.skipped[0].contains("changed graphic, joint, timing, or enablement"),
+            report.skipped[0]
+                .contains("changed graphic, joint, spawn command, timing, or enablement"),
             "the report must name what the user changed, not the transform this call never \
              had: {report:?}"
         );
@@ -8229,6 +9400,105 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         ] {
             assert!(after.contains(line), "{line} was disturbed:\n{after}");
         }
+    }
+
+    #[test]
+    fn a_new_hurtbox_range_is_inserted_at_its_one_based_frame() {
+        let pristine = hurt_of(HURTBOXES);
+        let mut edited = pristine.clone();
+        edited.0.insert(
+            0,
+            crate::data::HurtboxState {
+                target: crate::data::HurtTarget::Group(12),
+                status: "HIT_STATUS_XLU".into(),
+                active_start: 4,
+                active_end: 7,
+                site: 99,
+            },
+        );
+        edited.0.insert(
+            1,
+            crate::data::HurtboxState {
+                target: crate::data::HurtTarget::Group(12),
+                status: "HIT_STATUS_NORMAL".into(),
+                active_start: 8,
+                active_end: 8,
+                site: 100,
+            },
+        );
+        let (after, report) =
+            rewrite_hurtboxes(HURTBOXES, "mario/attack", &pristine, &edited).expect("rewrite");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 4.0);")
+                && after.contains("macros::HIT_NO(agent, 12, *HIT_STATUS_XLU);")
+        );
+        assert!(after.contains("frame(agent.lua_state_agent, 8.0);"));
+        assert_eq!(after.matches("macros::HIT_NO(agent, 12,").count(), 2);
+        assert_eq!(after.matches("macros::HIT_NODE(agent").count(), 4);
+        assert!(report.changed >= 2);
+    }
+
+    const DAMAGE_REACTION_SRC: &str = r#"unsafe extern "C" fn game_attackn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+    if macros::is_excute(agent) {
+        damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_ALWAYS, 0);
+    }
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_NORMAL, 0);
+    }
+}
+"#;
+
+    #[test]
+    fn a_damage_reaction_edit_rewrites_mode_and_value_without_touching_frames() {
+        let pristine = crate::acmd::parse_acmd_script(DAMAGE_REACTION_SRC).to_hurtbox_conditions();
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[0].condition = crate::data::HurtboxCondition::DamageBasedArmor { threshold: 18.0 };
+        let (after, report) =
+            rewrite_hurtbox_conditions(DAMAGE_REACTION_SRC, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 2);
+        assert!(after.contains(
+            "damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_DAMAGE_POWER, 18);"
+        ));
+        assert!(after.contains(
+            "damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_NORMAL, 0);"
+        ));
+    }
+
+    #[test]
+    fn a_new_damage_reaction_range_is_inserted_at_its_one_based_frame() {
+        let pristine = crate::acmd::parse_acmd_script(DAMAGE_REACTION_SRC).to_hurtbox_conditions();
+        let mut edited = pristine.clone();
+        edited.insert(
+            0,
+            crate::data::HurtboxConditionState {
+                condition: crate::data::HurtboxCondition::SuperArmor,
+                active_start: 1,
+                active_end: 1,
+                site: 99,
+            },
+        );
+        edited.insert(
+            1,
+            crate::data::HurtboxConditionState {
+                condition: crate::data::HurtboxCondition::Normal,
+                active_start: 2,
+                active_end: 2,
+                site: 100,
+            },
+        );
+        let (after, report) =
+            rewrite_hurtbox_conditions(DAMAGE_REACTION_SRC, "t", &pristine, &edited).unwrap();
+        assert!(after.contains("frame(agent.lua_state_agent, 1.0);"));
+        assert!(after.contains(
+            "damage!(agent, *MA_MSC_DAMAGE_DAMAGE_NO_REACTION, *DAMAGE_NO_REACTION_MODE_ALWAYS, 0);"
+        ));
+        assert!(after.contains("frame(agent.lua_state_agent, 2.0);"));
+        assert_eq!(after.matches("MA_MSC_DAMAGE_DAMAGE_NO_REACTION").count(), 4);
+        assert!(report.changed >= 2);
     }
 
     /// A `WHOLE_HIT` between two `HIT_NODE`s, so a status edit has to pick the right slot *and*
@@ -8879,10 +10149,9 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             "the user's call must be left exactly as written"
         );
         assert!(
-            report
-                .skipped
-                .iter()
-                .any(|s| s.contains("changed graphic, joint, timing, or enablement")),
+            report.skipped.iter().any(|s| {
+                s.contains("changed graphic, joint, spawn command, timing, or enablement")
+            }),
             "{report:?}"
         );
     }
@@ -8906,8 +10175,6 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
             (|c: &mut crate::data::EffectCall| c.effect_name = "sys_renamed".into())
                 as fn(&mut crate::data::EffectCall),
             |c| c.bone_name = "havel".into(),
-            |c| c.active_start += 3,
-            |c| c.active_end = 20,
             |c| c.disabled = true,
         ] {
             let mut edited = pristine.clone();
@@ -8920,6 +10187,426 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
                 "an unwritable edit must be named, not dropped: {report:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_flat_one_shot_retime_moves_its_frame_block_and_canonicalizes_end() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, false);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_late"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        edited[0].active_end = 9999;
+
+        let (after, report) = rewrite_effect_calls(source, "t", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 8.0);"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("frame(agent.lua_state_agent, 5.0);"),
+            "{after}"
+        );
+        let reparsed = crate::acmd::parse_effect_script(&after).to_effect_calls();
+        assert_eq!((reparsed[0].active_start, reparsed[0].active_end), (8, 8));
+    }
+
+    #[test]
+    fn a_zero_frame_retime_is_canonicalized_and_can_be_retimed_again() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        let mut zero = pristine.clone();
+        zero[0].active_start = 0;
+        zero[0].active_end = 9999;
+
+        let (at_first, first_report) = rewrite_effect_calls(source, "zero", &pristine, &zero)
+            .expect("zero-frame retime should be handled as the first script frame");
+        assert!(first_report.skipped.is_empty(), "{first_report:?}");
+        assert_eq!(first_report.changed, 1, "{first_report:?}");
+        assert!(
+            at_first.contains("frame(agent.lua_state_agent, 1.0);"),
+            "{at_first}"
+        );
+        let first_calls = crate::acmd::parse_effect_script(&at_first).to_effect_calls();
+        assert_eq!(
+            (first_calls[0].active_start, first_calls[0].active_end),
+            (1, 1)
+        );
+
+        let mut later = first_calls.clone();
+        later[0].active_start = 8;
+        later[0].active_end = 9999;
+        let (at_later, later_report) =
+            rewrite_effect_calls(&at_first, "zero-then-later", &first_calls, &later)
+                .expect("a later retime must remain available after frame zero was entered");
+        assert!(later_report.skipped.is_empty(), "{later_report:?}");
+        assert_eq!(later_report.changed, 1, "{later_report:?}");
+        assert!(
+            at_later.contains("frame(agent.lua_state_agent, 8.0);"),
+            "{at_later}"
+        );
+        let reparsed = crate::acmd::parse_effect_script(&at_later).to_effect_calls();
+        assert_eq!((reparsed[0].active_start, reparsed[0].active_end), (8, 8));
+    }
+
+    #[test]
+    fn a_retime_and_value_edit_move_one_block_atomically() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, true);
+        macros::LAST_EFFECT_SET_RATE(agent, 1);
+    }
+    frame(agent.lua_state_agent, 20.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_late"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        edited[0].offset[0] = 2.5;
+        edited[0].rate = Some(2.0);
+
+        let (after, report) = rewrite_effect_calls(source, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 3, "{report:?}");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 8.0);"),
+            "{after}"
+        );
+        assert!(after.contains("Hash40::new(\"top\"), 2.5, 1, 0"), "{after}");
+        assert!(
+            after.contains("macros::LAST_EFFECT_SET_RATE(agent, 2);"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("frame(agent.lua_state_agent, 5.0);"),
+            "{after}"
+        );
+        let reparsed = crate::acmd::parse_effect_script(&after).to_effect_calls();
+        assert_eq!(reparsed[0].active_start, 8);
+        assert_eq!(reparsed[0].active_end, 9999);
+        assert_eq!(reparsed[0].rate, Some(2.0));
+    }
+
+    #[test]
+    fn a_follow_retime_moves_its_unique_finite_stop_with_the_start() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, true);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("sys_attack"), false, true);
+    }
+    frame(agent.lua_state_agent, 20.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_late"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine[0].active_end, 12);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        edited[0].active_end = 15;
+
+        let (after, report) = rewrite_effect_calls(source, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 8.0);"),
+            "{after}"
+        );
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 15.0);"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("frame(agent.lua_state_agent, 5.0);"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("frame(agent.lua_state_agent, 12.0);"),
+            "{after}"
+        );
+        let reparsed = crate::acmd::parse_effect_script(&after).to_effect_calls();
+        assert_eq!((reparsed[0].active_start, reparsed[0].active_end), (8, 15));
+    }
+
+    #[test]
+    fn colour_and_control_point_events_use_the_same_safe_retime_path() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::FLASH(agent, 1, 0.2, 0.3, 0.4);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::ENABLE_AREA(agent, 3);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        edited[0].active_end = 9999;
+        edited[1].active_start = 16;
+        edited[1].active_end = 9999;
+
+        let (after, report) = rewrite_effect_calls(source, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 8.0);"),
+            "{after}"
+        );
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 16.0);"),
+            "{after}"
+        );
+        let reparsed = crate::acmd::parse_effect_script(&after).to_effect_calls();
+        assert_eq!((reparsed[0].active_start, reparsed[0].active_end), (8, 8));
+        assert_eq!((reparsed[1].active_start, reparsed[1].active_end), (16, 16));
+    }
+
+    #[test]
+    fn a_named_trail_retime_moves_its_paired_after_image_off_block() {
+        let source = format!(
+            "{}\n    frame(agent.lua_state_agent, 20.0);\n    if macros::is_excute(agent) {{\n        macros::AFTER_IMAGE_OFF(agent, 3);\n    }}\n}}\n",
+            TRAIL.strip_suffix("}\n").unwrap()
+        );
+        let pristine = crate::acmd::parse_effect_script(&source).to_effect_calls();
+        assert_eq!(pristine.len(), 1, "{pristine:#?}");
+        assert_eq!(
+            pristine[0].trail_command.as_deref(),
+            Some("AFTER_IMAGE4_ON_arg29")
+        );
+        assert_eq!(pristine[0].active_end, 20);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 7;
+        edited[0].active_end = 18;
+
+        let (after, report) = rewrite_effect_calls(&source, "t", &pristine, &edited).unwrap();
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 7.0);"),
+            "{after}"
+        );
+        assert!(
+            after.contains("frame(agent.lua_state_agent, 18.0);"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("frame(agent.lua_state_agent, 5.0);"),
+            "{after}"
+        );
+        assert!(
+            !after.contains("frame(agent.lua_state_agent, 20.0);"),
+            "{after}"
+        );
+        let reparsed = crate::acmd::parse_effect_script(&after).to_effect_calls();
+        assert_eq!((reparsed[0].active_start, reparsed[0].active_end), (7, 18));
+    }
+
+    #[test]
+    fn effect_timing_moves_refuse_nonflat_blocks_collisions_and_unrelated_lines() {
+        let branch = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if get_value_float(agent.lua_state_agent, *SO_VAR_FLOAT_LR) < 0.0 {
+        if macros::is_excute(agent) {
+            macros::EFFECT(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, false);
+        }
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(branch).to_effect_calls();
+        assert_eq!(pristine.len(), 1);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        let (after, report) = rewrite_effect_calls(branch, "branch", &pristine, &edited).unwrap();
+        assert_eq!(after, branch);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|note| note.contains("branch, loop, wait")),
+            "{report:?}"
+        );
+
+        let looped = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    for _ in 0..2 {
+        if macros::is_excute(agent) {
+            macros::EFFECT(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, false);
+        }
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(looped).to_effect_calls();
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        let (after, report) = rewrite_effect_calls(looped, "loop", &pristine, &edited).unwrap();
+        assert_eq!(after, looped);
+        assert!(
+            report.skipped.iter().any(|note| note.contains("loop")),
+            "{report:?}"
+        );
+
+        let collision = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, false);
+    }
+    frame(agent.lua_state_agent, 10.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_late"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, false);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(collision).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].active_start = 10;
+        let (after, report) =
+            rewrite_effect_calls(collision, "collision", &pristine, &edited).unwrap();
+        assert_eq!(after, collision);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|note| note.contains("occupied frame block")),
+            "{report:?}"
+        );
+
+        let unrelated = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, false);
+        macros::COL_PRI(agent, 2);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(unrelated).to_effect_calls();
+        assert_eq!(pristine.len(), 1);
+        let mut edited = pristine.clone();
+        edited[0].active_start = 8;
+        let (after, report) =
+            rewrite_effect_calls(unrelated, "unrelated", &pristine, &edited).unwrap();
+        assert_eq!(after, unrelated);
+        assert!(
+            report.skipped.iter().any(|note| {
+                note.contains("unrelated source lines") || note.contains("opaque source statement")
+            }),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn follow_timing_moves_refuse_stop_creation_removal_and_ambiguous_pairing() {
+        let no_stop = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(no_stop).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].active_end = 12;
+        let (after, report) =
+            rewrite_effect_calls(no_stop, "create-stop", &pristine, &edited).unwrap();
+        assert_eq!(after, no_stop);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|note| note.contains("creating or removing a stop")),
+            "{report:?}"
+        );
+
+        let finite = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, true);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("sys_attack"), false, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(finite).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].active_end = 9999;
+        let (after, report) =
+            rewrite_effect_calls(finite, "remove-stop", &pristine, &edited).unwrap();
+        assert_eq!(after, finite);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|note| note.contains("creating or removing a stop")),
+            "{report:?}"
+        );
+
+        let ambiguous = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 1, 0, 0, 0, 0, 1, true);
+    }
+    frame(agent.lua_state_agent, 6.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_attack"), Hash40::new("top"), 0, 2, 0, 0, 0, 0, 1, true);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("sys_attack"), false, true);
+    }
+    frame(agent.lua_state_agent, 12.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("sys_attack"), false, true);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(ambiguous).to_effect_calls();
+        assert_eq!(pristine.len(), 2);
+        assert!(pristine.iter().all(|call| call.active_end == 12));
+        let mut edited = pristine.clone();
+        edited[0].active_end = 15;
+        let (after, report) =
+            rewrite_effect_calls(ambiguous, "ambiguous", &pristine, &edited).unwrap();
+        assert_eq!(after, ambiguous);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|note| note.contains("unique paired stop")),
+            "{report:?}"
+        );
     }
 
     /// The write-back covered eleven numeric slots; every other property the hitbox panels
