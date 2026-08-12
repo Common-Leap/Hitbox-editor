@@ -9,7 +9,7 @@
 //     (c00, c07, c12, c50 …; NOT limited to 0–7). That's a modifier, expressed as
 //     `TransplantOp::one_slot_slots`, and it can ride on top of a transplant.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,128 @@ pub struct ModProjectFile {
     /// fighter name (e.g. "mario") → all edits for that fighter
     #[serde(default)]
     pub fighters: HashMap<String, FighterMod>,
+}
+
+/// Which ACMD portion of a saved project should be sent through the source exporter.
+///
+/// EFF edits deliberately do not belong to either scope: the source exporter produces a
+/// Smashline project, while EFF edits ship through the dedicated mod-folder/developer export
+/// paths. Keeping that boundary in one pure helper prevents the Edit Log's per-row export from
+/// accidentally changing the meaning of a whole-project export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcmdProjectScope<'a> {
+    /// Keep every fighter and every ACMD category represented by the project.
+    All,
+    /// Keep just one fighter/move pair, including every ACMD category recorded for it.
+    Move {
+        fighter: &'a str,
+        move_name: &'a str,
+    },
+}
+
+/// Return an ACMD-only view of `project` for a whole-project or one-move export.
+///
+/// This is intentionally a pure data transformation. It retains the complete edited values,
+/// not just the sparse edit log: game scripts, effect deltas and full call lists, frame residue,
+/// loss notes, sound/expression scripts, and capture provenance warnings all stay paired by move.
+/// EFF records are removed because a Smashline source export cannot carry them. Runtime live
+/// tweaks are kept only when their effect kind is present in a retained, enabled effect call;
+/// this avoids producing a tweak-only line for a spawn the scoped export does not ship.
+pub fn scope_acmd_project(project: &ModProjectFile, scope: AcmdProjectScope<'_>) -> ModProjectFile {
+    let mut scoped = ModProjectFile {
+        version: project.version,
+        name: project.name.clone(),
+        fighters: HashMap::new(),
+    };
+
+    // A whole-project export may have a tweak stored under one fighter while the corresponding
+    // spawn is stored under another (older project files and hand-edited projects can do this).
+    // Treat the retained ACMD project as one generated source and use the union of its effect
+    // kinds, matching `source_project`'s global tweak collection.
+    let all_retained_effects = match scope {
+        AcmdProjectScope::All => project
+            .fighters
+            .values()
+            .flat_map(|fighter| fighter.effect_calls_full.values())
+            .flat_map(|calls| calls.iter())
+            .filter(|call| !call.disabled)
+            .map(|call| call.effect_name.to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect::<HashSet<_>>(),
+        AcmdProjectScope::Move { .. } => HashSet::new(),
+    };
+
+    match scope {
+        AcmdProjectScope::All => {
+            for (fighter_name, fighter) in &project.fighters {
+                scoped.fighters.insert(
+                    fighter_name.clone(),
+                    scoped_fighter(fighter, None, &all_retained_effects),
+                );
+            }
+        }
+        AcmdProjectScope::Move {
+            fighter: selected_fighter,
+            move_name: selected_move,
+        } => {
+            if let Some(fighter) = project.fighters.get(selected_fighter) {
+                let retained_effects = fighter
+                    .effect_calls_full
+                    .get(selected_move)
+                    .into_iter()
+                    .flat_map(|calls| calls.iter())
+                    .filter(|call| !call.disabled)
+                    .map(|call| call.effect_name.to_ascii_lowercase())
+                    .filter(|name| !name.is_empty())
+                    .collect::<HashSet<_>>();
+                scoped.fighters.insert(
+                    selected_fighter.to_string(),
+                    scoped_fighter(fighter, Some(selected_move), &retained_effects),
+                );
+            }
+        }
+    }
+
+    scoped
+}
+
+/// Copy one fighter's ACMD fields, retaining either every move or one named move.
+fn scoped_fighter(
+    fighter: &FighterMod,
+    selected_move: Option<&str>,
+    retained_effects: &HashSet<String>,
+) -> FighterMod {
+    let mut scoped = fighter.clone();
+    scoped.eff = None;
+    scoped.acmd = scope_move_map(&fighter.acmd, selected_move);
+    scoped.effect_calls = scope_move_map(&fighter.effect_calls, selected_move);
+    scoped.effect_calls_full = scope_move_map(&fighter.effect_calls_full, selected_move);
+    scoped.effect_dropped_lines = scope_move_map(&fighter.effect_dropped_lines, selected_move);
+    scoped.effect_frame_residue = scope_move_map(&fighter.effect_frame_residue, selected_move);
+    scoped.sound_scripts = scope_move_map(&fighter.sound_scripts, selected_move);
+    scoped.expression_scripts = scope_move_map(&fighter.expression_scripts, selected_move);
+    scoped.capture_branch_warnings =
+        scope_move_map(&fighter.capture_branch_warnings, selected_move);
+    scoped.live_tweaks = fighter
+        .live_tweaks
+        .iter()
+        .filter(|tweak| retained_effects.contains(&tweak.effect_name.to_ascii_lowercase()))
+        .cloned()
+        .collect();
+    scoped
+}
+
+fn scope_move_map<V: Clone>(
+    source: &HashMap<String, V>,
+    selected_move: Option<&str>,
+) -> HashMap<String, V> {
+    source
+        .iter()
+        .filter(|(move_name, _)| {
+            selected_move.is_none_or(|selected| move_name.as_str() == selected)
+        })
+        .map(|(move_name, value)| (move_name.clone(), value.clone()))
+        .collect()
 }
 
 impl Default for ModProjectFile {
@@ -483,6 +605,7 @@ pub fn fighter_from_source_rel(source_rel: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::{EffectCall, EffectCallOp};
 
     /// A `modproject.json` exactly as builds before the transplant/one-slot rename wrote it:
     /// `EffMod.one_slot` holding `OneSlotOp`s whose costume scoping lived in `slots`.
@@ -673,6 +796,251 @@ mod tests {
             loaded.to_work_module_set_events(),
             script.to_work_module_set_events()
         );
+    }
+
+    fn fixture_effect_call(name: &str) -> EffectCall {
+        let source = format!(
+            r#"
+unsafe extern "C" fn effect_fixture(agent: &mut L2CAgentBase) {{
+    if macros::is_excute(agent) {{
+        macros::EFFECT(agent, Hash40::new("{name}"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, true);
+    }}
+}}
+"#
+        );
+        crate::acmd::parse_effect_script(&source)
+            .to_effect_calls()
+            .into_iter()
+            .next()
+            .expect("fixture effect call")
+    }
+
+    fn fixture_sound_script() -> crate::data::AcmdScript {
+        crate::acmd::parse_sound_script(
+            r#"
+unsafe extern "C" fn sound_fixture(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::PLAY_SE(agent, Hash40::new("se_common_swing"));
+    }
+}
+"#,
+        )
+    }
+
+    fn fixture_expression_script() -> crate::data::AcmdScript {
+        crate::acmd::parse_expression_script(
+            r#"
+unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        macros::QUAKE(agent, *CAMERA_QUAKE_KIND_L);
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn acmd_scope_keeps_effect_only_sound_only_expression_only_and_mixed_moves() {
+        let effect_only = fixture_effect_call("sys_flash");
+        let mixed_effect = fixture_effect_call("sys_smash_flash");
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "category_scope".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                effect_calls_full: HashMap::from([
+                    ("effect_only".into(), vec![effect_only]),
+                    ("mixed".into(), vec![mixed_effect]),
+                ]),
+                sound_scripts: HashMap::from([
+                    ("sound_only".into(), fixture_sound_script()),
+                    ("mixed".into(), fixture_sound_script()),
+                ]),
+                expression_scripts: HashMap::from([
+                    ("expression_only".into(), fixture_expression_script()),
+                    ("mixed".into(), fixture_expression_script()),
+                ]),
+                acmd: HashMap::from([(
+                    "mixed".into(),
+                    EditRecord {
+                        fighter: "mario".into(),
+                        fighter_display: "Mario".into(),
+                        move_name: "mixed".into(),
+                        script: crate::data::AcmdScript::default(),
+                        hitboxes_pristine: Vec::new(),
+                        hitboxes: Vec::new(),
+                    },
+                )]),
+                eff: Some(EffMod {
+                    source_rel: "effect/fighter/mario/ef_mario.eff".into(),
+                    ..Default::default()
+                }),
+                live_tweaks: vec![LiveTweak {
+                    effect_name: "SYS_SMASH_FLASH".into(),
+                    color: Some([1.2, 1.0, 1.0, 1.0]),
+                    speed: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let scoped = scope_acmd_project(&project, AcmdProjectScope::All);
+        let fighter = &scoped.fighters["mario"];
+        assert!(fighter.eff.is_none(), "ACMD scope must omit EFF edits");
+        assert!(fighter.effect_calls_full.contains_key("effect_only"));
+        assert!(fighter.sound_scripts.contains_key("sound_only"));
+        assert!(fighter.expression_scripts.contains_key("expression_only"));
+        assert!(fighter.acmd.contains_key("mixed"));
+        assert_eq!(fighter.live_tweaks.len(), 1);
+        assert_eq!(fighter.live_tweaks[0].effect_name, "SYS_SMASH_FLASH");
+    }
+
+    #[test]
+    fn one_move_acmd_scope_isolates_every_category_and_filters_live_tweaks() {
+        let first_call = fixture_effect_call("sys_first");
+        let second_call = fixture_effect_call("sys_second");
+        let first_edit = EffectCallEdit {
+            index: 0,
+            op: EffectCallOp::Modify(first_call.clone()),
+            pristine: Some(first_call.clone()),
+        };
+        let second_edit = EffectCallEdit {
+            index: 0,
+            op: EffectCallOp::Modify(second_call.clone()),
+            pristine: Some(second_call.clone()),
+        };
+        let first_record = EditRecord {
+            fighter: "mario".into(),
+            fighter_display: "Mario".into(),
+            move_name: "first".into(),
+            script: crate::data::AcmdScript::default(),
+            hitboxes_pristine: Vec::new(),
+            hitboxes: Vec::new(),
+        };
+        let second_record = EditRecord {
+            move_name: "second".into(),
+            ..first_record.clone()
+        };
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "one_move_scope".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                acmd: HashMap::from([
+                    ("first".into(), first_record),
+                    ("second".into(), second_record),
+                ]),
+                effect_calls: HashMap::from([
+                    ("first".into(), vec![first_edit]),
+                    ("second".into(), vec![second_edit]),
+                ]),
+                effect_calls_full: HashMap::from([
+                    ("first".into(), vec![first_call]),
+                    ("second".into(), vec![second_call]),
+                ]),
+                effect_dropped_lines: HashMap::from([
+                    ("first".into(), vec!["first loss".into()]),
+                    ("second".into(), vec!["second loss".into()]),
+                ]),
+                effect_frame_residue: HashMap::from([
+                    (
+                        "first".into(),
+                        std::collections::BTreeMap::from([(4, vec!["first residue".into()])]),
+                    ),
+                    (
+                        "second".into(),
+                        std::collections::BTreeMap::from([(8, vec!["second residue".into()])]),
+                    ),
+                ]),
+                sound_scripts: HashMap::from([
+                    ("first".into(), fixture_sound_script()),
+                    ("second".into(), fixture_sound_script()),
+                ]),
+                expression_scripts: HashMap::from([
+                    ("first".into(), fixture_expression_script()),
+                    ("second".into(), fixture_expression_script()),
+                ]),
+                capture_branch_warnings: HashMap::from([
+                    ("first".into(), "first warning".into()),
+                    ("second".into(), "second warning".into()),
+                ]),
+                eff: Some(EffMod {
+                    source_rel: "effect/fighter/mario/ef_mario.eff".into(),
+                    ..Default::default()
+                }),
+                live_tweaks: vec![
+                    LiveTweak {
+                        effect_name: "sys_first".into(),
+                        color: Some([1.1, 1.0, 1.0, 1.0]),
+                        speed: None,
+                    },
+                    LiveTweak {
+                        effect_name: "sys_second".into(),
+                        color: Some([1.0, 1.1, 1.0, 1.0]),
+                        speed: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        project.fighters.insert(
+            "luigi".into(),
+            FighterMod {
+                eff: Some(EffMod {
+                    source_rel: "effect/fighter/luigi/ef_luigi.eff".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let scoped = scope_acmd_project(
+            &project,
+            AcmdProjectScope::Move {
+                fighter: "mario",
+                move_name: "first",
+            },
+        );
+        assert_eq!(scoped.fighters.len(), 1);
+        let fighter = &scoped.fighters["mario"];
+        assert!(fighter.eff.is_none());
+        assert_eq!(fighter.acmd.keys().collect::<Vec<_>>(), vec!["first"]);
+        assert_eq!(
+            fighter.effect_calls.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            fighter.effect_calls_full.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            fighter.effect_dropped_lines.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            fighter.effect_frame_residue.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            fighter.sound_scripts.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            fighter.expression_scripts.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(
+            fighter.capture_branch_warnings.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(fighter.live_tweaks.len(), 1);
+        assert_eq!(fighter.live_tweaks[0].effect_name, "sys_first");
     }
 
     /// The plugin hardcodes this prefix (`acmd_hooks::EDIT_CLONE_PREFIX`) because it cannot

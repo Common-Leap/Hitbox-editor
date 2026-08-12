@@ -7265,6 +7265,14 @@ pub struct EffectScript {
 }
 
 /// A resolved effect event with computed active frame range.
+///
+/// Effect spawns that do not have an `EFFECT_OFF_KIND` remain active through the move.  ACMD
+/// does not have an explicit end-frame value for those calls, so the editor keeps the historical
+/// sentinel in the serialized model.  Keep this separate from the hitbox sentinel (`u32::MAX`):
+/// effect timing is persisted in old project files and `9999` is the compatibility value users
+/// already see in those files.
+pub(crate) const OPEN_ENDED_EFFECT_FRAME: u32 = 9999;
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EffectCall {
     pub effect_name: String,
@@ -7284,7 +7292,8 @@ pub struct EffectCall {
     pub follows_bone: bool,
     pub active_start: u32,
     /// For one-shot effects this equals `active_start`.
-    /// For following effects this is set to 9999 until an EFFECT_OFF_KIND closes it.
+    /// For following effects this is set to [`OPEN_ENDED_EFFECT_FRAME`] until an
+    /// `EFFECT_OFF_KIND` closes it.
     pub active_end: u32,
     /// Soft-removed by the user (kept in place so edit indices stay stable).
     #[serde(default)]
@@ -7429,13 +7438,47 @@ pub struct EffectCall {
 }
 
 impl EffectCall {
+    /// Whether this following effect has an explicit end frame.
+    ///
+    /// One-shot, colour, and control entries are point events and are never considered
+    /// early-ending.  Keeping that distinction here gives the editor one lifetime predicate
+    /// instead of making each panel reinterpret the sentinel independently.
+    pub(crate) fn ends_early(&self) -> bool {
+        self.follows_bone && self.active_end != OPEN_ENDED_EFFECT_FRAME
+    }
+
+    /// End a follow effect at a finite frame, or let it play through when `ends_early` is false.
+    ///
+    /// A newly enabled finite end receives a small editable window after the spawn. Existing
+    /// finite ends are clamped not to precede the start; play-through entries use the default
+    /// window when finite timing is enabled again.
+    pub(crate) fn set_ends_early(&mut self, ends_early: bool) {
+        if !self.follows_bone {
+            return;
+        }
+        if ends_early {
+            if self.active_end == OPEN_ENDED_EFFECT_FRAME {
+                self.active_end = self.default_finite_end_frame();
+            } else {
+                self.active_end = self.active_end.max(self.active_start);
+            }
+        } else {
+            self.active_end = OPEN_ENDED_EFFECT_FRAME;
+        }
+    }
+
+    /// The first finite end used when a play-through effect is switched to `End early`.
+    pub(crate) fn default_finite_end_frame(&self) -> u32 {
+        self.active_start.saturating_add(10).max(self.active_start)
+    }
+
     /// Keep the lifetime representation canonical for point events.
     ///
     /// Graphic one-shots, colour commands, and effect controls do not have an ACMD close event;
     /// their editor range is a single event frame. Older project files could retain a stale
     /// `active_end` after the start frame was edited, which made the verifier compare a lifetime
     /// that could never be emitted. Following effects and trails keep their independently
-    /// computed close frame (or the open-ended `9999` sentinel).
+    /// computed close frame (or the open-ended [`OPEN_ENDED_EFFECT_FRAME`] sentinel).
     pub(crate) fn normalize_timing(&mut self) {
         // ACMD/source frames and the editor timeline are one-based. MotionModule's frame zero
         // is the runtime representation of script frame one, not another editable ACMD frame.
@@ -7699,7 +7742,7 @@ fn eval_effect_stmts(
                             extra_args,
                         } => {
                             let active_end = if *follows_bone {
-                                9999
+                                OPEN_ENDED_EFFECT_FRAME
                             } else {
                                 script_frame(frame)
                             };
@@ -7739,7 +7782,8 @@ fn eval_effect_stmts(
                         EffectMacro::EffectOffKind { effect_name } => {
                             // EffectModule::kill_kind closes every live instance of this kind.
                             for call in calls.iter_mut().filter(|call| {
-                                &call.effect_name == effect_name && call.active_end == 9999
+                                &call.effect_name == effect_name
+                                    && call.active_end == OPEN_ENDED_EFFECT_FRAME
                             }) {
                                 call.active_end = script_frame(frame);
                             }
@@ -7763,7 +7807,7 @@ fn eval_effect_stmts(
                                 scale: 1.0,
                                 follows_bone: true,
                                 active_start: script_frame(frame),
-                                active_end: 9999,
+                                active_end: OPEN_ENDED_EFFECT_FRAME,
                                 disabled: false,
                                 extra_args: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
@@ -7812,7 +7856,10 @@ fn eval_effect_stmts(
                             match calls
                                 .iter_mut()
                                 .rev()
-                                .find(|c| c.active_end == 9999 && c.spawn_func == "AFTER_IMAGE_ON")
+                                .find(|c| {
+                                    c.active_end == OPEN_ENDED_EFFECT_FRAME
+                                        && c.spawn_func == "AFTER_IMAGE_ON"
+                                })
                             {
                                 Some(call) => {
                                     call.active_end = script_frame(frame);
@@ -7959,7 +8006,7 @@ fn eval_effect_stmts(
                                 scale: 1.0,
                                 follows_bone: false,
                                 active_start: script_frame(frame),
-                                // Not 9999, and not the transition length either. A colour
+                                // Not [`OPEN_ENDED_EFFECT_FRAME`], and not the transition length either. A colour
                                 // command is one instant event: `BURN_COLOR_FRAME` schedules an
                                 // interpolation the game runs on its own, with no closing call
                                 // anywhere for an end frame to mean.
@@ -8665,7 +8712,7 @@ mod tests {
             scale: 1.0,
             follows_bone: false,
             active_start: 17,
-            active_end: 9999,
+            active_end: OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: None,
             raw_line: None,
@@ -8690,7 +8737,7 @@ mod tests {
 
         let mut zero_frame = one_shot.clone();
         zero_frame.active_start = 0;
-        zero_frame.active_end = 9999;
+        zero_frame.active_end = OPEN_ENDED_EFFECT_FRAME;
         zero_frame.normalize_timing();
         assert_eq!(
             (zero_frame.active_start, zero_frame.active_end),
@@ -8717,9 +8764,70 @@ mod tests {
         let json = serde_json::to_string(&one_shot).unwrap();
         let mut legacy: EffectCall = serde_json::from_str(&json).unwrap();
         legacy.active_start = 42;
-        legacy.active_end = 9999;
+        legacy.active_end = OPEN_ENDED_EFFECT_FRAME;
         legacy.normalize_timing();
         assert_eq!((legacy.active_start, legacy.active_end), (42, 42));
+    }
+
+    #[test]
+    fn follow_effect_lifetime_helpers_distinguish_play_through_from_early_end() {
+        let mut follow = EffectCall {
+            effect_name: "trail".into(),
+            effect_name_alt: None,
+            spawn_func: "EFFECT_FOLLOW".into(),
+            bone_name: "top".into(),
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            follows_bone: true,
+            active_start: 12,
+            active_end: OPEN_ENDED_EFFECT_FRAME,
+            disabled: false,
+            extra_args: Some(vec!["true".into()]),
+            raw_line: None,
+            trail_command: None,
+            trail_off: None,
+            trail_bone2: None,
+            rate: None,
+            work_int: None,
+            camera_offset: None,
+            tint: None,
+            particle_tint: None,
+            alpha: None,
+            scale_w: None,
+            color: None,
+            control: None,
+            guard: None,
+            leading: Vec::new(),
+            trailing: Vec::new(),
+        };
+
+        assert!(!follow.ends_early());
+        follow.set_ends_early(true);
+        assert!(follow.ends_early());
+        assert_eq!(follow.active_end, 22);
+
+        // Switching back to a finite lifetime after play-through uses the documented default.
+        follow.active_end = 19;
+        follow.set_ends_early(false);
+        assert!(!follow.ends_early());
+        assert_eq!(follow.active_end, OPEN_ENDED_EFFECT_FRAME);
+        follow.set_ends_early(true);
+        assert_eq!(follow.active_end, 22);
+
+        // Saturation cannot produce an end before the spawn frame.
+        follow.active_start = u32::MAX;
+        follow.active_end = OPEN_ENDED_EFFECT_FRAME;
+        follow.set_ends_early(true);
+        assert_eq!(follow.active_end, u32::MAX);
+        assert!(follow.active_end >= follow.active_start);
+
+        // Point effects do not acquire a follow-effect lifetime through the helper.
+        follow.follows_bone = false;
+        follow.active_end = OPEN_ENDED_EFFECT_FRAME;
+        follow.set_ends_early(true);
+        assert!(!follow.ends_early());
+        assert_eq!(follow.active_end, OPEN_ENDED_EFFECT_FRAME);
     }
 
     #[test]

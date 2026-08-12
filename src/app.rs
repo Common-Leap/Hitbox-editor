@@ -30,6 +30,44 @@ fn carrier_send_reached_goal(
 /// The editor, ACMD source, exports, and user-facing timeline all use one-based game frames.
 const FIRST_GAME_FRAME: u32 = 1;
 
+/// Rebuild a linked ACMD source index and replace the previous snapshot only after the scan
+/// succeeds. An empty successful index is meaningful: it means the source project no longer
+/// defines any scripts, so retaining the old snapshot would keep deleted spans authoritative.
+fn rebuild_linked_acmd_source_index(
+    root: &Path,
+    current: &mut Option<crate::acmd_src::SourceIndex>,
+) -> anyhow::Result<bool> {
+    let index = crate::acmd_src::SourceIndex::build(root)?;
+    let has_scripts = index.script_count() > 0;
+    *current = Some(index);
+    Ok(has_scripts)
+}
+
+#[cfg(test)]
+mod linked_acmd_index_tests {
+    use super::rebuild_linked_acmd_source_index;
+    use crate::acmd_src::SourceIndex;
+
+    #[test]
+    fn successful_empty_rescan_replaces_old_index_but_failed_rescan_keeps_it() {
+        let old_root = tempfile::tempdir().unwrap();
+        let empty_root = tempfile::tempdir().unwrap();
+        let missing_root = old_root.path().join("deleted");
+        let mut current = Some(SourceIndex {
+            root: old_root.path().to_path_buf(),
+            ..SourceIndex::default()
+        });
+
+        assert!(!rebuild_linked_acmd_source_index(empty_root.path(), &mut current).unwrap());
+        assert_eq!(current.as_ref().unwrap().root, empty_root.path());
+        assert_eq!(current.as_ref().unwrap().script_count(), 0);
+
+        let replaced = current.clone();
+        assert!(rebuild_linked_acmd_source_index(&missing_root, &mut current).is_err());
+        assert_eq!(current.unwrap().root, replaced.unwrap().root);
+    }
+}
+
 /// The primary editor is deliberately split into task-sized surfaces.  The underlying ACMD
 /// model is still one move; this enum only controls which part of that model is in front of the
 /// user at a time.
@@ -835,9 +873,12 @@ fn timeline_frame_extent_with_change_kinetic(
         } else {
             effect.active_start
         };
-        [Some(effect.active_start), (end < 9999).then_some(end)]
-            .into_iter()
-            .flatten()
+        [
+            Some(effect.active_start),
+            (end < crate::data::OPEN_ENDED_EFFECT_FRAME).then_some(end),
+        ]
+        .into_iter()
+        .flatten()
     });
     // Sounds count too, and often decide the answer on their own: a `sound_` script routinely
     // plays a landing thud tens of frames after the last hitbox closed, and clipping the
@@ -1643,7 +1684,7 @@ fn set_effect_spawn_command(call: &mut crate::data::EffectCall, command: &str) -
         current
             .filter(|layout| layout.follows_bone)
             .map(|_| call.active_end)
-            .unwrap_or(9999)
+            .unwrap_or(crate::data::OPEN_ENDED_EFFECT_FRAME)
     } else {
         call.active_start
     };
@@ -2223,6 +2264,10 @@ pub struct VisionaryApp {
     // Current model/anim paths for the viewport callback
     current_model_dir: Option<PathBuf>,
     current_anim_path: Option<PathBuf>,
+    /// Visibility-only baseline applied before the selected move animation. Smash models ship
+    /// with many mutually-exclusive facial meshes visible in their raw model state; this
+    /// animation establishes the ordinary eyelid/face selection before a move overrides it.
+    current_default_eyelid_path: Option<PathBuf>,
     current_skel_path: Option<PathBuf>,
     // Pending model load (set when fighter selected, consumed in update)
     pending_model_load: Option<PathBuf>,
@@ -2574,6 +2619,7 @@ impl VisionaryApp {
             pending_history_action: None,
             current_model_dir: None,
             current_anim_path: None,
+            current_default_eyelid_path: None,
             current_skel_path: None,
             pending_model_load: None,
             last_frame_time: std::time::Instant::now(),
@@ -3126,6 +3172,7 @@ impl VisionaryApp {
             self.pending_capture = None;
             self.current_model_dir = None;
             self.current_anim_path = None;
+            self.current_default_eyelid_path = None;
             self.current_skel_path = None;
             self.pending_model_load = None;
             self.current_eff_path = None;
@@ -3220,12 +3267,14 @@ impl VisionaryApp {
         // than letting its script repopulate the new fighter's per-move state and hurtbox events.
         self.acmd_receiver = None;
         self.pending_project_script = None;
+        self.fetching_acmd = false;
         self.acmd_error = None;
         self.current_anim_path = None;
 
         let fighter = &self.state.fighters[idx];
         let model_dir = fighter.model_dir.clone();
         let motion_dir = fighter.motion_dir.clone();
+        self.current_default_eyelid_path = find_default_eyelid_nuanmb(&motion_dir);
         // A mod may not ship c00 at all, so weapon lookups follow the fighter's own base
         // slot rather than assuming slot 0 exists.
         let base_slot = fighter.base_slot();
@@ -3376,6 +3425,12 @@ impl VisionaryApp {
     }
 
     fn select_move(&mut self, mut move_entry: MoveEntry) {
+        // Dropping the receiver is cancellation: each worker owns only the sender for its own
+        // channel, so a result from the previous selection has nowhere to land. Clear the
+        // project half of that request at the same boundary.
+        self.acmd_receiver = None;
+        self.pending_project_script = None;
+        self.fetching_acmd = false;
         self.state.current_frame = FIRST_GAME_FRAME;
         self.selected_hitbox = None;
         self.selected_hurtbox = None;
@@ -3412,6 +3467,13 @@ impl VisionaryApp {
         // Path was resolved at move list build time — no disk scan needed
         self.current_anim_path = move_entry.anim_path.clone();
         self.state.selected_move = Some(move_entry);
+
+        // A linked project's spans can move whenever the user edits it outside Visionary.
+        // Rebuild before reading the new move, then use the ordinary cache-first fetch path for
+        // both project and vanilla sources. Saved edits are keyed by fighter/move and are
+        // reapplied by `apply_acmd_body` when this load finishes.
+        self.refresh_linked_acmd_source_index();
+        self.fetch_acmd();
     }
 
     /// Kick off a "Fetch ACMD" in the background.
@@ -3459,6 +3521,7 @@ impl VisionaryApp {
                 // Drop any mirror fetch still in flight for this same move, or it would land
                 // afterwards and overwrite the source-loaded script with the vanilla one.
                 self.acmd_receiver = None;
+                self.fetching_acmd = false;
                 let body =
                     crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror);
                 self.apply_acmd_body(&fighter_name, &move_name, Ok(body), "Project source");
@@ -3516,8 +3579,46 @@ impl VisionaryApp {
 
     /// Re-read the linked project from disk, keeping the same root.
     fn rescan_acmd_source(&mut self) {
-        if let Some(root) = self.acmd_src.as_ref().map(|index| index.root.clone()) {
-            self.link_acmd_source(root);
+        if self.refresh_linked_acmd_source_index() {
+            if let Some(index) = self.acmd_src.as_ref() {
+                self.state.status = format!(
+                    "Re-scanned {} script{} across {} fighter{} from {}",
+                    index.script_count(),
+                    if index.script_count() == 1 { "" } else { "s" },
+                    index.fighters.len(),
+                    if index.fighters.len() == 1 { "" } else { "s" },
+                    index.root.display()
+                );
+            }
+            self.reload_move_scripts();
+        }
+    }
+
+    /// Refresh the already-linked source project without recursively reloading the open move.
+    /// `select_move` uses this immediately before its own load; the manual Rescan action calls
+    /// it and then reloads once. Keeping those operations separate prevents a move click from
+    /// launching two mirror requests.
+    fn refresh_linked_acmd_source_index(&mut self) -> bool {
+        let Some(root) = self.acmd_src.as_ref().map(|index| index.root.clone()) else {
+            return false;
+        };
+        match rebuild_linked_acmd_source_index(&root, &mut self.acmd_src) {
+            Ok(has_scripts) => {
+                if !has_scripts {
+                    self.state.status = format!(
+                        "No ACMD scripts found under {} — linked source is now empty",
+                        root.display()
+                    );
+                }
+                true
+            }
+            Err(error) => {
+                self.state.status = format!(
+                    "Could not re-scan the ACMD source project at {}: {error}",
+                    root.display()
+                );
+                false
+            }
         }
     }
 
@@ -5848,16 +5949,44 @@ impl VisionaryApp {
         let mut clear_tweak_hash: Option<u64> = None;
         let mut export_all = false;
 
-        // Union of fighters across all edit sources: hitboxes, effect calls, authored eff.
+        // Union of fighters across every edit source shown here. Sound and expression used to
+        // be absent from this index, which made their saved edits invisible and impossible to
+        // export from the very window that claimed to contain all edits.
         let mut fighters: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
         for (name, display) in self.state.edit_log.fighters_sorted() {
             fighters.insert(name, display);
         }
-        for key in self.state.effect_call_edits.keys() {
-            if self.state.effect_call_edits[key].is_empty() {
+        for key in self
+            .state
+            .effect_call_edits
+            .keys()
+            .chain(self.state.effect_call_full.keys())
+        {
+            let has_delta = self
+                .state
+                .effect_call_edits
+                .get(key)
+                .is_some_and(|edits| !edits.is_empty());
+            let has_complete_list = self
+                .state
+                .effect_call_full
+                .get(key)
+                .is_some_and(|calls| !calls.is_empty());
+            if !has_delta && !has_complete_list {
                 continue;
             }
+            let fighter = key.split_once('/').map(|(f, _)| f).unwrap_or(key.as_str());
+            fighters
+                .entry(fighter.to_string())
+                .or_insert_with(|| crate::data::fighter_display_name(fighter));
+        }
+        for key in self
+            .state
+            .sound_script_edits
+            .keys()
+            .chain(self.state.expression_script_edits.keys())
+        {
             let fighter = key.split_once('/').map(|(f, _)| f).unwrap_or(key.as_str());
             fighters
                 .entry(fighter.to_string())
@@ -5891,8 +6020,8 @@ impl VisionaryApp {
 
             ui.label(
                 egui::RichText::new(
-                    "All edits across the toolkit — hitboxes (incl. live rules), effect \
-                     spawns, live tweaks, and authored eff values. Saved automatically; \
+                    "All edits across the toolkit — hitboxes, effect spawns, sounds, \
+                     expression, live tweaks, and authored eff values. Saved automatically; \
                      use ↶ to restore the source (also un-sends the live state).",
                 )
                 .small()
@@ -5935,7 +6064,7 @@ impl VisionaryApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (fighter_name, fighter_display) in &fighters {
                     let move_names = self.state.edit_log.moves_for(fighter_name);
-                    let call_keys: Vec<String> = self
+                    let call_keys: std::collections::BTreeSet<String> = self
                         .state
                         .effect_call_edits
                         .iter()
@@ -5946,9 +6075,44 @@ impl VisionaryApp {
                                     .unwrap_or(false)
                         })
                         .map(|(k, _)| k.clone())
+                        .chain(
+                            self.state
+                                .effect_call_full
+                                .keys()
+                                .filter(|key| {
+                                    self.state
+                                        .effect_call_full
+                                        .get(*key)
+                                        .is_some_and(|calls| !calls.is_empty())
+                                        && key
+                                            .split_once('/')
+                                            .is_some_and(|(fighter, _)| fighter == fighter_name)
+                                })
+                                .cloned(),
+                        )
                         .collect();
+                    let keys_for = |scripts: &HashMap<String, crate::data::AcmdScript>| {
+                        let mut keys: Vec<String> = scripts
+                            .iter()
+                            .filter(|(key, script)| {
+                                !script.stmts.is_empty()
+                                    && key
+                                        .split_once('/')
+                                        .is_some_and(|(fighter, _)| fighter == fighter_name)
+                            })
+                            .map(|(key, _)| key.clone())
+                            .collect();
+                        keys.sort();
+                        keys
+                    };
+                    let sound_keys = keys_for(&self.state.sound_script_edits);
+                    let expression_keys = keys_for(&self.state.expression_script_edits);
                     let eff = self.eff_mods.get(fighter_name).filter(|e| !e.is_empty());
-                    let total = move_names.len() + call_keys.len() + eff.map(|_| 1).unwrap_or(0);
+                    let total = move_names.len()
+                        + call_keys.len()
+                        + sound_keys.len()
+                        + expression_keys.len()
+                        + eff.map(|_| 1).unwrap_or(0);
 
                     egui::CollapsingHeader::new(
                         egui::RichText::new(format!("{fighter_display}  ({total})")).strong(),
@@ -6012,7 +6176,9 @@ impl VisionaryApp {
                                     }
                                     if ui
                                         .small_button("Export")
-                                        .on_hover_text("Export this move as smashline source")
+                                        .on_hover_text(
+                                            "Export every edited ACMD category for this move as verified smashline source",
+                                        )
                                         .clicked()
                                     {
                                         export_move =
@@ -6037,7 +6203,12 @@ impl VisionaryApp {
                             ui.label(egui::RichText::new("Effect spawns").small().strong());
                             for key in &call_keys {
                                 let mv = key.split_once('/').map(|(_, m)| m).unwrap_or(key);
-                                let edits = &self.state.effect_call_edits[key];
+                                let edits = self
+                                    .state
+                                    .effect_call_edits
+                                    .get(key)
+                                    .map(Vec::as_slice)
+                                    .unwrap_or_default();
                                 let (n_mod, n_add, n_rem, n_sup) =
                                     edits.iter().fold((0, 0, 0, 0), |(m, a, r, s), e| {
                                         match &e.op {
@@ -6053,8 +6224,14 @@ impl VisionaryApp {
                                 ui.horizontal(|ui| {
                                     ui.add_space(12.0);
                                     ui.label(mv);
-                                    let mut txt =
-                                        format!("{n_mod} edited · {n_add} added · {n_rem} removed");
+                                    let complete = self
+                                        .state
+                                        .effect_call_full
+                                        .get(key)
+                                        .map_or(0, Vec::len);
+                                    let mut txt = format!(
+                                        "{n_mod} edited · {n_add} added · {n_rem} removed · {complete} retained"
+                                    );
                                     if n_sup > 0 {
                                         txt.push_str(&format!(" · {n_sup} suppressed live"));
                                     }
@@ -6062,11 +6239,76 @@ impl VisionaryApp {
                                         egui::RichText::new(txt).small().color(egui::Color32::GRAY),
                                     );
                                     if ui
+                                        .small_button("Export")
+                                        .on_hover_text(
+                                            "Export every edited ACMD category for this move as verified smashline source",
+                                        )
+                                        .clicked()
+                                    {
+                                        export_move = Some((fighter_name.clone(), mv.to_string()));
+                                    }
+                                    if ui
                                         .small_button("↶")
                                         .on_hover_text("Discard these effect-spawn edits")
                                         .clicked()
                                     {
                                         remove_call_key = Some(key.clone());
+                                    }
+                                });
+                            }
+                        }
+
+                        if !sound_keys.is_empty() {
+                            ui.label(egui::RichText::new("Sounds").small().strong());
+                            for key in &sound_keys {
+                                let move_name = key.split_once('/').map(|(_, m)| m).unwrap_or(key);
+                                let count = self.state.sound_script_edits[key].to_sound_events().len();
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    ui.label(move_name);
+                                    ui.label(
+                                        egui::RichText::new(format!("{count} call(s)"))
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    if ui
+                                        .small_button("Export")
+                                        .on_hover_text(
+                                            "Export every edited ACMD category for this move as verified smashline source",
+                                        )
+                                        .clicked()
+                                    {
+                                        export_move =
+                                            Some((fighter_name.clone(), move_name.to_string()));
+                                    }
+                                });
+                            }
+                        }
+
+                        if !expression_keys.is_empty() {
+                            ui.label(egui::RichText::new("Expression").small().strong());
+                            for key in &expression_keys {
+                                let move_name = key.split_once('/').map(|(_, m)| m).unwrap_or(key);
+                                let count = self.state.expression_script_edits[key]
+                                    .to_expression_events()
+                                    .len();
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    ui.label(move_name);
+                                    ui.label(
+                                        egui::RichText::new(format!("{count} call(s)"))
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    if ui
+                                        .small_button("Export")
+                                        .on_hover_text(
+                                            "Export every edited ACMD category for this move as verified smashline source",
+                                        )
+                                        .clicked()
+                                    {
+                                        export_move =
+                                            Some((fighter_name.clone(), move_name.to_string()));
                                     }
                                 });
                             }
@@ -6153,8 +6395,10 @@ impl VisionaryApp {
             ui.separator();
             ui.horizontal(|ui| {
                 if ui
-                    .button("Export All")
-                    .on_hover_text("Export every logged hitbox edit to a folder")
+                    .button("Export all ACMD source")
+                    .on_hover_text(
+                        "Export all hitbox, effect-spawn, sound, expression, and live-tweak edits as verified smashline source. Authored EFF data ships through Export Mod Folder or Export Developer Files.",
+                    )
                     .clicked()
                 {
                     export_all = true;
@@ -6230,6 +6474,9 @@ impl VisionaryApp {
         }
         if let Some(key) = remove_call_key {
             self.state.effect_call_edits.remove(&key);
+            self.state.effect_call_full.remove(&key);
+            self.state.effect_dropped_lines.remove(&key);
+            self.state.effect_frame_residue.remove(&key);
             self.apply_effect_call_edits_to_current();
             self.push_effect_rules(); // discarded disabled-calls stop suppressing
         }
@@ -6253,61 +6500,55 @@ impl VisionaryApp {
     }
 
     fn export_logged_move(&mut self, fighter: &str, move_name: &str) {
-        let record = match self
-            .state
-            .edit_log
-            .entries
-            .get(fighter)
-            .and_then(|m| m.get(move_name))
-            .cloned()
-        {
-            Some(r) => r,
-            None => return,
-        };
-
-        let mut dialog = rfd::FileDialog::new();
-        if let Some(dir) = &self.export_dir {
-            dialog = dialog.set_directory(dir);
-        }
-        let dest = match dialog.pick_folder() {
-            Some(d) => d,
-            None => return,
-        };
-        self.export_dir = Some(dest.clone());
-        save_config_path("export_dir", &dest);
-
-        let plugin_name = format!(
+        let project = self.build_project();
+        let mut project = crate::mod_project::scope_acmd_project(
+            &project,
+            crate::mod_project::AcmdProjectScope::Move { fighter, move_name },
+        );
+        project.name = format!(
             "{}_{}_mod",
             fighter,
             move_name.to_lowercase().replace(' ', "_")
         );
-        let edits = vec![(
-            fighter.to_string(),
-            move_name.to_string(),
-            record.script.clone(),
-        )];
-        let project = crate::acmd::build_mod_project(&edits, &plugin_name);
-        let capture_warning = self
-            .state
-            .capture_branch_warnings
-            .get(&format!("{fighter}/{move_name}"))
-            .cloned();
-        match write_mod_project(&project, &dest) {
-            Ok(root) => {
-                self.state.status = format!("Exported project to {}", root.display());
-                if let Some(warning) = capture_warning {
-                    self.state.status.push_str(" — ⚠ ");
-                    self.state.status.push_str(&warning);
-                }
-            }
-            Err(e) => self.state.status = format!("Export failed: {}", e),
-        }
+        self.export_edit_log_source(project, Some((fighter, move_name)));
     }
 
     fn export_all_edits(&mut self) {
-        if self.state.edit_log.is_empty() {
-            return;
+        let project = self.build_project();
+        let mut project = crate::mod_project::scope_acmd_project(
+            &project,
+            crate::mod_project::AcmdProjectScope::All,
+        );
+        if project.name.trim().is_empty() {
+            project.name = "visionary_mod".into();
         }
+        self.export_edit_log_source(project, None);
+    }
+
+    /// Export the Edit Log's ACMD categories as verified Smashline source. Authored binary EFF
+    /// data is removed by `scope_acmd_project` and remains available through the dedicated mod
+    /// folder and developer-file workflows.
+    fn export_edit_log_source(
+        &mut self,
+        project: crate::mod_project::ModProjectFile,
+        selected_move: Option<(&str, &str)>,
+    ) {
+        let generated = match crate::mod_export::source_project(&project) {
+            Ok(Some(generated)) => generated,
+            Ok(None) => {
+                self.state.status = match selected_move {
+                    Some((fighter, move_name)) => {
+                        format!("No edited ACMD data to export for {fighter}/{move_name}.")
+                    }
+                    None => "No edited ACMD data to export yet.".into(),
+                };
+                return;
+            }
+            Err(error) => {
+                self.state.status = format!("Source export failed verification: {error}");
+                return;
+            }
+        };
 
         let mut dialog = rfd::FileDialog::new();
         if let Some(dir) = &self.export_dir {
@@ -6320,39 +6561,16 @@ impl VisionaryApp {
         self.export_dir = Some(dest.clone());
         save_config_path("export_dir", &dest);
 
-        let edits: Vec<(String, String, crate::data::AcmdScript)> = self
-            .state
-            .edit_log
-            .entries
-            .iter()
-            .flat_map(|(fighter, moves)| {
-                moves.iter().map(move |(move_name, record)| {
-                    (fighter.clone(), move_name.clone(), record.script.clone())
-                })
-            })
-            .collect();
-
-        let plugin_name = "visionary_mod";
-        let project = crate::acmd::build_mod_project(&edits, plugin_name);
-        let capture_warnings: Vec<String> = edits
-            .iter()
-            .filter_map(|(fighter, move_name, _)| {
-                self.state
-                    .capture_branch_warnings
-                    .get(&format!("{fighter}/{move_name}"))
-                    .cloned()
-            })
-            .collect();
-        match write_mod_project(&project, &dest) {
-            Ok(root) => {
-                self.state.status =
-                    format!("Exported {} move(s) to {}", edits.len(), root.display());
-                for warning in capture_warnings {
+        let root = dest.join(&generated.project.name);
+        match crate::mod_export::write_source_project(&generated.project, &root) {
+            Ok(()) => {
+                self.state.status = format!("Exported ACMD source to {}", root.display());
+                if !generated.warnings.is_empty() {
                     self.state.status.push_str(" — ⚠ ");
-                    self.state.status.push_str(&warning);
+                    self.state.status.push_str(&generated.warnings.join(" | "));
                 }
             }
-            Err(e) => self.state.status = format!("Export failed: {}", e),
+            Err(error) => self.state.status = format!("Source export failed: {error}"),
         }
     }
 
@@ -6717,14 +6935,18 @@ impl VisionaryApp {
             if self.state.selected_move.is_some() {
                 let btn_text = if self.fetching_acmd {
                     "Loading…"
+                } else if self.state.acmd_source.is_empty() {
+                    "Retry source"
                 } else {
-                    "Fetch source"
+                    "Reload source"
                 };
                 if ui
                     .add_enabled(!self.fetching_acmd, egui::Button::new(btn_text))
                     .on_hover_text(
-                        "Fetch this move's ACMD scripts from GitHub — hitboxes, hurtboxes, \
-                         effects and sounds. A move with no hitboxes can still have the rest.",
+                        "Reload this move's ACMD scripts from the linked project or local \
+                         GitHub cache — hitboxes, hurtboxes, effects, sounds, and expression. \
+                         Moves load automatically when selected; use this after changing the \
+                         source on disk or retrying a failed fetch.",
                     )
                     .clicked()
                 {
@@ -10951,13 +11173,27 @@ impl VisionaryApp {
                                             "{} · event at frame {}",
                                             effect.spawn_func, effect.active_start
                                         )
-                                    } else {
+                                    } else if effect.follows_bone && !effect.ends_early() {
+                                        format!(
+                                            "{} · bone {} · f{} onward",
+                                            effect.spawn_func,
+                                            effect.bone_name,
+                                            effect.active_start,
+                                        )
+                                    } else if effect.follows_bone {
                                         format!(
                                             "{} · bone {} · f{}-{}",
                                             effect.spawn_func,
                                             effect.bone_name,
                                             effect.active_start,
                                             effect.active_end
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} · bone {} · frame {}",
+                                            effect.spawn_func,
+                                            effect.bone_name,
+                                            effect.active_start
                                         )
                                     })
                                     .clicked()
@@ -11049,10 +11285,13 @@ impl VisionaryApp {
                     scale: 1.0,
                     follows_bone: true,
                     active_start: current,
-                    active_end: current.saturating_add(10),
+                    // Follow effects play through until the user explicitly opts into an
+                    // EFFECT_OFF_KIND lifetime.
+                    active_end: crate::data::OPEN_ENDED_EFFECT_FRAME,
                     disabled: false,
-                    // No originating macro — exports emit the plain EFFECT_FOLLOW form.
-                    extra_args: None,
+                    // This is the actual tail of the plain EFFECT_FOLLOW form. Keeping it in
+                    // the model also makes source verification agree with generated output.
+                    extra_args: Some(vec!["true".into()]),
                     raw_line: None,
                     trail_command: None,
                     trail_off: None,
@@ -12034,8 +12273,8 @@ impl VisionaryApp {
                             }
 
                             // One-shot effects have no meaningful "end" (they play their own
-                            // lifetime), so only follow effects show an end frame — otherwise the
-                            // row showed confusing "30-30" or "30-9999" ranges.
+                            // lifetime). Follow effects make their closing EFFECT_OFF_KIND an
+                            // explicit choice instead of exposing the serialized sentinel.
                             ec.normalize_timing();
                             ui.label(if is_control { "Event frame" } else { "Spawn frame" });
                             ui.horizontal(|ui| {
@@ -12048,20 +12287,49 @@ impl VisionaryApp {
                                 if start_changed {
                                     ec.active_start = ec.active_start.max(FIRST_GAME_FRAME);
                                     ec.normalize_timing();
+                                    // A finite follow lifetime must remain a valid interval when
+                                    // its spawn is moved past the old end. Open-ended calls keep
+                                    // the sentinel and are intentionally left unchanged.
+                                    if ec.ends_early() {
+                                        ec.active_end = ec.active_end.max(ec.active_start);
+                                    }
                                 }
                                 changed |= start_changed;
                                 if ec.follows_bone {
-                                    ui.label("→ until");
-                                    let end_changed = ui
-                                        .add(
-                                            egui::DragValue::new(&mut ec.active_end)
-                                                .range(FIRST_GAME_FRAME..=u32::MAX),
+                                    ui.separator();
+                                    let mut ends_early = ec.ends_early();
+                                    if ui
+                                        .checkbox(&mut ends_early, "End early")
+                                        .on_hover_text(
+                                            "Emit EFFECT_OFF_KIND at a finite frame. This ends all \
+                                             live instances of this effect kind, not only this spawn.",
                                         )
-                                        .changed();
-                                    if end_changed {
-                                        ec.active_end = ec.active_end.max(FIRST_GAME_FRAME);
+                                        .changed()
+                                    {
+                                        ec.set_ends_early(ends_early);
+                                        changed = true;
                                     }
-                                    changed |= end_changed;
+                                    if ec.ends_early() {
+                                        ui.label("→ frame");
+                                        let end_changed = ui
+                                            .add(
+                                                egui::DragValue::new(&mut ec.active_end)
+                                                    .range(ec.active_start..=u32::MAX),
+                                            )
+                                            .changed();
+                                        if end_changed {
+                                            ec.active_end = ec.active_end.max(ec.active_start);
+                                        }
+                                        changed |= end_changed;
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "plays through; no EFFECT_OFF_KIND",
+                                            )
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                        );
+                                    }
                                 } else {
                                     ui.label(
                                         egui::RichText::new("(one-shot)")
@@ -12072,7 +12340,14 @@ impl VisionaryApp {
                             });
                             if let Some(p) = &pristine {
                                 if p.follows_bone {
-                                    orig(ui, format!("orig {}→{}", p.active_start, p.active_end));
+                                    if p.ends_early() {
+                                        orig(
+                                            ui,
+                                            format!("orig {}→{}", p.active_start, p.active_end),
+                                        );
+                                    } else {
+                                        orig(ui, format!("orig {} onward", p.active_start));
+                                    }
                                 } else {
                                     orig(ui, format!("orig frame {}", p.active_start));
                                 }
@@ -13141,13 +13416,23 @@ impl VisionaryApp {
                 .unwrap_or_else(|| fighter.clone());
             fm.acmd = moves.clone();
         }
-        for (key, edits) in &self.state.effect_call_edits {
-            if edits.is_empty() {
-                continue;
-            }
+        let effect_keys: std::collections::BTreeSet<&String> = self
+            .state
+            .effect_call_edits
+            .keys()
+            .chain(self.state.effect_call_full.keys())
+            .collect();
+        for key in effect_keys {
             let (fighter, mv) = key.split_once('/').unwrap_or(("unknown", key.as_str()));
             let fm = project.fighters.entry(fighter.to_string()).or_default();
-            fm.effect_calls.insert(mv.to_string(), edits.clone());
+            if let Some(edits) = self
+                .state
+                .effect_call_edits
+                .get(key)
+                .filter(|edits| !edits.is_empty())
+            {
+                fm.effect_calls.insert(mv.to_string(), edits.clone());
+            }
             if let Some(full) = self.state.effect_call_full.get(key) {
                 fm.effect_calls_full.insert(mv.to_string(), full.clone());
                 if let Some(lost) = Self::project_loss_note(&self.state, key) {
@@ -15185,7 +15470,11 @@ impl VisionaryApp {
             scale: args.get(8 + off).and_then(|a| a.as_f32()).unwrap_or(1.0),
             follows_bone: follows,
             active_start: start,
-            active_end: if follows { 9999 } else { start },
+            active_end: if follows {
+                crate::data::OPEN_ENDED_EFFECT_FRAME
+            } else {
+                start
+            },
             disabled: false,
             // Everything past the size argument, so an export can reissue THIS macro rather
             // than substituting plain EFFECT/EFFECT_FOLLOW. All-or-nothing: a tail we cannot
@@ -15256,7 +15545,7 @@ impl VisionaryApp {
             scale: 1.0,
             follows_bone: true,
             active_start: start,
-            active_end: 9999,
+            active_end: crate::data::OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: None,
             raw_line: trail_capture_raw_line(func, args),
@@ -16381,7 +16670,7 @@ impl VisionaryApp {
                 let stop_frame = Self::motion_to_script_frame(line.frame);
                 let trail_off = line.args.first().and_then(|arg| arg.as_f32());
                 if let Some(trail) = effects.iter_mut().rev().find(|effect| {
-                    effect.active_end == 9999
+                    effect.active_end == crate::data::OPEN_ENDED_EFFECT_FRAME
                         && (effect.trail_command.is_some()
                             || effect.raw_line.is_some()
                             || effect.spawn_func == "AFTER_IMAGE_ON")
@@ -16414,7 +16703,7 @@ impl VisionaryApp {
             let stop_frame = Self::motion_to_script_frame(line.frame);
             // EffectModule::kill_kind terminates every live instance of the kind.
             for effect in effects.iter_mut().filter(|effect| {
-                effect.active_end == 9999
+                effect.active_end == crate::data::OPEN_ENDED_EFFECT_FRAME
                     && effect.trail_command.is_none()
                     && effect.raw_line.is_none()
                     && effect.spawn_func != "AFTER_IMAGE_ON"
@@ -23671,7 +23960,9 @@ impl VisionaryApp {
                 // A newly finite end, or a changed end, needs an injected replacement stop. If
                 // the edited start now lies after the old end, the pristine stop would run before
                 // the replacement starts, so the replacement also needs its own stop.
-                if ec.active_end != 9999 && (end_changed || ec.active_start > ec.active_end) {
+                if ec.active_end != crate::data::OPEN_ENDED_EFFECT_FRAME
+                    && (end_changed || ec.active_start > ec.active_end)
+                {
                     rules.push(crate::game_link::SpawnRuleWire {
                         eff_hash: hash,
                         suppress: false,
@@ -23697,7 +23988,9 @@ impl VisionaryApp {
                 // When the finite pristine stop no longer represents the edited timeline, block
                 // that authored AFTER_IMAGE_OFF before it can terminate the replacement trail.
                 if end_changed {
-                    if let Some(old) = pristine.filter(|p| p.active_end != 9999) {
+                    if let Some(old) =
+                        pristine.filter(|p| p.active_end != crate::data::OPEN_ENDED_EFFECT_FRAME)
+                    {
                         rules.push(Self::build_effect_stop_suppression(old, motion));
                     }
                 }
@@ -23793,7 +24086,7 @@ impl VisionaryApp {
             let end_changed = pristine
                 .map(|p| p.active_end != ec.active_end)
                 .unwrap_or(true);
-            if ec.follows_bone && ec.active_end != 9999 {
+            if ec.follows_bone && ec.active_end != crate::data::OPEN_ENDED_EFFECT_FRAME {
                 rules.push(crate::game_link::SpawnRuleWire {
                     eff_hash: hash,
                     suppress: false,
@@ -23819,7 +24112,11 @@ impl VisionaryApp {
             // If the finite pristine stop no longer represents the edited follow, suppress it
             // before the replacement stop is injected. A stop rule is separate from a spawn rule
             // even when both use the same effect hash.
-            if end_changed && pristine.is_some_and(|p| p.follows_bone && p.active_end != 9999) {
+            if end_changed
+                && pristine.is_some_and(|p| {
+                    p.follows_bone && p.active_end != crate::data::OPEN_ENDED_EFFECT_FRAME
+                })
+            {
                 if let Some(old) = pristine {
                     rules.push(Self::build_effect_stop_suppression(old, motion));
                 }
@@ -26301,14 +26598,14 @@ impl eframe::App for VisionaryApp {
                         if let Some(path) = skel_path {
                             rs.load_skeleton(path);
                         }
-                        if let Some(anim_path) = &self.current_anim_path {
-                            rs.apply_animation(
-                                queue,
-                                Some(anim_path.as_path()),
-                                skel_path,
-                                animation_frame_for_game_frame(self.state.current_frame),
-                            );
-                        }
+                        // Apply the eyelid baseline even before a move animation is selected.
+                        rs.apply_animation_with_default(
+                            queue,
+                            self.current_default_eyelid_path.as_deref(),
+                            self.current_anim_path.as_deref(),
+                            skel_path,
+                            animation_frame_for_game_frame(self.state.current_frame),
+                        );
                         let weapon_count = rs.weapon_skel_count();
                         if weapon_count > 0 {
                             self.state.status = format!(
@@ -27343,6 +27640,7 @@ impl eframe::App for VisionaryApp {
                         height: h,
                         animation_frame,
                         anim_path: self.current_anim_path.clone(),
+                        default_anim_path: self.current_default_eyelid_path.clone(),
                         skel_path: self.current_skel_path.clone(),
                     },
                 );
@@ -28285,6 +28583,52 @@ fn index_nuanmb(motion_dir: &Path) -> Vec<(String, PathBuf)> {
             Some((stem, p))
         })
         .collect()
+}
+
+/// Find the fighter model's visibility baseline in its actual costume motion directory.
+///
+/// Extractors normally write the lowercase filename, but mods assembled on Windows may retain
+/// the archive's display case. Compare case-insensitively so those projects behave the same on
+/// Linux, and inspect only this one directory so a missing cNN asset never falls back to a
+/// different costume.
+fn find_default_eyelid_nuanmb(motion_dir: &Path) -> Option<PathBuf> {
+    const DEFAULT_EYELID: &str = "a00defaulteyelid.nuanmb";
+    let entries = std::fs::read_dir(motion_dir).ok()?;
+    entries.flatten().map(|entry| entry.path()).find(|path| {
+        path.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(DEFAULT_EYELID))
+    })
+}
+
+#[cfg(test)]
+mod default_eyelid_tests {
+    use super::find_default_eyelid_nuanmb;
+
+    #[test]
+    fn default_eyelid_lookup_uses_the_selected_slot_and_ignores_case() {
+        let root = tempfile::tempdir().unwrap();
+        let c00 = root.path().join("c00");
+        let c12 = root.path().join("c12");
+        std::fs::create_dir_all(&c00).unwrap();
+        std::fs::create_dir_all(&c12).unwrap();
+        let exact = c00.join("a00defaulteyelid.nuanmb");
+        std::fs::write(&exact, b"slot zero").unwrap();
+        let selected = c12.join("A00DefaultEyelid.NUANMB");
+        std::fs::write(&selected, b"slot twelve").unwrap();
+
+        assert_eq!(find_default_eyelid_nuanmb(&c00), Some(exact));
+        assert_eq!(find_default_eyelid_nuanmb(&c12), Some(selected));
+        assert!(find_default_eyelid_nuanmb(root.path()).is_none());
+    }
+
+    #[test]
+    fn missing_default_eyelid_is_a_safe_noop() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(find_default_eyelid_nuanmb(root.path()).is_none());
+    }
 }
 
 /// Index animation files from every motion part at one costume slot by the hash stored in a
@@ -29461,21 +29805,6 @@ fn fetch_move_index(fighter: &str) -> anyhow::Result<Vec<String>> {
         .filter_map(|n| n.strip_suffix(".txt"))
         .map(|n| n.to_string())
         .collect())
-}
-
-fn write_mod_project(
-    project: &crate::acmd::ModProject,
-    parent_dir: &std::path::Path,
-) -> std::io::Result<std::path::PathBuf> {
-    let root = parent_dir.join(&project.name);
-    for file in &project.files {
-        let dest = root.join(&file.rel_path);
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&dest, &file.contents)?;
-    }
-    Ok(root)
 }
 
 /// The export's verification warnings, as a section for the README written into the mod folder.

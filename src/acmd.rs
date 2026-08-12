@@ -4001,6 +4001,31 @@ fn emit_effect_control(control: &crate::data::EffectControl, indent: &str) -> St
 /// own name without inventing arguments for a signature this code does not know, so it falls
 /// back to the plain pair. That is the old, compilable behaviour. A tail that is known to be
 /// *empty* is a different thing entirely and is reissued as-is.
+pub(crate) const EFFECT_FOLLOW_FALLBACK_TAIL: &[&str] = &["true"];
+pub(crate) const EFFECT_FALLBACK_TAIL: &[&str] = &["0", "0", "0", "0", "0", "0", "false"];
+
+/// The deterministic plain spawn that can represent an effect whose original tail is unknown.
+///
+/// Keep the macro name and tail together: the verifier uses the same table when it compares a
+/// legacy `None` tail with the generated source, while non-plain macro families remain strict and
+/// are still reported as downgrades.
+pub(crate) fn plain_spawn_fallback(follows_bone: bool) -> (&'static str, &'static [&'static str]) {
+    if follows_bone {
+        ("EFFECT_FOLLOW", EFFECT_FOLLOW_FALLBACK_TAIL)
+    } else {
+        ("EFFECT", EFFECT_FALLBACK_TAIL)
+    }
+}
+
+/// Return the fallback tail for one of the two plain spawn macro names.
+pub(crate) fn plain_spawn_fallback_tail(spawn_func: &str) -> Option<&'static [&'static str]> {
+    match spawn_func {
+        "EFFECT_FOLLOW" => Some(EFFECT_FOLLOW_FALLBACK_TAIL),
+        "EFFECT" => Some(EFFECT_FALLBACK_TAIL),
+        _ => None,
+    }
+}
+
 fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
     if let Some(control) = &call.control {
         return emit_effect_control(control, indent);
@@ -4042,14 +4067,11 @@ fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
     let Some(tail) = tail else {
         // The fallback pair takes ONE graphic, so a flipped call's second one is dropped
         // here rather than shifting every following argument by a slot.
-        return if call.follows_bone {
-            format!("{indent}macros::EFFECT_FOLLOW(agent, {graphic}, {bone}, {transform}, true);\n")
-        } else {
-            // macros::EFFECT takes six extra random-range args (zeroed) before the flag.
-            format!(
-                "{indent}macros::EFFECT(agent, {graphic}, {bone}, {transform}, 0, 0, 0, 0, 0, 0, false);\n"
-            )
-        };
+        let (fallback_func, fallback_tail) = plain_spawn_fallback(call.follows_bone);
+        let tail = fallback_tail.join(", ");
+        return format!(
+            "{indent}macros::{fallback_func}(agent, {graphic}, {bone}, {transform}, {tail});\n"
+        );
     };
 
     let graphics = match &call.effect_name_alt {
@@ -4210,7 +4232,7 @@ fn emit_effect_move_fn(
     > = std::collections::BTreeMap::new();
     for call in calls.iter().filter(|call| !call.disabled) {
         events.entry(call.active_start).or_default().1.push(call);
-        if call.follows_bone && call.active_end != 9999 {
+        if call.follows_bone && call.active_end != crate::data::OPEN_ENDED_EFFECT_FRAME {
             events
                 .entry(call.active_end.max(call.active_start))
                 .or_default()
@@ -7320,7 +7342,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         call.spawn_func = "EFFECT_FOLLOW_FLIP_ALPHA".into();
         call.effect_name_alt = Some("sys_attack_arc_alt".into());
         call.follows_bone = true;
-        call.active_end = 9999;
+        call.active_end = crate::data::OPEN_ENDED_EFFECT_FRAME;
         call.extra_args = Some(vec!["false".into(), "0".into(), "1.0".into()]);
 
         let (_, emitted) = emit_effect_move_fn(
@@ -7689,7 +7711,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         assert_eq!(calls[0].effect_name, "sys_smoke");
         assert_eq!(
-            calls[0].active_end, 9999,
+            calls[0].active_end,
+            crate::data::OPEN_ENDED_EFFECT_FRAME,
             "detach must not end the follow effect"
         );
         assert!(matches!(
@@ -8862,7 +8885,8 @@ unsafe extern "C" fn effect_specialhi2(agent: &mut L2CAgentBase) {{
             .find(|call| call.effect_name == "kirby_fcut_rise")
             .expect("follow call");
         assert_eq!(
-            follow.active_end, 9999,
+            follow.active_end,
+            crate::data::OPEN_ENDED_EFFECT_FRAME,
             "the follow is never closed by this script and must stay open"
         );
 
@@ -9052,7 +9076,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             scale: 1.0,
             follows_bone: true,
             active_start: 2,
-            active_end: 9999,
+            active_end: crate::data::OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: None,
             raw_line: None,

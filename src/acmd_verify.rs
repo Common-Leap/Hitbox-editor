@@ -530,6 +530,31 @@ macro_rules! diff_fields {
     };
 }
 
+/// Compare a spawn tail without mistaking a legacy plain macro for a changed call.
+///
+/// Newly added plain `EFFECT`/`EFFECT_FOLLOW` calls historically stored `extra_args = None`.
+/// Their emitter has always had a deterministic compilable fallback, however, so read-back
+/// parses that fallback as `Some(...)`.  Accept only that exact one-way normalization: explicit
+/// source tails, empty tails, and every non-plain macro family remain strict comparisons.
+fn effect_extra_args_match(want: &EffectCall, got: &EffectCall) -> bool {
+    if want.extra_args == got.extra_args {
+        return true;
+    }
+    if want.extra_args.is_some() || want.spawn_func != got.spawn_func {
+        return false;
+    }
+    let Some(fallback) = crate::acmd::plain_spawn_fallback_tail(&want.spawn_func) else {
+        return false;
+    };
+    got.extra_args.as_deref().is_some_and(|actual| {
+        actual.len() == fallback.len()
+            && actual
+                .iter()
+                .zip(fallback)
+                .all(|(actual, expected)| actual == expected)
+    })
+}
+
 fn check_hitbox_fidelity(subject: &str, script: &AcmdScript, emitted: &str, report: &mut Report) {
     let specified = script.to_hitboxes();
     let exported = crate::acmd::parse_acmd_script(emitted).to_hitboxes();
@@ -765,9 +790,6 @@ fn check_effect_fidelity(
         );
         return;
     }
-    let downgraded: HashSet<(String, String)> = crate::acmd::export_spawn_downgrades(calls)
-        .into_iter()
-        .collect();
     for (want, got) in specified.iter().zip(&exported) {
         if want.control.is_some() || got.control.is_some() {
             if want.control != got.control
@@ -785,18 +807,21 @@ fn check_effect_fidelity(
             continue;
         }
         // A spawn whose macro tail was never recorded is already reported by name as a
-        // downgrade; re-listing each of its shifted arguments would bury that.
-        if downgraded.contains(&(want.spawn_func.clone(), want.effect_name.clone())) {
-            continue;
-        }
+        // downgrade. The emitter necessarily falls back to the plain EFFECT/EFFECT_FOLLOW
+        // spelling, so the macro name, alternate graphic, and tail cannot be compared. Keep
+        // checking every independent field, however: a bad offset, frame, or modifier must not
+        // disappear merely because the source macro's tail was unavailable.
+        let downgraded = want.extra_args.is_none()
+            && want.raw_line.is_none()
+            && want.color.is_none()
+            && !want.spawn_func.is_empty()
+            && crate::acmd::plain_spawn_fallback_tail(&want.spawn_func).is_none();
         let mut out = Vec::new();
         diff_fields!(
             out,
             want,
             got,
             effect_name,
-            effect_name_alt,
-            spawn_func,
             bone_name,
             offset,
             rotation,
@@ -804,7 +829,6 @@ fn check_effect_fidelity(
             follows_bone,
             active_start,
             active_end,
-            extra_args,
             // Compared here rather than trusted, because the corpus oracle pairs calls on
             // `(spawn_func, effect_name)` alone and a colour command has no effect name at
             // all — every one of them would pair up and compare equal without this line.
@@ -821,6 +845,26 @@ fn check_effect_fidelity(
             // fallback. It must round-trip as its own field instead of being folded into tint.
             particle_tint,
         );
+        if !downgraded {
+            if want.effect_name_alt != got.effect_name_alt {
+                out.push(format!(
+                    "effect_name_alt — specified {:?}, exported {:?}",
+                    want.effect_name_alt, got.effect_name_alt
+                ));
+            }
+            if want.spawn_func != got.spawn_func {
+                out.push(format!(
+                    "spawn_func — specified {}, exported {}",
+                    want.spawn_func, got.spawn_func
+                ));
+            }
+            if !effect_extra_args_match(want, got) {
+                out.push(format!(
+                    "extra_args — specified {:?}, exported {:?}",
+                    want.extra_args, got.extra_args
+                ));
+            }
+        }
         for difference in out {
             report.blocker(
                 subject,
@@ -1648,6 +1692,159 @@ mod tests {
         );
         assert!(!report.has_blockers(), "{}", messages(&report));
         assert!(emitted.contains("frame(agent.lua_state_agent, 8.0);"));
+    }
+
+    #[test]
+    fn legacy_plain_effect_tail_matches_its_deterministic_fallback_only() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("sys_flash"), Hash40::new("top"), 0, 0, 0, 0, 0, 0, 1, true);
+    }
+}
+"#;
+        let parsed = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].extra_args.as_deref(),
+            Some(&["true".to_string()][..])
+        );
+
+        // A newly added or legacy project call can have no recorded tail.  The plain fallback
+        // emits exactly the same `true` tail and should not turn that compatibility detail into
+        // an export blocker.
+        let mut legacy = parsed.clone();
+        legacy[0].extra_args = None;
+        let emitted = crate::acmd::preview_effect_fn(
+            &legacy,
+            "test",
+            &[],
+            &std::collections::BTreeMap::new(),
+        );
+        let mut report = Report::default();
+        verify_effect_move(
+            "test",
+            &legacy,
+            &emitted,
+            &[],
+            None,
+            &std::collections::BTreeMap::new(),
+            &mut report,
+        );
+        assert!(!report.has_blockers(), "{}", messages(&report));
+
+        // An explicit tail remains an authorial claim.  Do not normalize a genuinely different
+        // bool or relax the comparison for a source-authored `Some(...)` value.
+        let mut wrong = parsed;
+        wrong[0].extra_args = Some(vec!["false".into()]);
+        let emitted =
+            crate::acmd::preview_effect_fn(&wrong, "test", &[], &std::collections::BTreeMap::new());
+        let mut report = Report::default();
+        verify_effect_move(
+            "test",
+            &wrong,
+            &emitted,
+            &[],
+            None,
+            &std::collections::BTreeMap::new(),
+            &mut report,
+        );
+        assert!(
+            !report.has_blockers(),
+            "explicit tails should round-trip: {}",
+            messages(&report)
+        );
+
+        // The read-back of the emitted `false` is faithful.  To exercise the strict mismatch,
+        // compare a call that claims the plain fallback while its emitted source carries a
+        // different explicit tail.
+        let mut mismatched = wrong;
+        mismatched[0].extra_args = None;
+        let mut report = Report::default();
+        verify_effect_move(
+            "test",
+            &mismatched,
+            &emitted,
+            &[],
+            None,
+            &std::collections::BTreeMap::new(),
+            &mut report,
+        );
+        assert!(
+            report
+                .blockers()
+                .any(|finding| finding.message.contains("extra_args")),
+            "a None tail must not accept a non-fallback explicit tail: {report:?}"
+        );
+    }
+
+    #[test]
+    fn missing_non_plain_tail_downgrade_still_checks_transform_fields() {
+        let source = r#"unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("sys_hit_l"), Hash40::new("sys_hit_r"), Hash40::new("top"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);
+    }
+}
+"#;
+        let parsed = crate::acmd::parse_effect_script(source).to_effect_calls();
+        assert_eq!(parsed.len(), 1);
+
+        // Without the recorded tail, emission intentionally falls back to plain
+        // EFFECT_FOLLOW. That downgrade is a warning, not permission to ignore the rest of the
+        // call's transform data.
+        let mut downgraded = parsed;
+        downgraded[0].extra_args = None;
+        let emitted = crate::acmd::preview_effect_fn(
+            &downgraded,
+            "test",
+            &[],
+            &std::collections::BTreeMap::new(),
+        );
+        let mut clean = Report::default();
+        verify_effect_move(
+            "test",
+            &downgraded,
+            &emitted,
+            &[],
+            None,
+            &std::collections::BTreeMap::new(),
+            &mut clean,
+        );
+        assert!(
+            !clean.has_blockers(),
+            "downgrade itself blocked: {}",
+            messages(&clean)
+        );
+        assert!(
+            clean
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("trailing arguments")),
+            "the missing-tail downgrade should remain visible: {}",
+            messages(&clean)
+        );
+
+        // The generated source still carries the original transform. A changed specified
+        // offset must be reported even though the macro family was downgraded.
+        downgraded[0].offset[0] = 99.0;
+        let mut report = Report::default();
+        verify_effect_move(
+            "test",
+            &downgraded,
+            &emitted,
+            &[],
+            None,
+            &std::collections::BTreeMap::new(),
+            &mut report,
+        );
+        assert!(
+            report
+                .blockers()
+                .any(|finding| finding.message.contains("offset")),
+            "a non-tail transform mismatch must remain a blocker: {}",
+            messages(&report)
+        );
     }
 
     /// The property the whole module exists for, checked against every script the app has ever

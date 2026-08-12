@@ -1599,7 +1599,10 @@ fn plan_effect_timing_moves(
             continue;
         }
         let stop_block = if move_end {
-            if !before.follows_bone || before.active_end == 9999 || after.active_end == 9999 {
+            if !before.follows_bone
+                || before.active_end == crate::data::OPEN_ENDED_EFFECT_FRAME
+                || after.active_end == crate::data::OPEN_ENDED_EFFECT_FRAME
+            {
                 skipped.push(format!(
                     "{label}: `{}` effect #{} would require creating or removing a stop command",
                     site.name,

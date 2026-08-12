@@ -85,8 +85,12 @@ pub struct HitboxRenderState {
     pub camera: Camera,
     pub current_width: u32,
     pub current_height: u32,
-    /// Cached animation data — reloaded only when the path changes
+    /// Cached selected-move animation data — reloaded only when the path changes.
     cached_anim: Option<(std::path::PathBuf, ssbh_data::anim_data::AnimData)>,
+    /// Cached default eyelid animation data. This is kept separately from the selected move
+    /// animation because the eyelid asset is a visibility baseline, not a second source of bone
+    /// or material animation.
+    cached_default_anim: Option<(std::path::PathBuf, Option<ssbh_data::anim_data::AnimData>)>,
     /// Cached skeleton data — reloaded only when the path changes
     cached_skel: Option<(std::path::PathBuf, ssbh_data::skel_data::SkelData)>,
     /// Weapon skeletons: (weapon_name, skel, attach_bone_name)
@@ -95,6 +99,7 @@ pub struct HitboxRenderState {
     /// Track last rendered state to skip redundant GPU work
     last_frame: f32,
     last_anim_path: Option<std::path::PathBuf>,
+    last_default_anim_path: Option<std::path::PathBuf>,
     last_skel_path: Option<std::path::PathBuf>,
     /// Cached GPU handles for use in paint()
     pub wgpu_device: Option<wgpu::Device>,
@@ -134,10 +139,12 @@ impl HitboxRenderState {
             current_width: 0,
             current_height: 0,
             cached_anim: None,
+            cached_default_anim: None,
             cached_skel: None,
             weapon_skels: Vec::new(),
             last_frame: -1.0,
             last_anim_path: None,
+            last_default_anim_path: None,
             last_skel_path: None,
             wgpu_device: Some(device.clone()),
             wgpu_queue: Some(queue.clone()),
@@ -203,16 +210,26 @@ impl HitboxRenderState {
         // Force re-skin on next frame
         self.last_frame = -1.0;
         self.last_anim_path = None;
+        self.last_default_anim_path = None;
         self.last_skel_path = None;
     }
 
-    pub fn apply_animation(
+    /// Apply a selected move animation over an optional default eyelid visibility animation.
+    ///
+    /// Default assets are parsed and cached independently from the selected move. Only
+    /// [`ssbh_data::anim_data::GroupType::Visibility`] groups survive the default-asset filter;
+    /// this prevents a malformed or customized `a00defaulteyelid.nuanmb` from changing bones or
+    /// materials while still restoring the game's eyelid state.
+    pub fn apply_animation_with_default(
         &mut self,
         queue: &wgpu::Queue,
+        default_anim_path: Option<&Path>,
         anim_path: Option<&Path>,
         skel_path: Option<&Path>,
         frame: f32,
     ) {
+        self.update_default_animation(default_anim_path);
+
         // Reload anim only when path changes
         if let Some(path) = anim_path {
             let needs_load = self
@@ -249,15 +266,43 @@ impl HitboxRenderState {
         let skel = self.cached_skel.as_ref().map(|(_, s)| s);
 
         for render_model in &mut self.render_models {
+            // RenderModel applies animations in iterator order. Put the default eyelid layer
+            // first so a selected move's visibility tracks take precedence over the baseline.
+            let animations = animation_layers(
+                self.cached_default_anim
+                    .as_ref()
+                    .and_then(|(_, a)| a.as_ref()),
+                anim,
+            );
             render_model.apply_anims(
                 queue,
-                anim.into_iter(),
+                animations.iter().copied(),
                 skel,
                 None,
                 None,
                 &self.shared_data,
                 frame,
             );
+        }
+    }
+
+    fn update_default_animation(&mut self, path: Option<&Path>) {
+        if let Some(path) = path {
+            let needs_load = self
+                .cached_default_anim
+                .as_ref()
+                .map(|(cached_path, _)| cached_path != path)
+                .unwrap_or(true);
+            if needs_load {
+                self.cached_default_anim = Some((
+                    path.to_path_buf(),
+                    ssbh_data::anim_data::AnimData::from_file(path)
+                        .ok()
+                        .map(|anim| visibility_only_animation(&anim)),
+                ));
+            }
+        } else {
+            self.cached_default_anim = None;
         }
     }
 
@@ -313,6 +358,41 @@ impl HitboxRenderState {
         let anim = self.cached_anim.as_ref().map(|(_, a)| a);
         compute_bone_world_matrices(skel, anim, &self.weapon_skels, frame)
     }
+}
+
+/// Keep only visibility groups from a default eyelid animation.
+///
+/// Default eyelid files are intended to provide a baseline for mesh visibility. Filtering at
+/// load time makes that contract explicit and protects the renderer from accidentally applying
+/// transform or material tracks found in a customized asset.
+fn visibility_only_animation(
+    animation: &ssbh_data::anim_data::AnimData,
+) -> ssbh_data::anim_data::AnimData {
+    use ssbh_data::anim_data::GroupType;
+
+    ssbh_data::anim_data::AnimData {
+        major_version: animation.major_version,
+        minor_version: animation.minor_version,
+        final_frame_index: animation.final_frame_index,
+        groups: animation
+            .groups
+            .iter()
+            .filter(|group| group.group_type == GroupType::Visibility)
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Build the animation stack in the same order used by [`RenderModel::apply_anims`]. Keeping this
+/// small piece pure makes the baseline-before-selected precedence easy to regression-test.
+fn animation_layers<'a>(
+    default_animation: Option<&'a ssbh_data::anim_data::AnimData>,
+    selected_animation: Option<&'a ssbh_data::anim_data::AnimData>,
+) -> Vec<&'a ssbh_data::anim_data::AnimData> {
+    default_animation
+        .into_iter()
+        .chain(selected_animation)
+        .collect()
 }
 
 /// Evaluates the bone hierarchy for `frame` and returns `bone name -> world matrix`.
@@ -568,6 +648,57 @@ mod tests {
         assert_eq!(top.x_axis.truncate(), glam::Vec3::X);
     }
 
+    #[test]
+    fn default_eyelid_animation_keeps_visibility_groups_only() {
+        use ssbh_data::anim_data::{AnimData, GroupData, GroupType};
+
+        let animation = AnimData {
+            major_version: 2,
+            minor_version: 1,
+            final_frame_index: 12.0,
+            groups: vec![
+                GroupData {
+                    group_type: GroupType::Transform,
+                    nodes: Vec::new(),
+                },
+                GroupData {
+                    group_type: GroupType::Visibility,
+                    nodes: Vec::new(),
+                },
+                GroupData {
+                    group_type: GroupType::Material,
+                    nodes: Vec::new(),
+                },
+            ],
+        };
+
+        let filtered = super::visibility_only_animation(&animation);
+
+        assert_eq!(filtered.major_version, animation.major_version);
+        assert_eq!(filtered.minor_version, animation.minor_version);
+        assert_eq!(filtered.final_frame_index, animation.final_frame_index);
+        assert_eq!(filtered.groups.len(), 1);
+        assert_eq!(filtered.groups[0].group_type, GroupType::Visibility);
+    }
+
+    #[test]
+    fn default_eyelid_layer_precedes_selected_animation() {
+        use ssbh_data::anim_data::AnimData;
+
+        let default = AnimData {
+            major_version: 2,
+            minor_version: 1,
+            final_frame_index: 0.0,
+            groups: Vec::new(),
+        };
+        let selected = default.clone();
+        let layers = super::animation_layers(Some(&default), Some(&selected));
+
+        assert_eq!(layers.len(), 2);
+        assert!(std::ptr::eq(layers[0], &default));
+        assert!(std::ptr::eq(layers[1], &selected));
+    }
+
     /// Benchmark for the editor's dominant per-frame CPU cost. Ignored by default because it
     /// needs real game files; run it against an extracted data root with:
     ///
@@ -696,6 +827,8 @@ pub struct ViewportCallback {
     /// before constructing the callback.
     pub animation_frame: f32,
     pub anim_path: Option<std::path::PathBuf>,
+    /// Optional default eyelid visibility baseline for the selected fighter/costume.
+    pub default_anim_path: Option<std::path::PathBuf>,
     pub skel_path: Option<std::path::PathBuf>,
 }
 
@@ -723,6 +856,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
 
             let frame_changed = (self.animation_frame - state.last_frame).abs() > f32::EPSILON;
             let anim_changed = self.anim_path != state.last_anim_path;
+            let default_anim_changed = self.default_anim_path != state.last_default_anim_path;
             let skel_changed = self.skel_path != state.last_skel_path;
 
             state.resize(device, w, h);
@@ -731,15 +865,17 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             state.wgpu_queue = Some(queue.clone());
 
             // Re-skin when frame, animation, or skeleton changes
-            if frame_changed || anim_changed || skel_changed {
-                state.apply_animation(
+            if frame_changed || anim_changed || default_anim_changed || skel_changed {
+                state.apply_animation_with_default(
                     queue,
+                    self.default_anim_path.as_deref(),
                     self.anim_path.as_deref(),
                     self.skel_path.as_deref(),
                     self.animation_frame,
                 );
                 state.last_frame = self.animation_frame;
                 state.last_anim_path = self.anim_path.clone();
+                state.last_default_anim_path = self.default_anim_path.clone();
                 state.last_skel_path = self.skel_path.clone();
             }
 
