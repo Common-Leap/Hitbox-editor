@@ -16,7 +16,20 @@ use serde::{Deserialize, Serialize};
 use crate::data::{EditRecord, EffectCallEdit};
 
 pub const PROJECT_FILE_NAME: &str = "modproject.json";
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
+
+/// The source and runtime provenance needed to reopen one move without fetching it again.
+///
+/// `body` is the merged source body shown to the editor before any saved project edits are
+/// applied. Captures are optional because ordinary source loads do not need them; when present
+/// they preserve the typed tails required for safe live injection of added or retimed calls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MoveSourceSnapshot {
+    #[serde(default)]
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<crate::game_link::CaptureLine>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModProjectFile {
@@ -125,6 +138,7 @@ fn scoped_fighter(
     scoped.effect_frame_residue = scope_move_map(&fighter.effect_frame_residue, selected_move);
     scoped.sound_scripts = scope_move_map(&fighter.sound_scripts, selected_move);
     scoped.expression_scripts = scope_move_map(&fighter.expression_scripts, selected_move);
+    scoped.move_sources = scope_move_map(&fighter.move_sources, selected_move);
     scoped.capture_branch_warnings =
         scope_move_map(&fighter.capture_branch_warnings, selected_move);
     scoped.live_tweaks = fighter
@@ -228,6 +242,9 @@ pub struct FighterMod {
     /// an export from presenting an observed arm as if it were the complete source.
     #[serde(default)]
     pub capture_branch_warnings: HashMap<String, String>,
+    /// move name → the merged source body and optional typed live-capture payload used to load it
+    #[serde(default)]
+    pub move_sources: HashMap<String, MoveSourceSnapshot>,
     /// authored .eff edits for this fighter's effect file
     #[serde(default)]
     pub eff: Option<EffMod>,
@@ -701,6 +718,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn move_source_snapshot_round_trips_the_merged_body_and_typed_capture_tail() {
+        let snapshot = MoveSourceSnapshot {
+            body: "unsafe extern \"C\" fn game_fixture(...) {}".into(),
+            captures: vec![crate::game_link::CaptureLine {
+                kind: 7,
+                motion: 0x1234,
+                frame: 3.5,
+                func: "ATTACK".into(),
+                args: vec![
+                    crate::game_link::LuaArgWire::Hash(0xfeed),
+                    crate::game_link::LuaArgWire::Num(1.25),
+                    crate::game_link::LuaArgWire::Int(-4),
+                    crate::game_link::LuaArgWire::Bool(true),
+                    crate::game_link::LuaArgWire::Nil,
+                ],
+                run: 9,
+            }],
+        };
+        let mut project = ModProjectFile::default();
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                move_sources: HashMap::from([("fixture".into(), snapshot.clone())]),
+                ..Default::default()
+            },
+        );
+
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(json.contains("game_fixture"));
+        assert!(json.contains("\"captures\""));
+        let loaded: ModProjectFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.fighters["mario"].move_sources["fixture"], snapshot);
+        assert!(
+            loaded.is_empty(),
+            "source provenance alone is not a mod edit"
+        );
+    }
+
+    #[test]
+    fn legacy_version_one_projects_default_move_sources_empty() {
+        let project: ModProjectFile = serde_json::from_str(LEGACY_PROJECT_JSON).unwrap();
+        assert_eq!(project.version, 1);
+        assert!(project.fighters["kirby"].move_sources.is_empty());
+    }
+
     /// The one-slot side must not assume the vanilla 8 costumes anywhere in the format.
     #[test]
     fn one_slot_scoping_survives_slot_numbers_past_the_vanilla_eight() {
@@ -970,6 +1033,22 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
                     ("first".into(), "first warning".into()),
                     ("second".into(), "second warning".into()),
                 ]),
+                move_sources: HashMap::from([
+                    (
+                        "first".into(),
+                        MoveSourceSnapshot {
+                            body: "first source".into(),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "second".into(),
+                        MoveSourceSnapshot {
+                            body: "second source".into(),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
                 eff: Some(EffMod {
                     source_rel: "effect/fighter/mario/ef_mario.eff".into(),
                     ..Default::default()
@@ -1039,6 +1118,11 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
             fighter.capture_branch_warnings.keys().collect::<Vec<_>>(),
             vec!["first"]
         );
+        assert_eq!(
+            fighter.move_sources.keys().collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        assert_eq!(fighter.move_sources["first"].body, "first source");
         assert_eq!(fighter.live_tweaks.len(), 1);
         assert_eq!(fighter.live_tweaks[0].effect_name, "sys_first");
     }

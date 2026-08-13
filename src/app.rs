@@ -2150,6 +2150,128 @@ struct SourceBuffer {
     note: Option<String>,
 }
 
+/// A move selection that is waiting for the user to choose between the saved source snapshot
+/// and a newly available source body. Keeping the old selection active until this is resolved
+/// prevents a mismatch from silently rebasing the editor underneath the user.
+#[derive(Clone)]
+struct PendingMoveSourceMismatch {
+    fighter: String,
+    move_entry: MoveEntry,
+    saved: crate::mod_project::MoveSourceSnapshot,
+    current: crate::mod_project::MoveSourceSnapshot,
+}
+
+#[derive(Default)]
+struct LiveApplyReport {
+    restored_moves: usize,
+    missing_source: BTreeSet<String>,
+    missing_fighter: BTreeSet<String>,
+    missing_capture_donor: BTreeSet<String>,
+    missing_runtime_constant: BTreeSet<String>,
+}
+
+impl LiveApplyReport {
+    fn status_suffix(&self) -> String {
+        let mut notes = Vec::new();
+        if self.restored_moves > 0 {
+            notes.push(format!("{} move(s) restored live", self.restored_moves));
+        }
+        if !self.missing_source.is_empty() {
+            notes.push(format!(
+                "{} move(s) need a saved source/capture baseline",
+                self.missing_source.len()
+            ));
+        }
+        if !self.missing_fighter.is_empty() {
+            notes.push(format!(
+                "{} fighter(s) are not loaded in the current data roots",
+                self.missing_fighter.len()
+            ));
+        }
+        if !self.missing_capture_donor.is_empty() {
+            notes.push(format!(
+                "{} move(s)/category(ies) need stored live capture donors",
+                self.missing_capture_donor.len()
+            ));
+        }
+        if !self.missing_runtime_constant.is_empty() {
+            notes.push(format!(
+                "{} move(s)/category(ies) need measured runtime constants",
+                self.missing_runtime_constant.len()
+            ));
+        }
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" — live restore notes: {}", notes.join("; "))
+        }
+    }
+}
+
+/// Limitations returned by a live rule family while a project move is being materialized.
+/// Export/source state remains intact when either flag is set; the load report only explains why
+/// that family was not sent live.
+#[derive(Default, Clone, Copy)]
+struct LiveReplayLimits {
+    missing_capture_donor: bool,
+    missing_runtime_constant: bool,
+}
+
+/// Source-independent materialization of one saved move. The live pushers still share the
+/// existing `AppState` implementation, but project reload first resolves every source/edit
+/// category into this value so the selected UI move is no longer the source of truth for other
+/// persisted moves.
+#[derive(Clone)]
+struct MoveReplayContext {
+    fighter: String,
+    move_name: String,
+    motion: u64,
+    source: crate::mod_project::MoveSourceSnapshot,
+    captures: Vec<crate::game_link::CaptureLine>,
+    game_pristine: crate::data::AcmdScript,
+    game: crate::data::AcmdScript,
+    hitboxes_pristine: Vec<crate::data::Hitbox>,
+    hitboxes: Vec<crate::data::Hitbox>,
+    effects_pristine: Vec<crate::data::EffectCall>,
+    effects: Vec<crate::data::EffectCall>,
+    sound_pristine: crate::data::AcmdScript,
+    sound: crate::data::AcmdScript,
+    expression_pristine: crate::data::AcmdScript,
+    expression: crate::data::AcmdScript,
+}
+
+fn materialize_effect_calls(
+    pristine: &[crate::data::EffectCall],
+    edits: Option<&[crate::data::EffectCallEdit]>,
+) -> Vec<crate::data::EffectCall> {
+    let mut effects: Vec<_> = pristine
+        .iter()
+        .cloned()
+        .map(crate::data::EffectCall::normalized_timing)
+        .collect();
+    let Some(edits) = edits else {
+        return effects;
+    };
+    for edit in edits {
+        match &edit.op {
+            crate::data::EffectCallOp::Modify(call) => {
+                if let Some(slot) = effects.get_mut(edit.index) {
+                    *slot = call.clone().normalized_timing();
+                }
+            }
+            crate::data::EffectCallOp::Add(call) => {
+                effects.push(call.clone().normalized_timing());
+            }
+            crate::data::EffectCallOp::Remove => {
+                if let Some(slot) = effects.get_mut(edit.index) {
+                    slot.disabled = true;
+                }
+            }
+        }
+    }
+    effects
+}
+
 /// Why the source pane has no script to edit. Each state gets its own answer, because
 /// "nothing here" is exactly the unhelpful thing this window used to say.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2277,6 +2399,10 @@ pub struct VisionaryApp {
     /// In-flight "Fetch ACMD" result: `(fighter, move, body or error)`. The fetch used to run
     /// inline and blocked the UI thread for a whole GitHub round trip on every click.
     acmd_receiver: Option<std::sync::mpsc::Receiver<AcmdFetchResult>>,
+    /// Merged source/capture snapshots remembered for every move visited this session.
+    move_source_cache: HashMap<String, crate::mod_project::MoveSourceSnapshot>,
+    /// Selection is held here while the source mismatch modal is open.
+    source_mismatch_prompt: Option<PendingMoveSourceMismatch>,
     /// The linked project's own scripts for the move whose mirror fetch is in flight, waiting
     /// to be merged back over it. `None` whenever no project defines the move, or when the
     /// project defines enough of it that no fetch was needed.
@@ -2320,6 +2446,16 @@ pub struct VisionaryApp {
     /// Live effect point-control rules per "fighter/move" (detach and area toggles). These
     /// use the captured primitive arguments as their identity, rather than an effect-kind hash.
     effect_control_rules_store: HashMap<String, Vec<crate::game_link::EffectControlRuleWire>>,
+    /// Project load is materializing moves other than the UI target. Those moves may use only
+    /// their exported capture snapshot; the original selected move may additionally fall back
+    /// to the currently live capture bucket.
+    rebuilding_project_live: bool,
+    replay_live_fallback_key: Option<String>,
+    /// Rule families that declined a project-wide live materialization because their captured
+    /// identity or runtime value was not safe to reconstruct. Kept separate from the final
+    /// report while the ordinary pushers run against a temporary move selection.
+    replay_missing_capture: BTreeSet<String>,
+    replay_missing_constant: BTreeSet<String>,
     /// (move key, hitbox snapshot) — change detection for live hitbox pushes.
     hitbox_watch: Option<(String, Vec<crate::data::Hitbox>)>,
     hitbox_dirty_at: Option<std::time::Instant>,
@@ -2625,6 +2761,8 @@ impl VisionaryApp {
             last_frame_time: std::time::Instant::now(),
             move_list_receiver: None,
             acmd_receiver: None,
+            move_source_cache: HashMap::new(),
+            source_mismatch_prompt: None,
             pending_project_script: None,
             bone_names: Vec::new(),
             hurtbox_volumes: Vec::new(),
@@ -2645,6 +2783,10 @@ impl VisionaryApp {
             hitbox_rules_store: HashMap::new(),
             effect_rules_store: HashMap::new(),
             effect_control_rules_store: HashMap::new(),
+            rebuilding_project_live: false,
+            replay_live_fallback_key: None,
+            replay_missing_capture: BTreeSet::new(),
+            replay_missing_constant: BTreeSet::new(),
             hitbox_watch: None,
             hitbox_dirty_at: None,
             captures_seen_seq: 0,
@@ -3146,6 +3288,15 @@ impl VisionaryApp {
         self.state
             .capture_branch_warnings
             .retain(|key, _| !fighter_key_matches(key, &fighter));
+        self.move_source_cache
+            .retain(|key, _| !fighter_key_matches(key, &fighter));
+        if self
+            .source_mismatch_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.fighter.eq_ignore_ascii_case(&fighter))
+        {
+            self.source_mismatch_prompt = None;
+        }
         self.hitbox_rules_store
             .retain(|key, _| !fighter_key_matches(key, &fighter));
         self.effect_rules_store
@@ -3245,6 +3396,11 @@ impl VisionaryApp {
     }
 
     fn select_fighter(&mut self, idx: usize) {
+        if self.source_mismatch_prompt.is_some() {
+            return;
+        }
+        self.commit_current_edits();
+        self.source_mismatch_prompt = None;
         self.state.selected_fighter = Some(idx);
         self.state.selected_move = None;
         // A fighter switch is also a move-state boundary.  Clearing only the editable hitboxes
@@ -3424,7 +3580,63 @@ impl VisionaryApp {
         });
     }
 
-    fn select_move(&mut self, mut move_entry: MoveEntry) {
+    fn select_move(&mut self, move_entry: MoveEntry) {
+        if self.source_mismatch_prompt.is_some() {
+            return;
+        }
+        // Panel edits are keyed at the end of the frame, but a click can navigate before that
+        // pass runs. Commit explicitly at the navigation boundary so leaving a move cannot lose
+        // the last drag or source-point edit.
+        self.commit_current_edits();
+
+        let fighter_name = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|fighter| fighter.name.clone());
+        if let Some(fighter_name) = fighter_name {
+            self.refresh_linked_acmd_source_index();
+            let key = Self::move_key(&fighter_name, &move_entry.name);
+            if let Some(saved) = self.move_source_cache.get(&key).cloned() {
+                if let Some((body, _)) = self.warm_source_body(&fighter_name, &move_entry.name) {
+                    if body != saved.body {
+                        let captures = self.captures_for_move(&fighter_name, move_entry.hash);
+                        let captures = if captures.is_empty() {
+                            saved
+                                .captures
+                                .iter()
+                                .filter(|capture| capture.motion == move_entry.hash)
+                                .cloned()
+                                .collect()
+                        } else {
+                            captures
+                        };
+                        let current = crate::mod_project::MoveSourceSnapshot { body, captures };
+                        self.source_mismatch_prompt = Some(PendingMoveSourceMismatch {
+                            fighter: fighter_name,
+                            move_entry,
+                            saved,
+                            current,
+                        });
+                        return;
+                    }
+                }
+                self.activate_move(move_entry, Some(saved), "Saved project source");
+                return;
+            }
+        }
+        self.activate_move(move_entry, None, "");
+    }
+
+    /// Finish a move selection after source resolution has made its choice. The old selection
+    /// remains live while a mismatch modal is open, so this is the only function that clears the
+    /// current move and starts a new fetch/load.
+    fn activate_move(
+        &mut self,
+        mut move_entry: MoveEntry,
+        snapshot: Option<crate::mod_project::MoveSourceSnapshot>,
+        snapshot_label: &str,
+    ) {
         // Dropping the receiver is cancellation: each worker owns only the sender for its own
         // channel, so a result from the previous selection has nowhere to land. Clear the
         // project half of that request at the same boundary.
@@ -3467,12 +3679,56 @@ impl VisionaryApp {
         // Path was resolved at move list build time — no disk scan needed
         self.current_anim_path = move_entry.anim_path.clone();
         self.state.selected_move = Some(move_entry);
+        if let (Some(key), Some(snapshot)) = (self.current_move_key(), snapshot.as_ref()) {
+            // Store even an empty-body capture snapshot before choosing the body/capture load
+            // branch below. Capture-only provenance can legitimately have no previewable ACMD
+            // category, but its typed donor lines still make it a reusable move source.
+            self.move_source_cache.insert(key, snapshot.clone());
+        }
 
+        if let Some(snapshot) = snapshot.filter(|snapshot| !snapshot.body.is_empty()) {
+            let fighter = self
+                .state
+                .selected_fighter
+                .and_then(|i| self.state.fighters.get(i))
+                .map(|fighter| fighter.name.clone());
+            if let Some(fighter) = fighter {
+                let move_name = self
+                    .state
+                    .selected_move
+                    .as_ref()
+                    .map(|move_entry| move_entry.name.clone())
+                    .unwrap_or_default();
+                self.apply_acmd_body(
+                    &fighter,
+                    &move_name,
+                    Ok(snapshot.body),
+                    if snapshot_label.is_empty() {
+                        "Saved source"
+                    } else {
+                        snapshot_label
+                    },
+                );
+                if snapshot_label == "Current source" {
+                    self.rebase_current_edit_record();
+                }
+                self.refresh_current_live_rules();
+                return;
+            }
+        }
+        if let Some(snapshot) = self
+            .current_move_key()
+            .and_then(|key| self.move_source_cache.get(&key))
+            .filter(|snapshot| !snapshot.captures.is_empty())
+            .cloned()
+        {
+            if snapshot.body.is_empty() {
+                self.load_from_capture();
+                return;
+            }
+        }
         // A linked project's spans can move whenever the user edits it outside Visionary.
-        // Rebuild before reading the new move, then use the ordinary cache-first fetch path for
-        // both project and vanilla sources. Saved edits are keyed by fighter/move and are
-        // reapplied by `apply_acmd_body` when this load finishes.
-        self.refresh_linked_acmd_source_index();
+        // The ordinary source path remains the fallback for moves with no remembered snapshot.
         self.fetch_acmd();
     }
 
@@ -3485,6 +3741,13 @@ impl VisionaryApp {
     /// against the disk cache and the result is applied on the UI thread in
     /// [`Self::poll_acmd_fetch`].
     fn fetch_acmd(&mut self) {
+        if self.source_mismatch_prompt.is_some() {
+            return;
+        }
+        // The explicit refresh button can be clicked in the same frame as a panel edit. Keep the
+        // edited record current before a mismatch prompt or the eventual source apply rebuilds
+        // the visible move from its keyed maps.
+        self.commit_current_edits();
         let (fighter_name, move_name) = match (
             self.state
                 .selected_fighter
@@ -3524,7 +3787,12 @@ impl VisionaryApp {
                 self.fetching_acmd = false;
                 let body =
                     crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror);
-                self.apply_acmd_body(&fighter_name, &move_name, Ok(body), "Project source");
+                self.apply_fetched_body_with_mismatch(
+                    &fighter_name,
+                    &move_name,
+                    body,
+                    "Project source",
+                );
                 return;
             }
             // Cold cache and a partial override: the fetch below runs as it would for an
@@ -3544,6 +3812,52 @@ impl VisionaryApp {
             ctx.request_repaint();
         });
         self.acmd_receiver = Some(rx);
+    }
+
+    /// Apply a freshly resolved source body, or stop at the mismatch prompt if this move already
+    /// has a saved baseline. Initial navigation uses `activate_move` and therefore never reaches
+    /// this path for a remembered snapshot; reaching it means the user explicitly requested a
+    /// source refresh.
+    fn apply_fetched_body_with_mismatch(
+        &mut self,
+        fighter: &str,
+        move_name: &str,
+        body: String,
+        source_label: &str,
+    ) {
+        let key = Self::move_key(fighter, move_name);
+        if let Some(saved) = self.move_source_cache.get(&key).cloned() {
+            if saved.body != body {
+                let Some(move_entry) = self
+                    .state
+                    .selected_move
+                    .clone()
+                    .filter(|entry| entry.name == move_name)
+                else {
+                    return;
+                };
+                let motion = hash40::hash40(&move_name.to_lowercase()).0;
+                let captures = self.captures_for_move(fighter, motion);
+                let captures = if captures.is_empty() {
+                    saved
+                        .captures
+                        .iter()
+                        .filter(|capture| capture.motion == motion)
+                        .cloned()
+                        .collect()
+                } else {
+                    captures
+                };
+                self.source_mismatch_prompt = Some(PendingMoveSourceMismatch {
+                    fighter: fighter.to_string(),
+                    move_entry,
+                    saved,
+                    current: crate::mod_project::MoveSourceSnapshot { body, captures },
+                });
+                return;
+            }
+        }
+        self.apply_acmd_body(fighter, move_name, Ok(body), source_label);
     }
 
     // ── Linked ACMD source project ────────────────────────────────────────────
@@ -5358,7 +5672,11 @@ impl VisionaryApp {
         }
 
         let (body, label) = merge_fetched_body(self.pending_project_script.take(), body);
-        self.apply_acmd_body(&fighter_name, &move_name, body, label);
+        if let Ok(body) = body {
+            self.apply_fetched_body_with_mismatch(&fighter_name, &move_name, body, label);
+        } else {
+            self.apply_acmd_body(&fighter_name, &move_name, body, label);
+        }
     }
 
     /// Put both fetch paths on the first frame where the move actually shows something.
@@ -5433,11 +5751,15 @@ impl VisionaryApp {
     ) {
         match body {
             Ok(body) => {
+                // Keep the exact merged, unedited body as the move's persistent baseline. The
+                // keyed edit maps below are applied after parsing and must never become the
+                // source snapshot themselves.
+                self.remember_move_source_body(fighter_name, move_name, body.clone());
                 // A fresh mirror fetch replaces the live snapshot for this move, so any
                 // branch warning from that snapshot is no longer applicable. Project-source
                 // loads deliberately retain a saved note, allowing an exported project to
                 // preserve the provenance it was created from.
-                if source_label == "GitHub" {
+                if matches!(source_label, "GitHub" | "Current source") {
                     self.state
                         .capture_branch_warnings
                         .remove(&format!("{fighter_name}/{move_name}"));
@@ -5459,6 +5781,10 @@ impl VisionaryApp {
                 // write-back diffs against. A saved edit replaces what is *shown*, never that
                 // baseline: it has to keep meaning "what the file says" rather than "what was on
                 // screen last time".
+                let has_any_source_category = !script.stmts.is_empty()
+                    || !effect_script.stmts.is_empty()
+                    || !sound_script.stmts.is_empty()
+                    || !expression_script.stmts.is_empty();
                 self.state.sound_script = sound_script;
                 self.state.loaded_body = body.clone();
                 self.apply_saved_sound_edits_to_current();
@@ -5470,7 +5796,11 @@ impl VisionaryApp {
                 // collision list as unavailable only when the parser found no game statements
                 // at all; otherwise the same script must remain the source for the sidebar,
                 // timeline, export, and live rules.
-                if hitboxes.is_empty() && !effects_only && script.stmts.is_empty() {
+                if hitboxes.is_empty()
+                    && !effects_only
+                    && script.stmts.is_empty()
+                    && !has_any_source_category
+                {
                     self.acmd_error = Some(format!(
                         "No hitboxes found for {}/{}",
                         fighter_name, move_name
@@ -6664,6 +6994,44 @@ impl VisionaryApp {
         );
     }
 
+    /// When the user explicitly chooses a newer source body, keep the edited payload but make
+    /// the newly parsed collision list the baseline exported with the next project save.
+    fn rebase_current_edit_record(&mut self) {
+        let Some((fighter, move_name)) = self.current_move_key().and_then(|key| {
+            key.split_once('/')
+                .map(|(fighter, move_name)| (fighter.to_string(), move_name.to_string()))
+        }) else {
+            return;
+        };
+        if let Some(record) = self
+            .state
+            .edit_log
+            .entries
+            .get_mut(&fighter)
+            .and_then(|moves| moves.get_mut(&move_name))
+        {
+            record.hitboxes_pristine = self.state.hitboxes_pristine.clone();
+        }
+        // Effect edits keep a pristine copy for export/source diagnostics as well as their
+        // index. Rebase that side of each positional edit to the newly selected source while
+        // leaving the user's edited call in `op` untouched. Additions have no source donor.
+        let effect_pristine = self.state.effects_pristine.clone();
+        if let Some(edits) = self
+            .state
+            .effect_call_edits
+            .get_mut(&Self::move_key(&fighter, &move_name))
+        {
+            for edit in edits {
+                edit.pristine = match &edit.op {
+                    crate::data::EffectCallOp::Modify(_) | crate::data::EffectCallOp::Remove => {
+                        effect_pristine.get(edit.index).cloned()
+                    }
+                    crate::data::EffectCallOp::Add(_) => None,
+                };
+            }
+        }
+    }
+
     fn draw_left_panel(&mut self, ui: &mut Ui) {
         if self.state.data_root.is_none() {
             ui.add(
@@ -6976,6 +7344,7 @@ impl VisionaryApp {
                     .clicked()
                 {
                     self.game_link.clear_captures();
+                    self.forget_current_move_capture();
                     self.state.status = "Cleared the live capture — perform the move again \
                                          to record a clean run."
                         .into();
@@ -8609,6 +8978,12 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 || partial_unrepresentable > 0 {
+            if unrepresentable > 0 {
+                self.note_live_replay_capture_limit("expression");
+            }
+            if partial_unrepresentable > 0 {
+                self.note_live_replay_capture_limit("expression partial rate");
+            }
             self.state.status = format!(
                 "Expression edit staged, but {unrepresentable} camera/rumble and {partial_unrepresentable} partial-rate call(s) need a safe live identity or numeric/hash value"
             );
@@ -12712,6 +13087,10 @@ impl VisionaryApp {
 
     /// Key for `effect_call_edits`: fighter-scoped so moves with the same name on
     /// different fighters don't collide ("mario/attack_air_n").
+    fn move_key(fighter: &str, move_name: &str) -> String {
+        format!("{fighter}/{move_name}")
+    }
+
     fn current_move_key(&self) -> Option<String> {
         let fighter = self
             .state
@@ -12719,7 +13098,106 @@ impl VisionaryApp {
             .and_then(|i| self.state.fighters.get(i))
             .map(|f| f.name.clone())?;
         let mv = self.state.selected_move.as_ref()?.name.clone();
-        Some(format!("{fighter}/{mv}"))
+        Some(Self::move_key(&fighter, &mv))
+    }
+
+    fn remember_move_source_body(&mut self, fighter: &str, move_name: &str, body: String) {
+        let key = Self::move_key(fighter, move_name);
+        let captures = self
+            .move_source_cache
+            .get(&key)
+            .map(|snapshot| snapshot.captures.clone())
+            .unwrap_or_default();
+        self.move_source_cache.insert(
+            key,
+            crate::mod_project::MoveSourceSnapshot { body, captures },
+        );
+    }
+
+    fn remember_move_source_snapshot(
+        &mut self,
+        fighter: &str,
+        move_name: &str,
+        body: String,
+        captures: Vec<crate::game_link::CaptureLine>,
+    ) {
+        self.move_source_cache.insert(
+            Self::move_key(fighter, move_name),
+            crate::mod_project::MoveSourceSnapshot { body, captures },
+        );
+    }
+
+    fn remember_current_move_captures(
+        &mut self,
+        body_if_missing: Option<String>,
+        captures: Vec<crate::game_link::CaptureLine>,
+    ) {
+        let Some((fighter, move_name)) = self
+            .state
+            .selected_fighter
+            .and_then(|i| self.state.fighters.get(i))
+            .map(|fighter| fighter.name.clone())
+            .zip(self.state.selected_move.as_ref().map(|mv| mv.name.clone()))
+        else {
+            return;
+        };
+        let key = Self::move_key(&fighter, &move_name);
+        let body = body_if_missing
+            .or_else(|| self.move_source_cache.get(&key).map(|s| s.body.clone()))
+            .unwrap_or_default();
+        self.remember_move_source_snapshot(&fighter, &move_name, body, captures);
+    }
+
+    /// Return the merged source body when every required input is already local. This is used
+    /// for mismatch detection; normal move navigation never performs a network request merely to
+    /// compare a saved project snapshot.
+    fn warm_source_body(&self, fighter: &str, move_name: &str) -> Option<(String, &'static str)> {
+        if let Some(project) = self
+            .acmd_src
+            .as_ref()
+            .and_then(|index| index.script_source(fighter, move_name))
+        {
+            let mirror = if project.needs_mirror() {
+                crate::acmd::cached_script_body(fighter, move_name)
+            } else {
+                Some(String::new())
+            }?;
+            return Some((
+                crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror),
+                "Project source",
+            ));
+        }
+        crate::acmd::cached_script_body(fighter, move_name)
+            .filter(|body| !body.is_empty())
+            .map(|body| (body, "GitHub"))
+    }
+
+    fn capture_snapshot_body(
+        move_name: &str,
+        script: &crate::data::AcmdScript,
+        effects: &[crate::data::EffectCall],
+        sound: &crate::data::AcmdScript,
+        expression: &crate::data::AcmdScript,
+    ) -> String {
+        let mut sections = Vec::new();
+        if !script.stmts.is_empty() {
+            sections.push(crate::acmd::preview_game_fn(script, move_name));
+        }
+        if !effects.is_empty() {
+            sections.push(crate::acmd::preview_effect_fn(
+                effects,
+                move_name,
+                &[],
+                &Default::default(),
+            ));
+        }
+        if !sound.stmts.is_empty() {
+            sections.push(crate::acmd::preview_sound_fn(sound, move_name));
+        }
+        if !expression.stmts.is_empty() {
+            sections.push(crate::acmd::preview_expression_fn(expression, move_name));
+        }
+        sections.join("\n")
     }
 
     fn json_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
@@ -12896,6 +13374,7 @@ impl VisionaryApp {
         self.push_motion_module_set_rate_rules();
         self.push_motion_module_set_helper_calculation_rules();
         self.push_motion_module_set_rate_partial_rules();
+        self.push_expression_motion_module_set_rate_partial_rules();
         self.push_clr_speed_rules();
         self.push_set_air_rules();
         self.push_change_kinetic_rules();
@@ -12908,6 +13387,323 @@ impl VisionaryApp {
         self.push_kinetic_clear_speed_all_rules();
         self.push_kinetic_set_consider_ground_friction_rules();
         self.push_effect_rules();
+    }
+
+    fn note_live_replay_capture_limit(&mut self, category: &str) {
+        if !self.rebuilding_project_live {
+            return;
+        }
+        if let Some(key) = self.current_move_key() {
+            self.replay_missing_capture
+                .insert(format!("{key} {category}"));
+        }
+    }
+
+    fn note_live_replay_constant_limit(&mut self, category: &str) {
+        if !self.rebuilding_project_live {
+            return;
+        }
+        if let Some(key) = self.current_move_key() {
+            self.replay_missing_constant
+                .insert(format!("{key} {category}"));
+        }
+    }
+
+    /// Materialize one persisted move without consulting the currently selected move. This is
+    /// the boundary between project data and the stateful live-rule builders below it.
+    fn materialize_move_replay_context(
+        &self,
+        fighter: &str,
+        move_name: &str,
+        source: &crate::mod_project::MoveSourceSnapshot,
+    ) -> Option<MoveReplayContext> {
+        if fighter.is_empty() || move_name.is_empty() {
+            return None;
+        }
+        let key = Self::move_key(fighter, move_name);
+        let game_pristine = crate::acmd::parse_acmd_script(&source.body);
+        let mut hitboxes_pristine = game_pristine.to_hitboxes();
+        self.normalize_hitbox_bones(&mut hitboxes_pristine);
+        let effect_pristine = crate::acmd::parse_effect_script(&source.body)
+            .to_effect_calls()
+            .into_iter()
+            .map(crate::data::EffectCall::normalized_timing)
+            .collect::<Vec<_>>();
+        let sound_pristine = crate::acmd::parse_sound_script(&source.body);
+        let expression_pristine = crate::acmd::parse_expression_script(&source.body);
+        let sound = resolve_sound_state(
+            &sound_pristine,
+            self.state.sound_script_edits.get(&key).cloned(),
+        )
+        .0;
+        let expression = resolve_expression_state(
+            &expression_pristine,
+            self.state.expression_script_edits.get(&key).cloned(),
+        )
+        .0;
+        let effects = self
+            .state
+            .effect_call_full
+            .get(&key)
+            .cloned()
+            .map(|calls| {
+                calls
+                    .into_iter()
+                    .map(crate::data::EffectCall::normalized_timing)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                materialize_effect_calls(
+                    &effect_pristine,
+                    self.state.effect_call_edits.get(&key).map(Vec::as_slice),
+                )
+            });
+        let record = self
+            .state
+            .edit_log
+            .entries
+            .get(fighter)
+            .and_then(|moves| moves.get(move_name));
+        let game = record
+            .map(|record| record.script.clone())
+            .unwrap_or_else(|| game_pristine.clone());
+        let hitboxes = record
+            .map(|record| record.hitboxes.clone())
+            .unwrap_or_else(|| hitboxes_pristine.clone());
+        let motion = hash40::hash40(&move_name.to_lowercase()).0;
+        let captures = source
+            .captures
+            .iter()
+            .filter(|capture| capture.motion == motion)
+            .cloned()
+            .collect();
+        Some(MoveReplayContext {
+            fighter: fighter.to_string(),
+            move_name: move_name.to_string(),
+            motion,
+            source: source.clone(),
+            captures,
+            game_pristine,
+            game,
+            hitboxes_pristine,
+            hitboxes,
+            effects_pristine: effect_pristine,
+            effects,
+            sound_pristine,
+            sound,
+            expression_pristine,
+            expression,
+        })
+    }
+
+    /// Apply an already materialized context through the ordinary source loader, then install
+    /// its pre-resolved category values. The second assignment is deliberately data-only: it
+    /// avoids a second source lookup while keeping the existing loader's error handling, source
+    /// notes, loss tracking, and rule-family baseline setup in one place.
+    fn apply_move_replay_context(&mut self, context: MoveReplayContext) {
+        let key = Self::move_key(&context.fighter, &context.move_name);
+        self.move_source_cache.insert(key, context.source.clone());
+        if context.source.body.is_empty() {
+            if !context.captures.is_empty() {
+                self.load_from_capture();
+            }
+            return;
+        }
+        self.apply_acmd_body(
+            &context.fighter,
+            &context.move_name,
+            Ok(context.source.body.clone()),
+            "Saved project source",
+        );
+        // `apply_acmd_body` has already established these same values, but using the context
+        // here makes the project-wide path independent of whichever move happened to be open
+        // before loading and keeps every persisted edit category in one materialization unit.
+        self.state.set_script(context.game_pristine);
+        self.state.script = context.game;
+        self.state.hitboxes_pristine = context.hitboxes_pristine;
+        self.state.hitboxes = context.hitboxes;
+        self.state.effects_pristine = context.effects_pristine;
+        self.state.effects = context.effects;
+        self.state.sound_script = context.sound;
+        self.state.sounds_pristine = context.sound_pristine.to_sound_events();
+        self.state.sounds = self.state.sound_script.to_sound_events();
+        self.state.expression_script = context.expression;
+        self.state.expressions_pristine = context.expression_pristine.to_expression_events();
+        self.state.expressions = self.state.expression_script.to_expression_events();
+        self.state
+            .expression_motion_module_set_rate_partial_pristine = context
+            .expression_pristine
+            .to_motion_module_set_rate_partial_events();
+    }
+
+    /// Rehydrate every move represented by a loaded project through the same source parser and
+    /// rule builders used for normal navigation. The temporary selection is intentional: the
+    /// existing builders all take their identity and capture set from the current move, while
+    /// their keyed stores keep the resulting rules alive after the next iteration.
+    fn rebuild_all_saved_live_rules(&mut self) -> LiveApplyReport {
+        let selected = (
+            self.state.selected_fighter,
+            self.state.selected_move.clone(),
+        );
+        let mut keys = BTreeSet::new();
+        keys.extend(self.move_source_cache.keys().cloned());
+        keys.extend(self.state.effect_call_edits.keys().cloned());
+        keys.extend(self.state.effect_call_full.keys().cloned());
+        keys.extend(self.state.sound_script_edits.keys().cloned());
+        keys.extend(self.state.expression_script_edits.keys().cloned());
+        keys.extend(
+            self.state
+                .edit_log
+                .entries
+                .iter()
+                .flat_map(|(fighter, moves)| {
+                    moves
+                        .keys()
+                        .map(move |move_name| Self::move_key(fighter, move_name))
+                }),
+        );
+
+        self.hitbox_rules_store.clear();
+        self.effect_rules_store.clear();
+        self.effect_control_rules_store.clear();
+        self.replay_missing_capture.clear();
+        self.replay_missing_constant.clear();
+        self.replay_live_fallback_key = selected.0.and_then(|fighter_index| {
+            selected.1.as_ref().and_then(|move_entry| {
+                self.state
+                    .fighters
+                    .get(fighter_index)
+                    .map(|fighter| Self::move_key(&fighter.name, &move_entry.name))
+            })
+        });
+        self.rebuilding_project_live = true;
+        self.game_link.begin_rule_batch();
+        let mut report = LiveApplyReport::default();
+
+        for key in keys {
+            let Some((fighter, move_name)) = key.split_once('/') else {
+                continue;
+            };
+            let Some(fighter_index) = self
+                .state
+                .fighters
+                .iter()
+                .position(|entry| entry.name.eq_ignore_ascii_case(fighter))
+            else {
+                report.missing_fighter.insert(fighter.to_string());
+                continue;
+            };
+            let Some(snapshot) = self.move_source_cache.get(&key).cloned() else {
+                report.missing_source.insert(key);
+                continue;
+            };
+            let Some(context) = self.materialize_move_replay_context(fighter, move_name, &snapshot)
+            else {
+                report.missing_source.insert(key);
+                continue;
+            };
+            self.state.selected_fighter = Some(fighter_index);
+            self.state.selected_move = Some(MoveEntry {
+                name: move_name.to_string(),
+                hash: context.motion,
+                frame_count: 0,
+                anim_path: None,
+            });
+            clear_move_state(&mut self.state);
+            if context.source.body.is_empty() && context.captures.is_empty() {
+                report.missing_source.insert(key);
+                continue;
+            }
+            self.apply_move_replay_context(context);
+            // `apply_acmd_body` handles the common game/effect path. Calling the aggregate once
+            // more also covers sound/expression-only moves and the less common point families.
+            self.refresh_current_live_rules();
+            self.push_motion_rate_rules();
+            let effect_limits = self.push_effect_rules();
+            if effect_limits.missing_capture_donor {
+                report.missing_capture_donor.insert(format!("{key} effect"));
+            }
+            if effect_limits.missing_runtime_constant {
+                report
+                    .missing_runtime_constant
+                    .insert(format!("{key} effect"));
+            }
+            report.restored_moves += 1;
+        }
+
+        // The record-based hitbox rebuild also covers legacy records whose source snapshot was
+        // absent, while the per-move pass above supplies the persisted capture donors for new
+        // and retimed calls.
+        for key in self.push_all_saved_hitbox_rules() {
+            report
+                .missing_capture_donor
+                .insert(format!("{key} collision"));
+        }
+
+        if let (Some(fighter_index), Some(move_entry)) = selected {
+            if self.state.fighters.get(fighter_index).is_some() {
+                self.state.selected_fighter = Some(fighter_index);
+                let key = self
+                    .state
+                    .fighters
+                    .get(fighter_index)
+                    .map(|fighter| Self::move_key(&fighter.name, &move_entry.name));
+                self.state.selected_move = Some(move_entry);
+                clear_move_state(&mut self.state);
+                if let Some(key) = key {
+                    if let Some(snapshot) = self.move_source_cache.get(&key).cloned() {
+                        let fighter = key.split('/').next().unwrap_or_default();
+                        let move_name = key.split('/').nth(1).unwrap_or_default();
+                        if let Some(context) =
+                            self.materialize_move_replay_context(fighter, move_name, &snapshot)
+                        {
+                            if !context.source.body.is_empty() || !context.captures.is_empty() {
+                                self.apply_move_replay_context(context);
+                                self.refresh_current_live_rules();
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            self.state.selected_move = None;
+            clear_move_state(&mut self.state);
+        }
+
+        self.rebuilding_project_live = false;
+        self.replay_live_fallback_key = None;
+        report
+            .missing_capture_donor
+            .extend(std::mem::take(&mut self.replay_missing_capture));
+        report
+            .missing_runtime_constant
+            .extend(std::mem::take(&mut self.replay_missing_constant));
+
+        // Every pusher normally sends as it updates its keyed store. These final sends guarantee
+        // the complete union is present after the last move has been materialized.
+        let hitboxes: Vec<_> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let effects: Vec<_> = self
+            .effect_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let controls: Vec<_> = self
+            .effect_control_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.end_rule_batch();
+        self.game_link.send_hitbox_rules(&hitboxes);
+        self.game_link.send_spawn_rules(&effects);
+        self.game_link.send_effect_control_rules(&controls);
+        report
     }
 
     fn queue_history_action(&mut self, action: HistoryAction) {
@@ -13231,26 +14027,18 @@ impl VisionaryApp {
         let Some(mv) = self.current_move_key() else {
             return;
         };
+        if let Some(full) = self.state.effect_call_full.get(&mv) {
+            self.state.effects = full
+                .iter()
+                .cloned()
+                .map(crate::data::EffectCall::normalized_timing)
+                .collect();
+            return;
+        }
         let Some(edits) = self.state.effect_call_edits.get(&mv) else {
             return;
         };
-        for edit in edits {
-            match &edit.op {
-                crate::data::EffectCallOp::Modify(call) => {
-                    if let Some(slot) = self.state.effects.get_mut(edit.index) {
-                        *slot = call.clone().normalized_timing();
-                    }
-                }
-                crate::data::EffectCallOp::Add(call) => {
-                    self.state.effects.push(call.clone().normalized_timing());
-                }
-                crate::data::EffectCallOp::Remove => {
-                    if let Some(slot) = self.state.effects.get_mut(edit.index) {
-                        slot.disabled = true;
-                    }
-                }
-            }
-        }
+        self.state.effects = materialize_effect_calls(&self.state.effects_pristine, Some(edits));
     }
 
     /// Repair legacy one-shot ranges in every persisted effect snapshot before it is saved or
@@ -13400,6 +14188,9 @@ impl VisionaryApp {
 
     fn build_project(&mut self) -> crate::mod_project::ModProjectFile {
         use crate::mod_project::ModProjectFile;
+        // Export can happen in the same frame as the last panel edit. Commit the current
+        // collision/script surface before collecting the keyed project maps.
+        self.commit_current_edits();
         self.normalize_effect_call_storage();
         self.sync_eff_mods_from_editor();
         let mut project = ModProjectFile {
@@ -13469,6 +14260,20 @@ impl VisionaryApp {
                 .or_default()
                 .expression_scripts
                 .insert(mv.to_string(), script.clone());
+        }
+        // Keep every source visited during the session. `ModProjectFile::is_empty` deliberately
+        // ignores this provenance-only field, so browsing without edits still does not create a
+        // mod, while an edited project can be reopened without fetching any visited move again.
+        for (key, snapshot) in &self.move_source_cache {
+            let Some((fighter, move_name)) = key.split_once('/') else {
+                continue;
+            };
+            project
+                .fighters
+                .entry(fighter.to_string())
+                .or_default()
+                .move_sources
+                .insert(move_name.to_string(), snapshot.clone());
         }
         for (fighter, eff) in &self.eff_mods {
             if eff.is_empty() {
@@ -13803,6 +14608,10 @@ impl VisionaryApp {
         self.state.sound_script_edits.clear();
         self.state.expression_script_edits.clear();
         self.state.capture_branch_warnings.clear();
+        self.move_source_cache.clear();
+        self.source_mismatch_prompt = None;
+        self.rebuilding_project_live = false;
+        self.replay_live_fallback_key = None;
         self.eff_mods.clear();
         self.live_overrides = crate::game_link::LiveOverrides::default();
         self.state.hitboxes = self.state.hitboxes_pristine.clone();
@@ -13817,9 +14626,41 @@ impl VisionaryApp {
         let mut n_calls = 0;
         let mut n_eff = 0;
         for (fighter, mut fm) in project.fighters {
+            for (move_name, snapshot) in &fm.move_sources {
+                self.move_source_cache
+                    .insert(Self::move_key(&fighter, move_name), snapshot.clone());
+            }
             for (move_name, record) in &mut fm.acmd {
+                // Version-1 projects have no provenance field. If a linked or disk-cached body
+                // is already available, promote that local source into the session cache so a
+                // legacy edit can still be replayed live; an unavailable body remains an
+                // explicit source-only limitation in LiveApplyReport.
+                let local_body = if !fm.move_sources.contains_key(move_name) {
+                    self.warm_source_body(&fighter, move_name)
+                        .map(|(body, _)| body)
+                        .filter(|body| !body.is_empty())
+                        .or_else(|| crate::acmd::cached_script_body(&fighter, move_name))
+                } else {
+                    None
+                };
+                if let Some(body) = local_body.clone() {
+                    self.move_source_cache.insert(
+                        Self::move_key(&fighter, move_name),
+                        crate::mod_project::MoveSourceSnapshot {
+                            body,
+                            ..Default::default()
+                        },
+                    );
+                }
                 if record.hitboxes_pristine.is_empty() {
-                    if let Some(body) = crate::acmd::cached_script_body(&fighter, move_name) {
+                    let body = fm
+                        .move_sources
+                        .get(move_name)
+                        .map(|snapshot| snapshot.body.clone())
+                        .filter(|body| !body.is_empty())
+                        .or_else(|| local_body.clone())
+                        .or_else(|| crate::acmd::cached_script_body(&fighter, move_name));
+                    if let Some(body) = body {
                         record.hitboxes_pristine =
                             crate::acmd::parse_acmd_script(&body).to_hitboxes();
                     }
@@ -13911,36 +14752,12 @@ impl VisionaryApp {
             }
         }
 
-        // Re-apply to what's currently loaded and push it live.
+        // Re-apply every saved move through the normal parser/rule path and push the complete
+        // keyed union live. This no longer depends on whichever move happened to be selected
+        // when the JSON was opened.
         self.normalize_effect_call_storage();
-        self.apply_saved_hitbox_edits_to_current();
-        self.apply_effect_call_edits_to_current();
-        self.push_hitbox_rules();
-        self.push_hurtbox_rules();
-        self.push_reverse_lr_rules();
-        self.push_speed_rules();
-        self.push_speed_ex_rules();
-        self.push_add_speed_no_limit_rules();
-        self.push_correct_rules();
-        self.push_ft_catch_stop_rules();
-        self.push_ft_start_adjust_motion_frame_rules();
-        self.push_motion_module_set_rate_rules();
-        self.push_motion_module_set_helper_calculation_rules();
-        self.push_motion_module_set_rate_partial_rules();
-        self.push_expression_rules();
-        self.push_clr_speed_rules();
-        self.push_set_air_rules();
-        self.push_change_kinetic_rules();
-        self.push_kinetic_energy_rules();
-        self.push_kinetic_add_speed_rules();
-        self.push_work_flag_rules();
-        self.push_work_transition_term_rules();
-        self.push_work_module_inc_int_rules();
-        self.push_work_module_set_rules();
-        self.push_kinetic_clear_speed_all_rules();
-        self.push_kinetic_set_consider_ground_friction_rules();
-        let pending_hitbox_live = self.push_all_saved_hitbox_rules();
-        self.push_effect_rules();
+        let live_report = self.rebuild_all_saved_live_rules();
+        self.live_overrides.flush_all(&self.game_link);
         self.push_effect_aliases();
         // Rebuild merged views for every fighter with transplant ops so the eff editor and
         // viewport show them (character-centric overlays survive project reloads).
@@ -13953,6 +14770,22 @@ impl VisionaryApp {
         for f in slotted {
             self.build_merged_preview(&f);
         }
+        // A loaded project is an explicit live restore: stage every authored/transplanted EFF,
+        // not only the currently open editor file. The carrier still controls what can be
+        // observed mid-match; these merged files are the safe next-entry path.
+        let deployable: Vec<String> = self
+            .eff_mods
+            .iter()
+            .filter(|(_, eff)| !eff.is_empty())
+            .map(|(fighter, _)| fighter.clone())
+            .collect();
+        for fighter in deployable {
+            self.deploy_live_eff(&fighter);
+        }
+        // Loading is synchronous from the editor's point of view. Publish the coalesced carrier
+        // aliases now rather than waiting for the next egui frame, so restored effect redirects
+        // and previews are available together with the staged merged files.
+        self.flush_effect_aliases();
         if let Some(fighter) = self
             .state
             .selected_fighter
@@ -13977,11 +14810,7 @@ impl VisionaryApp {
             "Project '{}' loaded: {n_acmd} move edit(s), {n_calls} effect-call edit(s), {n_eff} eff edit(s)",
             self.project_name
         );
-        if pending_hitbox_live > 0 {
-            self.state.status.push_str(&format!(
-                " — {pending_hitbox_live} hitbox change(s) need the move opened or performed once for live preview"
-            ));
-        }
+        self.state.status.push_str(&live_report.status_suffix());
     }
 
     /// "Game has existing edits" prompt: the plugin persists pins across sessions, so a
@@ -14089,6 +14918,61 @@ impl VisionaryApp {
             }
             Some("ignore") => {
                 self.pin_sync_prompt = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolve a source change without discarding the move that is currently on screen. A
+    /// project snapshot is the exact baseline used when its edits were authored; choosing the
+    /// current source deliberately keeps those edited values but rebases their pristine side.
+    fn draw_source_mismatch_modal(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.source_mismatch_prompt.clone() else {
+            return;
+        };
+        let mut choice = None;
+        egui::Window::new("Move source changed")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "The available source for {}/{} differs from the saved project snapshot.",
+                    prompt.fighter, prompt.move_entry.name
+                ));
+                ui.add_space(4.0);
+                ui.label(
+                    "Saved edits can be restored against the exported source, or kept while the \
+                     newer source becomes the new pristine baseline.",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Use saved project data").clicked() {
+                        choice = Some("saved");
+                    }
+                    if ui.button("Use current source").clicked() {
+                        choice = Some("current");
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some("cancel");
+                    }
+                });
+            });
+        let Some(choice) = choice else {
+            return;
+        };
+        // The modal keeps the old move visible, so a user can still finish a drag or source edit
+        // before deciding. Commit that last frame before either source choice clears/rebuilds it.
+        self.commit_current_edits();
+        self.source_mismatch_prompt = None;
+        match choice {
+            "saved" => self.activate_move(
+                prompt.move_entry,
+                Some(prompt.saved),
+                "Saved project source",
+            ),
+            "current" => {
+                self.activate_move(prompt.move_entry, Some(prompt.current), "Current source")
             }
             _ => {}
         }
@@ -14422,7 +15306,43 @@ impl VisionaryApp {
     ///   * run — the plugin tags each playback, and only the newest is loaded. Without it,
     ///     performing a move grounded and then aerial left the union of both branches and the
     ///     editor showed spawns that never occur together.
+    fn captures_for_move(&self, fighter: &str, motion: u64) -> Vec<crate::game_link::CaptureLine> {
+        self.game_link
+            .latest_run_for(motion, fighter_kind_id(fighter))
+    }
+
+    /// Forget the persisted donor for the current move as well as the plugin's in-memory
+    /// capture. A source-backed move keeps its source body; a capture-only move drops the whole
+    /// remembered snapshot so the next navigation can resolve a real source or wait for a fresh
+    /// performance instead of silently reusing the discarded capture-derived body.
+    fn forget_current_move_capture(&mut self) {
+        let Some(key) = self.current_move_key() else {
+            return;
+        };
+        if self.state.acmd_source == "Live capture" {
+            self.move_source_cache.remove(&key);
+        } else if let Some(snapshot) = self.move_source_cache.get_mut(&key) {
+            snapshot.captures.clear();
+        }
+    }
+
     fn captures_for_selected_fighter(&self, motion: u64) -> Vec<crate::game_link::CaptureLine> {
+        if let Some(key) = self.current_move_key() {
+            if let Some(snapshot) = self.move_source_cache.get(&key) {
+                let captures: Vec<_> = snapshot
+                    .captures
+                    .iter()
+                    .filter(|capture| capture.motion == motion)
+                    .cloned()
+                    .collect();
+                if !captures.is_empty()
+                    || (self.rebuilding_project_live
+                        && self.replay_live_fallback_key.as_deref() != Some(key.as_str()))
+                {
+                    return captures;
+                }
+            }
+        }
         self.game_link
             .latest_run_for(motion, self.current_fighter_kind())
     }
@@ -14574,7 +15494,22 @@ impl VisionaryApp {
         let Some(motion) = self.current_motion_hash() else {
             return;
         };
-        let captures = self.captures_for_selected_fighter(motion);
+        // An explicit Live refresh must adopt the newest plugin run even when this move already
+        // has an exported donor snapshot. During project-wide replay the stored donor is the
+        // authoritative source for non-selected moves, so only the normal interactive path
+        // prefers a freshly observed run here.
+        let captures = if self.rebuilding_project_live {
+            self.captures_for_selected_fighter(motion)
+        } else {
+            let live = self
+                .game_link
+                .latest_run_for(motion, self.current_fighter_kind());
+            if live.is_empty() {
+                self.captures_for_selected_fighter(motion)
+            } else {
+                live
+            }
+        };
         if captures.is_empty() {
             self.state.status = "No live capture yet — perform the move in game first.".into();
             return;
@@ -14644,6 +15579,22 @@ impl VisionaryApp {
         let n_snd = captured_sounds.to_sound_events().len();
         let captured_expressions = Self::expression_script_from_captures(&captures);
         let n_expr = captured_expressions.to_expression_events().len();
+        let capture_body = self.state.selected_move.as_ref().map(|move_entry| {
+            Self::capture_snapshot_body(
+                &move_entry.name,
+                &hurt,
+                &effects,
+                &captured_sounds,
+                &captured_expressions,
+            )
+        });
+        let source_body_was_missing = self.state.loaded_body.is_empty();
+        self.remember_current_move_captures(
+            source_body_was_missing
+                .then_some(capture_body.clone())
+                .flatten(),
+            captures.clone(),
+        );
         let n_reverse_lr = hurt.to_reverse_lr_events().len();
         let n_speed_ex = hurt.to_speed_ex_events().len();
         let n_speed = hurt.to_speed_events().len();
@@ -14778,6 +15729,14 @@ impl VisionaryApp {
             self.state.selected_effect_call = None;
             self.apply_effect_call_edits_to_current();
             self.push_effect_rules();
+        }
+        // Do this after the source-adoption decision above. A synthesized capture body is a
+        // provenance snapshot, not a fetched source; setting it earlier would make the loader
+        // refuse to adopt the captured game script because it appeared to have a source body.
+        if source_body_was_missing {
+            if let Some(body) = capture_body.filter(|body| !body.is_empty()) {
+                self.state.loaded_body = body;
+            }
         }
         if can_adopt_live_script {
             self.state.acmd_source = "Live capture".into();
@@ -17524,6 +18483,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("SET_SPEED");
             self.state.status = format!(
                 "SET_SPEED edit staged, but {unrepresentable} point(s) need a live capture and an unambiguous frame"
             );
@@ -17643,6 +18603,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("SET_SPEED_EX");
             self.state.status = format!(
                 "SET_SPEED_EX edit staged, but {unrepresentable} point(s) need a numeric live capture or an unambiguous frame"
             );
@@ -17757,6 +18718,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("ADD_SPEED_NO_LIMIT");
             self.state.status = format!(
                 "ADD_SPEED_NO_LIMIT edit staged, but {unrepresentable} point(s) need a live capture and an unambiguous frame"
             );
@@ -17880,6 +18842,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("CORRECT");
             self.state.status = format!(
                 "CORRECT edit staged, but {unrepresentable} point(s) need a numeric live capture and numeric replacement kind"
             );
@@ -18007,6 +18970,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("FT_CATCH_STOP");
             self.state.status = format!(
                 "FT_CATCH_STOP edit staged, but {unrepresentable} point(s) need a numeric live capture and a unique argument pair"
             );
@@ -18128,6 +19092,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("FT_START_ADJUST_MOTION_FRAME_arg1");
             self.state.status = format!(
                 "FT_START_ADJUST_MOTION_FRAME_arg1 edit staged, but {unrepresentable} point(s) need a numeric live capture and a unique value"
             );
@@ -18256,6 +19221,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("MotionModule::set_rate");
             self.state.status = format!(
                 "MotionModule::set_rate edit staged, but {unrepresentable} point(s) need a numeric live capture, a unique same-frame rate, and a positive live replacement"
             );
@@ -18381,6 +19347,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("MotionModule::set_helper_calculation");
             self.state.status = format!(
                 "MotionModule::set_helper_calculation edit staged, but {unrepresentable} point(s) need a boolean live capture and a unique same-frame value"
             );
@@ -18693,6 +19660,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("MotionModule::set_rate_partial");
             self.state.status = format!(
                 "MotionModule::set_rate_partial edit staged, but {unrepresentable} point(s) need a numeric part/rate live capture, a unique same-frame key, and a positive live replacement"
             );
@@ -18737,6 +19705,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("expression partial rate");
             self.state.status = format!(
                 "Expression partial-rate edit staged, but {unrepresentable} point(s) need an exact numeric part/rate capture, a unique same-frame native key, and a positive live replacement"
             );
@@ -18862,6 +19831,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("CLR_SPEED");
             self.state.status = format!(
                 "CLR_SPEED edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique frame/key"
             );
@@ -18988,6 +19958,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("change_kinetic");
             self.state.status = format!(
                 "change_kinetic edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique frame/key"
             );
@@ -19130,6 +20101,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("KineticModule energy");
             self.state.status = format!(
                 "KineticModule energy edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique frame/key"
             );
@@ -19265,6 +20237,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("KineticModule::add_speed");
             self.state.status = format!(
                 "KineticModule::add_speed edit staged, but {unrepresentable} point(s) need a unique zero-z live capture and unchanged frame"
             );
@@ -19397,6 +20370,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("WorkModule::inc_int");
             self.state.status = format!(
                 "WorkModule::inc_int edit staged, but {unrepresentable} point(s) need a numeric slot capture, a numeric replacement, and a unique same-frame slot key"
             );
@@ -19528,6 +20502,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("WorkModule flag");
             self.state.status = format!(
                 "WorkModule flag edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique same-frame operation/flag key"
             );
@@ -19666,6 +20641,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("WorkModule transition term");
             self.state.status = format!(
                 "WorkModule transition-term edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric replacement, and a unique same-frame operation/term key"
             );
@@ -19907,6 +20883,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("WorkModule value");
             self.state.status = format!(
                 "WorkModule value edit staged, but {unrepresentable} point(s) need a numeric live capture, a numeric value and slot replacement, and a unique same-frame operation/value/slot key"
             );
@@ -20352,6 +21329,7 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("set_consider_ground_friction");
             self.state.status = format!(
                 "set_consider_ground_friction edit staged, but {unrepresentable} point(s) need a numeric live capture/attribute for live rules"
             );
@@ -20428,7 +21406,7 @@ impl VisionaryApp {
     /// open in the UI. Projects written before `hitboxes_pristine` was added cannot safely
     /// derive suppress/retime rules; those moves are counted so the load status can tell the
     /// user to open or perform them once and recover a baseline.
-    fn push_all_saved_hitbox_rules(&mut self) -> usize {
+    fn push_all_saved_hitbox_rules(&mut self) -> BTreeSet<String> {
         let records: Vec<(String, String, crate::data::EditRecord)> = self
             .state
             .edit_log
@@ -20440,16 +21418,37 @@ impl VisionaryApp {
                 })
             })
             .collect();
-        let mut incomplete = 0;
+        let mut incomplete = BTreeSet::new();
         for (fighter, move_name, record) in records {
+            let key = Self::move_key(&fighter, &move_name);
             if record.hitboxes_pristine.is_empty() {
-                incomplete += 1;
+                incomplete.insert(key);
                 continue;
             }
             let motion = hash40::hash40(&move_name.to_lowercase()).0;
             let captures = self
-                .game_link
-                .latest_run_for(motion, fighter_kind_id(&fighter));
+                .move_source_cache
+                .get(&Self::move_key(&fighter, &move_name))
+                .map(|snapshot| {
+                    snapshot
+                        .captures
+                        .iter()
+                        .filter(|capture| capture.motion == motion)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .filter(|captures: &Vec<crate::game_link::CaptureLine>| !captures.is_empty())
+                .unwrap_or_else(|| {
+                    let key = Self::move_key(&fighter, &move_name);
+                    let allow_live = !self.rebuilding_project_live
+                        || self.replay_live_fallback_key.as_deref() == Some(key.as_str());
+                    if allow_live {
+                        self.game_link
+                            .latest_run_for(motion, fighter_kind_id(&fighter))
+                    } else {
+                        Vec::new()
+                    }
+                });
             let family_prefix = |category: u8| match category {
                 1 => "CATCH",
                 2 => "AREA_WIND",
@@ -20500,7 +21499,7 @@ impl VisionaryApp {
                             if !Self::append_wind_replacement_rules(
                                 &mut rules, motion, original, edited,
                             ) {
-                                incomplete += 1;
+                                incomplete.insert(key.clone());
                             }
                         } else {
                             let (frame_start, frame_end) =
@@ -20581,10 +21580,9 @@ impl VisionaryApp {
                         });
                     }
                 } else {
-                    incomplete += 1;
+                    incomplete.insert(key.clone());
                 }
             }
-            let key = format!("{fighter}/{move_name}");
             if rules.is_empty() {
                 self.hitbox_rules_store.remove(&key);
             } else {
@@ -23880,9 +24878,9 @@ impl VisionaryApp {
     /// script's values; a moved spawn gets a transform override; a RETIMED spawn is
     /// suppressed at its pristine frame and re-injected (from a live capture) at the new
     /// frame with its edited transform baked in. Only changed calls produce a rule.
-    fn push_effect_rules(&mut self) {
+    fn push_effect_rules(&mut self) -> LiveReplayLimits {
         let Some(mv_key) = self.current_move_key() else {
-            return;
+            return LiveReplayLimits::default();
         };
         let motion = self.current_motion_hash();
         let mut effects = self.state.effects.clone();
@@ -24301,6 +25299,13 @@ impl VisionaryApp {
                 "LAST_EFFECT_SET_WORK_INT keeps its authored Work ID in export/source; live \
                  preview cannot translate symbolic Work IDs or replay them safely after a retime."
                     .into();
+        }
+        if unsupported_control || unsupported_work_int {
+            self.note_live_replay_constant_limit("effect control/work value");
+        }
+        LiveReplayLimits {
+            missing_capture_donor: missing_capture || missing_control_capture,
+            missing_runtime_constant: unsupported_control || unsupported_work_int,
         }
     }
 
@@ -27396,6 +28401,7 @@ impl eframe::App for VisionaryApp {
             }
         }
         self.draw_pin_sync_modal(&ctx);
+        self.draw_source_mismatch_modal(&ctx);
         let t = self.perf.start();
         self.draw_transplant_studio(&ctx);
         self.perf.end("transplant_window", t);
@@ -29348,6 +30354,7 @@ fn clear_move_state(state: &mut crate::data::AppState) {
         .expression_motion_module_set_rate_partial_pristine
         .clear();
     state.acmd_source = String::new();
+    state.loaded_body.clear();
 }
 
 /// The status message for a capture that carried nothing this editor can show, or `None` to load.
@@ -31810,6 +32817,7 @@ mod live_effect_capture_tests {
             sounds: script.to_sound_events(),
             sounds_pristine: script.to_sound_events(),
             acmd_source: "Live capture".into(),
+            loaded_body: "previous move source".into(),
             ..Default::default()
         };
         // A field that belongs to the *fighter*, not the move, and must survive.
@@ -31857,6 +32865,7 @@ mod live_effect_capture_tests {
             "ft_start_adjust_motion_frame_pristine"
         );
         assert!(state.acmd_source.is_empty(), "acmd_source");
+        assert!(state.loaded_body.is_empty(), "loaded_body");
 
         // The fighter's own data is untouched — this is not `AppState::default()`.
         assert_eq!(

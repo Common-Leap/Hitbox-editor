@@ -363,7 +363,7 @@ pub fn integer_point_key(func: &str, args: &[i64]) -> u64 {
 }
 
 /// One captured ACMD call, as streamed by the plugin (`AcmdCapture`).
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CaptureLine {
     /// Fighter kind of the performing agent.
     pub kind: i32,
@@ -917,6 +917,20 @@ impl LiveOverrides {
         sent
     }
 
+    /// Send every restored/project entry immediately, bypassing the interactive debounce.
+    /// Project loading is an explicit state restore rather than a live drag, so waiting for a
+    /// timer would leave the game temporarily different from the loaded project.
+    pub fn flush_all(&mut self, link: &GameLink) -> usize {
+        let mut sent = 0;
+        for (hash, entry) in self.entries.iter_mut() {
+            if entry.dirty_at.take().is_some() {
+                link.send_modifier_edit(*hash, &entry.form, false);
+                sent += 1;
+            }
+        }
+        sent
+    }
+
     /// True while a debounced send is pending (keep repainting so it fires).
     pub fn any_dirty(&self) -> bool {
         self.entries.values().any(|e| e.dirty_at.is_some())
@@ -1118,6 +1132,7 @@ impl Default for Shared {
 pub struct GameLink {
     shared: Arc<Mutex<Shared>>,
     started: AtomicBool,
+    rule_send_suppressed: AtomicBool,
 }
 
 impl Default for GameLink {
@@ -1125,11 +1140,24 @@ impl Default for GameLink {
         Self {
             shared: Arc::new(Mutex::new(Shared::default())),
             started: AtomicBool::new(false),
+            rule_send_suppressed: AtomicBool::new(false),
         }
     }
 }
 
 impl GameLink {
+    /// Temporarily hold live rule replacements while a project is materialized. The editor
+    /// builds each move through the ordinary pushers, but the plugin must receive only the
+    /// final flattened replacement for each rule family.
+    pub fn begin_rule_batch(&self) {
+        self.rule_send_suppressed.store(true, Ordering::SeqCst);
+    }
+
+    /// Resume live rule sends after a project batch has staged its complete stores.
+    pub fn end_rule_batch(&self) {
+        self.rule_send_suppressed.store(false, Ordering::SeqCst);
+    }
+
     /// Spawn the connection thread (idempotent). Called lazily when the eff editor opens.
     pub fn ensure_started(&self) {
         if self.started.swap(true, Ordering::SeqCst) {
@@ -1185,6 +1213,9 @@ impl GameLink {
     /// Replace the plugin's live spawn-rule list (suppress/retime ACMD effect spawns).
     /// Send the FULL current rule set every time — an empty slice clears all rules.
     pub fn send_spawn_rules(&self, rules: &[SpawnRuleWire]) {
+        if self.rule_send_suppressed.load(Ordering::SeqCst) {
+            return;
+        }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "spawn_rules": rules }))
         else {
             return;
@@ -1198,6 +1229,9 @@ impl GameLink {
 
     /// Replace the live effect point-control rules (detach and area toggles).
     pub fn send_effect_control_rules(&self, rules: &[EffectControlRuleWire]) {
+        if self.rule_send_suppressed.load(Ordering::SeqCst) {
+            return;
+        }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({
             "effect_control_rules": rules
         })) else {
@@ -1508,6 +1542,9 @@ impl GameLink {
     /// Replace the plugin's live hitbox-rule list (modify/suppress/inject ATTACKs).
     /// Always the FULL set — an empty slice clears all rules.
     pub fn send_hitbox_rules(&self, rules: &[HitboxRuleWire]) {
+        if self.rule_send_suppressed.load(Ordering::SeqCst) {
+            return;
+        }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "hitbox_rules": rules }))
         else {
             return;
@@ -4466,5 +4503,28 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(inner).unwrap();
         assert_eq!(value["spawn_rules"][0]["frame_start"].as_f64(), Some(1.0));
         assert_eq!(value["spawn_rules"][0]["frame_end"].as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn project_rule_batches_publish_only_after_the_flattened_union_is_ready() {
+        let link = GameLink::default();
+        link.begin_rule_batch();
+        link.send_spawn_rules(&[]);
+        link.send_effect_control_rules(&[]);
+        link.send_hitbox_rules(&[]);
+        assert!(
+            link.shared.lock().unwrap().outbox.is_empty(),
+            "intermediate materialization sends must stay local"
+        );
+        link.end_rule_batch();
+        link.send_spawn_rules(&[]);
+        link.send_effect_control_rules(&[]);
+        link.send_hitbox_rules(&[]);
+        let shared = link.shared.lock().unwrap();
+        assert_eq!(
+            shared.outbox.len(),
+            3,
+            "the completed project publishes one replacement per live rule family"
+        );
     }
 }
