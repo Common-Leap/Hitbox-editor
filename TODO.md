@@ -96,120 +96,11 @@ project between those sends. New editable data must be included in project seria
 
 ## Active backlog
 
-The entries below are the remaining inherited work plus the currently open upstream requests.
-The GitHub issue number is part of the task identity; do not infer a request from an old local
-label or a completed entry that used to have a similar name.
+The measured movement audit found no additional safe editable family in the current corpus. The
+only remaining item is the version-matched native evidence needed for partial-animation frame
+editing:
 
-### [ ] #26 — Make sound calls structurally editable
-
-[Upstream issue #26](https://github.com/Common-Leap/Visionary/issues/26) says sounds can be seen but
-their frame cannot be changed and calls cannot be added or removed. The existing sound work covers
-the measured name-edit path; this is the remaining scheduling and list-editing request.
-
-Acceptance:
-
-- The sound timeline and **Sound & feedback** panel can retime an existing sound and add or remove
-  a supported sound call without losing `STOP_SE`, suppression tails, loop sites, or unknown source
-  lines.
-- The full `sound_` statement tree, not only changed rows, is stored in the project and emitted so
-  an installed category does not silence calls the editor did not display.
-- The live surface either suppresses/injects the exact measured call safely or clearly reports a
-  source/export-only structural change. No rule may be keyed from the edited sound instead of the
-  pristine call the game executes.
-- Generated export and linked-source write-back have separate behavior: generated source may add,
-  remove, or move calls; linked source rewrites existing values and reports structural operations
-  unless a safe source insertion/removal contract is proven.
-- Project import restores sound edits for every saved move and publishes them with the complete
-  sound/live-rule union only after all project data is staged.
-
-### [ ] #25 — Make expression scripts structurally editable
-
-[Upstream issue #25](https://github.com/Common-Leap/Visionary/issues/25) says expression calls are
-visible but their frame cannot be changed and calls cannot be added or removed. Existing measured
-camera, rumble, and partial-rate value controls do not close this request.
-
-Acceptance:
-
-- The expression timeline and panel can retime supported calls and add/remove supported expression
-  calls with the correct macro-specific arguments.
-- Unknown expression statements remain source-preserved and visible; a structural operation that
-  cannot be represented safely is refused with a useful source-only explanation.
-- Parse/IR, generated export, live capture/rule/injection, and source write-back all agree on site
-  identity and argument shape. Live edits use a measured native identity rather than an array
-  index that can change after a loop or branch.
-- The complete edited `expression_` script is serialized and restored for every move. Project
-  import publishes the final expression rules together with the other categories, never one
-  partially loaded move at a time.
-
-### [ ] #24 — Expose the `EFFECT_FOLLOW_FLIP` tail value
-
-[Upstream issue #24](https://github.com/Common-Leap/Visionary/issues/24) reports that the last
-`effect_follow_flip` value, described by the reporter as its rotation control, cannot be edited.
-This is separate from the completed X/Y/Z transform-label correction: the missing control is in
-the macro-specific tail after the shared transform arguments.
-
-First verify the actual macro signature and the meaning of the final tail token (for example, a
-flip-axis/rotation selector) before naming the widget. Preserve the authored token and do not
-turn a symbolic `EF_FLIP_*` value into an invented numeric enum.
-
-Acceptance:
-
-- The parser/IR retains the exact tail with a typed, macro-specific field only where its arity and
-  meaning are measured; unsupported tails remain verbatim.
-- The panel labels the field honestly and lets the user edit the supported value without hiding
-  the alternate graphic or shared X/Y/Z transform controls.
-- Export reproduces the selected flip family and its complete tail. The plugin hook/capture path
-  applies a changed value only when the native live identity is proven; otherwise the UI reports
-  source/export-only rather than claiming live success.
-- Linked-source sync rewrites only the existing tail argument when safe and reports a command or
-  tail-shape change as structural. The complete effect edit is persisted and restored by project
-  import with the final flattened effect rule union.
-
-### [ ] #23 — Highlight the selected hitbox
-
-[Upstream issue #23](https://github.com/Common-Leap/Visionary/issues/23) asks for a visible
-difference between a selected hitbox and the other hitboxes, similar to the existing effect
-selection feedback.
-
-This is presentation state, not a new ACMD capability. Its explicit surface scope is **Panel**
-and renderer/timeline presentation only; Parse + IR, Live, Export, and Write-back are out of scope
-because selecting an item must not create or change a game edit or project record.
-
-Acceptance:
-
-- Selecting a hitbox in the list, timeline, or viewport produces the same obvious highlight and
-  keeps the existing attack/grab/wind category colors readable.
-- The highlight follows selection changes, deletion/reindexing, move changes, and timeline
-  seeking without sticking to the wrong hitbox.
-- The selected state does not alter hitbox values, live rules, generated source, or project import.
-- A focused UI/model test covers selection identity and the visual-state decision for at least one
-  ordinary attack and one non-attack collision family.
-
-### [ ] E1 — Finish measured movement, kinetics, and status coverage
-
-The typed movement slices are in place, but the parent remains open for the broader status-module
-and kinetic families that are still source-preserved. Do not turn a textual occurrence into an
-editable feature without a buildable signature and a safe live identity.
-
-Remaining scope to measure and decide:
-
-- the `sv_kinetic_energy` families and other status-module mutations not covered by the existing
-  exact receiver/arity slices;
-- the read-only `KineticModule::get_sum_speed_y` and getter-driven status expressions, where the
-  first question is whether there is an honest editable concept at all;
-- any additional direct kinetic or WorkModule operation found in a current corpus audit.
-
-For every family that is actually typed, carry the exact measured form through Parse + IR, the
-Movement/Status panel and timeline, live capture/rule/hook, generated export, and value-only
-source write-back. Keep unmeasured receivers, malformed arities, symbolic-only live identities,
-branches, and loops raw or explicitly source-only. Movement preview is out of scope unless a
-separate task defines and verifies the animation/kinetic simulation contract.
-
-Every accepted movement edit must be represented in the project file and restored for every saved
-move by the one-transaction project import path. The final live union, not the currently selected
-move, is what reaches the game.
-
-#### [!] E1r — `MotionModule::set_frame_partial` binding mismatch
+### [!] E1r — `MotionModule::set_frame_partial` binding mismatch
 
 Blocked pending version-matched source or runtime evidence for the missing boolean argument. The
 retained source calls use three arguments after the receiver, while the pinned native binding has
@@ -224,11 +115,21 @@ live hook that invents the boolean.
 
 Checked against the upstream repository on 2026-08-15, excluding #5 and #4 as requested.
 
-- Open #23, #24, #25, and #26 were not equivalent to an active backlog entry, so they are
-  included above as separate tasks. #24, #25, and #26 extend already completed baseline features
-  but ask for distinct controls or structural edits.
+- Open #23, #24, #25, and #26 were added to this backlog, implemented across their required
+  surfaces, validated, and removed from the active list as completed work. #23 is presentation-
+  only; #24 uses the measured integer flip-axis/control tail; #25 and #26 retain complete source
+  trees for structural export and keep live replay value-only where identity is safe.
 - #27 is complete: the linked-source implementation now indexes the whole project, preserves
   multi-file ownership, reports duplicate identities, and keeps per-file write-back safe. It is
   omitted from the active list with the other completed work.
+- The E1 corpus audit found 190 `change_kinetic`, 102 `add_speed`, 34 ground-friction, 27 suspend,
+  27 resume, 6 enable, 6 clear, and 2 unable calls, all covered by the existing measured slices.
+  The remaining 162 `get_sum_speed_y` calls are read-only getters, and the current corpus has no
+  `sv_kinetic_energy` or StatusModule mutation family to add honestly. They remain source/raw
+  where no editable concept or safe live identity exists.
+- E1r remains blocked: the pinned `skyline-smash` binding exposes
+  `set_frame_partial(receiver, part_kind, frame, sync: bool)`, while the retained source calls
+  have three arguments after the receiver and the pinned `smash-script` macros provide no wrapper.
+  The source call and its boolean meaning are still preserved rather than guessed.
 - Closed issues #1–#3 and #6–#22 are not re-added: their completed goals were removed from this
   active list. #4 and #5 are intentionally excluded even though #5 remains open upstream.

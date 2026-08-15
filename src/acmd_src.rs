@@ -2035,6 +2035,19 @@ fn source_compare_float(value: f32) -> f32 {
 fn canonicalize_effect_call_for_source(
     mut call: crate::data::EffectCall,
 ) -> crate::data::EffectCall {
+    // `flip_axis` is the typed view of one token that is also retained in `extra_args` for
+    // lossless export. Callers may edit the typed field directly, so make the two views agree
+    // before comparing a source rewrite with the edited model.
+    if let (Some(axis), Some(tail_index)) = (
+        call.flip_axis.clone(),
+        crate::acmd::effect_flip_axis_tail_index(&call.spawn_func),
+    ) {
+        if let Some(extra_args) = call.extra_args.as_mut() {
+            if let Some(slot) = extra_args.get_mut(tail_index) {
+                *slot = axis;
+            }
+        }
+    }
     call.offset = call.offset.map(source_compare_float);
     call.rotation = call.rotation.map(source_compare_float);
     call.scale = source_compare_float(call.scale);
@@ -2221,9 +2234,25 @@ pub fn rewrite_effect_calls(
             edits.extend(color_edits(text, macro_site, color));
             continue;
         }
+        let was = &pristine[differs[0]];
+        if was.flip_axis != target.flip_axis {
+            let axis_slot = crate::acmd::effect_flip_axis_tail_index(&target.spawn_func)
+                .map(|tail| 10 + usize::from(target.effect_name_alt.is_some()) + tail);
+            match (target.flip_axis.as_deref(), axis_slot.and_then(|slot| macro_site.args.get(slot)))
+            {
+                (Some(_), Some(_)) => {}
+                (Some(_), None) => report.skipped.push(format!(
+                    "{label}: `{}` has no measured flip-axis/control tail slot — source syncing left that value unchanged",
+                    macro_site.name
+                )),
+                (None, _) => report.skipped.push(format!(
+                    "{label}: `{}` flip-axis/control value was cleared — source syncing does not remove a macro tail",
+                    macro_site.name
+                )),
+            }
+        }
         edits.extend(transform_edits(text, macro_site, target));
 
-        let was = &pristine[differs[0]];
         let sites = modifier_sites.get(ordinal);
         modifier_edits(
             text,
@@ -2717,6 +2746,7 @@ fn transform_matches(a: &crate::data::EffectCall, b: &crate::data::EffectCall) -
     a.offset == b.offset
         && a.rotation == b.rotation
         && a.scale == b.scale
+        && a.flip_axis == b.flip_axis
         && a.rate == b.rate
         && a.work_int == b.work_int
         && a.camera_offset == b.camera_offset
@@ -2773,6 +2803,26 @@ fn transform_edits(
     for (slot, value) in slots {
         if let Some(span) = site.args.get(slot) {
             edits.extend(float_edit(text, span, value));
+        }
+    }
+    if let (Some(axis), Some(tail_index)) = (
+        call.flip_axis.as_deref(),
+        crate::acmd::effect_flip_axis_tail_index(&call.spawn_func),
+    ) {
+        if let Some(span) = site.args.get(10 + off + tail_index) {
+            let current = text[span.clone()].trim();
+            let token = axis.trim();
+            let replacement = if token.parse::<i64>().is_ok() || token.starts_with('*') {
+                token.to_string()
+            } else {
+                format!("*{token}")
+            };
+            if current != replacement {
+                edits.push(Replacement {
+                    span: span.clone(),
+                    value: replacement,
+                });
+            }
         }
     }
     edits
@@ -7911,6 +7961,25 @@ pub fn rewrite_sounds(
     let mut report = SyncReport::default();
     let mut edits: Vec<Replacement> = Vec::new();
 
+    if pristine.len() != edited.len() {
+        report.skipped.push(format!(
+            "{label}: {} sound call(s) were added or removed — source syncing only rewrites existing sound names",
+            edited.len().abs_diff(pristine.len())
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    if pristine
+        .iter()
+        .zip(edited)
+        .any(|(before, now)| before.site != now.site)
+    {
+        report.skipped.push(format!(
+            "{label}: sound call order changed — source syncing does not move or reorder sound statements"
+        ));
+        return Ok((text.to_string(), report));
+    }
+
     for (before, now) in pristine.iter().zip(edited.iter()) {
         if before == now {
             continue;
@@ -8944,6 +9013,33 @@ visionary_set_speed(agent, 9, 10);
             after.contains("// A comment mentioning"),
             "comments survive"
         );
+    }
+
+    #[test]
+    fn syncing_a_flip_axis_rewrites_only_the_measured_tail_token() {
+        let source = r#"unsafe extern "C" fn effect_flip(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("left"), Hash40::new("right"), Hash40::new("top"), 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.5, true, *EF_FLIP_YZ);
+    }
+}
+"#;
+        let pristine = crate::acmd::parse_effect_script(source).to_effect_calls();
+        let mut edited = pristine.clone();
+        edited[0].flip_axis = Some("*EF_FLIP_XY".into());
+
+        let (after, report) =
+            rewrite_effect_calls(source, "mario/effect_flip", &pristine, &edited).unwrap();
+        assert_eq!(report.changed, 1, "{report:?}");
+        let reparsed = crate::acmd::parse_effect_script(&after).to_effect_calls();
+        assert_eq!(
+            effect_call_set_signature(&reparsed),
+            effect_call_set_signature(&edited),
+            "rewritten source:\n{after}\nreparsed: {reparsed:#?}\nedited: {edited:#?}"
+        );
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(after.contains("1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.5, true, *EF_FLIP_XY);"));
+        assert!(!after.contains("*EF_FLIP_YZ"));
     }
 
     /// Retuning the spawn beside a Work ID line must leave that authored token untouched. The

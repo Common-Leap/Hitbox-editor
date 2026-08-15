@@ -1703,6 +1703,11 @@ fn set_effect_spawn_command(call: &mut crate::data::EffectCall, command: &str) -
                 .collect(),
         )
     };
+    call.flip_axis = crate::acmd::effect_flip_axis_tail_index(command).and_then(|index| {
+        call.extra_args
+            .as_ref()
+            .and_then(|tail| tail.get(index).cloned())
+    });
     // This helper is deliberately limited to ordinary spawns, but clearing stale raw identity
     // makes that invariant explicit if an older project carried inconsistent fields.
     call.raw_line = None;
@@ -1729,6 +1734,36 @@ fn effect_spawn_default_live_tail(command: &str) -> Option<Vec<crate::game_link:
             })
             .collect(),
     )
+}
+
+/// Resolve only the flip-axis constants measured in the pinned native lua table. A source token
+/// outside this set stays source/export-only; turning an arbitrary symbolic expression into a
+/// number would make the live preview claim a value the editor cannot prove.
+fn effect_flip_axis_live_value(value: &str) -> Option<i64> {
+    let token = value.trim().trim_start_matches('*');
+    if let Ok(number) = token.parse::<i64>() {
+        return Some(number);
+    }
+    Some(match token {
+        "EF_FLIP_NONE" => 0x0,
+        "EF_FLIP_YZ" | "EF_FLIP_AXIS_YZ" => 0x1,
+        "EF_FLIP_ZX" | "EF_FLIP_AXIS_ZX" => 0x2,
+        "EF_FLIP_XY" | "EF_FLIP_AXIS_XY" => 0x3,
+        "EF_FLIP_1" => 0x4,
+        "EF_FLIP_2" => 0x5,
+        "EF_FLIP_BITCTRL" | "EF_FLIP_TRANS_X" => 0x10000,
+        "EF_FLIP_TRANS_Y" => 0x20000,
+        "EF_FLIP_TRANS_Z" => 0x40000,
+        "EF_FLIP_ROT_X" => 0x100000,
+        "EF_FLIP_ROT_Y" => 0x200000,
+        "EF_FLIP_ROT_Z" => 0x400000,
+        "EF_FLIP_SCALE_X" => 0x1000000,
+        "EF_FLIP_SCALE_Y" => 0x2000000,
+        "EF_FLIP_SCALE_Z" => 0x4000000,
+        "EF_FLIP_PTCL_X" => 0x10000000,
+        "EF_FLIP_PTCL_Y" => 0x20000000,
+        _ => return None,
+    })
 }
 
 /// Rebuild a captured effect call for a potentially different spawn family. The donor's
@@ -1784,6 +1819,17 @@ fn retarget_effect_capture_args(
         args.extend_from_slice(&donor_args[donor_tail_start..]);
     } else {
         args.extend(effect_spawn_default_live_tail(target_func)?);
+    }
+    if let (Some(axis), Some(axis_index)) = (
+        call.flip_axis
+            .as_deref()
+            .and_then(effect_flip_axis_live_value),
+        crate::acmd::effect_flip_axis_tail_index(target_func),
+    ) {
+        let slot = 9 + target_offset + axis_index;
+        if let Some(value) = args.get_mut(slot) {
+            *value = A::Int(axis);
+        }
     }
     Some((target_func.to_string(), args))
 }
@@ -2092,6 +2138,25 @@ fn hitbox_display_color(hb: &crate::data::Hitbox) -> Color32 {
         crate::data::CAT_ATTACK_FP => Color32::from_rgba_premultiplied(240, 120, 220, 180),
         _ => hitbox_color(hb.hitbox_type),
     }
+}
+
+fn hitbox_is_selected(selected: Option<usize>, index: usize) -> bool {
+    selected == Some(index)
+}
+
+/// Presentation-only styling for a collision volume. The selected outline is deliberately
+/// white and heavier so it remains obvious against every family color; the fill keeps the
+/// attack/grab/wind palette visible underneath it.
+fn hitbox_viewport_style(color: Color32, selected: bool) -> (egui::Stroke, Color32) {
+    let (width, stroke_color, alpha) = if selected {
+        (3.5, Color32::WHITE, 82)
+    } else {
+        (2.0, color, 40)
+    };
+    (
+        egui::Stroke::new(width, stroke_color),
+        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+    )
 }
 
 type AcmdFetchResult = (String, String, Result<String, String>);
@@ -4161,7 +4226,7 @@ impl VisionaryApp {
         let sound_edited = self
             .current_move_key()
             .is_some_and(|key| self.state.sound_script_edits.contains_key(&key));
-        if show_category("sound") && sound_edited && !self.state.sound_script.stmts.is_empty() {
+        if show_category("sound") && sound_edited {
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -4177,10 +4242,7 @@ impl VisionaryApp {
         let expression_edited = self
             .current_move_key()
             .is_some_and(|key| self.state.expression_script_edits.contains_key(&key));
-        if show_category("expression")
-            && expression_edited
-            && !self.state.expression_script.stmts.is_empty()
-        {
+        if show_category("expression") && expression_edited {
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -7678,7 +7740,7 @@ impl VisionaryApp {
                         let mut to_delete = None;
                         for (i, hb) in self.state.hitboxes.iter().enumerate() {
                             let color = hitbox_display_color(hb);
-                            let selected = self.selected_hitbox == Some(i);
+                            let selected = hitbox_is_selected(self.selected_hitbox, i);
                             ui.horizontal(|ui| {
                                 ui.colored_label(color, "*");
                                 let shape = if hb.category == 2 {
@@ -8578,14 +8640,13 @@ impl VisionaryApp {
     /// edit goes into `state.sound_script` rather than `state.script` — writing it to the game
     /// script would put a `PLAY_SE` in a function that never had one.
     ///
-    /// The name only. A sound's frame is the block it sits in rather than an argument, so moving
-    /// one is a structural edit the write-back path cannot express — the same limit the hurtbox
-    /// section has, and it is better to not offer the widget than to offer one whose change is
-    /// reported as skipped.
+    /// Sound names are value edits; frame, presence, and macro arity are structural edits on the
+    /// preserved `sound_` statement tree. Flat calls can be moved, while calls in loops/branches
+    /// are removable but not retimed because moving them would change control flow.
     fn draw_sound_section(&mut self, ui: &mut Ui) {
         use crate::data::ExcuteStmt;
 
-        if self.state.sounds.is_empty() {
+        if self.current_move_key().is_none() {
             return;
         }
 
@@ -8629,9 +8690,16 @@ impl VisionaryApp {
             ));
         }
 
+        enum StructuralAction {
+            Move { site: usize, frame: u32 },
+            Remove { site: usize },
+            Add(crate::data::SoundCall),
+        }
+
         // Collected and applied after the loop, so the mutable borrow of the script does not
         // overlap the event list it was derived from — the hurtbox section's reason exactly.
         let mut edit: Option<(usize, ExcuteStmt)> = None;
+        let mut structural: Option<StructuralAction> = None;
 
         for event in &self.state.sounds {
             let active = event.frame == self.state.current_frame;
@@ -8664,12 +8732,55 @@ impl VisionaryApp {
                         if let Some(tail) = &event.call.tail {
                             ui.weak(format!("for {tail} frames"));
                         }
+                        let flat = self.state.sound_script.sound_site_is_flat(event.site);
+                        if ui
+                            .add_enabled(
+                                flat && event.frame != self.state.current_frame,
+                                egui::Button::new("Move here"),
+                            )
+                            .on_hover_text(if flat {
+                                "Move this sound call to the current playhead frame."
+                            } else {
+                                "This call is inside a loop or branch; retiming it would change its control flow."
+                            })
+                            .clicked()
+                        {
+                            structural = Some(StructuralAction::Move {
+                                site: event.site,
+                                frame: self.state.current_frame.max(FIRST_GAME_FRAME),
+                            });
+                        }
+                        if ui
+                            .small_button("Remove")
+                            .on_hover_text("Remove this source sound call, including every loop iteration if it is looped.")
+                            .clicked()
+                        {
+                            structural = Some(StructuralAction::Remove { site: event.site });
+                        }
                         if changed {
                             edit = Some((event.site, ExcuteStmt::Sound(call)));
                         }
                     });
                 });
         }
+
+        ui.menu_button("＋ Add sound", |ui| {
+            ui.label("Add a measured PLAY_SE-family call at the playhead:");
+            for (func, hashes, has_tail) in crate::acmd::SOUND_FUNCS {
+                if ui.button(*func).clicked() {
+                    let fallback = candidates
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "se_common_added".into());
+                    structural = Some(StructuralAction::Add(crate::data::SoundCall {
+                        func: (*func).into(),
+                        sounds: vec![fallback; *hashes],
+                        tail: (*has_tail).then(|| "1".into()),
+                    }));
+                    ui.close();
+                }
+            }
+        });
 
         if let Some((site, replacement)) = edit {
             if let Some(stmt) = self.state.sound_script.sound_stmt_mut(site) {
@@ -8685,6 +8796,51 @@ impl VisionaryApp {
                         .sound_script_edits
                         .insert(key, self.state.sound_script.clone());
                 }
+                self.push_sound_rules();
+            }
+        }
+
+        if let Some(action) = structural {
+            let changed = match action {
+                StructuralAction::Add(call) => self
+                    .state
+                    .sound_script
+                    .insert_sound_at_frame(self.state.current_frame.max(FIRST_GAME_FRAME), call),
+                StructuralAction::Remove { site } => self.state.sound_script.remove_sound(site),
+                StructuralAction::Move { site, frame } => {
+                    if !self.state.sound_script.sound_site_is_flat(site) {
+                        false
+                    } else {
+                        let call =
+                            self.state.sound_script.sound_stmt_mut(site).and_then(
+                                |stmt| match stmt {
+                                    ExcuteStmt::Sound(call) => Some(call.clone()),
+                                    _ => None,
+                                },
+                            );
+                        call.is_some_and(|call| {
+                            self.state.sound_script.remove_sound(site)
+                                && self.state.sound_script.insert_sound_at_frame(frame, call)
+                        })
+                    }
+                }
+            };
+            if changed {
+                self.state.sounds = self.state.sound_script.to_sound_events();
+                self.state.total_frames = self.state.total_frames.max(
+                    self.state
+                        .sounds
+                        .iter()
+                        .map(|event| event.frame)
+                        .max()
+                        .unwrap_or(0),
+                );
+                if let Some(key) = self.current_move_key() {
+                    self.state
+                        .sound_script_edits
+                        .insert(key, self.state.sound_script.clone());
+                }
+                self.state.status = "Sound structural edit staged — generated export includes the complete sound_ tree; linked-source sync will report frame/add/remove operations, and live replay remains limited to safe value edits.".into();
                 self.push_sound_rules();
             }
         }
@@ -8712,6 +8868,8 @@ impl VisionaryApp {
         let Some(motion) = self.current_motion_hash() else {
             return;
         };
+        let structural =
+            Self::sound_structure_changed(&self.state.sounds_pristine, &self.state.sounds);
         let rules = Self::sound_rules_for(motion, &self.state.sounds_pristine, &self.state.sounds);
 
         let key = format!("{mv_key}#sound");
@@ -8727,6 +8885,26 @@ impl VisionaryApp {
             .cloned()
             .collect();
         self.game_link.send_hitbox_rules(&all);
+        if structural {
+            self.state.status = "Sound structural edit staged for generated export/source sync; the live plugin keeps only exact in-place sound-name edits, so no unsafe frame/add/remove rule was sent.".into();
+        }
+    }
+
+    /// Structural sound changes cannot be represented by the value-only sound hook. Treat the
+    /// whole list as source/export-only when its source ordinals, frames, or macro shapes move;
+    /// this also prevents a stale site match from retuning the wrong call after an insertion.
+    fn sound_structure_changed(
+        pristine: &[crate::data::SoundEvent],
+        shown: &[crate::data::SoundEvent],
+    ) -> bool {
+        pristine.len() != shown.len()
+            || pristine.iter().zip(shown).any(|(before, now)| {
+                before.site != now.site
+                    || before.frame != now.frame
+                    || before.call.func != now.call.func
+                    || before.call.sounds.len() != now.call.sounds.len()
+                    || before.call.tail.is_some() != now.call.tail.is_some()
+            })
     }
 
     /// The live rules for a set of sound edits: one per site whose call the user changed.
@@ -8742,6 +8920,9 @@ impl VisionaryApp {
         pristine: &[crate::data::SoundEvent],
         shown: &[crate::data::SoundEvent],
     ) -> Vec<crate::game_link::HitboxRuleWire> {
+        if Self::sound_structure_changed(pristine, shown) {
+            return Vec::new();
+        }
         let mut rules = Vec::new();
         for now in shown {
             let Some(was) = pristine.iter().find(|s| s.site == now.site) else {
@@ -8753,11 +8934,7 @@ impl VisionaryApp {
             if was.call == now.call {
                 continue;
             }
-            if was.call.func != now.call.func {
-                // A different macro is a different hook. The panel offers no way to do this, but
-                // a project loaded from disk could carry one; leave it to the export.
-                continue;
-            }
+            debug_assert_eq!(was.call.func, now.call.func);
             // **The key is the sound the SCRIPT names, not the one the user typed.** The rule has
             // to match the call the game makes; keying on the edit would never fire, and nothing
             // downstream can tell a rule that never fires from a rule that was never sent.
@@ -8925,6 +9102,15 @@ impl VisionaryApp {
             // applying a partial zip and making the staged project disagree with the game.
             return (Vec::new(), pristine.len().abs_diff(shown.len()));
         }
+        if pristine.iter().zip(shown).any(|(was, now)| {
+            was.site != now.site || was.frame != now.frame || was.call.func() != now.call.func()
+        }) {
+            // A structural expression operation changes the source-to-capture alignment. Do
+            // not partially apply unrelated argument edits from the same staged script: the
+            // whole expression update is source/export-only until a fresh measured baseline is
+            // available.
+            return (Vec::new(), 1);
+        }
         let mut rules = Vec::new();
         let mut unrepresentable = 0;
         for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
@@ -9051,23 +9237,19 @@ impl VisionaryApp {
     ///
     /// The arguments stay source tokens rather than being decoded into guessed constant
     /// namespaces. That makes a named camera constant, a raw captured number, and a mod author's
-    /// own expression equally safe to round-trip. This panel therefore edits the token text
-    /// directly; frame movement and macro replacement remain structural and are left to export.
+    /// own expression equally safe to round-trip. This panel edits the token text directly and
+    /// supports structural edits for measured flat calls without touching unknown source lines.
     fn draw_expression_section(&mut self, ui: &mut Ui) {
         use crate::data::ExpressionCall;
 
+        if self.current_move_key().is_none() {
+            return;
+        }
         let raw_partial_frames = self.state.expression_script.to_raw_partial_frame_events();
         let partial_rate_events = self
             .state
             .expression_script
             .to_motion_module_set_rate_partial_events();
-        if self.state.expressions.is_empty()
-            && partial_rate_events.is_empty()
-            && raw_partial_frames.is_empty()
-        {
-            return;
-        }
-
         ui.separator();
         editor_section_heading_with_badge(
             ui,
@@ -9169,7 +9351,14 @@ impl VisionaryApp {
             }
         }
 
+        enum StructuralAction {
+            Move { site: usize, frame: u32 },
+            Remove { site: usize },
+            Add(ExpressionCall),
+        }
+
         let mut edit: Option<(usize, ExpressionCall)> = None;
+        let mut structural: Option<StructuralAction> = None;
         for event in &self.state.expressions {
             let active = event.frame == self.state.current_frame;
             let mut call = event.call.clone();
@@ -9186,6 +9375,34 @@ impl VisionaryApp {
                             if active { "◆" } else { "◇" },
                         );
                         ui.label(format!("f{} · {}", event.frame, call.func()));
+                        let flat = self
+                            .state
+                            .expression_script
+                            .expression_site_is_flat(event.site);
+                        if ui
+                            .add_enabled(
+                                flat && event.frame != self.state.current_frame,
+                                egui::Button::new("Move here"),
+                            )
+                            .on_hover_text(if flat {
+                                "Move this expression call to the current playhead frame."
+                            } else {
+                                "This call is inside a loop or branch; retiming it would change its control flow."
+                            })
+                            .clicked()
+                        {
+                            structural = Some(StructuralAction::Move {
+                                site: event.site,
+                                frame: self.state.current_frame.max(FIRST_GAME_FRAME),
+                            });
+                        }
+                        if ui
+                            .small_button("Remove")
+                            .on_hover_text("Remove this measured expression call from the exported script.")
+                            .clicked()
+                        {
+                            structural = Some(StructuralAction::Remove { site: event.site });
+                        }
                     });
                     ui.horizontal_wrapped(|ui| match &mut call {
                         ExpressionCall::RumbleHit { kind, unk } => {
@@ -9247,6 +9464,42 @@ impl VisionaryApp {
             }
         }
 
+        ui.menu_button("＋ Add expression call", |ui| {
+            ui.label("Add a measured expression family at the playhead:");
+            for (label, call) in [
+                (
+                    "RUMBLE_HIT",
+                    ExpressionCall::RumbleHit {
+                        kind: "0".into(),
+                        unk: "0".into(),
+                    },
+                ),
+                ("QUAKE", ExpressionCall::Quake { kind: "0".into() }),
+                (
+                    "FT_ATTACK_ABS_CAMERA_QUAKE",
+                    ExpressionCall::FtAttackAbsCameraQuake {
+                        attack_abs_kind: "0".into(),
+                        quake_kind: "0".into(),
+                    },
+                ),
+                (
+                    "ControlModule::set_rumble",
+                    ExpressionCall::ControlModuleSetRumble {
+                        receiver: "agent.module_accessor".into(),
+                        kind: "0".into(),
+                        duration: "0".into(),
+                        looped: "false".into(),
+                        target: "0".into(),
+                    },
+                ),
+            ] {
+                if ui.button(label).clicked() {
+                    structural = Some(StructuralAction::Add(call));
+                    ui.close();
+                }
+            }
+        });
+
         if let Some((site, replacement)) = edit {
             if let Some(call) = self.state.expression_script.expression_stmt_mut(site) {
                 *call = replacement;
@@ -9259,6 +9512,56 @@ impl VisionaryApp {
                 self.state.status =
                     "Expression edit staged — export or sync it into the linked source project."
                         .into();
+                self.push_expression_rules();
+            }
+        }
+
+        if let Some(action) = structural {
+            let changed = match action {
+                StructuralAction::Add(call) => {
+                    self.state.expression_script.insert_expression_at_frame(
+                        self.state.current_frame.max(FIRST_GAME_FRAME),
+                        call,
+                    )
+                }
+                StructuralAction::Remove { site } => {
+                    self.state.expression_script.remove_expression(site)
+                }
+                StructuralAction::Move { site, frame } => {
+                    if !self.state.expression_script.expression_site_is_flat(site) {
+                        false
+                    } else {
+                        let call = self
+                            .state
+                            .expression_script
+                            .expression_stmt_mut(site)
+                            .map(|call| call.clone());
+                        call.is_some_and(|call| {
+                            self.state.expression_script.remove_expression(site)
+                                && self
+                                    .state
+                                    .expression_script
+                                    .insert_expression_at_frame(frame, call)
+                        })
+                    }
+                }
+            };
+            if changed {
+                self.state.expressions = self.state.expression_script.to_expression_events();
+                self.state.total_frames = self.state.total_frames.max(
+                    self.state
+                        .expressions
+                        .iter()
+                        .map(|event| event.frame)
+                        .max()
+                        .unwrap_or(0),
+                );
+                if let Some(key) = self.current_move_key() {
+                    self.state
+                        .expression_script_edits
+                        .insert(key, self.state.expression_script.clone());
+                }
+                self.state.status = "Expression structural edit staged — generated export includes the complete expression_ tree; linked-source sync will report frame/add/remove operations, and live replay keeps only safe in-place argument edits.".into();
                 self.push_expression_rules();
             }
         }
@@ -11666,6 +11969,7 @@ impl VisionaryApp {
                     active_end: current,
                     disabled: false,
                     extra_args: None,
+                    flip_axis: None,
                     raw_line: None,
                     trail_command: None,
                     trail_off: None,
@@ -11724,6 +12028,7 @@ impl VisionaryApp {
                     // This is the actual tail of the plain EFFECT_FOLLOW form. Keeping it in
                     // the model also makes source verification agree with generated output.
                     extra_args: Some(vec!["true".into()]),
+                    flip_axis: None,
                     raw_line: None,
                     trail_command: None,
                     trail_off: None,
@@ -12329,6 +12634,47 @@ impl VisionaryApp {
                                     ui.label("");
                                 }
                                 ui.end_row();
+
+                                if let Some(axis) = ec.flip_axis.as_mut() {
+                                    ui.label("Flip axis/control");
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(axis)
+                                                .desired_width(150.0),
+                                        )
+                                        .on_hover_text(
+                                            "Measured EFFECT_*_FLIP integer control. Keep symbolic \
+                                             EF_FLIP_* constants when the source uses them; this is \
+                                             not an X/Y/Z rotation angle.",
+                                        )
+                                        .changed();
+                                    if let Some(p) = &pristine {
+                                        orig(
+                                            ui,
+                                            format!(
+                                                "orig {}",
+                                                p.flip_axis.as_deref().unwrap_or("none")
+                                            ),
+                                        );
+                                    } else {
+                                        ui.label("");
+                                    }
+                                    ui.end_row();
+                                }
+                                if let Some(axis_index) =
+                                    crate::acmd::effect_flip_axis_tail_index(&ec.spawn_func)
+                                {
+                                    if let Some(axis) = ec.flip_axis.clone() {
+                                        if let Some(tail) = ec.extra_args.as_mut() {
+                                            if let Some(slot) = tail.get_mut(axis_index) {
+                                                if *slot != axis {
+                                                    *slot = axis;
+                                                    respawn_needed = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 if show_advanced {
                                 // Playback rate — the `LAST_EFFECT_SET_RATE` line that follows
@@ -14300,9 +14646,6 @@ impl VisionaryApp {
             }
         }
         for (key, script) in &self.state.sound_script_edits {
-            if script.stmts.is_empty() {
-                continue;
-            }
             let (fighter, mv) = key.split_once('/').unwrap_or(("unknown", key.as_str()));
             project
                 .fighters
@@ -14312,9 +14655,6 @@ impl VisionaryApp {
                 .insert(mv.to_string(), script.clone());
         }
         for (key, script) in &self.state.expression_script_edits {
-            if script.stmts.is_empty() {
-                continue;
-            }
             let (fighter, mv) = key.split_once('/').unwrap_or(("unknown", key.as_str()));
             project
                 .fighters
@@ -16475,6 +16815,16 @@ impl VisionaryApp {
         let f32_at = |i: usize| args.get(i).and_then(|a| a.as_f32()).unwrap_or(0.0);
         let bone_hash = args.get(1 + off).and_then(|a| a.as_hash()).unwrap_or(0);
         let start = Self::motion_to_script_frame(frame);
+        let extra_args = args.get(9 + off..).and_then(|tail| {
+            tail.iter()
+                .map(crate::game_link::LuaArgWire::to_source_arg)
+                .collect::<Option<Vec<_>>>()
+        });
+        let flip_axis = crate::acmd::effect_flip_axis_tail_index(func).and_then(|index| {
+            extra_args
+                .as_ref()
+                .and_then(|tail| tail.get(index).cloned())
+        });
         Some(crate::data::EffectCall {
             effect_name: eff_rev
                 .get(&eff_hash)
@@ -16500,11 +16850,8 @@ impl VisionaryApp {
             // Everything past the size argument, so an export can reissue THIS macro rather
             // than substituting plain EFFECT/EFFECT_FOLLOW. All-or-nothing: a tail we cannot
             // spell in full is dropped, and the export falls back to the known-good pair.
-            extra_args: args.get(9 + off..).and_then(|tail| {
-                tail.iter()
-                    .map(crate::game_link::LuaArgWire::to_source_arg)
-                    .collect::<Option<Vec<_>>>()
-            }),
+            extra_args,
+            flip_axis,
             raw_line: None,
             trail_command: None,
             trail_off: None,
@@ -16569,6 +16916,7 @@ impl VisionaryApp {
             active_end: crate::data::OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: trail_capture_raw_line(func, args),
             trail_command: Some(func.to_string()),
             trail_off: None,
@@ -16638,6 +16986,7 @@ impl VisionaryApp {
             active_end: start,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,
@@ -16707,6 +17056,7 @@ impl VisionaryApp {
             active_end: start,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,
@@ -24959,6 +25309,7 @@ impl VisionaryApp {
         let mut rules: Vec<crate::game_link::SpawnRuleWire> = Vec::new();
         let mut missing_capture = false;
         let mut unsupported_work_int = false;
+        let mut unsupported_flip_axis = false;
         for (i, ec) in effects.iter().enumerate() {
             let pristine = pristines.get(i);
             let spawn_frame = pristine.map(|p| p.active_start).unwrap_or(ec.active_start);
@@ -25139,6 +25490,22 @@ impl VisionaryApp {
                 });
                 continue;
             }
+            let flip_axis_changed = pristine
+                .map(|p| p.flip_axis != ec.flip_axis)
+                .unwrap_or(ec.flip_axis.is_some());
+            if flip_axis_changed
+                && ec
+                    .flip_axis
+                    .as_deref()
+                    .and_then(effect_flip_axis_live_value)
+                    .is_none()
+            {
+                // The source/export path retains arbitrary symbolic tokens. Live injection is
+                // allowed only for the measured integer values above; leave the authored spawn
+                // alone rather than suppressing it with a value the plugin cannot reconstruct.
+                unsupported_flip_axis = true;
+                continue;
+            }
             // A follow emitter has no automatic relationship to the editor's end frame.
             // Schedule the same EFFECT_OFF_KIND that exported ACMD emits. This dispatches
             // through the plugin's normal kill-kind hook, which redirects transplanted kinds
@@ -25194,6 +25561,7 @@ impl VisionaryApp {
                     orig_hash != hash
                         || p.effect_name_alt != ec.effect_name_alt
                         || p.spawn_func != ec.spawn_func
+                        || p.flip_axis != ec.flip_axis
                 })
                 .unwrap_or(true);
             if (retimed || swapped) && ec.work_int.is_some() {
@@ -25341,7 +25709,12 @@ impl VisionaryApp {
             .cloned()
             .collect();
         self.game_link.send_effect_control_rules(&all_controls);
-        if missing_capture {
+        if unsupported_flip_axis {
+            self.state.status =
+                "This flip-axis/control token is preserved for source/export, but live preview \
+                 only accepts measured numeric or EF_FLIP_* constants."
+                    .into();
+        } else if missing_capture {
             self.state.status =
                 "Swapped/retimed effect needs a live capture — perform the move in game once so \
                  the change previews live (export applies it regardless)."
@@ -25362,12 +25735,14 @@ impl VisionaryApp {
                  preview cannot translate symbolic Work IDs or replay them safely after a retime."
                     .into();
         }
-        if unsupported_control || unsupported_work_int {
+        if unsupported_control || unsupported_work_int || unsupported_flip_axis {
             self.note_live_replay_constant_limit("effect control/work value");
         }
         LiveReplayLimits {
             missing_capture_donor: missing_capture || missing_control_capture,
-            missing_runtime_constant: unsupported_control || unsupported_work_int,
+            missing_runtime_constant: unsupported_control
+                || unsupported_work_int
+                || unsupported_flip_axis,
         }
     }
 
@@ -26447,7 +26822,9 @@ impl VisionaryApp {
                     let start = frame_x(row.start.min(total));
                     let end = frame_end_x(row.end.max(row.start).min(total)).max(start + 3.0);
                     let selected = match &row.selection {
-                        TimelineSelection::Hitbox(i) => self.selected_hitbox == Some(*i),
+                        TimelineSelection::Hitbox(i) => {
+                            hitbox_is_selected(self.selected_hitbox, *i)
+                        }
                         TimelineSelection::Effect(i) => self.state.selected_effect_call == Some(*i),
                         TimelineSelection::Command { family, site } => self
                             .selected_command
@@ -26658,7 +27035,7 @@ impl VisionaryApp {
                 let y_top = rect.top() + 24.0 + row as f32 * row_height;
                 let y_bot = y_top + bar_height;
                 let color = hitbox_display_color(hb);
-                let is_selected = self.selected_hitbox == Some(row);
+                let is_selected = hitbox_is_selected(self.selected_hitbox, row);
 
                 let start_x = frame_start_to_x(hb.active_start);
                 let end_x = if hb.active_end == 9999 {
@@ -28874,7 +29251,7 @@ impl eframe::App for VisionaryApp {
                             }
                         }
 
-                        for hb in &self.state.hitboxes {
+                        for (hitbox_index, hb) in self.state.hitboxes.iter().enumerate() {
                             // `ATTACK_ABS` has no volume and no bone to hang one on. Its size
                             // and offsets are zero because the call has no such arguments, so
                             // drawing it would put a dot at the model's origin that looks like
@@ -28891,13 +29268,8 @@ impl eframe::App for VisionaryApp {
                             }
 
                             let color = hitbox_display_color(hb);
-                            let stroke = egui::Stroke::new(2.0, color);
-                            let fill = egui::Color32::from_rgba_unmultiplied(
-                                color.r(),
-                                color.g(),
-                                color.b(),
-                                40,
-                            );
+                            let selected = hitbox_is_selected(self.selected_hitbox, hitbox_index);
+                            let (stroke, fill) = hitbox_viewport_style(color, selected);
 
                             // Wind areas are defined in the fighter's 2D object space. Render
                             // their real circle/AABB footprint rather than reusing the 3D ATTACK
@@ -35950,6 +36322,7 @@ mod live_effect_capture_tests {
             active_end: 9999,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,
@@ -36068,6 +36441,7 @@ mod live_effect_capture_tests {
             active_end: 1,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,
@@ -38729,5 +39103,50 @@ mod effect_control_rule_tests {
             VisionaryApp::effect_control_capture_args(&captures, "ENABLE_AREA", 9, 1),
             Some(vec![A::Int(3)])
         );
+    }
+}
+
+#[cfg(test)]
+mod hitbox_selection_visual_tests {
+    use super::{hitbox_display_color, hitbox_is_selected, hitbox_viewport_style};
+    use crate::data::Hitbox;
+
+    #[test]
+    fn selection_identity_is_index_scoped() {
+        assert!(hitbox_is_selected(Some(2), 2));
+        assert!(!hitbox_is_selected(Some(2), 1));
+        assert!(!hitbox_is_selected(None, 2));
+    }
+
+    #[test]
+    fn selected_attack_and_wind_keep_family_color_but_gain_obvious_outline() {
+        for category in [0, 2] {
+            let hitbox = Hitbox {
+                category,
+                ..Hitbox::default()
+            };
+            let color = hitbox_display_color(&hitbox);
+            let (normal_stroke, normal_fill) = hitbox_viewport_style(color, false);
+            let (selected_stroke, selected_fill) = hitbox_viewport_style(color, true);
+            assert!(selected_stroke.width > normal_stroke.width);
+            assert_eq!(selected_stroke.color, egui::Color32::WHITE);
+            assert!(selected_fill.r() >= normal_fill.r());
+            assert!(selected_fill.g() >= normal_fill.g());
+            assert!(selected_fill.b() >= normal_fill.b());
+            assert!(selected_fill.a() > normal_fill.a());
+        }
+    }
+}
+
+#[cfg(test)]
+mod effect_flip_axis_tests {
+    use super::effect_flip_axis_live_value;
+
+    #[test]
+    fn measured_flip_axis_tokens_resolve_only_to_known_native_values() {
+        assert_eq!(effect_flip_axis_live_value("*EF_FLIP_YZ"), Some(1));
+        assert_eq!(effect_flip_axis_live_value("EF_FLIP_XY"), Some(3));
+        assert_eq!(effect_flip_axis_live_value("5"), Some(5));
+        assert_eq!(effect_flip_axis_live_value("*PROJECT_LOCAL_FLIP"), None);
     }
 }

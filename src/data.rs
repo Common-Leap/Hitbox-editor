@@ -3430,6 +3430,107 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// Whether a sound site is a flat, unconditional source call that the structural editor can
+    /// move without changing a loop or runtime branch.
+    ///
+    /// A sound inside a loop or [`AcmdStmt::RawBlock`] is still removable as one source line,
+    /// but moving it out would change how often it plays or which branch owns it. Keep that
+    /// distinction in the IR instead of letting the panel make a seemingly harmless retime that
+    /// silently changes control flow on export.
+    pub fn sound_site_is_flat(&self, site: usize) -> bool {
+        fn walk(stmts: &[AcmdStmt], site: usize, seen: &mut usize, nested: bool) -> Option<bool> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for statement in inner {
+                            if !is_sound_stmt(statement) {
+                                continue;
+                            }
+                            if *seen == site {
+                                return Some(!nested);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if is_sound_stmt(inner) => {
+                        if *seen == site {
+                            return Some(!nested);
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen, true) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        walk(&self.stmts, site, &mut 0, false).unwrap_or(false)
+    }
+
+    /// Remove one sound source statement by its source ordinal.
+    ///
+    /// Loop sites are source ordinals rather than unrolled event ordinals, so removing one site
+    /// removes the line for every iteration. That is the only structural operation offered for a
+    /// nested sound; retiming it is intentionally gated by [`Self::sound_site_is_flat`].
+    pub fn remove_sound(&mut self, site: usize) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        let mut inner_index = 0;
+                        while inner_index < inner.len() {
+                            if !is_sound_stmt(&inner[inner_index]) {
+                                inner_index += 1;
+                                continue;
+                            }
+                            if *seen == site {
+                                inner.remove(inner_index);
+                                if inner.is_empty() {
+                                    stmts.remove(index);
+                                }
+                                return true;
+                            }
+                            *seen += 1;
+                            inner_index += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if is_sound_stmt(inner) => {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Insert a supported sound call in a new or existing top-level frame block.
+    ///
+    /// The insertion is deliberately flat. It never inserts into a loop or raw branch, and it
+    /// never consumes or rewrites an existing unknown statement, so project import/export keeps
+    /// the complete source tree around the new call.
+    pub fn insert_sound_at_frame(&mut self, frame: u32, call: SoundCall) -> bool {
+        self.insert_flat_call_at_frame(frame, ExcuteStmt::Sound(call))
+    }
+
     /// The expression call an [`ExpressionEvent::site`] refers to, in source order.
     pub fn expression_stmt_mut(&mut self, site: usize) -> Option<&mut ExpressionCall> {
         fn walk<'a>(
@@ -3469,6 +3570,121 @@ impl AcmdScript {
             None
         }
         walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Whether an expression site is a flat, unconditional source call suitable for retiming.
+    pub fn expression_site_is_flat(&self, site: usize) -> bool {
+        fn walk(stmts: &[AcmdStmt], site: usize, seen: &mut usize, nested: bool) -> Option<bool> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for statement in inner {
+                            if !is_expression_stmt(statement) {
+                                continue;
+                            }
+                            if *seen == site {
+                                return Some(!nested);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if is_expression_stmt(inner) => {
+                        if *seen == site {
+                            return Some(!nested);
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen, true) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        walk(&self.stmts, site, &mut 0, false).unwrap_or(false)
+    }
+
+    /// Remove one measured expression source statement by source ordinal.
+    pub fn remove_expression(&mut self, site: usize) -> bool {
+        fn walk(stmts: &mut Vec<AcmdStmt>, site: usize, seen: &mut usize) -> bool {
+            let mut index = 0;
+            while index < stmts.len() {
+                match &mut stmts[index] {
+                    AcmdStmt::Excute(inner) => {
+                        let mut inner_index = 0;
+                        while inner_index < inner.len() {
+                            if !is_expression_stmt(&inner[inner_index]) {
+                                inner_index += 1;
+                                continue;
+                            }
+                            if *seen == site {
+                                inner.remove(inner_index);
+                                if inner.is_empty() {
+                                    stmts.remove(index);
+                                }
+                                return true;
+                            }
+                            *seen += 1;
+                            inner_index += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) if is_expression_stmt(inner) => {
+                        if *seen == site {
+                            stmts.remove(index);
+                            return true;
+                        }
+                        *seen += 1;
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if walk(body, site, seen) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            false
+        }
+
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
+    /// Insert a measured expression call in a new or existing top-level frame block.
+    pub fn insert_expression_at_frame(&mut self, frame: u32, call: ExpressionCall) -> bool {
+        self.insert_flat_call_at_frame(frame, ExcuteStmt::Expression(call))
+    }
+
+    /// Insert one flat point call after its absolute frame. This is shared by the sound and
+    /// expression structural editors so their source-tree behavior cannot drift.
+    fn insert_flat_call_at_frame(&mut self, frame: u32, call: ExcuteStmt) -> bool {
+        let target = frame.max(1) as f32;
+        for index in 0..self.stmts.len() {
+            if !matches!(self.stmts[index], AcmdStmt::Frame(value) if script_frame(value) == frame)
+            {
+                continue;
+            }
+            if let Some(AcmdStmt::Excute(inner)) = self.stmts.get_mut(index + 1) {
+                inner.push(call);
+                return true;
+            }
+            self.stmts.insert(index + 1, AcmdStmt::Excute(vec![call]));
+            return true;
+        }
+
+        let insert_at = self
+            .stmts
+            .iter()
+            .position(|stmt| matches!(stmt, AcmdStmt::Frame(value) if *value > target))
+            .unwrap_or(self.stmts.len());
+        self.stmts.insert(insert_at, AcmdStmt::Frame(target));
+        self.stmts
+            .insert(insert_at + 1, AcmdStmt::Excute(vec![call]));
+        true
     }
 
     /// The `SET_SPEED_EX` call an event site's ordinal refers to, in source order.
@@ -7039,6 +7255,10 @@ pub enum EffectMacro {
         /// without this code having to know all two dozen signatures.
         #[serde(default)]
         extra_args: Vec<String>,
+        /// The measured integer flip-axis/control tail, when this is a flipped spawn family.
+        /// This is the authored token (`*EF_FLIP_YZ`, `0`, etc.), not an invented enum value.
+        #[serde(default)]
+        flip_axis: Option<String>,
     },
     /// AFTER_IMAGE4_ON / AFTER_IMAGE_ON — sword/weapon trail effects.
     AfterImage {
@@ -7307,6 +7527,13 @@ pub struct EffectCall {
     /// conflating the two downgraded them to plain `EFFECT_FOLLOW` on export.
     #[serde(default)]
     pub extra_args: Option<Vec<String>>,
+    /// The measured integer flip-axis/control tail for flipped spawn families.
+    ///
+    /// This remains the exact authored token so symbolic `*EF_FLIP_*` values survive project
+    /// save, export, and source sync. `None` means the command is not flipped or its tail was not
+    /// measured; it is never a guessed numeric default.
+    #[serde(default)]
+    pub flip_axis: Option<String>,
     /// Set for spawns that cannot be recomposed from a transform (currently the
     /// AFTER_IMAGE trail macros); exports re-emit this line as-is.
     #[serde(default)]
@@ -7740,6 +7967,7 @@ fn eval_effect_stmts(
                             scale,
                             follows_bone,
                             extra_args,
+                            flip_axis,
                         } => {
                             let active_end = if *follows_bone {
                                 OPEN_ENDED_EFFECT_FRAME
@@ -7759,6 +7987,7 @@ fn eval_effect_stmts(
                                 active_end,
                                 disabled: false,
                                 extra_args: Some(extra_args.clone()),
+                                flip_axis: flip_axis.clone(),
                                 raw_line: None,
                                 trail_command: None,
                                 trail_off: None,
@@ -7810,6 +8039,7 @@ fn eval_effect_stmts(
                                 active_end: OPEN_ENDED_EFFECT_FRAME,
                                 disabled: false,
                                 extra_args: None,
+                                flip_axis: None,
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
                                 trail_command: (!command.is_empty()).then(|| command.clone()),
                                 trail_off: None,
@@ -7975,6 +8205,7 @@ fn eval_effect_stmts(
                                 active_end: script_frame(frame),
                                 disabled: false,
                                 extra_args: None,
+                                flip_axis: None,
                                 raw_line: None,
                                 trail_command: None,
                                 trail_off: None,
@@ -8013,6 +8244,7 @@ fn eval_effect_stmts(
                                 active_end: script_frame(frame),
                                 disabled: false,
                                 extra_args: None,
+                                flip_axis: None,
                                 raw_line: None,
                                 trail_command: None,
                                 trail_off: None,
@@ -8234,6 +8466,104 @@ mod tests {
                 ReverseLrEvent { frame: 5, site: 0 },
                 ReverseLrEvent { frame: 8, site: 1 },
             ]
+        );
+    }
+
+    #[test]
+    fn sound_structural_edits_keep_unknown_lines_and_guard_nested_retimes() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(3.0),
+                AcmdStmt::Excute(vec![
+                    ExcuteStmt::Sound(SoundCall {
+                        func: "PLAY_SE".into(),
+                        sounds: vec!["se_first".into()],
+                        tail: None,
+                    }),
+                    ExcuteStmt::Raw("unknown_sound_line(agent);".into()),
+                ]),
+                AcmdStmt::Loop {
+                    count: 2,
+                    body: vec![
+                        AcmdStmt::Wait(1.0),
+                        AcmdStmt::Excute(vec![ExcuteStmt::Sound(SoundCall {
+                            func: "PLAY_SE".into(),
+                            sounds: vec!["se_looped".into()],
+                            tail: None,
+                        })]),
+                    ],
+                },
+            ],
+        };
+
+        assert!(script.sound_site_is_flat(0));
+        assert!(!script.sound_site_is_flat(1));
+        assert!(script.remove_sound(1));
+        assert!(matches!(
+            &script.stmts[1],
+            AcmdStmt::Excute(inner)
+                if inner.iter().any(|stmt| matches!(stmt, ExcuteStmt::Raw(line) if line == "unknown_sound_line(agent);"))
+        ));
+        assert!(script.insert_sound_at_frame(
+            9,
+            SoundCall {
+                func: "PLAY_SE".into(),
+                sounds: vec!["se_added".into()],
+                tail: None,
+            }
+        ));
+        assert_eq!(
+            script
+                .to_sound_events()
+                .iter()
+                .map(|event| (event.frame, event.call.sounds[0].as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "se_first"), (9, "se_added")]
+        );
+        let emitted = crate::acmd::preview_sound_fn(&script, "fixture");
+        assert_eq!(
+            crate::acmd::parse_sound_script(&emitted).to_sound_events(),
+            script.to_sound_events()
+        );
+    }
+
+    #[test]
+    fn expression_structural_edits_keep_branch_boundaries_and_round_trip_export() {
+        let mut script = AcmdScript {
+            stmts: vec![
+                AcmdStmt::Frame(2.0),
+                AcmdStmt::Excute(vec![ExcuteStmt::Expression(ExpressionCall::Quake {
+                    kind: "0".into(),
+                })]),
+                AcmdStmt::RawBlock {
+                    header: "if runtime_condition() {".into(),
+                    body: vec![
+                        AcmdStmt::Frame(5.0),
+                        AcmdStmt::Excute(vec![ExcuteStmt::Expression(ExpressionCall::RumbleHit {
+                            kind: "rbkind_loop".into(),
+                            unk: "0".into(),
+                        })]),
+                    ],
+                },
+            ],
+        };
+
+        assert!(script.expression_site_is_flat(0));
+        assert!(!script.expression_site_is_flat(1));
+        assert!(script.remove_expression(1));
+        assert!(script.insert_expression_at_frame(7, ExpressionCall::Quake { kind: "2".into() }));
+        assert_eq!(
+            script
+                .to_expression_events()
+                .iter()
+                .map(|event| (event.frame, event.call.func()))
+                .collect::<Vec<_>>(),
+            vec![(2, "QUAKE"), (7, "QUAKE")]
+        );
+        let emitted = crate::acmd::preview_expression_fn(&script, "fixture");
+        assert_eq!(
+            crate::acmd::parse_expression_script(&emitted).to_expression_events(),
+            script.to_expression_events()
         );
     }
 
@@ -8667,6 +8997,7 @@ mod tests {
                     scale: 1.0,
                     follows_bone: false,
                     extra_args: Vec::new(),
+                    flip_axis: None,
                 }]),
                 EffectStmt::Wait(5.0),
                 EffectStmt::Excute(vec![EffectMacro::Effect {
@@ -8679,6 +9010,7 @@ mod tests {
                     scale: 1.0,
                     follows_bone: false,
                     extra_args: Vec::new(),
+                    flip_axis: None,
                 }]),
                 // An absolute frame AFTER waits must not be treated as another wait.
                 EffectStmt::Frame(20.0),
@@ -8692,6 +9024,7 @@ mod tests {
                     scale: 1.0,
                     follows_bone: false,
                     extra_args: Vec::new(),
+                    flip_axis: None,
                 }]),
             ],
         };
@@ -8715,6 +9048,7 @@ mod tests {
             active_end: OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,
@@ -8784,6 +9118,7 @@ mod tests {
             active_end: OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: Some(vec!["true".into()]),
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,

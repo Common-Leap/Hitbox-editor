@@ -183,8 +183,11 @@ impl ModProjectFile {
             f.acmd.is_empty()
                 && f.effect_calls.values().all(|v| v.is_empty())
                 && f.effect_calls_full.values().all(|v| v.is_empty())
-                && f.sound_scripts.values().all(|s| s.stmts.is_empty())
-                && f.expression_scripts.values().all(|s| s.stmts.is_empty())
+                // An empty category script is an explicit replacement: it means the user
+                // removed every call and wants the generated plugin to silence the stock
+                // category. The map's presence, not the statement count, carries that intent.
+                && f.sound_scripts.is_empty()
+                && f.expression_scripts.is_empty()
                 && f.eff.as_ref().map(|e| e.is_empty()).unwrap_or(true)
                 && f.live_tweaks.is_empty()
         })

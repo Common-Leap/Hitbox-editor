@@ -118,23 +118,17 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
             // showed it could not change an outcome.
             dropped.insert(format!("{fighter}/{move_name}"), lost.clone());
         }
-        // Sound scripts. A move whose sound script parsed to nothing is skipped rather than
-        // exported: emitting an empty `sound_` function would install silence over the
-        // fighter's own, which is a deletion the user never asked for.
+        // Sound scripts. An empty script is intentional when the user removed every call; it
+        // must be emitted so the generated replacement silences the stock category. A missing
+        // map entry, not an empty script, means the category was never edited.
         let mut sound_moves: Vec<_> = edits.sound_scripts.iter().collect();
         sound_moves.sort_by(|a, b| a.0.cmp(b.0));
         for (move_name, script) in sound_moves {
-            if script.stmts.is_empty() {
-                continue;
-            }
             sound_edits.push((fighter.clone(), move_name.clone(), script.clone()));
         }
         let mut expression_moves: Vec<_> = edits.expression_scripts.iter().collect();
         expression_moves.sort_by(|a, b| a.0.cmp(b.0));
         for (move_name, script) in expression_moves {
-            if script.stmts.is_empty() {
-                continue;
-            }
             expression_edits.push((fighter.clone(), move_name.clone(), script.clone()));
         }
 
@@ -144,15 +138,8 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
         for (move_name, warning) in &edits.capture_branch_warnings {
             let exported = edits.acmd.contains_key(move_name)
                 || edits.effect_calls_full.contains_key(move_name)
-                || edits
-                    .sound_scripts
-                    .get(move_name)
-                    .is_some_and(|script| !script.stmts.is_empty());
-            let exported = exported
-                || edits
-                    .expression_scripts
-                    .get(move_name)
-                    .is_some_and(|script| !script.stmts.is_empty());
+                || edits.sound_scripts.contains_key(move_name);
+            let exported = exported || edits.expression_scripts.contains_key(move_name);
             if exported {
                 capture_warnings.push(warning.clone());
             }
@@ -926,6 +913,53 @@ unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
             Ok(_) => panic!("uncovered live tweak unexpectedly exported"),
         };
         assert!(error.contains("kirby_dash"), "{error}");
+    }
+
+    #[test]
+    fn empty_sound_and_expression_scripts_are_explicit_project_replacements() {
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION,
+            name: "clear_categories".into(),
+            ..Default::default()
+        };
+        project.fighters.insert(
+            "mario".into(),
+            FighterMod {
+                sound_scripts: HashMap::from([("attack_air_n".into(), Default::default())]),
+                expression_scripts: HashMap::from([("attack_air_n".into(), Default::default())]),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            !project.is_empty(),
+            "an explicit empty replacement is still an edit"
+        );
+        let round_tripped: ModProjectFile =
+            serde_json::from_str(&serde_json::to_string(&project).unwrap()).unwrap();
+        let generated = source_project(&round_tripped)
+            .unwrap()
+            .expect("empty category replacements should generate source");
+        let acmd = generated
+            .project
+            .files
+            .iter()
+            .find(|file| file.rel_path == "src/mario/acmd.rs")
+            .map(|file| file.contents.as_str())
+            .expect("generated fighter source");
+        assert!(
+            acmd.contains("unsafe extern \"C\" fn sound_attackairn"),
+            "{acmd}"
+        );
+        assert!(
+            acmd.contains("unsafe extern \"C\" fn expression_attackairn"),
+            "{acmd}"
+        );
+        assert!(acmd.contains("agent.acmd(\"sound_attackairn\""), "{acmd}");
+        assert!(
+            acmd.contains("agent.acmd(\"expression_attackairn\""),
+            "{acmd}"
+        );
     }
 
     /// Audit a real editor-produced project against a real ArcExplorer dump. This verifies that

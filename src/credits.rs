@@ -9,37 +9,69 @@ const CREDIT_SUGGESTION_CONTACT_ID: &str = "751250088910913647";
 const ART_FRAME_STROKE_WIDTH: f32 = 1.5;
 const ART_FRAME_SIDE_GUTTER: i8 = 6;
 
-const SUPPORT: &[&str] = &[
-    "770942826519199784",
-    "318117607003652109",
-    "195577361033330688",
-    "340711847420231691",
-    "188362544283516928",
-    "1377069620434960404",
-    "120364653795606529",
-    "744631056522674246",
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CreditEntry {
+    id: &'static str,
+    contribution: Option<&'static str>,
+}
+
+impl CreditEntry {
+    const fn person(id: &'static str) -> Self {
+        Self {
+            id,
+            contribution: None,
+        }
+    }
+
+    const fn upstream(id: &'static str, contribution: &'static str) -> Self {
+        Self {
+            id,
+            contribution: Some(contribution),
+        }
+    }
+}
+
+const SUPPORT: &[CreditEntry] = &[
+    CreditEntry::person("770942826519199784"),
+    CreditEntry::person("318117607003652109"),
+    CreditEntry::person("195577361033330688"),
+    CreditEntry::person("340711847420231691"),
+    CreditEntry::person("188362544283516928"),
+    CreditEntry::person("1377069620434960404"),
+    CreditEntry::person("120364653795606529"),
+    CreditEntry::person("744631056522674246"),
 ];
 
-const TESTING: &[&str] = &[
-    "195577361033330688",
-    "188362544283516928",
-    "1377069620434960404",
+const TESTING: &[CreditEntry] = &[
+    CreditEntry::person("195577361033330688"),
+    CreditEntry::person("188362544283516928"),
+    CreditEntry::person("1377069620434960404"),
 ];
 
-const ART: &[&str] = &["385629478308806666"];
+const ART: &[CreditEntry] = &[CreditEntry::person("385629478308806666")];
 
-const DEVELOPMENT: &[&str] = &[
-    "125287732439285761",
-    "179233946012352512",
-    "340711847420231691",
-    "214199485105045504",
+const UPSTREAM_DEVELOPMENT: &[CreditEntry] = &[
+    CreditEntry::upstream("125287732439285761", "Switch Toolbox and BNTX tooling"),
+    CreditEntry::upstream("179233946012352512", "ARCropolis tools and Smash research"),
+    CreditEntry::upstream(
+        "340711847420231691",
+        "EffectResearch and effect documentation",
+    ),
+    CreditEntry::upstream(
+        "214199485105045504",
+        "SSBH rendering, file formats, textures, and ArcExplorer",
+    ),
+    CreditEntry::upstream(
+        "120364653795606529",
+        "Parameter labels and dumped-script contributions",
+    ),
 ];
 
-const SECTIONS: &[(&str, &[&str])] = &[
+const SECTIONS: &[(&str, &[CreditEntry])] = &[
     ("Support", SUPPORT),
     ("Testing", TESTING),
     ("Art", ART),
-    ("Development", DEVELOPMENT),
+    ("Upstream Development", UPSTREAM_DEVELOPMENT),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,7 +294,7 @@ impl CreditsWindow {
         }
     }
 
-    fn draw_section(&self, ui: &mut egui::Ui, title: &str, ids: &[&str]) {
+    fn draw_section(&self, ui: &mut egui::Ui, title: &str, entries: &[CreditEntry]) {
         let available_width = ui.available_width();
         ui.label(
             egui::RichText::new(title.to_uppercase())
@@ -272,26 +304,33 @@ impl CreditsWindow {
         );
         ui.add_space(6.0);
 
-        let metrics = grid_metrics(available_width, ids.len());
-        for (row_index, row) in ids.chunks(metrics.columns).enumerate() {
+        let metrics = grid_metrics(available_width, entries.len());
+        for (row_index, row) in entries.chunks(metrics.columns).enumerate() {
             let row_width = metrics.card_width * row.len() as f32
                 + metrics.gap * row.len().saturating_sub(1) as f32;
             let side_space = ((available_width - row_width) / 2.0).max(0.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = metrics.gap;
                 ui.add_space(side_space);
-                for id in row {
-                    let profile = self.profile(id);
-                    profile_card(ui, profile, metrics.card_width, metrics.avatar_size, false);
+                for entry in row {
+                    let profile = self.profile(entry.id);
+                    profile_card(
+                        ui,
+                        profile,
+                        metrics.card_width,
+                        metrics.avatar_size,
+                        entry.contribution,
+                        false,
+                    );
                 }
             });
-            if row_index + 1 < ids.len().div_ceil(metrics.columns) {
+            if row_index + 1 < entries.len().div_ceil(metrics.columns) {
                 ui.add_space(metrics.gap);
             }
         }
     }
 
-    fn draw_art_section(&self, ui: &mut egui::Ui, ids: &[&str]) -> egui::Response {
+    fn draw_art_section(&self, ui: &mut egui::Ui, entries: &[CreditEntry]) -> egui::Response {
         let accent = egui::Color32::from_rgb(238, 158, 255);
         let available_width = ui.available_width();
         let frame = art_frame(available_width, accent);
@@ -308,9 +347,9 @@ impl CreditsWindow {
                     );
                     ui.add_space(8.0);
                     let (card_width, avatar_size) = art_profile_sizes(content_width);
-                    for id in ids {
-                        let profile = self.profile(id);
-                        profile_card(ui, profile, card_width, avatar_size, true);
+                    for entry in entries {
+                        let profile = self.profile(entry.id);
+                        profile_card(ui, profile, card_width, avatar_size, None, true);
                     }
                 });
             })
@@ -384,6 +423,7 @@ fn profile_card(
     profile: &DiscordProfile,
     card_width: f32,
     avatar_size: f32,
+    contribution: Option<&str>,
     featured: bool,
 ) {
     let margin = if featured { 15 } else { 8 };
@@ -435,8 +475,23 @@ fn profile_card(
                         .color(egui::Color32::from_rgb(148, 154, 184)),
                 );
             }
+            if let Some(contribution) = contribution {
+                ui.add_space(3.0);
+                add_contribution_note(ui, contribution);
+            }
         });
     });
+}
+
+fn add_contribution_note(ui: &mut egui::Ui, contribution: &str) -> egui::Response {
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(contribution)
+                .size(9.0)
+                .color(egui::Color32::from_rgb(157, 164, 198)),
+        )
+        .wrap(),
+    )
 }
 
 fn art_frame(available_width: f32, accent: egui::Color32) -> egui::Frame {
@@ -595,7 +650,7 @@ fn unique_ids() -> Vec<&'static str> {
     let mut seen = HashSet::new();
     SECTIONS
         .iter()
-        .flat_map(|(_, ids)| ids.iter().copied())
+        .flat_map(|(_, entries)| entries.iter().map(|entry| entry.id))
         .filter(|id| seen.insert(*id))
         .collect()
 }
@@ -630,11 +685,22 @@ mod tests {
     fn credits_roster_has_expected_sections_and_unique_people() {
         assert_eq!(
             SECTIONS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-            ["Support", "Testing", "Art", "Development"]
+            ["Support", "Testing", "Art", "Upstream Development"]
         );
         assert_eq!(unique_ids().len(), 12);
-        assert!(SUPPORT.contains(&"340711847420231691"));
-        assert!(DEVELOPMENT.contains(&"340711847420231691"));
+        assert!(SUPPORT.iter().any(|entry| entry.id == "340711847420231691"));
+        assert!(UPSTREAM_DEVELOPMENT
+            .iter()
+            .any(|entry| entry.id == "340711847420231691"));
+        assert!(SUPPORT.iter().any(|entry| entry.id == "120364653795606529"));
+        assert!(UPSTREAM_DEVELOPMENT
+            .iter()
+            .any(|entry| entry.id == "120364653795606529"));
+        assert!(UPSTREAM_DEVELOPMENT.iter().all(|entry| {
+            entry
+                .contribution
+                .is_some_and(|contribution| !contribution.trim().is_empty())
+        }));
     }
 
     #[test]
@@ -734,6 +800,52 @@ mod tests {
                 painted_right,
                 clip_rect.right()
             );
+        }
+    }
+
+    #[test]
+    fn upstream_contribution_notes_wrap_inside_narrow_and_wide_cards() {
+        for card_width in [128.0, 180.0, 320.0] {
+            let context = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(card_width, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut note_rects = Vec::new();
+            let mut clip_rect = None;
+            let _ = context.run_ui(input, |ui| {
+                clip_rect = Some(ui.clip_rect());
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(8, 8))
+                    .show(ui, |ui| {
+                        ui.set_width((card_width - 16.0).max(1.0));
+                        for entry in UPSTREAM_DEVELOPMENT {
+                            let contribution = entry
+                                .contribution
+                                .expect("every upstream entry has a contribution note");
+                            note_rects.push(add_contribution_note(ui, contribution).rect);
+                        }
+                    });
+            });
+
+            let clip_rect = clip_rect.expect("the test UI should have a clip rectangle");
+            let content_width = (card_width - 16.0).max(1.0);
+            for rect in note_rects {
+                assert!(
+                    rect.width() <= content_width + 0.01,
+                    "note width {} exceeded card content width {} at card width {card_width}",
+                    rect.width(),
+                    content_width
+                );
+                assert!(
+                    rect.left() >= clip_rect.left() - 0.01
+                        && rect.right() <= clip_rect.right() + 0.01,
+                    "note rect {rect:?} escaped the viewport at card width {card_width}"
+                );
+            }
         }
     }
 

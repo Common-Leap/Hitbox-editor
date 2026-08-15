@@ -799,6 +799,8 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                             .and_then(|value| value.trim().parse::<f32>().ok())
                             .unwrap_or(default)
                     };
+                    let flip_axis = crate::acmd::effect_flip_axis_tail_index(name)
+                        .and_then(|index| t.get(10 + off + index).cloned());
                     macros.push(EffectMacro::Effect {
                         effect_name,
                         effect_name_alt,
@@ -815,6 +817,7 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                         scale: num(9 + off, 1.0),
                         follows_bone,
                         extra_args: t[10 + off..].to_vec(),
+                        flip_axis,
                     });
                     continue;
                 }
@@ -1572,6 +1575,23 @@ pub fn effect_spawn_layout(name: &str) -> Option<&'static EffectSpawnLayout> {
     EFFECT_SPAWN_LAYOUTS
         .iter()
         .find(|layout| layout.name == name)
+}
+
+/// Return the tail-relative slot of the measured flip-axis/control argument.
+///
+/// The native `EFFECT_FOLLOW_FLIP` binding calls this final value an `i32 axis`; it is not a
+/// rotation angle. Every supported flipped layout has exactly one integer tail slot, while the
+/// surrounding numeric and boolean tail slots vary by macro family. Keeping the lookup beside
+/// the layout table prevents the panel, source writer, and parser from assuming that the axis is
+/// always the last argument or always at the same absolute position.
+pub fn effect_flip_axis_tail_index(name: &str) -> Option<usize> {
+    let layout = effect_spawn_layout(name)?;
+    layout.flip.then(|| {
+        layout
+            .tail
+            .iter()
+            .position(|(_, kind)| *kind == EffectSpawnTailKind::Integer)
+    })?
 }
 
 /// Dumped effect spawn macros that share the common graphic/joint/transform prefix.
@@ -4068,11 +4088,11 @@ fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
         num(call.scale)
     );
 
-    let tail = call
+    let Some(source_tail) = call
         .extra_args
         .as_ref()
-        .filter(|_| !call.spawn_func.is_empty());
-    let Some(tail) = tail else {
+        .filter(|_| !call.spawn_func.is_empty())
+    else {
         // The fallback pair takes ONE graphic, so a flipped call's second one is dropped
         // here rather than shifting every following argument by a slot.
         let (fallback_func, fallback_tail) = plain_spawn_fallback(call.follows_bone);
@@ -4082,6 +4102,19 @@ fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
         );
     };
 
+    // `flip_axis` is the typed view of one token retained in `extra_args` for unknown-tail
+    // fidelity. Keep export correct even when a project/API caller changed the typed field
+    // without also patching the duplicate tail slot; the panel normally keeps both in sync.
+    let mut tail = source_tail.clone();
+    if let (Some(axis), Some(tail_index)) = (
+        call.flip_axis.as_ref(),
+        effect_flip_axis_tail_index(&call.spawn_func),
+    ) {
+        if let Some(slot) = tail.get_mut(tail_index) {
+            *slot = axis.clone();
+        }
+    }
+
     let graphics = match &call.effect_name_alt {
         Some(alt) => format!("{graphic}, {}", hash_arg(alt)),
         None => graphic,
@@ -4089,7 +4122,7 @@ fn emit_spawn_call(call: &crate::data::EffectCall, indent: &str) -> String {
     let mut args = format!("agent, {graphics}, {bone}, {transform}");
     for extra in tail {
         args.push_str(", ");
-        args.push_str(extra);
+        args.push_str(&extra);
     }
     format!("{indent}macros::{}({args});\n", call.spawn_func)
 }
@@ -6916,6 +6949,7 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
                         .chain(["false".into()])
                         .collect(),
                 ),
+                flip_axis: None,
                 raw_line: None,
                 trail_command: None,
                 trail_off: None,
@@ -6946,6 +6980,7 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
                 active_end: 20,
                 disabled: false,
                 extra_args: Some(vec!["true".into()]),
+                flip_axis: None,
                 raw_line: None,
                 trail_command: None,
                 trail_off: None,
@@ -7327,6 +7362,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             calls[0].extra_args.as_deref(),
             Some(&["true".to_string(), "*EF_FLIP_YZ".to_string()][..])
         );
+        assert_eq!(calls[0].flip_axis.as_deref(), Some("*EF_FLIP_YZ"));
         assert_eq!(calls[1].spawn_func, "EFFECT_FOLLOW_NO_STOP");
 
         let (_, emitted) =
@@ -7352,6 +7388,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         call.follows_bone = true;
         call.active_end = crate::data::OPEN_ENDED_EFFECT_FRAME;
         call.extra_args = Some(vec!["false".into(), "0".into(), "1.0".into()]);
+        call.flip_axis = Some("*EF_FLIP_XY".into());
 
         let (_, emitted) = emit_effect_move_fn(
             &calls,
@@ -7366,7 +7403,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             "the selected command and both graphic slots must be exported:\n{emitted}"
         );
         assert!(
-            emitted.contains(", 1.2, false, 0, 1.0);"),
+            emitted.contains(", 1.2, false, *EF_FLIP_XY, 1.0);"),
             "the target command must receive its own bool/axis/alpha tail:\n{emitted}"
         );
 
@@ -7378,8 +7415,9 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         assert_eq!(
             reparsed[0].extra_args.as_deref(),
-            Some(&["false", "0", "1.0"].map(str::to_string)[..])
+            Some(&["false", "*EF_FLIP_XY", "1.0"].map(str::to_string)[..])
         );
+        assert_eq!(reparsed[0].flip_axis.as_deref(), Some("*EF_FLIP_XY"));
     }
 
     /// `LAST_EFFECT_SET_RATE` was parsed into the IR and then dropped on the way to
@@ -9087,6 +9125,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             active_end: crate::data::OPEN_ENDED_EFFECT_FRAME,
             disabled: false,
             extra_args: None,
+            flip_axis: None,
             raw_line: None,
             trail_command: None,
             trail_off: None,

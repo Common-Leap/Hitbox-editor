@@ -475,18 +475,36 @@ A **Move sounds** section in **Sound & feedback** lists the same calls with the 
 editable, so you can give a punch a heavier impact or swap a fighter's footsteps
 for someone else's. The name is a label in the fighter's own sound bank; one the
 bank does not have plays nothing rather than reporting an error, so a typo is
-silent in game as well as here. An edit reaches both the exported plugin and, if
-you have a project linked, your own `sound_` function.
+silent in game as well as here. Exact in-place name changes are previewed live
+when their original call can be identified safely, and all edits reach the
+generated `sound_` function and the linked source report.
 
-Only the name. Moving a sound to another frame would mean moving the call between
-`frame` blocks, which is a change of structure rather than of a value — the same
-limit hurtbox states have — so no widget offers it. `SET_PLAY_INHIVIT`'s
-suppression window is shown beside its call and is not editable either.
+The section also offers **Move here**, **Remove**, and **Add sound**. A flat call can
+move between frame blocks; calls inside loops or runtime branches can be removed
+as authored, but are not retimed because that would change their control flow.
+Adding, removing, and retiming are structural: generated export applies them,
+linked-source sync reports them instead of guessing, and the live plugin keeps
+only exact in-place name replacements. `SET_PLAY_INHIVIT`'s suppression window
+is shown beside its call and is not editable.
 
-Sound is not previewed live yet: an edit is written and exported, but a running
-game keeps playing the original until the mod is built and installed. A move
-whose sounds you have not touched is left out of the export entirely, so the
-fighter's own `sound_` script keeps playing exactly as it did.
+The complete edited `sound_` tree is saved in `modproject.json`, including the
+unknown lines around calls and an intentional empty replacement when every call
+was removed. Loading a project stages every saved sound and expression script
+before publishing the final live-rule union, so a move that has not been edited
+does not replace the fighter's own category script.
+
+**Expression scripts** share the **Sound & feedback** tab. Measured `RUMBLE_HIT`,
+`QUAKE`, `FT_ATTACK_ABS_CAMERA_QUAKE`, and `ControlModule::set_rumble` calls can
+be retimed, added, removed, and have their authored arguments edited. Unknown
+lines remain visible in the generated/source paths. Structural edits are
+export/source edits; live replay sends only safe in-place argument changes with
+a measured capture identity, and refuses loop/branch retimes or ambiguous
+call alignment.
+
+Selecting a hitbox in the collision list, timeline, or viewport gives it the
+same bright outline while retaining its attack, grab, search, or wind family
+color. Selection is presentation state only: it does not change project data,
+generated source, or live rules.
 
 **Motion & state commands** appear in their own timeline lanes and in the
 matching editor tab:
