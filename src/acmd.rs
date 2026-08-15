@@ -680,10 +680,18 @@ pub(crate) const DISPLAYED_PREFIXES: [&str; 4] = ["game_", "effect_", "sound_", 
 /// by attribute — `#[acmd_script(script = "game_attacks4")] fn my_custom_name` — so pulling it
 /// apart by prefix would silently drop it on the floor. Only the mirror is safe to take apart
 /// that way, because it is always dumped vanilla and always plainly named.
-pub fn merge_project_over_mirror(project: &str, covered: &[&str], mirror: &str) -> String {
+/// Fill categories a project does not define, while leaving categories that were found more than
+/// once untouched. The latter are blocked rather than replaced by vanilla: choosing one duplicate
+/// source function would make the linked project appear correct while editing the wrong file.
+pub fn merge_project_over_mirror_blocked(
+    project: &str,
+    covered: &[&str],
+    blocked: &[&str],
+    mirror: &str,
+) -> String {
     let mut body = project.to_string();
     for prefix in SCRIPT_PREFIXES {
-        if covered.contains(&prefix) {
+        if covered.contains(&prefix) || blocked.contains(&prefix) {
             continue;
         }
         if let Some(function) = extract_function(mirror, prefix) {
@@ -9767,7 +9775,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 with_effects += 1;
                 // Overriding the hitboxes must not take the effects with it — the shape of
                 // most hitbox mods, and what used to display as a move with no effects at all.
-                let merged = merge_project_over_mirror(GAME_ONLY, &["game_"], mirror);
+                let merged = merge_project_over_mirror_blocked(GAME_ONLY, &["game_"], &[], mirror);
                 assert_eq!(
                     parse_effect_script(&merged).to_effect_calls().len(),
                     effects,
@@ -9784,7 +9792,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 
             if hitboxes > 0 {
                 with_hitboxes += 1;
-                let merged = merge_project_over_mirror(EFFECT_ONLY, &["effect_"], mirror);
+                let merged =
+                    merge_project_over_mirror_blocked(EFFECT_ONLY, &["effect_"], &[], mirror);
                 assert_eq!(
                     parse_acmd_script(&merged).to_hitboxes().len(),
                     hitboxes,
@@ -9799,7 +9808,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 
             // The case D1a named. A sound-only project used to fall back to the mirror whole,
             // so its own sounds were the one thing that did not survive being loaded.
-            let merged = merge_project_over_mirror(SOUND_ONLY, &["sound_"], mirror);
+            let merged = merge_project_over_mirror_blocked(SOUND_ONLY, &["sound_"], &[], mirror);
             assert_eq!(
                 parse_acmd_script(&merged).to_hitboxes().len(),
                 hitboxes,

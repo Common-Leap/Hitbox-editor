@@ -165,11 +165,14 @@ By default Visionary reads ACMD scripts from an online archive of the *vanilla*
 scripts. If you have already modded a move, that is not the code your game runs.
 
 Open **Windows → ACMD Source** and link the Rust project that builds your
-plugin — the folder holding its `Cargo.toml`. Visionary indexes every
-`unsafe extern "C" fn game_*` / `effect_*` function in it and reads the selected
-move from there instead, so the editor shows the macros you actually called.
-Both the smashline layout (`Agent::new("mario")` beside the scripts) and the
-older `#[acmd_script(agent = "…", script = "…")]` attributes are recognised.
+plugin — the folder holding its `Cargo.toml`. Visionary recursively scans its
+Rust source files, so scripts can stay in their existing modules and filenames;
+you do not need to create a specially named aggregate file. It joins
+registrations with functions even when they live in different source files and
+reads the selected move from the original functions, so the editor shows the
+macros you actually called. Both the smashline layout (`Agent::new("mario")`
+beside the scripts) and the older `#[acmd_script(agent = "…", script = "…")]`
+attributes are recognised.
 
 A project rarely overrides everything, and it does not have to. Each category is
 resolved on its own: your `game_attackairn` is used for the hitboxes, and the
@@ -191,8 +194,11 @@ The editor and the rest of the app stay in sync both ways while you work:
   text, so the code always shows what you are looking at.
 
 Nothing touches the file on disk until you press **Save**, which rewrites only
-that one function and leaves the rest of the file alone. **Revert** restores the
-script as loaded, panels included.
+that one function in the source file that owns it and leaves the rest of the
+project alone. If the same fighter and script name appears in more than one
+function, Visionary reports the conflicting files and functions instead of
+guessing which one to edit; resolve the duplicate and press **Rescan**.
+**Revert** restores the script as loaded, panels included.
 
 **Show** switches between your source, the code Visionary *would* write into
 `acmd_source/` if you exported the move right now, and both side by side. The

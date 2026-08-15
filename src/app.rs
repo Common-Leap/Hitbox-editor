@@ -38,7 +38,7 @@ fn rebuild_linked_acmd_source_index(
     current: &mut Option<crate::acmd_src::SourceIndex>,
 ) -> anyhow::Result<bool> {
     let index = crate::acmd_src::SourceIndex::build(root)?;
-    let has_scripts = index.script_count() > 0;
+    let has_scripts = index.has_scripts();
     *current = Some(index);
     Ok(has_scripts)
 }
@@ -679,8 +679,12 @@ fn merge_fetched_body(
     match project {
         Some(project) => {
             let mirror = body.unwrap_or_default();
-            let merged =
-                crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror);
+            let merged = crate::acmd::merge_project_over_mirror_blocked(
+                &project.body,
+                &project.covers,
+                &project.blocked,
+                &mirror,
+            );
             (Ok(merged), "Project source")
         }
         None => (body, "GitHub"),
@@ -2282,6 +2286,8 @@ enum NoSource {
     FighterAbsent,
     /// Linked and has the fighter, but not this move.
     MoveAbsent,
+    /// The move has a duplicate script identity and cannot safely choose a source function.
+    Ambiguous,
     /// The move IS in the project; the user just has not opened either script yet.
     NothingOpen,
 }
@@ -2873,7 +2879,7 @@ impl VisionaryApp {
         if let Some(root) = load_config_path(ACMD_SRC_CONFIG_KEY) {
             app.acmd_src = crate::acmd_src::SourceIndex::build(&root)
                 .ok()
-                .filter(|index| index.script_count() > 0);
+                .filter(|index| index.has_scripts());
         }
 
         // Profiling helper: preselect a fighter by internal name so a `VISIONARY_PROFILE` run
@@ -3785,8 +3791,12 @@ impl VisionaryApp {
                 // afterwards and overwrite the source-loaded script with the vanilla one.
                 self.acmd_receiver = None;
                 self.fetching_acmd = false;
-                let body =
-                    crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror);
+                let body = crate::acmd::merge_project_over_mirror_blocked(
+                    &project.body,
+                    &project.covers,
+                    &project.blocked,
+                    &mirror,
+                );
                 self.apply_fetched_body_with_mismatch(
                     &fighter_name,
                     &move_name,
@@ -3868,7 +3878,8 @@ impl VisionaryApp {
             Ok(index) => {
                 let scripts = index.script_count();
                 let fighters = index.fighters.len();
-                if scripts == 0 {
+                let conflicts = index.conflict_count();
+                if !index.has_scripts() {
                     self.state.status = format!(
                         "No ACMD scripts found under {} — expected a smashline project with \
                          `unsafe extern \"C\" fn game_*` functions",
@@ -3877,10 +3888,18 @@ impl VisionaryApp {
                     return;
                 }
                 self.state.status = format!(
-                    "Linked {scripts} script{} across {fighters} fighter{} from {}",
+                    "Linked {scripts} usable script{} across {fighters} fighter{} from {}{}",
                     if scripts == 1 { "" } else { "s" },
                     if fighters == 1 { "" } else { "s" },
-                    root.display()
+                    root.display(),
+                    if conflicts == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {conflicts} ambiguous script{} need resolution",
+                            if conflicts == 1 { "" } else { "s" }
+                        )
+                    }
                 );
                 self.acmd_src = Some(index);
                 save_config_path(ACMD_SRC_CONFIG_KEY, &root);
@@ -3896,12 +3915,21 @@ impl VisionaryApp {
         if self.refresh_linked_acmd_source_index() {
             if let Some(index) = self.acmd_src.as_ref() {
                 self.state.status = format!(
-                    "Re-scanned {} script{} across {} fighter{} from {}",
+                    "Re-scanned {} usable script{} across {} fighter{} from {}{}",
                     index.script_count(),
                     if index.script_count() == 1 { "" } else { "s" },
                     index.fighters.len(),
                     if index.fighters.len() == 1 { "" } else { "s" },
-                    index.root.display()
+                    index.root.display(),
+                    if index.conflict_count() == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {} ambiguous script{} need resolution",
+                            index.conflict_count(),
+                            if index.conflict_count() == 1 { "" } else { "s" }
+                        )
+                    }
                 );
             }
             self.reload_move_scripts();
@@ -3969,7 +3997,10 @@ impl VisionaryApp {
         let (fighter, move_name) = (fighter.name.clone(), move_entry.name.clone());
         let script = crate::acmd::acmd_script_name(script_prefix, &move_name);
         let Some(site) = index.script(&fighter, &script) else {
-            self.state.status = format!("{script} is not in the linked project");
+            self.state.status = index.conflict(&fighter, &script).map_or_else(
+                || format!("{script} is not in the linked project"),
+                crate::acmd_src::ScriptConflict::description,
+            );
             return;
         };
         let (file, span) = (site.file.clone(), site.span.clone());
@@ -6023,9 +6054,14 @@ impl VisionaryApp {
                             .small()
                             .monospace(),
                     );
+                    let conflict_summary = if index.conflict_count() == 0 {
+                        String::new()
+                    } else {
+                        format!(" · {} ambiguous", index.conflict_count())
+                    };
                     ui.label(
                         egui::RichText::new(format!(
-                            "· {} scripts · {} fighters",
+                            "· {} usable scripts · {} fighters{conflict_summary}",
                             index.script_count(),
                             index.fighters.len()
                         ))
@@ -6089,7 +6125,7 @@ impl VisionaryApp {
 
             // Everything that needs `&self` is resolved before the buffer is borrowed
             // mutably below — closures capturing both would not borrow-check.
-            let scripts: Vec<(&str, String, bool, bool)> = [
+            let scripts: Vec<(&str, String, bool, bool, bool)> = [
                 ("game", "Hitboxes"),
                 ("effect", "Effects"),
                 ("sound", "Sounds"),
@@ -6102,24 +6138,43 @@ impl VisionaryApp {
                     .acmd_src
                     .as_ref()
                     .is_some_and(|index| index.script(&fighter, &name).is_some());
+                let ambiguous = self
+                    .acmd_src
+                    .as_ref()
+                    .is_some_and(|index| index.conflict(&fighter, &name).is_some());
                 let showing = self
                     .acmd_src_buffer
                     .as_ref()
                     .is_some_and(|b| b.script == name);
-                (label, name, present, showing)
+                (label, name, present, ambiguous, showing)
             })
             .collect();
-            let any_script = scripts.iter().any(|(_, _, present, _)| *present);
+            let any_script = scripts.iter().any(|(_, _, present, _, _)| *present);
+            let any_ambiguous = scripts.iter().any(|(_, _, _, ambiguous, _)| *ambiguous);
             let reason = match self.acmd_src.as_ref() {
                 None => NoSource::NotLinked,
                 Some(index) if !index.has_fighter(&fighter) => NoSource::FighterAbsent,
+                Some(_) if !any_script && any_ambiguous => NoSource::Ambiguous,
                 Some(_) if !any_script => NoSource::MoveAbsent,
                 Some(_) => NoSource::NothingOpen,
             };
 
+            if any_ambiguous {
+                ui.label(
+                    egui::RichText::new(
+                        "One or more source functions are duplicated; those categories are \
+                         blocked until the project has one owner for each script.",
+                    )
+                    .small()
+                    .color(egui::Color32::from_rgb(230, 190, 90)),
+                );
+            }
+
             if view != SourceView::Generated {
                 ui.horizontal_wrapped(|ui| {
-                    for (prefix, (label, name, present, showing)) in scripts.iter().enumerate() {
+                    for (prefix, (label, name, present, ambiguous, showing)) in
+                        scripts.iter().enumerate()
+                    {
                         if ui
                             .add_enabled(
                                 *present && !*showing,
@@ -6127,6 +6182,8 @@ impl VisionaryApp {
                             )
                             .on_hover_text(if *present {
                                 format!("Open {name} from the project")
+                            } else if *ambiguous {
+                                format!("{name} has more than one source owner")
                             } else {
                                 format!("{name} is not in the linked project")
                             })
@@ -13163,7 +13220,12 @@ impl VisionaryApp {
                 Some(String::new())
             }?;
             return Some((
-                crate::acmd::merge_project_over_mirror(&project.body, &project.covers, &mirror),
+                crate::acmd::merge_project_over_mirror_blocked(
+                    &project.body,
+                    &project.covers,
+                    &project.blocked,
+                    &mirror,
+                ),
                 "Project source",
             ));
         }
@@ -30042,6 +30104,10 @@ fn draw_source_pane(
                 "The linked project has {fighter}, but not {move_name}. Switch to Generated \
                  to see what an export would write for it."
             ),
+            NoSource::Ambiguous => format!(
+                "The linked project has duplicate source owners for {fighter}/{move_name}. \
+                 Resolve the duplicate functions, then rescan the project."
+            ),
             NoSource::NothingOpen => {
                 "Open one of this move's scripts above to edit it.".to_string()
             }
@@ -36955,6 +37021,7 @@ mod live_effect_capture_tests {
         let project = crate::acmd_src::ProjectScript {
             body: PROJECT_GAME.to_string(),
             covers: vec!["game_"],
+            blocked: Vec::new(),
         };
 
         let (body, label) = merge_fetched_body(Some(project.clone()), Err("offline".into()));

@@ -320,17 +320,46 @@ fn push_arg(text: &str, span: Range<usize>, args: &mut Vec<Range<usize>>) {
 // ── Project indexing ──────────────────────────────────────────────────────────
 
 /// One ACMD function located in the user's source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScriptSite {
     pub file: PathBuf,
+    /// The Rust function that owns the script registration.
+    pub function: String,
     /// The `unsafe extern "C" fn …` item, from `fn` through its closing brace.
     pub span: Range<usize>,
+}
+
+/// One script identity found in more than one source function.
+///
+/// An ambiguous identity is kept out of [`SourceIndex::script`] so the editor cannot read or
+/// write whichever file happened to win a filesystem sort. The locations remain available for a
+/// useful warning and for the author to resolve in their project.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptConflict {
+    pub fighter: String,
+    pub script: String,
+    pub sites: Vec<ScriptSite>,
+}
+
+impl ScriptConflict {
+    pub fn description(&self) -> String {
+        let locations = self
+            .sites
+            .iter()
+            .map(|site| format!("{}::{}", site.file.display(), site.function))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{}: {} is ambiguous; found it in {} — resolve the duplicate before editing it",
+            self.fighter, self.script, locations
+        )
+    }
 }
 
 /// Where a fighter's scripts live in the user's project.
 #[derive(Debug, Default, Clone)]
 pub struct FighterScripts {
-    /// ACMD script name (`game_attackairn`, `effect_attackairn`) → its function.
+    /// Unambiguous ACMD script name (`game_attackairn`, `effect_attackairn`) → its function.
     pub scripts: HashMap<String, ScriptSite>,
 }
 
@@ -341,6 +370,9 @@ pub struct ProjectScript {
     pub body: String,
     /// The [`crate::acmd::SCRIPT_PREFIXES`] entries `body` covers.
     pub covers: Vec<&'static str>,
+    /// Categories the linked project defines more than once and therefore cannot be selected
+    /// safely. These are deliberately not filled from the mirror.
+    pub blocked: Vec<&'static str>,
 }
 
 impl ProjectScript {
@@ -352,7 +384,7 @@ impl ProjectScript {
     pub fn needs_mirror(&self) -> bool {
         crate::acmd::DISPLAYED_PREFIXES
             .iter()
-            .any(|prefix| !self.covers.contains(prefix))
+            .any(|prefix| !self.covers.contains(prefix) && !self.blocked.contains(prefix))
     }
 }
 
@@ -364,6 +396,8 @@ pub struct SourceIndex {
     pub fighters: HashMap<String, FighterScripts>,
     /// Files that were read during the scan, for change detection.
     pub files: Vec<PathBuf>,
+    /// Duplicate script identities that were found but deliberately not selected.
+    pub conflicts: Vec<ScriptConflict>,
 }
 
 impl SourceIndex {
@@ -389,6 +423,7 @@ impl SourceIndex {
             .collect();
         let mut by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
         let mut project_wide: Vec<String> = Vec::new();
+        let mut project_registrations: HashMap<String, Vec<String>> = HashMap::new();
         for (file, text) in &sources {
             let names = scan_fighter_names(text);
             for name in &names {
@@ -404,6 +439,14 @@ impl SourceIndex {
                     }
                 }
             }
+            for (script, function) in scan_acmd_registrations(text) {
+                let scripts = project_registrations
+                    .entry(function.to_string())
+                    .or_default();
+                if !scripts.iter().any(|known| known == script) {
+                    scripts.push(script.to_string());
+                }
+            }
         }
         for (file, text) in &sources {
             let neighbours = file
@@ -411,7 +454,13 @@ impl SourceIndex {
                 .and_then(|dir| by_dir.get(dir))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            index.index_file(file, text, neighbours, &project_wide);
+            index.index_file(
+                file,
+                text,
+                neighbours,
+                &project_wide,
+                &project_registrations,
+            );
         }
         index.files = files;
         Ok(index)
@@ -420,6 +469,24 @@ impl SourceIndex {
     /// Total number of indexed scripts, across every fighter.
     pub fn script_count(&self) -> usize {
         self.fighters.values().map(|f| f.scripts.len()).sum()
+    }
+
+    /// Number of script identities that need the user to resolve before they can be edited.
+    pub fn conflict_count(&self) -> usize {
+        self.conflicts.len()
+    }
+
+    /// The duplicate locations for one fighter + ACMD script name, if any.
+    pub fn conflict(&self, fighter: &str, script_name: &str) -> Option<&ScriptConflict> {
+        let fighter = normalize_fighter(fighter);
+        self.conflicts
+            .iter()
+            .find(|conflict| conflict.fighter == fighter && conflict.script == script_name)
+    }
+
+    /// Whether the scan found either an editable script or a conflict worth resolving.
+    pub fn has_scripts(&self) -> bool {
+        self.script_count() > 0 || self.conflict_count() > 0
     }
 
     /// The site for one fighter + ACMD script name.
@@ -446,8 +513,13 @@ impl SourceIndex {
     pub fn script_source(&self, fighter: &str, move_name: &str) -> Option<ProjectScript> {
         let mut body = String::new();
         let mut covers: Vec<&'static str> = Vec::new();
+        let mut blocked: Vec<&'static str> = Vec::new();
         for prefix in crate::acmd::SCRIPT_PREFIXES {
             let name = crate::acmd::acmd_script_name(prefix.trim_end_matches('_'), move_name);
+            if self.conflict(fighter, &name).is_some() {
+                blocked.push(prefix);
+                continue;
+            }
             if let Some(site) = self.script(fighter, &name) {
                 if let Ok(text) = std::fs::read_to_string(&site.file) {
                     // The span came from this file's text; a concurrent edit can shrink it.
@@ -459,7 +531,11 @@ impl SourceIndex {
                 }
             }
         }
-        (!covers.is_empty()).then_some(ProjectScript { body, covers })
+        (!covers.is_empty() || !blocked.is_empty()).then_some(ProjectScript {
+            body,
+            covers,
+            blocked,
+        })
     }
 
     fn index_file(
@@ -468,6 +544,7 @@ impl SourceIndex {
         text: &str,
         neighbours: &[String],
         project_wide: &[String],
+        project_registrations: &HashMap<String, Vec<String>>,
     ) {
         let functions = scan_acmd_functions(text);
         if functions.is_empty() {
@@ -476,23 +553,27 @@ impl SourceIndex {
         // `agent.acmd("game_attackairn", game_attackairn, …)` names a script explicitly, as
         // does a `#[acmd_script(script = "…")]` attribute; a plain `fn game_attackairn` is
         // its own name by convention.
-        let mut named: HashMap<&str, &str> = HashMap::new();
+        let mut named: HashMap<&str, Vec<&str>> = HashMap::new();
         for (script, function) in scan_acmd_registrations(text) {
-            named.insert(function, script);
+            let scripts = named.entry(function).or_default();
+            if !scripts.contains(&script) {
+                scripts.push(script);
+            }
         }
 
         for function in functions {
-            let script_name = function
-                .script
-                .clone()
-                .or_else(|| named.get(function.name.as_str()).map(|s| s.to_string()))
-                .or_else(|| {
-                    ["game_", "effect_", "sound_", "expression_"]
-                        .iter()
-                        .any(|prefix| function.name.starts_with(prefix))
-                        .then(|| function.name.clone())
-                });
-            let Some(script_name) = script_name else {
+            let script_names: Vec<String> = if let Some(script) = function.script.clone() {
+                vec![script]
+            } else if let Some(scripts) = named.get(function.name.as_str()) {
+                scripts.iter().map(|script| (*script).to_string()).collect()
+            } else if let Some(scripts) = project_registrations.get(function.name.as_str()) {
+                scripts.clone()
+            } else if ["game_", "effect_", "sound_", "expression_"]
+                .iter()
+                .any(|prefix| function.name.starts_with(prefix))
+            {
+                vec![function.name.clone()]
+            } else {
                 continue;
             };
             // Narrowest scope that names exactly ONE fighter wins: the function's own
@@ -508,17 +589,51 @@ impl SourceIndex {
             else {
                 continue;
             };
-            self.fighters
-                .entry(normalize_fighter(&fighter))
-                .or_default()
-                .scripts
-                .insert(
+            for script_name in script_names {
+                self.record_script(
+                    &fighter,
                     script_name,
                     ScriptSite {
                         file: file.to_path_buf(),
-                        span: function.span,
+                        function: function.name.clone(),
+                        span: function.span.clone(),
                     },
                 );
+            }
+        }
+    }
+
+    fn record_script(&mut self, fighter: &str, script: String, site: ScriptSite) {
+        let fighter = normalize_fighter(fighter);
+        if let Some(conflict) = self
+            .conflicts
+            .iter_mut()
+            .find(|conflict| conflict.fighter == fighter && conflict.script == script)
+        {
+            if !conflict.sites.contains(&site) {
+                conflict.sites.push(site);
+            }
+            return;
+        }
+
+        let existing = self
+            .fighters
+            .entry(fighter.clone())
+            .or_default()
+            .scripts
+            .remove(&script);
+        if let Some(existing) = existing {
+            self.conflicts.push(ScriptConflict {
+                fighter,
+                script,
+                sites: vec![existing, site],
+            });
+        } else {
+            self.fighters
+                .get_mut(&fighter)
+                .expect("record_script inserted the fighter above")
+                .scripts
+                .insert(script, site);
         }
     }
 }
@@ -756,8 +871,20 @@ fn scan_acmd_registrations(text: &str) -> Vec<(&str, &str)> {
         "install_acmd_script!(",
     ] {
         let mut search = 0;
-        while let Some(rel) = text[search..].find(marker) {
-            let open = search + rel + marker.len() - 1;
+        while search < text.len() {
+            if !text.is_char_boundary(search) {
+                search += 1;
+                continue;
+            }
+            if let Some(next) = skip_trivia(text, search) {
+                search = next;
+                continue;
+            }
+            if !text[search..].starts_with(marker) {
+                search += 1;
+                continue;
+            }
+            let open = search + marker.len() - 1;
             search = open + 1;
             let Some((args, _)) = split_call_args(text, open + 1, text.len()) else {
                 continue;
@@ -841,6 +968,9 @@ pub fn create_script(
     script_name: &str,
     source: &str,
 ) -> Result<CreatedScript> {
+    if let Some(conflict) = index.conflict(fighter, script_name) {
+        bail!("{}", conflict.description());
+    }
     if index.script(fighter, script_name).is_some() {
         bail!("{fighter}: the project already has a {script_name}");
     }
@@ -2239,6 +2369,9 @@ fn sync_script(
     script_name: &str,
     rewrite: impl FnOnce(&str) -> Result<(String, SyncReport)>,
 ) -> Result<SyncReport> {
+    if let Some(conflict) = index.conflict(fighter, script_name) {
+        bail!("{}", conflict.description());
+    }
     let Some(site) = index.script(fighter, script_name) else {
         bail!("{fighter}: the project has no {script_name} to sync into");
     };
@@ -8219,6 +8352,138 @@ pub fn install(agent: &mut smashline::Agent) {
         write(tmp.path(), "target/debug/build.rs", MARIO);
         let index = SourceIndex::build(tmp.path()).unwrap();
         (tmp, index)
+    }
+
+    #[test]
+    fn a_whole_project_indexes_split_files_and_writes_back_to_the_owning_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_file = write(
+            tmp.path(),
+            "src/mario/neutral/air.rs",
+            r#"unsafe extern "C" fn custom_neutral_game(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+}
+"#,
+        );
+        let effect_file = write(
+            tmp.path(),
+            "src/mario/neutral/visuals.rs",
+            r#"unsafe extern "C" fn custom_neutral_effect(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+}
+"#,
+        );
+        // Registrations live in a third file and use names that do not carry a category prefix.
+        // The project-wide registration pass is what joins these functions back to their scripts.
+        let install_file = write(
+            tmp.path(),
+            "src/mario/install.rs",
+            r#"pub fn install() {
+    let agent = &mut smashline::Agent::new("mario");
+    agent.acmd("game_attackairn", custom_neutral_game, smashline::Priority::Default);
+    agent.acmd("effect_attackairn", custom_neutral_effect, smashline::Priority::Default);
+}
+"#,
+        );
+
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        let game = index.script("mario", "game_attackairn").unwrap();
+        let effect = index.script("mario", "effect_attackairn").unwrap();
+        assert_eq!(game.file, game_file);
+        assert_eq!(game.function, "custom_neutral_game");
+        assert_eq!(effect.file, effect_file);
+        assert_eq!(effect.function, "custom_neutral_effect");
+        assert_eq!(index.conflict_count(), 0);
+        let body = index.script_source("mario", "attack_air_n").unwrap().body;
+        assert!(body.contains("fn custom_neutral_game"));
+        assert!(body.contains("fn custom_neutral_effect"));
+
+        let install_before = std::fs::read_to_string(&install_file).unwrap();
+        let report = sync_script(&index, "mario", "game_attackairn", |body| {
+            Ok((
+                body.replace("5.0", "6.0"),
+                SyncReport {
+                    changed: 1,
+                    ..SyncReport::default()
+                },
+            ))
+        })
+        .unwrap();
+        assert_eq!(report.files, vec![game_file.clone()]);
+        assert!(std::fs::read_to_string(&game_file)
+            .unwrap()
+            .contains("frame(agent.lua_state_agent, 6.0)"));
+        assert!(std::fs::read_to_string(&effect_file)
+            .unwrap()
+            .contains("frame(agent.lua_state_agent, 4.0)"));
+        assert_eq!(
+            std::fs::read_to_string(&install_file).unwrap(),
+            install_before
+        );
+    }
+
+    #[test]
+    fn duplicate_script_identities_are_reported_and_never_filled_from_the_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "src/mario/first.rs",
+            r#"#[acmd_script(agent = "fighter_mario", script = "game_attackairn", category = ACMD_GAME)]
+unsafe extern "C" fn first_game(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 3.0);
+}
+"#,
+        );
+        write(
+            tmp.path(),
+            "src/mario/second.rs",
+            r#"#[acmd_script(agent = "fighter_mario", script = "game_attackairn", category = ACMD_GAME)]
+unsafe extern "C" fn second_game(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 7.0);
+}
+"#,
+        );
+
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        assert!(index.script("mario", "game_attackairn").is_none());
+        assert_eq!(index.conflict_count(), 1);
+        let conflict = index.conflict("mario", "game_attackairn").unwrap();
+        assert_eq!(conflict.sites.len(), 2);
+        assert!(conflict
+            .sites
+            .iter()
+            .any(|site| site.function == "first_game"));
+        assert!(conflict
+            .sites
+            .iter()
+            .any(|site| site.function == "second_game"));
+        assert!(conflict.description().contains("first.rs::first_game"));
+        assert!(conflict.description().contains("second.rs::second_game"));
+
+        let project = index.script_source("mario", "attack_air_n").unwrap();
+        assert!(project.body.is_empty());
+        assert!(project.covers.is_empty());
+        assert_eq!(project.blocked, ["game_"]);
+        assert!(
+            project.needs_mirror(),
+            "the other missing categories may still be filled from the mirror"
+        );
+        let merged = crate::acmd::merge_project_over_mirror_blocked(
+            &project.body,
+            &project.covers,
+            &project.blocked,
+            "unsafe extern \"C\" fn game_attackairn(agent: &mut L2CAgentBase) { }",
+        );
+        assert!(merged.is_empty(), "an ambiguous category must stay blocked");
+
+        let error = create_script(&index, "mario", "game_attackairn", "")
+            .expect_err("creation must not add a third copy to an ambiguous identity")
+            .to_string();
+        assert!(error.contains("ambiguous"), "{error}");
+        assert!(
+            error.contains("first_game") && error.contains("second_game"),
+            "{error}"
+        );
     }
 
     #[test]
