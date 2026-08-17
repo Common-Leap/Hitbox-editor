@@ -271,6 +271,21 @@ impl LuaArgWire {
             _ => None,
         }
     }
+    /// This argument as a boolean, or `None` when it is not one.
+    ///
+    /// `Int` is accepted for `0`/`1` only. The wire genuinely delivers Lua values under a
+    /// different tag than the source spelling suggests — hashes arrive tagged `Int` — so
+    /// refusing `Int` outright would lose real captures. Accepting *any* integer would not:
+    /// it would turn a misread slot into `true` and write that into an export. Values outside
+    /// `0`/`1` are left for the caller to treat as "not captured".
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            LuaArgWire::Bool(b) => Some(*b),
+            LuaArgWire::Int(0) => Some(false),
+            LuaArgWire::Int(1) => Some(true),
+            _ => None,
+        }
+    }
     pub fn as_hash(&self) -> Option<u64> {
         match self {
             LuaArgWire::Hash(h) => Some(*h),
@@ -559,6 +574,9 @@ pub const CAT_WORK_MODULE_SET: u8 = 34;
 /// Wire category for direct `WorkModule::inc_int` point overrides.
 pub const CAT_WORK_MODULE_INC_INT: u8 = 35;
 
+/// Wire category for direct `MotionModule::set_frame_partial` point overrides.
+pub const CAT_MOTION_MODULE_SET_FRAME_PARTIAL: u8 = 36;
+
 /// The wire category a modifier's rules go out under.
 pub fn attack_mod_category(kind: crate::data::AttackModKind) -> u8 {
     match kind {
@@ -726,6 +744,16 @@ pub struct HbOverridesWire {
     /// Replacement direct `MotionModule::set_rate_partial` rate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_module_rate_partial: Option<f32>,
+    /// Replacement direct `MotionModule::set_frame_partial` seek frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_module_frame_partial: Option<f32>,
+    /// Replacement direct `MotionModule::set_frame_partial` sync flag.
+    ///
+    /// The native binding always receives this boolean; source may omit it, in which case the
+    /// game's own Lua reader passes `true`. The editor sends a value only when the user changed
+    /// one that the capture also carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_module_frame_partial_sync: Option<bool>,
     /// Replacement numeric flag for direct `WorkModule::on_flag` / `off_flag` calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_flag: Option<i64>,
@@ -1133,6 +1161,7 @@ pub struct GameLink {
     shared: Arc<Mutex<Shared>>,
     started: AtomicBool,
     rule_send_suppressed: AtomicBool,
+    project_send_suppressed: AtomicBool,
 }
 
 impl Default for GameLink {
@@ -1141,6 +1170,7 @@ impl Default for GameLink {
             shared: Arc::new(Mutex::new(Shared::default())),
             started: AtomicBool::new(false),
             rule_send_suppressed: AtomicBool::new(false),
+            project_send_suppressed: AtomicBool::new(false),
         }
     }
 }
@@ -1156,6 +1186,24 @@ impl GameLink {
     /// Resume live rule sends after a project batch has staged its complete stores.
     pub fn end_rule_batch(&self) {
         self.rule_send_suppressed.store(false, Ordering::SeqCst);
+    }
+
+    /// Hold every outbound live-edit message while a project is being replaced and rebuilt.
+    /// Unlike [`Self::begin_rule_batch`], this also covers pins, aliases, donor payloads,
+    /// effect reloads, and kind modifiers: clearing the old project must not briefly publish
+    /// an empty or partially restored state before the new project's stores are complete.
+    pub fn begin_project_batch(&self) {
+        self.project_send_suppressed.store(true, Ordering::SeqCst);
+    }
+
+    /// Allow the caller to publish the final, fully materialized project state.
+    pub fn end_project_batch(&self) {
+        self.project_send_suppressed.store(false, Ordering::SeqCst);
+    }
+
+    fn sends_suppressed(&self) -> bool {
+        self.project_send_suppressed.load(Ordering::SeqCst)
+            || self.rule_send_suppressed.load(Ordering::SeqCst)
     }
 
     /// Spawn the connection thread (idempotent). Called lazily when the eff editor opens.
@@ -1213,7 +1261,7 @@ impl GameLink {
     /// Replace the plugin's live spawn-rule list (suppress/retime ACMD effect spawns).
     /// Send the FULL current rule set every time — an empty slice clears all rules.
     pub fn send_spawn_rules(&self, rules: &[SpawnRuleWire]) {
-        if self.rule_send_suppressed.load(Ordering::SeqCst) {
+        if self.sends_suppressed() {
             return;
         }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "spawn_rules": rules }))
@@ -1229,7 +1277,7 @@ impl GameLink {
 
     /// Replace the live effect point-control rules (detach and area toggles).
     pub fn send_effect_control_rules(&self, rules: &[EffectControlRuleWire]) {
-        if self.rule_send_suppressed.load(Ordering::SeqCst) {
+        if self.sends_suppressed() {
             return;
         }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({
@@ -1247,6 +1295,9 @@ impl GameLink {
     /// Replace the plugin's live transplant alias list (copy/replaced kind → donor kind,
     /// optionally costume-gated). Full-list replace; empty clears all aliases.
     pub fn send_effect_aliases(&self, aliases: &[EffectAliasWire]) {
+        if self.sends_suppressed() {
+            return;
+        }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "effect_aliases": aliases }))
         else {
             return;
@@ -1261,6 +1312,9 @@ impl GameLink {
     /// Cross-fighter donor eff files the plugin co-loads with each target fighter's
     /// effects (smashline-transplant mechanism), so donor content is spawnable live.
     pub fn send_donor_effs(&self, specs: &[DonorEffWire]) {
+        if self.sends_suppressed() {
+            return;
+        }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "donor_effs": specs })) else {
             return;
         };
@@ -1274,6 +1328,9 @@ impl GameLink {
     /// Stripped donor eff bytes for the plugin to inject as resident data (live
     /// cross-character transplant). Sent whenever the referenced donor set changes.
     pub fn send_donor_bytes(&self, donors: &[DonorBytesWire]) {
+        if self.sends_suppressed() {
+            return;
+        }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "donor_bytes": donors }))
         else {
             return;
@@ -1288,7 +1345,7 @@ impl GameLink {
     /// Custom names (transplant copies) so the plugin resolves their hashes for display
     /// instead of falling back to hex.
     pub fn send_effect_names(&self, names: &[String]) {
-        if names.is_empty() {
+        if names.is_empty() || self.sends_suppressed() {
             return;
         }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "effect_names": names }))
@@ -1324,6 +1381,9 @@ impl GameLink {
     /// Ask the plugin to clear ALL its pinned edits (incl. the SD save) and re-notify
     /// pristine values.
     pub fn send_reset_pins(&self) {
+        if self.sends_suppressed() {
+            return;
+        }
         let frame = "<TCP_MESSAGE>{\"command\":\"reset_pins\"}</TCP_MESSAGE>".to_string();
         if let Ok(mut s) = self.shared.lock() {
             s.outbox.push(frame);
@@ -1334,6 +1394,9 @@ impl GameLink {
     /// Tell the plugin the live-eff manifest / merged files on the Eden SD changed —
     /// it refreshes its Arcropolis file-provider registrations.
     pub fn send_live_eff_reload(&self) {
+        if self.sends_suppressed() {
+            return;
+        }
         let frame = "<TCP_MESSAGE>{\"command\":\"live_eff_reload\"}</TCP_MESSAGE>".to_string();
         if let Ok(mut s) = self.shared.lock() {
             s.outbox.push(frame);
@@ -1343,6 +1406,9 @@ impl GameLink {
 
     /// Ask the plugin to write `sd:/effect_viewer_probe.txt` (serving-chain diagnosis).
     pub fn send_live_eff_probe(&self) {
+        if self.sends_suppressed() {
+            return;
+        }
         let frame = "<TCP_MESSAGE>{\"command\":\"live_eff_probe\"}</TCP_MESSAGE>".to_string();
         if let Ok(mut s) = self.shared.lock() {
             s.outbox.push(frame);
@@ -1542,7 +1608,7 @@ impl GameLink {
     /// Replace the plugin's live hitbox-rule list (modify/suppress/inject ATTACKs).
     /// Always the FULL set — an empty slice clears all rules.
     pub fn send_hitbox_rules(&self, rules: &[HitboxRuleWire]) {
-        if self.rule_send_suppressed.load(Ordering::SeqCst) {
+        if self.sends_suppressed() {
             return;
         }
         let Ok(payload) = serde_json::to_string(&serde_json::json!({ "hitbox_rules": rules }))
@@ -1561,6 +1627,9 @@ impl GameLink {
     /// transplant is physically world-space, so accidentally pinning them moves it to the
     /// stage origin. Authored EFF modifiers may additionally include kind-global scale.
     pub fn send_modifier_edit(&self, id: u64, data: &RpmEffectData, include_scale: bool) {
+        if self.sends_suppressed() {
+            return;
+        }
         let mut value = serde_json::json!({
             "speed": data.speed,
             "rainbow": {
@@ -2540,6 +2609,41 @@ mod tests {
         );
     }
 
+    /// Structural sound rules must dispatch every table member through its native animation
+    /// command after the editor has pushed the typed arguments. A missing arm would leave the
+    /// base call suppressed with no replacement, which is the exact failure this wire path fixes.
+    #[test]
+    fn the_plugin_dispatches_every_sound_injection_command() {
+        let source = plugin_sound_hooks_source();
+        let body = source
+            .split_once("pub(super) unsafe fn inject(")
+            .expect("plugin still exposes the sound injection dispatcher")
+            .1;
+        for (func, _, _) in crate::acmd::SOUND_FUNCS {
+            let arm = format!("\"{func}\" => smash::app::sv_animcmd::{func}(lua_state),");
+            assert!(
+                body.contains(&arm),
+                "sound injection has no dispatch arm for {func}"
+            );
+        }
+    }
+
+    /// The editor's semantic Hash40 wire values must become the integer-tagged slots that the
+    /// native sound macros receive at runtime. Without this boundary conversion, a structural
+    /// `PLAY_SE` addition can crash while the existing rename/suppress hook path still works.
+    #[test]
+    fn the_plugin_normalizes_sound_hashes_before_native_injection() {
+        let source = plugin_sound_hooks_source();
+        assert!(source.contains("pub(super) fn normalize_injection_args"));
+        assert!(source.contains("*arg = LuaArg::Int(hash as i64)"));
+        let inject_tick = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs"),
+        )
+        .expect("read plugin hitbox viewer source");
+        assert!(inject_tick.contains("sound_hooks::normalize_injection_args(&mut args, command)"));
+    }
+
     /// Every hook reads exactly as many lua arguments as its macro declares.
     ///
     /// The arity is a literal in each `sound_hook!` invocation, separate from the table above,
@@ -2605,6 +2709,50 @@ mod tests {
         assert!(
             source.contains("claimed by another object"),
             "the cross-object refusal is gone — captures from two objects can now merge"
+        );
+    }
+
+    /// The plugin must move complete capture history out of its heap when no editor is connected.
+    /// The archive is durable and unbounded; only the live delivery queue remains in memory.
+    #[test]
+    fn the_plugin_archives_capture_history_and_skips_no_destination_serialization() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs"),
+        )
+        .expect("read the plugin's hitbox_viewer");
+        assert!(
+            source.contains("mod capture_archive;")
+                && source.contains("capture_archive::append_line(line)")
+                && source.contains("capture_archive::begin_replay()")
+                && !source.contains("MAX_CAPTURE_LINES"),
+            "capture history must be archived instead of dropping complete old runs"
+        );
+
+        let archive = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/capture_archive.rs"),
+        )
+        .expect("read the plugin's capture archive");
+        assert!(
+            archive.contains("acmd_captures.jsonl")
+                && archive.contains("thread::spawn")
+                && archive.contains("take_replay(max"),
+            "capture history must use a worker-backed disk archive and chunked replay"
+        );
+
+        let server =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "plugins/slight_replica/src/rust_extender/debugging/debuggable_server/mod.rs",
+            ))
+            .expect("read the plugin's debuggable server");
+        assert!(
+            server.contains("pub fn notify_acmd_capture(line")
+                && server.contains("pub fn notify_acmd_capture_archive_record(record: &str)")
+                && server.contains(
+                    "if !emit_wanted() {\n        return;\n    }\n    emit(\"AcmdCapture\""
+                ),
+            "no-editor capture notifications must not serialize JSON that has nowhere to go"
         );
     }
 
@@ -3296,6 +3444,11 @@ mod tests {
         let module = std::fs::read_to_string(root.join("mod.rs")).expect("read hitbox_viewer");
         assert!(module.contains(&format!("pub const CAT_EXPRESSION: u8 = {CAT_EXPRESSION};")));
         assert!(module.contains("pub expression_args: Option<Vec<LuaArg>>,"));
+        assert!(module.contains("CAT_EXPRESSION => match inj.command.as_deref()"));
+        assert!(module.contains("control_set_rumble_native_args(&args)"));
+        assert!(module.contains("any_rules() && !is_injecting()"));
+        assert!(module.contains("original!()(boma, kind, duration, looped, target)"));
+        assert!(module.contains("category == CAT_SOUND || category == CAT_EXPRESSION"));
         for func in [
             "RUMBLE_HIT",
             "QUAKE",
@@ -3510,6 +3663,9 @@ mod tests {
         assert!(module.contains(&format!(
             "pub const CAT_WORK_MODULE_INC_INT: u8 = {CAT_WORK_MODULE_INC_INT};"
         )));
+        assert!(module.contains(&format!(
+            "pub const CAT_MOTION_MODULE_SET_FRAME_PARTIAL: u8 = {CAT_MOTION_MODULE_SET_FRAME_PARTIAL};"
+        )));
         assert!(module.contains("pub clr_speed_kinetic_kind: Option<i64>"));
         assert!(module.contains("pub change_kinetic_type: Option<i64>"));
         assert!(module.contains("pub kinetic_energy_id: Option<i64>"));
@@ -3525,6 +3681,8 @@ mod tests {
         assert!(module.contains("pub motion_module_rate: Option<f32>"));
         assert!(module.contains("pub motion_module_helper_calculation: Option<bool>"));
         assert!(module.contains("pub motion_module_rate_partial: Option<f32>"));
+        assert!(module.contains("pub motion_module_frame_partial: Option<f32>"));
+        assert!(module.contains("pub motion_module_frame_partial_sync: Option<bool>"));
         assert!(module.contains("replace = smash::app::sv_kinetic_energy::clear_speed"));
         assert!(module.contains("replace = smash::app::sv_animcmd::SET_AIR"));
         assert!(module.contains("replace = smash::app::lua_bind::KineticModule::change_kinetic"));
@@ -3571,6 +3729,15 @@ mod tests {
             rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_rate_partial")
         );
         assert!(rate_hooks.contains("hook_motion_module_set_rate_partial"));
+        assert!(
+            rate_hooks.contains("replace = smash::app::lua_bind::MotionModule::set_frame_partial")
+        );
+        assert!(rate_hooks.contains("hook_motion_module_set_frame_partial"));
+        // The hook takes the native four-argument form. The three-argument source shape is a Lua
+        // convenience the game fills in before this binding is reached, so a hook written against
+        // the source arity would not compile — and would be modelling the wrong contract.
+        assert!(rate_hooks.contains("    sync: bool,\n"));
+        assert!(rate_hooks.contains(".filter(|value| value.is_finite() && *value >= 0.0)"));
         for (category, other) in [
             (CAT_CLR_SPEED, CAT_FT_START_ADJUST_MOTION_FRAME),
             (CAT_SET_AIR, CAT_CLR_SPEED),
@@ -3607,6 +3774,11 @@ mod tests {
             (CAT_WORK_TRANSITION_TERM, CAT_WORK_FLAG),
             (CAT_WORK_MODULE_INC_INT, CAT_WORK_TRANSITION_TERM),
             (CAT_WORK_MODULE_SET, CAT_WORK_MODULE_INC_INT),
+            (CAT_MOTION_MODULE_SET_FRAME_PARTIAL, CAT_WORK_MODULE_SET),
+            (
+                CAT_MOTION_MODULE_SET_FRAME_PARTIAL,
+                CAT_MOTION_MODULE_SET_RATE_PARTIAL,
+            ),
         ] {
             assert_ne!(category, other, "kinetic category collision");
         }
@@ -3979,6 +4151,53 @@ mod tests {
         assert_eq!(
             rule["overrides"]["motion_module_rate_partial"].as_f64(),
             Some(1.25)
+        );
+    }
+
+    #[test]
+    fn outbound_motion_module_set_frame_partial_rules_match_plugin_wire_fields() {
+        let link = GameLink::default();
+        let pristine_part = 2.0;
+        let pristine_frame = 4.0;
+        let key = numeric_point_key(
+            "MotionModule::set_frame_partial",
+            &[pristine_part, pristine_frame],
+        );
+        link.send_hitbox_rules(&[HitboxRuleWire {
+            motion: 0x99,
+            category: CAT_MOTION_MODULE_SET_FRAME_PARTIAL,
+            hitbox_id: Some(key),
+            suppress: false,
+            frame_start: Some(12.5),
+            frame_end: Some(12.5),
+            overrides: Some(HbOverridesWire {
+                motion_module_frame_partial: Some(6.5),
+                motion_module_frame_partial_sync: Some(false),
+                ..Default::default()
+            }),
+            inject: None,
+            func: Some("MotionModule::set_frame_partial".into()),
+        }]);
+        let frame = link.shared.lock().unwrap().outbox[0].clone();
+        let inner = &frame["<TCP_MESSAGE>".len()..frame.len() - "</TCP_MESSAGE>".len()];
+        let value: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let rule = &value["hitbox_rules"][0];
+        assert_eq!(
+            rule["category"].as_u64(),
+            Some(CAT_MOTION_MODULE_SET_FRAME_PARTIAL as u64)
+        );
+        assert_eq!(rule["hitbox_id"].as_u64(), Some(key));
+        assert_eq!(
+            rule["func"].as_str(),
+            Some("MotionModule::set_frame_partial")
+        );
+        assert_eq!(
+            rule["overrides"]["motion_module_frame_partial"].as_f64(),
+            Some(6.5)
+        );
+        assert_eq!(
+            rule["overrides"]["motion_module_frame_partial_sync"].as_bool(),
+            Some(false)
         );
     }
 
@@ -4525,6 +4744,45 @@ mod tests {
             shared.outbox.len(),
             3,
             "the completed project publishes one replacement per live rule family"
+        );
+    }
+
+    #[test]
+    fn project_batches_hold_every_live_family_until_the_replacement_is_ready() {
+        let link = GameLink::default();
+        link.begin_project_batch();
+        link.send_spawn_rules(&[]);
+        link.send_effect_control_rules(&[]);
+        link.send_hitbox_rules(&[]);
+        link.send_effect_aliases(&[]);
+        link.send_donor_effs(&[]);
+        link.send_donor_bytes(&[]);
+        link.send_effect_names(&["example".into()]);
+        link.send_reset_pins();
+        link.send_live_eff_reload();
+        link.send_live_eff_probe();
+        link.send_modifier_edit(0x1234, &RpmEffectData::default(), false);
+        assert!(
+            link.shared.lock().unwrap().outbox.is_empty(),
+            "project replacement must not expose clears or partial restores"
+        );
+
+        link.end_project_batch();
+        link.send_spawn_rules(&[]);
+        link.send_effect_control_rules(&[]);
+        link.send_hitbox_rules(&[]);
+        link.send_effect_aliases(&[]);
+        link.send_donor_effs(&[]);
+        link.send_donor_bytes(&[]);
+        link.send_effect_names(&["example".into()]);
+        link.send_reset_pins();
+        link.send_live_eff_reload();
+        link.send_live_eff_probe();
+        link.send_modifier_edit(0x1234, &RpmEffectData::default(), false);
+        assert_eq!(
+            link.shared.lock().unwrap().outbox.len(),
+            11,
+            "the finished import can publish one message per protocol family"
         );
     }
 }

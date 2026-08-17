@@ -1,4 +1,7 @@
-//! Live override for `FT_MOTION_RATE` — E2.
+//! Live override for `FT_MOTION_RATE` — E2 — and for the direct `MotionModule` playback setters.
+//!
+//! The partial-animation setters live here too: `set_rate_partial` because it is a rate, and
+//! `set_frame_partial` because it is the same `(boma, part_kind, …)` shape hooked the same way.
 //!
 //! **One hook covers all three rate macros.** `smash-script` compiles `FT_MOTION_RATE`,
 //! `FT_MOTION_RATE_RANGE` and `FT_DESIRED_RATE` down to the same `sv_animcmd::FT_MOTION_RATE`
@@ -18,8 +21,8 @@
 
 use super::{
     any_rules, read_args_exact, record, record_for_boma, HbOverrides, LuaArg,
-    CAT_MOTION_MODULE_SET_HELPER_CALCULATION, CAT_MOTION_MODULE_SET_RATE,
-    CAT_MOTION_MODULE_SET_RATE_PARTIAL, CAT_MOTION_RATE,
+    CAT_MOTION_MODULE_SET_FRAME_PARTIAL, CAT_MOTION_MODULE_SET_HELPER_CALCULATION,
+    CAT_MOTION_MODULE_SET_RATE, CAT_MOTION_MODULE_SET_RATE_PARTIAL, CAT_MOTION_RATE,
 };
 
 /// Reports per rule set, not per boot.
@@ -279,6 +282,58 @@ unsafe fn hook_motion_module_set_rate_partial(
     original!()(boma, part_kind, rate)
 }
 
+/// Capture and sparsely override the direct partial-animation frame setter.
+///
+/// The native binding always carries `sync`, even for the three-argument source form the corpus
+/// writes: the game's own Lua reader counts its arguments and passes `true` when the call is
+/// short. So the capture always has a boolean to report, and a replacement always has one to
+/// send — there is no "absent" case to represent on this side of the wire.
+#[skyline::hook(replace = smash::app::lua_bind::MotionModule::set_frame_partial)]
+unsafe fn hook_motion_module_set_frame_partial(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    part_kind: i32,
+    frame_value: f32,
+    sync: bool,
+) {
+    let args = [
+        LuaArg::Int(part_kind as i64),
+        LuaArg::Num(frame_value),
+        LuaArg::Bool(sync),
+    ];
+    record_for_boma(boma, "MotionModule::set_frame_partial", &args);
+    if any_rules() && !boma.is_null() {
+        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+        // Keyed on the part kind and the pristine seek frame only. `sync` stays out of the key
+        // so an edit that flips it still matches the call it was staged against.
+        let key = super::numeric_point_key(
+            "MotionModule::set_frame_partial",
+            &[part_kind as f32, frame_value],
+        );
+        if let Some((suppress, overrides)) =
+            super::action_for(CAT_MOTION_MODULE_SET_FRAME_PARTIAL, motion, key, frame)
+        {
+            if suppress {
+                return;
+            }
+            if let Some(item) = overrides {
+                // A saved rule or an older editor can still send an invalid float. Keep the
+                // native call safe even when the sync flag itself is the only valid edit.
+                let replacement = item
+                    .motion_module_frame_partial
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .unwrap_or(frame_value);
+                let replacement_sync = item.motion_module_frame_partial_sync.unwrap_or(sync);
+                if replacement != frame_value || replacement_sync != sync {
+                    original!()(boma, part_kind, replacement, replacement_sync);
+                    return;
+                }
+            }
+        }
+    }
+    original!()(boma, part_kind, frame_value, sync)
+}
+
 /// Set once the hook is in. Read by `write_capture_diag`.
 static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -291,14 +346,15 @@ pub fn install() {
         hook_ft_motion_rate,
         hook_motion_module_set_rate,
         hook_motion_module_set_helper_calculation,
-        hook_motion_module_set_rate_partial
+        hook_motion_module_set_rate_partial,
+        hook_motion_module_set_frame_partial
     );
     INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
     // `diag::note`, not `skyline::println!` — the two go to different places and only one of
     // them is a file anybody reads afterwards. Telling someone to grep diag.txt for a banner
     // that was never written there cost a game boot once already.
     crate::slight::diag::note(
-        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate, MotionModule::set_helper_calculation, MotionModule::set_rate_partial)",
+        "ACMD RATE hooks installed (FT_MOTION_RATE, MotionModule::set_rate, MotionModule::set_helper_calculation, MotionModule::set_rate_partial, MotionModule::set_frame_partial)",
     );
 }
 

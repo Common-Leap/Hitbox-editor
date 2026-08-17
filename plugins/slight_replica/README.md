@@ -131,6 +131,12 @@ For an emulator running on the same computer:
 No Rust Parameter Manager or FTP server is required for this normal Visionary
 workflow.
 
+When Visionary is not connected, deduplicated ACMD captures are still preserved in
+`sd:/slight/user/acmd_captures.jsonl`. The archive is written by a background
+worker and is not capped by the plugin's live-memory delivery queue. When the
+editor connects later, the archive is replayed in small batches; reconnecting
+does not create duplicate capture entries in the editor.
+
 For a physical console or an emulator on another computer, forward the plugin's
 TCP port to port `7878` on the computer running Visionary. The current editor
 connects to localhost, so the forwarding endpoint must appear locally at
@@ -223,7 +229,7 @@ so one per line or comma-separated both work:
 | `liveeff` | the editor's merged-eff manifest registration |
 | `effect` | the seventeen `EffectModule` request and kill hooks |
 | `acmd` | the ACMD capture and injection hooks |
-| `hitbox` | live hitbox capture and injection |
+| `hitbox` | live ACMD capture and injection for hitboxes and sounds |
 | `agent` | the Smashline line callbacks that drive the per-frame engine |
 | `systems` | the SLight system facades and the editor's TCP server |
 

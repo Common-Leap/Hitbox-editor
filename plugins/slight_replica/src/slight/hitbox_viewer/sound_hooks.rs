@@ -4,11 +4,11 @@
 //! not a collision, but the capture stream, the rule store and the lua-argument plumbing all
 //! live here, and a second copy of any of them is a second thing to keep in step.
 //!
-//! **What the editor can do to a sound, and therefore what this applies.** D1d scoped editing to
-//! *which sound a call plays* — retiming, adding and deleting are out of scope there because a
-//! sound's frame is the block it sits in rather than an argument. So a rule can rewrite the hash
-//! arguments, or suppress the call outright (the preview for "mute this"). Nothing here can move
-//! a call to another frame, and the editor never asks it to.
+//! **What the editor can do to a sound, and therefore what this applies.** Name-only edits rewrite
+//! the captured hash arguments. Structural flat edits pair a frame-scoped suppression of the
+//! pristine call with a typed per-frame injection of the edited call, so removing or moving a
+//! sound does not leave the original base call playing. Calls whose authored tail is symbolic or
+//! otherwise not measurable remain source/export-only and are deliberately not silenced.
 
 use super::{any_rules, read_args_exact, record, HbOverrides, LuaArg, CAT_SOUND, RULES};
 
@@ -39,6 +39,34 @@ const SOUND_FUNCS: &[(&str, usize, bool)] = &[
     ("PLAY_FLY_VOICE", 2, false),
     ("SET_PLAY_INHIVIT", 1, true),
 ];
+
+pub(super) fn injection_arg_count(func: &str) -> Option<usize> {
+    SOUND_FUNCS
+        .iter()
+        .find(|(name, _, _)| *name == func)
+        .map(|(_, hashes, has_tail)| hashes + usize::from(*has_tail))
+}
+
+/// Normalize the hash slots to the representation the native sound macros actually receive.
+/// Captured `PLAY_SE` calls carry their `Hash40` values in integer-tagged Lua slots, even though
+/// the source signature names them as hashes. Keeping this conversion at the sound boundary lets
+/// the editor wire remain semantically typed while preventing a native macro from seeing the
+/// wrong Lua value tag during a structural replay.
+pub(super) fn normalize_injection_args(args: &mut [LuaArg], func: &str) {
+    let Some(hash_count) = SOUND_FUNCS
+        .iter()
+        .find(|(name, _, _)| *name == func)
+        .map(|(_, hashes, _)| *hashes)
+    else {
+        return;
+    };
+    for arg in args.iter_mut().take(hash_count) {
+        if let LuaArg::Hash(hash) = arg {
+            let hash = *hash;
+            *arg = LuaArg::Int(hash as i64);
+        }
+    }
+}
 
 /// A slot-0 sound hash, however the lua stack happens to have typed it.
 ///
@@ -271,6 +299,28 @@ macro_rules! sound_hook {
             original!()(lua_state)
         }
     };
+}
+
+/// Replay one complete sound call from the per-frame structural injector. The caller has already
+/// pushed the typed arguments onto the current Lua stack; dispatching through the native macro is
+/// what keeps the call's ordinary sound-bank and 3D/stop semantics intact.
+pub(super) unsafe fn inject(lua_state: u64, func: &str) -> bool {
+    match func {
+        "PLAY_SE" => smash::app::sv_animcmd::PLAY_SE(lua_state),
+        "PLAY_SE_NO_3D" => smash::app::sv_animcmd::PLAY_SE_NO_3D(lua_state),
+        "PLAY_SE_REMAIN" => smash::app::sv_animcmd::PLAY_SE_REMAIN(lua_state),
+        "STOP_SE" => smash::app::sv_animcmd::STOP_SE(lua_state),
+        "PLAY_STEP" => smash::app::sv_animcmd::PLAY_STEP(lua_state),
+        "PLAY_STEP_FLIPPABLE" => smash::app::sv_animcmd::PLAY_STEP_FLIPPABLE(lua_state),
+        "PLAY_SEQUENCE" => smash::app::sv_animcmd::PLAY_SEQUENCE(lua_state),
+        "PLAY_STATUS" => smash::app::sv_animcmd::PLAY_STATUS(lua_state),
+        "PLAY_LANDING_SE" => smash::app::sv_animcmd::PLAY_LANDING_SE(lua_state),
+        "PLAY_DOWN_SE" => smash::app::sv_animcmd::PLAY_DOWN_SE(lua_state),
+        "PLAY_FLY_VOICE" => smash::app::sv_animcmd::PLAY_FLY_VOICE(lua_state),
+        "SET_PLAY_INHIVIT" => smash::app::sv_animcmd::SET_PLAY_INHIVIT(lua_state),
+        _ => return false,
+    }
+    true
 }
 
 sound_hook!(hook_play_se, smash::app::sv_animcmd::PLAY_SE, "PLAY_SE", 1);

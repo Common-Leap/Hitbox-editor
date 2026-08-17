@@ -454,6 +454,10 @@ fn parse_excute_block(lines: &[&str]) -> Vec<ExcuteStmt> {
             stmts.push(stmt);
             continue;
         }
+        if let Some(stmt) = parse_motion_module_set_frame_partial_call(line) {
+            stmts.push(stmt);
+            continue;
+        }
         if let Some(stmt) = parse_clr_speed_call(line) {
             stmts.push(stmt);
             continue;
@@ -889,8 +893,19 @@ fn parse_excute_block_effects(lines: &[&str]) -> Vec<EffectMacro> {
                 if t.len() > 1 {
                     let effect_name =
                         extract_hash40_string(&t[1]).unwrap_or_else(|| t[1].trim().to_string());
-                    macros.push(EffectMacro::EffectOffKind { effect_name });
-                    continue;
+                    // Modelled only when BOTH booleans are literals. Reading one and defaulting
+                    // the other would write a call the script does not contain while looking
+                    // like it preserved the author's value; a call that is not modelled falls
+                    // through to `EffectMacro::Raw` below and is kept exactly as written.
+                    if let (Some(fade), Some(detach)) = (bool_token_at(&t, 2), bool_token_at(&t, 3))
+                    {
+                        macros.push(EffectMacro::EffectOffKind {
+                            effect_name,
+                            fade,
+                            detach,
+                        });
+                        continue;
+                    }
                 }
             }
         }
@@ -1625,8 +1640,7 @@ pub fn parse_effect_script(source: &str) -> crate::data::EffectScript {
 /// The structure — `frame`, `wait`, `is_excute` blocks, branches — is read by the same walker
 /// the `game_` script uses, because it is the same shape; only the calls inside the blocks
 /// differ, and none of them is typed yet. That is deliberate: this pass exists to prove the
-/// round trip is byte-exact before anything starts rewriting sound lines. See the `sound_`
-/// entry in `TODO.md` for the staging.
+/// round trip is byte-exact before anything starts rewriting sound lines.
 ///
 /// `AcmdScript::to_hitboxes` and `to_hurtboxes` are meaningless on the result — a sound script
 /// has no collisions — and nothing calls them on it.
@@ -1634,7 +1648,8 @@ pub fn parse_effect_script(source: &str) -> crate::data::EffectScript {
 /// Called only by its own corpus gate for now, which is the whole point of landing it on its
 /// own: the round trip has to be proven before a panel or an export is built on top of it. The
 /// generated-source pane is not that consumer — it promises what an export would write, and an
-/// export does not write sound scripts yet.
+/// export does not write sound scripts yet. This remains an intentionally narrow staging parser
+/// until sound editing has its own complete surface contract.
 #[allow(dead_code)]
 pub fn parse_sound_script(source: &str) -> AcmdScript {
     let Some(sound_fn) = extract_function(source, "sound_") else {
@@ -2615,6 +2630,42 @@ fn parse_motion_module_set_rate_partial_call(line: &str) -> Option<ExcuteStmt> {
     ))
 }
 
+/// Parse the measured direct `MotionModule::set_frame_partial` shapes:
+/// `MotionModule::set_frame_partial(agent.module_accessor, part_kind, frame)` and the HDR `boma`
+/// form, plus the native four-argument spelling that carries `sync` explicitly.
+///
+/// The corpus writes only the three-argument form. That is not a truncated call: the
+/// version-matched Lua reader counts its arguments and supplies `sync = true` when the third is
+/// absent, so the omission is retained as `sync: None` and re-emitted without the argument.
+/// Only the seek frame and the authored `sync` are value edits; the part kind stays source-owned.
+fn parse_motion_module_set_frame_partial_call(line: &str) -> Option<ExcuteStmt> {
+    let needle = "MotionModule::set_frame_partial(";
+    let start = line.find(needle)? + needle.len();
+    let end = line[start..].rfind(')')? + start;
+    let tokens = tokenize_args(&line[start..end]);
+    let (module_accessor, part_kind, frame, sync) = match tokens.as_slice() {
+        [module_accessor, part_kind, frame] => (module_accessor, part_kind, frame, None),
+        [module_accessor, part_kind, frame, sync] => match sync.trim() {
+            "true" => (module_accessor, part_kind, frame, Some(true)),
+            "false" => (module_accessor, part_kind, frame, Some(false)),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !matches!(module_accessor.trim(), "agent.module_accessor" | "boma") {
+        return None;
+    }
+    let part_kind = parse_motion_module_part_kind(part_kind)?;
+    let frame = frame.trim().parse::<f32>().ok()?;
+    (frame.is_finite() && frame >= 0.0).then_some(ExcuteStmt::MotionModuleSetFramePartial(
+        crate::data::MotionModuleSetFramePartialCall {
+            part_kind,
+            frame,
+            sync,
+        },
+    ))
+}
+
 /// Parse the exact measured `CLR_SPEED(agent, kinetic_id)` shape or its generated helper call.
 /// The vendored crate exposes only the generic kinetic primitive macro, so generated source uses
 /// the helper while editable source retains the corpus's `macros::CLR_SPEED` spelling.
@@ -3116,6 +3167,23 @@ fn parse_attack_clear(line: &str) -> Option<u32> {
         .trim()
         .parse::<u32>()
         .ok()
+}
+
+/// A source argument that is literally `true` or `false`, or `None` for anything else.
+///
+/// Anything else is a constant or an expression, and the caller's job is then to keep the whole
+/// call verbatim rather than to substitute a value for the part it could not read.
+fn bool_token(s: &str) -> Option<bool> {
+    match s.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// [`bool_token`] for one slot of an extracted argument list, absent slot included.
+fn bool_token_at(args: &[String], slot: usize) -> Option<bool> {
+    bool_token(args.get(slot)?)
 }
 
 /// Strip leading `*` dereference from constant names like `*ATTACK_SETOFF_KIND_ON`.
@@ -3628,6 +3696,21 @@ fn emit_excute_stmts(stmts: &[crate::data::ExcuteStmt], indent: &str) -> Vec<Str
                 call.part_kind,
                 num(call.rate)
             ),
+            crate::data::ExcuteStmt::MotionModuleSetFramePartial(call) => match call.sync {
+                // An omitted `sync` is re-emitted omitted. The game's own reader defaults it, so
+                // spelling it out would change the author's source for no behavioural gain.
+                None => format!(
+                    "{indent}MotionModule::set_frame_partial(agent.module_accessor, {}, {});",
+                    call.part_kind,
+                    num(call.frame)
+                ),
+                Some(sync) => format!(
+                    "{indent}MotionModule::set_frame_partial(agent.module_accessor, {}, {}, {});",
+                    call.part_kind,
+                    num(call.frame),
+                    sync
+                ),
+            },
             crate::data::ExcuteStmt::ClrSpeed(call) => {
                 format!("{indent}visionary_clr_speed(agent, {});", call.kinetic_kind)
             }
@@ -4229,8 +4312,15 @@ fn emit_spawn_stop(call: &crate::data::EffectCall, indent: &str) -> String {
             attack_mod_num(arg)
         );
     }
+    // The author's own booleans, exactly as the trail above keeps its `AFTER_IMAGE_OFF`
+    // argument. Hardcoding the pair here rewrote 59% of the corpus's kills — including all
+    // four that end `ganon_sword_flare`, the effect bound to the sword article Ganondorf's
+    // smash attacks generate and remove within the move.
+    let (default_fade, default_detach) = crate::data::EFFECT_OFF_KIND_DEFAULT;
+    let fade = call.off_fade.unwrap_or(default_fade);
+    let detach = call.off_detach.unwrap_or(default_detach);
     format!(
-        "{indent}macros::EFFECT_OFF_KIND(agent, {}, false, true);\n",
+        "{indent}macros::EFFECT_OFF_KIND(agent, {}, {fade}, {detach});\n",
         hash_arg(&call.effect_name)
     )
 }
@@ -6146,7 +6236,7 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
         // and it stays `Raw` rather than being reinterpreted.
         assert!(parse_attack_mod_call("        macros::ATK_POWER(agent, 3);").is_none());
         // `ATK_HIT_ABS` takes no id and passes local variables. It must not be dragged in here
-        // by its shared prefix — see TODO.md B3 for why it is carried verbatim instead.
+        // by its shared prefix — it is outside the hitbox-modifier family for that reason.
         let hit_abs = r#"        macros::ATK_HIT_ABS(agent, *FIGHTER_ATTACK_ABSOLUTE_KIND_THROW, Hash40::new("throw"), target, target_group, target_no);"#;
         assert!(parse_attack_mod_call(hit_abs).is_none());
     }
@@ -6847,12 +6937,12 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
             "the measured expression calls no longer all have typed events"
         );
         assert_eq!(
-            expression_scripts, 335,
+            expression_scripts, 342,
             "the local expression corpus changed; update the measured D2 scope deliberately"
         );
         assert_eq!(
             written,
-            [65, 51, 2, 279],
+            [71, 51, 2, 286],
             "the measured expression macro counts changed; update D2 before expanding scope"
         );
     }
@@ -6953,6 +7043,8 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
                 raw_line: None,
                 trail_command: None,
                 trail_off: None,
+                off_fade: None,
+                off_detach: None,
                 trail_bone2: None,
                 rate: None,
                 work_int: None,
@@ -6984,6 +7076,8 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
                 raw_line: None,
                 trail_command: None,
                 trail_off: None,
+                off_fade: None,
+                off_detach: None,
                 trail_bone2: None,
                 rate: None,
                 work_int: None,
@@ -9129,6 +9223,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
@@ -9183,6 +9279,192 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
                 .map(|line| format!("{line}\n"))
                 .collect()
         })
+    }
+
+    /// Every `EFFECT_OFF_KIND` the corpus writes comes back out of the export unchanged.
+    ///
+    /// **A round trip cannot show this and never could.** Until this change the parser dropped
+    /// the call's two booleans, so the export's invented `false, true` parsed back to the same
+    /// nothing the source did, and `check_effect_fidelity` — which compares the export against
+    /// the model by parsing it with that same parser — agreed with itself on every one of them.
+    /// The claim has to be pinned against the SOURCE TEXT instead.
+    ///
+    /// Ganondorf's forward smash is the move that surfaced it: `ganon_sword_flare` is killed
+    /// with `false, false` in all four of the smashes that generate his sword article, and the
+    /// export rewrote every one.
+    #[test]
+    fn every_corpus_effect_off_kind_is_exported_with_the_arguments_it_was_written_with() {
+        let bodies = corpus_bodies();
+        if bodies.is_empty() {
+            return;
+        }
+        // `macros::EFFECT_OFF_KIND(agent, Hash40::new("x"), false, true);` — the whole call, so
+        // a comparison cannot pass by matching only the name and the kind.
+        let kills = |text: &str| -> Vec<String> {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("macros::EFFECT_OFF_KIND("))
+                .map(str::to_string)
+                .collect()
+        };
+
+        let mut checked = 0usize;
+        let mut pairs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut problems: Vec<String> = Vec::new();
+        for (path, body) in &bodies {
+            let Some(original) = function_interior(body, "effect_") else {
+                continue;
+            };
+            let mut want = kills(&original);
+            if want.is_empty() {
+                continue;
+            }
+            checked += want.len();
+            for line in &want {
+                if let Some(tail) = line.rsplit("\"),").next() {
+                    pairs.insert(tail.trim_end_matches(");").trim().to_string());
+                }
+            }
+            let calls = parse_effect_script(body).to_effect_calls();
+            let (_, residue) = parse_effect_script(body).to_effect_calls_and_residue();
+            let emitted = preview_effect_fn(&calls, "test", &[], &residue);
+            let mut got = kills(&emitted);
+            want.sort();
+            got.sort();
+            if want != got {
+                problems.push(format!(
+                    "{path}:\n--- source ---\n{}\n--- export ---\n{}",
+                    want.join("\n"),
+                    got.join("\n")
+                ));
+            }
+        }
+
+        assert!(
+            problems.is_empty(),
+            "{} script(s) export an EFFECT_OFF_KIND the source does not contain:\n\n{}",
+            problems.len(),
+            problems.join("\n\n")
+        );
+        // Guard the oracle with what it claims to test. Every one of these passes trivially if
+        // the corpus happens to write only the pair the export used to hardcode, and a cache
+        // holding one fighter can easily do that.
+        assert!(
+            checked > 0 && pairs.len() > 1,
+            "the cached corpus holds {checked} kill(s) spelling {pairs:?} — with fewer than two \
+             distinct argument pairs this test cannot fail, so it is not a gate"
+        );
+    }
+
+    /// A kill for an effect this script never started is kept, rather than dropped.
+    ///
+    /// The parser closes an OPEN call to consume a kill, so a kill that matches none used to
+    /// disappear along with the effect it was supposed to end. Half the corpus's kills are this
+    /// shape — a status or the other half of a two-part special started the effect — which is
+    /// the same situation an unmatched `AFTER_IMAGE_OFF` is already carried through.
+    #[test]
+    fn a_kill_with_no_spawn_to_close_is_carried_into_the_export() {
+        let source = r#"unsafe extern "C" fn effect_specialhi(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("ganon_sword_flare"), true, false);
+    }
+}
+"#;
+        let script = parse_effect_script(source);
+        let (calls, residue) = script.to_effect_calls_and_residue();
+        let emitted = preview_effect_fn(&calls, "special_hi", &[], &residue);
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_OFF_KIND(agent, Hash40::new(\"ganon_sword_flare\"), true, false);"
+            ),
+            "the kill must survive with its own arguments:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("frame(agent.lua_state_agent, 4.0);"),
+            "and at the frame it was written at:\n{emitted}"
+        );
+    }
+
+    /// The pair is read from the source and written back, not defaulted.
+    ///
+    /// Ganondorf's forward smash, cut to the two lines that matter. The mutation this is here
+    /// to catch is the one that shipped: an emitter that writes a constant pair passes every
+    /// round-trip test in this file and fails only this assertion.
+    #[test]
+    fn a_kill_keeps_the_booleans_its_script_wrote() {
+        let source = r#"unsafe extern "C" fn effect_attacks4(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 28.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("ganon_sword_flare"), Hash40::new("haver"), 0, 0, 0, 0, 0, 0, 1, true);
+    }
+    frame(agent.lua_state_agent, 35.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("ganon_sword_flare"), false, false);
+    }
+}
+"#;
+        let calls = parse_effect_script(source).to_effect_calls();
+        assert_eq!(
+            (calls[0].off_fade, calls[0].off_detach),
+            (Some(false), Some(false)),
+            "the closing kill's arguments belong to the call it closes: {:?}",
+            calls[0]
+        );
+        let emitted = preview_effect_fn(&calls, "attack_s4", &[], &Default::default());
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_OFF_KIND(agent, Hash40::new(\"ganon_sword_flare\"), false, false);"
+            ),
+            "the export must not substitute its own pair:\n{emitted}"
+        );
+
+        // An effect the editor ends itself has no authored pair, and the documented default is
+        // what it gets. Without this the assertion above passes on a build that simply never
+        // writes the default, and the fallback would go untested.
+        let mut invented = calls.clone();
+        invented[0].off_fade = None;
+        invented[0].off_detach = None;
+        let emitted = preview_effect_fn(&invented, "attack_s4", &[], &Default::default());
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_OFF_KIND(agent, Hash40::new(\"ganon_sword_flare\"), false, true);"
+            ),
+            "an editor-created stop uses EFFECT_OFF_KIND_DEFAULT:\n{emitted}"
+        );
+    }
+
+    /// A kill whose booleans are not literals is left alone entirely.
+    ///
+    /// Reading one and defaulting the other would write a call the script does not contain.
+    /// The line stays verbatim and closes nothing, so exactly one kill still reaches the game.
+    #[test]
+    fn a_kill_with_a_non_literal_argument_is_kept_verbatim() {
+        let source = r#"unsafe extern "C" fn effect_attacks4(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 28.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW(agent, Hash40::new("ganon_sword_flare"), Hash40::new("haver"), 0, 0, 0, 0, 0, 0, 1, true);
+    }
+    frame(agent.lua_state_agent, 35.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_OFF_KIND(agent, Hash40::new("ganon_sword_flare"), false, hidden);
+    }
+}
+"#;
+        let script = parse_effect_script(source);
+        let (calls, residue) = script.to_effect_calls_and_residue();
+        let emitted = preview_effect_fn(&calls, "attack_s4", &[], &residue);
+        assert_eq!(
+            emitted.matches("EFFECT_OFF_KIND").count(),
+            1,
+            "exactly one kill, and it is the author's own:\n{emitted}"
+        );
+        assert!(
+            emitted.contains(
+                "macros::EFFECT_OFF_KIND(agent, Hash40::new(\"ganon_sword_flare\"), false, hidden);"
+            ),
+            "the unreadable call is reproduced as written:\n{emitted}"
+        );
     }
 
     /// The gate on loading `sound_` at all.
@@ -9262,8 +9544,8 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         assert_eq!(
             checked - byte_exact,
-            6,
-            "{} of {checked} sound scripts came back with different whitespace; 6 are known \
+            7,
+            "{} of {checked} sound scripts came back with different whitespace; 7 are known \
              mis-indented at source, so any other number is the emitter's formatting changing",
             checked - byte_exact
         );
@@ -10363,10 +10645,13 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         );
         eprintln!("[audit] {lossy} of {with_calls} effect scripts still lose a line");
         assert!(
-            lossy <= 12,
+            lossy <= 13,
             "the export deletes lines from {lossy} of {with_calls} effect scripts; C5 measured \
              28, C6 brought it to 19, C6b's COL_NORMAL to 15, C2's raw-command trail to 13, and \
-             E3's frame-anchored residue to 12. Something started dropping user code again."
+             E3's frame-anchored residue to 12. The 13th is not a regression: the local cache \
+             gained littlemac/SpecialNDash after E3 measured 12, and it loses only the `else {{` \
+             and bare-expression shapes already counted here. Something started dropping user \
+             code again."
         );
         // The other half of the ratchet, and the half E3 needed. `lossy` counts what the report
         // *names*; these two count what the export *writes*. A change that stopped producing
@@ -10397,7 +10682,15 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
         // assumed `pop()` would keep those two files lossy, and it was wrong in the useful
         // direction: kirby `SpecialHi2` and `SpecialAirHi2` are now clean.
         let expected: std::collections::BTreeMap<String, usize> =
-            [("wait_loop_sync_mot", 7), ("else {", 5)]
+            // littlemac/SpecialNDash, cached after C6b measured this, adds all five of the
+            // entries C6b did not see: two `else {`, its two bare `WorkModule::get_float`
+            // statements, and the decompiler's `if(0x1462c0(...))`.
+            [
+                ("wait_loop_sync_mot", 7),
+                ("else {", 7),
+                ("WorkModule::get_float", 2),
+                ("if", 1),
+            ]
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect();
@@ -11608,7 +11901,7 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
     }
 
     #[test]
-    fn motion_module_set_frame_partial_binding_mismatch_remains_raw() {
+    fn motion_module_set_frame_partial_parse_export_round_trips_measured_and_native_shapes() {
         let source = r#"unsafe extern "C" fn expression_appeallwl(agent: &mut L2CAgentBase) {
     frame(agent.lua_state_agent, 8.0);
     if macros::is_excute(agent) {
@@ -11629,33 +11922,82 @@ unsafe extern "C" fn effect_test(agent: &mut L2CAgentBase) {
 }
 "#;
         let script = parse_expression_script(source);
-        let raw = script.to_raw_partial_frame_events();
-        assert_eq!(
-            raw.iter().map(|event| event.frame).collect::<Vec<_>>(),
-            [8, 13, 18, 23]
-        );
-        assert_eq!(raw[0].source, "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);");
-        assert_eq!(raw[1].source, "MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3);");
-        assert_eq!(raw[2].source, "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);");
-        assert_eq!(raw[3].source, "MotionModule::set_frame_partial_sync_anim_cmd(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 4);");
-        let emitted = preview_expression_fn(&script, "appeal_lw_l");
+        let events = script.to_motion_module_set_frame_partial_events();
 
-        // The public corpus supplies three arguments, while the pinned native binding requires
-        // a fourth boolean. Neither shape is safe to type until that boolean's source/runtime
-        // contract is measured, so source export must preserve each call verbatim.
-        let round_tripped =
-            preview_expression_fn(&parse_expression_script(&emitted), "appeal_lw_l");
+        // The corpus's three-argument form and the native four-argument form are one family. The
+        // difference between them is whether the author wrote `sync`, which is why the omission
+        // is `None` rather than the `true` the game substitutes for it.
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.frame, event.call.frame, event.call.sync, event.site))
+                .collect::<Vec<_>>(),
+            [
+                (8, 2.0, None, 0),
+                (13, 3.0, None, 1),
+                (18, 0.0, Some(false), 2),
+            ]
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.call.part_kind == "*FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL"));
+
+        // An omitted `sync` is `true` at runtime; an authored `false` is the only way to get the
+        // other behaviour, so the two must not collapse into one another.
+        assert!(events[0].call.effective_sync());
+        assert!(!events[2].call.effective_sync());
+
+        // The sync-anim-cmd wrapper is a different binding with no corpus calls, so it is still
+        // carried verbatim rather than folded into this family.
+        let raw = script.to_raw_partial_frame_events();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].frame, 23);
+        assert_eq!(raw[0].source, "MotionModule::set_frame_partial_sync_anim_cmd(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 4);");
+
+        let emitted = preview_expression_fn(&script, "appeal_lw_l");
         for line in [
-            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);",
-            "MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3);",
-            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2.0);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 3.0);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0.0, false);",
             "MotionModule::set_frame_partial_sync_anim_cmd(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 4);",
         ] {
-            assert!(emitted.contains(line), "raw partial-frame call was lost: {line}");
-            assert!(
-                round_tripped.contains(line),
-                "raw partial-frame call was lost on reparse: {line}"
-            );
+            assert!(emitted.contains(line), "partial-frame call was lost: {line}");
+        }
+        assert_eq!(
+            parse_expression_script(&emitted).to_motion_module_set_frame_partial_events(),
+            events
+        );
+    }
+
+    #[test]
+    fn malformed_motion_module_set_frame_partial_shapes_remain_raw() {
+        let source = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        MotionModule::set_frame_partial(agent.module_accessor, 2);
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL);
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, -1);
+        MotionModule::set_frame_partial(other.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 1);
+        MotionModule::set_frame_partial(agent.module_accessor, part_kind, 1);
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, frame);
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 1, sync);
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        assert!(script
+            .to_motion_module_set_frame_partial_events()
+            .is_empty());
+        let emitted = preview_game_fn(&script, "x");
+        for line in [
+            "MotionModule::set_frame_partial(agent.module_accessor, 2);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, -1);",
+            "MotionModule::set_frame_partial(other.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 1);",
+            "MotionModule::set_frame_partial(agent.module_accessor, part_kind, 1);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, frame);",
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 1, sync);",
+        ] {
+            assert!(emitted.contains(line), "malformed call was rewritten: {line}");
         }
     }
 

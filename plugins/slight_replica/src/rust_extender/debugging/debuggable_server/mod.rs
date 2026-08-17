@@ -136,16 +136,48 @@ pub fn notify_effect(id: u64, name: &str, data: &EffectData) {
 
 /// Stream one captured ACMD line to the editor (live-ACMD source).
 pub fn notify_acmd_capture(line: &crate::slight::hitbox_viewer::CaptureLine) {
+    // Capture history remains in the plugin for a later connection, but there is no reason to
+    // allocate a JSON value for every ordinary move when neither a client nor debug fallback can
+    // receive it. Busy no-editor matches are the common case.
+    if !emit_wanted() {
+        return;
+    }
     emit("AcmdCapture", &serde_json::json!({ "AcmdCapture": line }));
 }
 
 /// Tell the editor a captured motion has finished playing — every line it produces has now
 /// been streamed. Emitted strictly after those lines (see `take_pending_ends`).
 pub fn notify_acmd_capture_end(end: &crate::slight::hitbox_viewer::CaptureEnd) {
+    if !emit_wanted() {
+        return;
+    }
     emit(
         "AcmdCaptureEnd",
         &serde_json::json!({ "AcmdCaptureEnd": end }),
     );
+}
+
+/// Replay one validated record from the disk-backed capture archive. Keeping the archive format
+/// private to the plugin avoids deserializing a lifetime-bound `func` field just to send the same
+/// JSON back over the wire.
+pub fn notify_acmd_capture_archive_record(record: &str) {
+    if !emit_wanted() {
+        return;
+    }
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(record) else {
+        return;
+    };
+    let Some(data) = record.get("data") else {
+        return;
+    };
+    match record.get("type").and_then(serde_json::Value::as_str) {
+        Some("line") => emit("AcmdCapture", &serde_json::json!({ "AcmdCapture": data })),
+        Some("end") => emit(
+            "AcmdCaptureEnd",
+            &serde_json::json!({ "AcmdCaptureEnd": data }),
+        ),
+        _ => {}
+    }
 }
 
 pub fn remove_effect(id: u64) {

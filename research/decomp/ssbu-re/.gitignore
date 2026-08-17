@@ -28,3 +28,9 @@
 /analyze_out.txt
 /qrd_probe*.txt
 /tc_out.txt
+# Symbol, string and glue dumps read out of the game executable. `*.bin` above
+# does not catch these because the tooling writes them as `<image>.bin.txt`.
+*.bin.txt
+/at1304.txt
+/glue_tail_bytes.txt
+/strrefs.txt

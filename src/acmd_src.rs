@@ -1585,7 +1585,7 @@ fn effect_stop_block(
     call_sites: &[Option<MacroSite>],
     calls: &[crate::data::EffectCall],
     all_sites: &[MacroSite],
-) -> Option<EffectSourceBlock> {
+) -> Option<(MacroSite, EffectSourceBlock)> {
     let is_trail = call.trail_command.is_some()
         || call.spawn_func == "AFTER_IMAGE_ON"
         || call.raw_line.is_some();
@@ -1635,7 +1635,7 @@ fn effect_stop_block(
     if paired != 1 || calls.get(call_index).is_none() {
         return None;
     }
-    Some(stop_block.clone())
+    Some((stop_site.clone(), stop_block.clone()))
 }
 
 fn plan_effect_timing_moves(
@@ -1777,7 +1777,7 @@ fn plan_effect_timing_moves(
                 continue;
             }
         }
-        if let Some(block) = &stop_block {
+        if let Some((_, block)) = &stop_block {
             if frame_blocks.iter().any(|candidate| {
                 candidate.frame == after.active_end && candidate.range != block.range
             }) {
@@ -1857,7 +1857,8 @@ fn apply_effect_timing_moves(
                 &call_sites,
                 calls,
                 &all_sites,
-            )?;
+            )?
+            .1;
             let mut stop_edits: Vec<Replacement> = value_edits
                 .iter()
                 .filter(|edit| {
@@ -2141,6 +2142,14 @@ pub fn rewrite_effect_calls(
         ));
     }
 
+    // The stop command's own arguments live on a different line from the spawn, so they are
+    // resolved against the whole source rather than the spawn's site.
+    let all_sites = all_effect_source_sites(text);
+    let call_sites: Vec<Option<MacroSite>> = ordinals
+        .iter()
+        .map(|ordinal| sites.get(*ordinal).cloned())
+        .collect();
+
     for (ordinal, call_indices) in per_site {
         let Some(macro_site) = sites.get(ordinal) else {
             report.skipped.push(format!(
@@ -2252,6 +2261,19 @@ pub fn rewrite_effect_calls(
             }
         }
         edits.extend(transform_edits(text, macro_site, target));
+        off_kind_edits(
+            text,
+            label,
+            macro_site,
+            differs[0],
+            was,
+            target,
+            &call_sites,
+            &pristine,
+            &all_sites,
+            &mut edits,
+            &mut report,
+        );
 
         let sites = modifier_sites.get(ordinal);
         modifier_edits(
@@ -2924,6 +2946,82 @@ fn control_const_edit(
         span,
         value: replacement,
     })
+}
+
+/// Write an edited `EFFECT_OFF_KIND` boolean pair back into the kill's own source line.
+///
+/// The stop is a separate call from the spawn it ends, so this cannot go through
+/// [`transform_edits`]: it has to find the paired kill first, and it refuses rather than
+/// guesses when the pairing is not unique — the same rule the timing mover already applies to
+/// the same block.
+#[allow(clippy::too_many_arguments)]
+fn off_kind_edits(
+    text: &str,
+    label: &str,
+    macro_site: &MacroSite,
+    call_index: usize,
+    was: &crate::data::EffectCall,
+    target: &crate::data::EffectCall,
+    call_sites: &[Option<MacroSite>],
+    pristine: &[crate::data::EffectCall],
+    all_sites: &[MacroSite],
+    edits: &mut Vec<Replacement>,
+    report: &mut SyncReport,
+) {
+    if was.off_fade == target.off_fade && was.off_detach == target.off_detach {
+        return;
+    }
+    // "The editor has no value" is not a request to write the default one. A project saved
+    // before these fields existed loads with both unset while the source it is synced against
+    // has real values, and writing the default here would overwrite the author's own pair with
+    // the invented one this whole change exists to stop.
+    if target.off_fade.is_none() && target.off_detach.is_none() {
+        return;
+    }
+    let (default_fade, default_detach) = crate::data::EFFECT_OFF_KIND_DEFAULT;
+    if !target.follows_bone || target.active_end == crate::data::OPEN_ENDED_EFFECT_FRAME {
+        report.skipped.push(format!(
+            "{label}: `{}` changed its EFFECT_OFF_KIND flags but no longer ends at a finite \
+             frame — there is no stop command in the source to retune",
+            macro_site.name
+        ));
+        return;
+    }
+    let Some((stop_site, _)) = effect_stop_block(
+        text, call_index, was, macro_site, call_sites, pristine, all_sites,
+    ) else {
+        report.skipped.push(format!(
+            "{label}: `{}` changed its EFFECT_OFF_KIND flags but its stop command could not be \
+             identified uniquely in the source",
+            macro_site.name
+        ));
+        return;
+    };
+    for (slot, value) in [
+        (2, target.off_fade.unwrap_or(default_fade)),
+        (3, target.off_detach.unwrap_or(default_detach)),
+    ] {
+        let Some(span) = stop_site.args.get(slot) else {
+            report.skipped.push(format!(
+                "{label}: `EFFECT_OFF_KIND` has no argument {slot} to write"
+            ));
+            continue;
+        };
+        let current = text[span.clone()].trim();
+        if current != "true" && current != "false" {
+            report.skipped.push(format!(
+                "{label}: `EFFECT_OFF_KIND` argument {slot} is not a literal boolean, so source \
+                 syncing left it unchanged"
+            ));
+            continue;
+        }
+        if current != value.to_string() {
+            edits.push(Replacement {
+                span: span.clone(),
+                value: value.to_string(),
+            });
+        }
+    }
 }
 
 fn control_unk_edit(
@@ -4487,7 +4585,7 @@ pub(crate) fn sync_hurtbox_conditions(
 /// too high and retune a different call.
 ///
 /// `ATK_HIT_ABS` and `ATK_LERP_RATIO` are deliberately absent — they take no id, so they are not
-/// this family and have no site here. See `TODO.md` B3.
+/// this family and have no site here.
 const ATTACK_MOD_COMMANDS: &[(&str, usize)] = &[("ATK_POWER", 2), ("ATK_SET_SHIELD_SETOFF_MUL", 2)];
 
 /// The attack-modifier calls in `text`, in document order — index `n` is site `n`.
@@ -5554,6 +5652,174 @@ pub fn sync_expression_motion_module_set_rate_partial(
     let script_name = crate::acmd::acmd_script_name("expression", move_name);
     sync_script(index, fighter, &script_name, |body| {
         rewrite_motion_module_set_rate_partial(
+            body,
+            &format!("{fighter}/{move_name}"),
+            pristine,
+            edited,
+        )
+    })
+}
+
+/// The verified direct `MotionModule::set_frame_partial` calls in source order.
+///
+/// Both authored arities are buildable: the corpus's three-argument form and the native
+/// four-argument form. Which one a site uses is part of its shape, so the rewrite below can
+/// refuse a change that would have to add or remove an argument.
+pub(crate) fn motion_module_set_frame_partial_sites(text: &str) -> Vec<MacroSite> {
+    scan_named_sites(
+        text,
+        crate::data::MotionModuleSetFramePartialCall::FUNC,
+        0..text.len(),
+    )
+    .into_iter()
+    .filter(|site| {
+        (site.args.len() == 3 || site.args.len() == 4)
+            && site
+                .arg(text, 0)
+                .is_some_and(|value| matches!(value.trim(), "agent.module_accessor" | "boma"))
+            && site
+                .arg(text, 1)
+                .is_some_and(valid_motion_module_part_kind_token)
+            && site
+                .arg(text, 2)
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+            && site
+                .arg(text, 3)
+                .is_none_or(|value| matches!(value.trim(), "true" | "false"))
+    })
+    .collect()
+}
+
+/// Rewrite only the seek frame and the authored `sync` of existing direct
+/// `MotionModule::set_frame_partial` calls.
+///
+/// Adding or removing `sync` is structural — it changes the call's arity, and an omitted `sync`
+/// is not the same source as an authored `true` even though the game runs them identically. Those
+/// edits are reported rather than written.
+pub fn rewrite_motion_module_set_frame_partial(
+    text: &str,
+    label: &str,
+    pristine: &[crate::data::MotionModuleSetFramePartialEvent],
+    edited: &[crate::data::MotionModuleSetFramePartialEvent],
+) -> Result<(String, SyncReport)> {
+    let sites = motion_module_set_frame_partial_sites(text);
+    let mut report = SyncReport::default();
+    if pristine.len() != sites.len() || edited.len() != pristine.len() {
+        report.skipped.push(format!(
+            "{label}: source has {} buildable `MotionModule::set_frame_partial` call(s), while the editor has {} pristine and {} edited point(s) — malformed or looped calls are source-only",
+            sites.len(),
+            pristine.len(),
+            edited.len()
+        ));
+        return Ok((text.to_string(), report));
+    }
+
+    let mut edits = Vec::new();
+    for (index, (before, now)) in pristine.iter().zip(edited).enumerate() {
+        if before == now {
+            continue;
+        }
+        if before.site != index || now.site != index {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_frame_partial` site {} does not match the flat source order — source syncing refuses positional guessing",
+                before.site
+            ));
+            continue;
+        }
+        if before.frame != now.frame {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_frame_partial` site {} was retimed from frame {} to {} — source syncing only retunes its seek frame and sync flag",
+                before.site, before.frame, now.frame
+            ));
+            continue;
+        }
+        if before.call.part_kind != now.call.part_kind {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_frame_partial` site {} changed part kind — source syncing only retunes its seek frame and sync flag",
+                before.site
+            ));
+            continue;
+        }
+        if before.call.sync.is_some() != now.call.sync.is_some() {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_frame_partial` site {} added or removed its `sync` argument — source syncing does not change a call's arity",
+                before.site
+            ));
+            continue;
+        }
+        let Some(site) = sites.get(index) else {
+            continue;
+        };
+        if site.name != crate::data::MotionModuleSetFramePartialCall::FUNC
+            || site.args.len() != usize::from(before.call.sync.is_some()) + 3
+            || site
+                .arg(text, 0)
+                .is_none_or(|value| !matches!(value.trim(), "agent.module_accessor" | "boma"))
+            || site
+                .arg(text, 1)
+                .is_none_or(|value| value.trim() != before.call.part_kind.trim())
+        {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_frame_partial` site {} no longer has its verified receiver/part-kind/arity shape",
+                before.site
+            ));
+            continue;
+        }
+        if !(now.call.frame.is_finite() && now.call.frame >= 0.0) {
+            report.skipped.push(format!(
+                "{label}: `MotionModule::set_frame_partial` site {} has a non-finite or negative seek frame — source syncing leaves the call intact",
+                before.site
+            ));
+            continue;
+        }
+        if let Some(span) = site.args.get(2) {
+            if let Some(edit) = to_f32_edit(text, span, now.call.frame) {
+                edits.push(edit);
+            }
+        }
+        if let (Some(span), Some(sync)) = (site.args.get(3), now.call.sync) {
+            if let Some(edit) = bool_edit(text, span, sync) {
+                edits.push(edit);
+            }
+        }
+    }
+    report.changed = edits.len();
+    Ok((apply(text, edits), report))
+}
+
+/// Sync edited direct `MotionModule::set_frame_partial` values into the project's `game_`
+/// function.
+pub fn sync_motion_module_set_frame_partial(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::MotionModuleSetFramePartialEvent],
+    edited: &[crate::data::MotionModuleSetFramePartialEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("game", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_motion_module_set_frame_partial(
+            body,
+            &format!("{fighter}/{move_name}"),
+            pristine,
+            edited,
+        )
+    })
+}
+
+/// Sync edited direct `MotionModule::set_frame_partial` values into the project's `expression_`
+/// function. The rewrite is shared with the `game_` path; only the category anchor differs.
+pub fn sync_expression_motion_module_set_frame_partial(
+    index: &SourceIndex,
+    fighter: &str,
+    move_name: &str,
+    pristine: &[crate::data::MotionModuleSetFramePartialEvent],
+    edited: &[crate::data::MotionModuleSetFramePartialEvent],
+) -> Result<SyncReport> {
+    let script_name = crate::acmd::acmd_script_name("expression", move_name);
+    sync_script(index, fighter, &script_name, |body| {
+        rewrite_motion_module_set_frame_partial(
             body,
             &format!("{fighter}/{move_name}"),
             pristine,
@@ -12709,6 +12975,92 @@ pub fn install() { let agent = &mut smashline::Agent::new("test_fighter"); }
         assert_eq!(after, text);
         assert!(report.skipped.iter().any(|note| note.contains("part kind")));
         assert_eq!(motion_module_set_rate_partial_sites(text).len(), 1);
+    }
+
+    #[test]
+    fn motion_module_set_frame_partial_source_sync_changes_only_seek_frame_and_sync() {
+        let text = r#"unsafe extern "C" fn expression_appeallwl(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);
+    }
+    frame(agent.lua_state_agent, 18.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, false);
+    }
+}
+"#;
+        let pristine =
+            crate::acmd::parse_expression_script(text).to_motion_module_set_frame_partial_events();
+        assert_eq!(pristine.len(), 2);
+        let mut edited = pristine.clone();
+        edited[0].call.frame = 5.0;
+        edited[1].call.sync = Some(true);
+        let (after, report) =
+            rewrite_motion_module_set_frame_partial(text, "pacman/appeal_lw_l", &pristine, &edited)
+                .unwrap();
+        assert_eq!(report.changed, 2, "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+
+        // Only the two argument spans move: the receiver spelling, the part-kind token and the
+        // three-argument call's missing `sync` are all left exactly as the author wrote them.
+        assert!(after.contains(
+            "MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 5);"
+        ));
+        assert!(after.contains(
+            "MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 0, true);"
+        ));
+        assert_eq!(
+            crate::acmd::parse_expression_script(&after)
+                .to_motion_module_set_frame_partial_events(),
+            edited
+        );
+    }
+
+    #[test]
+    fn motion_module_set_frame_partial_source_sync_refuses_arity_part_and_retime_changes() {
+        let text = r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
+    if macros::is_excute(agent) {
+        MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);
+        MotionModule::set_frame_partial(boma, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL);
+    }
+}
+"#;
+        let pristine =
+            crate::acmd::parse_acmd_script(text).to_motion_module_set_frame_partial_events();
+        assert_eq!(pristine.len(), 1);
+        assert_eq!(motion_module_set_frame_partial_sites(text).len(), 1);
+
+        // Spelling out the boolean the game was supplying is an arity change, not a value edit.
+        let mut edited = pristine.clone();
+        edited[0].call.sync = Some(true);
+        let (after, report) =
+            rewrite_motion_module_set_frame_partial(text, "pacman/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert!(
+            report.skipped.iter().any(|note| note.contains("`sync`")),
+            "{report:?}"
+        );
+
+        let mut edited = pristine.clone();
+        edited[0].call.part_kind = "*FIGHTER_MOTION_PART_SET_KIND_UPPER_BODY".into();
+        let (after, report) =
+            rewrite_motion_module_set_frame_partial(text, "pacman/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert!(
+            report.skipped.iter().any(|note| note.contains("part kind")),
+            "{report:?}"
+        );
+
+        let mut edited = pristine.clone();
+        edited[0].frame += 1;
+        let (after, report) =
+            rewrite_motion_module_set_frame_partial(text, "pacman/x", &pristine, &edited).unwrap();
+        assert_eq!(after, text);
+        assert!(
+            report.skipped.iter().any(|note| note.contains("retimed")),
+            "{report:?}"
+        );
     }
 
     #[test]

@@ -45,6 +45,11 @@ impl Facade for DebuggableServerFacade {
             }
             // Live-ACMD capture stream. The first battle object to execute each fighter-kind +
             // motion owns its one immutable snapshot until the editor explicitly clears it.
+            for record in crate::slight::hitbox_viewer::take_archive_replay(MAX_NOTIFY_PER_TICK) {
+                crate::rust_extender::debuggable_server::notify_acmd_capture_archive_record(
+                    &record,
+                );
+            }
             for line in crate::slight::hitbox_viewer::take_pending(MAX_NOTIFY_PER_TICK) {
                 crate::rust_extender::debuggable_server::notify_acmd_capture(&line);
             }

@@ -32,6 +32,7 @@ use std::sync::LazyLock;
 use parking_lot::Mutex;
 use smash::lib::{L2CValue, L2CValueType};
 
+mod capture_archive;
 mod rate_hooks;
 mod sound_hooks;
 
@@ -283,6 +284,9 @@ pub const CAT_WORK_MODULE_SET: u8 = 34;
 /// Direct `WorkModule::inc_int` point. Must equal the editor's wire category.
 pub const CAT_WORK_MODULE_INC_INT: u8 = 35;
 
+/// Direct `MotionModule::set_frame_partial` point. Must equal the editor's wire category.
+pub const CAT_MOTION_MODULE_SET_FRAME_PARTIAL: u8 = 36;
+
 /// Targetless rule key for `SET_AIR`. Must equal `game_link::KINETIC_KEY_SET_AIR`.
 const KINETIC_KEY_SET_AIR: u64 = u64::MAX - 2;
 
@@ -336,13 +340,11 @@ fn next_run() -> u32 {
     NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Everything captured this session, one claimed run per (kind, motion).
-static CAPTURE_LOG: LazyLock<Mutex<Vec<CaptureLine>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 /// Dedupe keys within each claimed run.
 static CAPTURE_SEEN: LazyLock<Mutex<HashMap<u32, HashSet<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-/// Not-yet-sent lines. Holds clones so reconnect/resend and network draining never borrow the
-/// immutable session log.
+/// Not-yet-sent lines. The durable archive is the reconnect source; this queue is only the live
+/// network delivery buffer.
 static CAPTURE_PENDING: LazyLock<Mutex<Vec<CaptureLine>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 /// Completed motions not yet sent (drained strictly AFTER the lines they terminate).
@@ -363,6 +365,9 @@ struct CaptureClaim {
     /// each other, because a charged smash releases at a different motion frame each time, so the
     /// dedupe key differs and the timeline fills with duplicates (R13).
     ended: bool,
+    /// Prevent duplicate completion records when the end-frame and motion-switch observers fire
+    /// on adjacent callbacks after the pending end has already been drained.
+    end_sent: bool,
 }
 
 /// Bounded report budget for the claim-collision drop in `mark_capture_motion`.
@@ -555,8 +560,13 @@ pub unsafe fn record_for_boma(
         args: args.to_vec(),
         run,
     };
-    CAPTURE_PENDING.lock().push(line.clone());
-    CAPTURE_LOG.lock().push(line);
+    // The archive owns the complete session history. The pending queue is only needed while
+    // there is somewhere to stream it; avoiding a second owned copy is important on the no-editor
+    // path, which is also the path that can run for an entire long match.
+    if capture_stream_wanted() {
+        CAPTURE_PENDING.lock().push(line.clone());
+    }
+    capture_archive::append_line(line);
     CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if func.contains("EFFECT") {
         EFFECT_CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -564,6 +574,11 @@ pub unsafe fn record_for_boma(
     CAPTURE_LAST_KIND.store(kind as u64, std::sync::atomic::Ordering::Relaxed);
     CAPTURE_LAST_MOTION.store(motion, std::sync::atomic::Ordering::Relaxed);
     CAPTURE_LAST_FRAME.store(frame.to_bits() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn capture_stream_wanted() -> bool {
+    crate::rust_extender::net::simple_server::has_client()
+        || crate::slight::smash_utils::debug_logging_enabled()
 }
 
 /// Ask the game thread to clear capture snapshots and ownership claims. The TCP server thread
@@ -576,16 +591,15 @@ fn clear_captures_if_requested() {
     if !CLEAR_CAPTURES_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    CAPTURE_LOG.lock().clear();
     CAPTURE_SEEN.lock().clear();
     CAPTURE_PENDING.lock().clear();
     END_PENDING.lock().clear();
     CAPTURE_CLAIMS.lock().clear();
     MOTION_WATCH.lock().clear();
     MOTION_WATCH_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-    // A fresh capture window is a fresh thing to debug. Budgeting these per boot is what made
-    // D1g's third round unreadable: ordinary play spent the budget thousands of lines before
-    // the case under test ever arrived.
+    capture_archive::clear();
+    // A fresh capture window is a fresh thing to debug. The archive is cleared in the same
+    // game-thread transaction as the in-memory ownership state.
     CLAIM_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
     crate::rust_extender::debuggable_server::notify_acmd_capture_cleared();
     crate::slight::diag::note("live ACMD captures cleared");
@@ -612,7 +626,7 @@ pub fn take_pending(max: usize) -> Vec<CaptureLine> {
 /// has already been handed out, so the editor never sees "motion finished" ahead of the
 /// lines that motion produced (the facade drains at most 32 lines per notify tick).
 pub fn take_pending_ends(max: usize) -> Vec<CaptureEnd> {
-    if !CAPTURE_PENDING.lock().is_empty() {
+    if !CAPTURE_PENDING.lock().is_empty() || capture_archive::replay_active() {
         return Vec::new();
     }
     let mut q = END_PENDING.lock();
@@ -623,10 +637,19 @@ pub fn take_pending_ends(max: usize) -> Vec<CaptureEnd> {
     q.drain(..n).collect()
 }
 
-/// Re-queue the whole capture log (new editor client connected).
+/// Replay the complete disk-backed capture archive (new editor client connected).
 pub fn requeue_all() {
-    let log = CAPTURE_LOG.lock().clone();
-    *CAPTURE_PENDING.lock() = log;
+    capture_archive::begin_replay();
+}
+
+/// Drain a small archive replay batch for the facade. Keeping this separate from the live typed
+/// queue means reconnecting never loads the complete history into plugin memory.
+pub fn take_archive_replay(max: usize) -> Vec<String> {
+    capture_archive::take_replay(max)
+}
+
+pub fn archive_replay_active() -> bool {
+    capture_archive::replay_active()
 }
 
 /// Claim the first playback of `(kind, motion)` for one battle object and return its run id.
@@ -715,6 +738,7 @@ fn mark_capture_motion(
                         boid,
                         run,
                         ended: false,
+                        end_sent: false,
                     },
                 );
                 run
@@ -739,6 +763,7 @@ fn mark_capture_motion(
                         boid,
                         run,
                         ended: false,
+                        end_sent: false,
                     },
                 );
                 run
@@ -795,16 +820,33 @@ fn push_end(kind: i32, motion: u64, run: u32) {
     if q.iter().any(|e| e.run == run) {
         return;
     }
-    q.push(CaptureEnd { kind, motion, run });
+    let end = CaptureEnd { kind, motion, run };
+    q.push(end);
+    capture_archive::append_end(end);
 }
 
 fn finish_capture(boid: u32, kind: i32, motion: u64, run: u32) {
-    let owned = CAPTURE_CLAIMS
-        .lock()
-        .get(&(kind, motion))
-        .is_some_and(|claim| claim.boid == boid && claim.run == run);
-    if owned {
+    let (naturally_ended, should_emit) = {
+        let mut claims = CAPTURE_CLAIMS.lock();
+        let Some(claim) = claims.get_mut(&(kind, motion)) else {
+            return;
+        };
+        if claim.boid != boid || claim.run != run {
+            return;
+        }
+        let should_emit = !claim.end_sent;
+        let naturally_ended = claim.ended;
+        claim.end_sent = true;
+        (naturally_ended, should_emit)
+    };
+    if should_emit {
         push_end(kind, motion, run);
+    }
+    // A naturally completed run can never receive another authored line. Drop only its
+    // in-memory dedupe set; an interrupted run may resume on the same motion and still needs its
+    // keys. The complete line history is already in the disk archive either way.
+    if naturally_ended {
+        CAPTURE_SEEN.lock().remove(&run);
     }
 }
 
@@ -982,6 +1024,11 @@ pub struct HbOverrides {
     pub motion_module_helper_calculation: Option<bool>,
     /// Replacement direct `MotionModule::set_rate_partial` rate.
     pub motion_module_rate_partial: Option<f32>,
+    /// Replacement direct `MotionModule::set_frame_partial` seek frame.
+    pub motion_module_frame_partial: Option<f32>,
+    /// Replacement direct `MotionModule::set_frame_partial` sync flag. The native binding always
+    /// carries this boolean even when the authored source omitted it.
+    pub motion_module_frame_partial_sync: Option<bool>,
     /// Replacement numeric flag for direct `WorkModule::on_flag` / `off_flag` calls.
     pub work_flag: Option<i64>,
     /// Replacement numeric transition term for direct WorkModule transition-term calls.
@@ -1029,7 +1076,9 @@ pub struct HitboxRule {
     /// it → defaults to attack, preserving prior behavior.
     #[serde(default)]
     pub category: u8,
-    /// ATTACK id this rule targets (None = any id in the motion) — unused for inject.
+    /// ATTACK id this rule targets (None = any id in the motion). For injected sound calls this
+    /// is also an optional per-call discriminator, because two identical sounds may share a
+    /// frame and must both fire.
     #[serde(default)]
     pub hitbox_id: Option<u64>,
     #[serde(default)]
@@ -1127,6 +1176,7 @@ pub fn set_rules(rules: Vec<HitboxRule>) {
                         "motion_module_set_helper_calculation"
                     }
                     CAT_MOTION_MODULE_SET_RATE_PARTIAL => "motion_module_set_rate_partial",
+                    CAT_MOTION_MODULE_SET_FRAME_PARTIAL => "motion_module_set_frame_partial",
                     CAT_WORK_FLAG => "work_flag",
                     CAT_WORK_TRANSITION_TERM => "work_transition_term",
                     CAT_WORK_MODULE_SET => "work_module_set",
@@ -1294,7 +1344,10 @@ macro_rules! expression_hook {
         unsafe fn $hook_name(lua_state: u64) {
             let args = read_args_exact(lua_state, $arity);
             record(lua_state, $func, &args);
-            if any_rules() {
+            // A replacement is already the fully typed call we deliberately chose. Do not run
+            // it back through authored expression rules: a second rumble with the same payload
+            // on the same frame can otherwise match a suppression rule and disappear.
+            if any_rules() && !is_injecting() {
                 let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
                     as *mut smash::app::BattleObjectModuleAccessor;
                 if !boma.is_null() {
@@ -2188,7 +2241,10 @@ unsafe fn hook_control_set_rumble(
         LuaArg::Int(target as i64),
     ];
     record_for_boma(boma, "ControlModule::set_rumble", &args);
-    if any_rules() && !boma.is_null() {
+    // Direct rumble injections enter this hook through the same native binding. They must pass
+    // straight to the original call; applying authored rules again can suppress or rewrite a
+    // replacement that happens to share a frame and payload with another call.
+    if any_rules() && !is_injecting() && !boma.is_null() {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         if let Some((suppress, overrides)) =
@@ -2225,9 +2281,20 @@ unsafe fn hook_control_set_rumble(
 }
 
 /// Inject rules for a motion, tagged with the collision family to fire through.
-fn injection_fingerprint(motion: u64, category: u8, injection: &InjectRule) -> u64 {
+fn injection_fingerprint(
+    motion: u64,
+    category: u8,
+    injection_key: Option<u64>,
+    injection: &InjectRule,
+) -> u64 {
     let mut hash = fnv(0xcbf2_9ce4_8422_2325, motion);
     hash = fnv(hash, category as u64);
+    // `hitbox_id` is a per-call discriminator for sound and expression additions. Keep it out of
+    // the other families' fingerprints so their established injection deduplication remains
+    // unchanged.
+    if category == CAT_SOUND || category == CAT_EXPRESSION {
+        hash = fnv(hash, injection_key.unwrap_or_default());
+    }
     hash = fnv(hash, injection.frame.to_bits() as u64);
     for byte in injection.command.as_deref().unwrap_or_default().bytes() {
         hash = fnv(hash, byte as u64);
@@ -2246,7 +2313,7 @@ fn injections_for(motion: u64) -> Vec<(u64, u8, InjectRule)> {
         .map(|rule| {
             let injection = rule.inject.clone().unwrap();
             (
-                injection_fingerprint(rule.motion, rule.category, &injection),
+                injection_fingerprint(rule.motion, rule.category, rule.hitbox_id, &injection),
                 rule.category,
                 injection,
             )
@@ -3261,6 +3328,49 @@ pub unsafe fn inject_tick(lua_state: u64) {
             let mut agent = smash::lib::L2CAgent::new(lua_state);
             agent.clear_lua_stack();
             let mut args = inj.args.clone();
+            if category == CAT_SOUND {
+                let Some(command) = inj.command.as_deref() else {
+                    crate::slight::diag::note("rejected sound injection without a command");
+                    continue;
+                };
+                let Some(expected) = sound_hooks::injection_arg_count(command) else {
+                    crate::slight::diag::note(format!(
+                        "rejected sound injection with unknown command {command}"
+                    ));
+                    continue;
+                };
+                if args.len() != expected {
+                    crate::slight::diag::note(format!(
+                        "rejected sound injection for {command} with {} args (expected {expected})",
+                        args.len()
+                    ));
+                    continue;
+                }
+                sound_hooks::normalize_injection_args(&mut args, command);
+            }
+            if category == CAT_EXPRESSION {
+                let Some(command) = inj.command.as_deref() else {
+                    crate::slight::diag::note("rejected expression injection without a command");
+                    continue;
+                };
+                let valid = match command {
+                    "RUMBLE_HIT" => {
+                        matches!(args.as_slice(), [LuaArg::Hash(_), LuaArg::Int(_)])
+                    }
+                    "QUAKE" => matches!(args.as_slice(), [LuaArg::Int(_)]),
+                    "FT_ATTACK_ABS_CAMERA_QUAKE" => {
+                        matches!(args.as_slice(), [LuaArg::Int(_), LuaArg::Int(_)])
+                    }
+                    "ControlModule::set_rumble" => control_set_rumble_native_args(&args).is_some(),
+                    _ => false,
+                };
+                if !valid {
+                    crate::slight::diag::note(format!(
+                        "rejected expression injection for {command} with an invalid typed argument vector"
+                    ));
+                    continue;
+                }
+            }
             if category == CAT_REVERSE_LR && inj.command.as_deref() != Some("REVERSE_LR") {
                 crate::slight::diag::note(
                     "rejected reverse_lr injection without REVERSE_LR command",
@@ -3377,15 +3487,33 @@ pub unsafe fn inject_tick(lua_state: u64) {
                     continue;
                 }
             }
-            for a in &args {
-                let mut v = a.to_l2c();
-                agent.push_lua_stack(&mut v);
+            if !(category == CAT_EXPRESSION
+                && inj.command.as_deref() == Some("ControlModule::set_rumble"))
+            {
+                for a in &args {
+                    let mut v = a.to_l2c();
+                    agent.push_lua_stack(&mut v);
+                }
             }
             // Fire through the collision family the rule targets. The guard keeps the
             // replay out of the pristine capture (these functions are our own hooks).
             {
                 let _g = InjectGuard::new();
                 match category {
+                    CAT_SOUND => {
+                        let Some(command) = inj.command.as_deref() else {
+                            crate::slight::diag::note(
+                                "rejected sound injection without a command after validation",
+                            );
+                            continue;
+                        };
+                        if !sound_hooks::inject(agent.lua_state_agent, command) {
+                            crate::slight::diag::note(format!(
+                                "rejected sound injection with unknown command {command}"
+                            ));
+                            continue;
+                        }
+                    }
                     CAT_REVERSE_LR => smash::app::sv_animcmd::REVERSE_LR(agent.lua_state_agent),
                     CAT_SET_AIR => smash::app::sv_animcmd::SET_AIR(agent.lua_state_agent),
                     CAT_KINETIC_CLEAR_SPEED_ALL => {
@@ -3447,6 +3575,36 @@ pub unsafe fn inject_tick(lua_state: u64) {
                         let vector = smash::phx::Vector3f { x, y, z };
                         smash::app::lua_bind::KineticModule::add_speed(boma, &vector);
                     }
+                    CAT_EXPRESSION => match inj.command.as_deref() {
+                        Some("RUMBLE_HIT") => {
+                            smash::app::sv_animcmd::RUMBLE_HIT(agent.lua_state_agent)
+                        }
+                        Some("QUAKE") => smash::app::sv_animcmd::QUAKE(agent.lua_state_agent),
+                        Some("FT_ATTACK_ABS_CAMERA_QUAKE") => {
+                            smash::app::sv_animcmd::FT_ATTACK_ABS_CAMERA_QUAKE(
+                                agent.lua_state_agent,
+                            )
+                        }
+                        Some("ControlModule::set_rumble") => {
+                            let Some((kind, duration, looped, target)) =
+                                control_set_rumble_native_args(&args)
+                            else {
+                                crate::slight::diag::note(
+                                    "rejected direct expression injection with invalid native args",
+                                );
+                                continue;
+                            };
+                            smash::app::lua_bind::ControlModule::set_rumble(
+                                boma, kind, duration, looped, target,
+                            );
+                        }
+                        _ => {
+                            crate::slight::diag::note(
+                                "rejected expression injection with an unknown command",
+                            );
+                            continue;
+                        }
+                    },
                     CAT_GRAB => smash::app::sv_animcmd::CATCH(agent.lua_state_agent),
                     CAT_SEARCH => smash::app::sv_animcmd::SEARCH(agent.lua_state_agent),
                     CAT_ATTACK_FP => smash::app::sv_animcmd::ATTACK_FP(agent.lua_state_agent),
@@ -3510,6 +3668,7 @@ pub unsafe fn inject_tick(lua_state: u64) {
 }
 
 pub fn install() {
+    capture_archive::init();
     skyline::install_hooks!(
         hook_attack,
         hook_attack_ignore_throw,

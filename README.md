@@ -85,10 +85,12 @@ the Fighters list, then use the tabs beside the viewport:
   ground/air, and stored script-state commands.
 - **Sound & feedback** contains move sounds, camera shake, controller rumble,
   and supported expression-script animation controls.
+- **Visual effects** contains particle spawns, trails, model or screen colour
+  changes, and effect-control commands from the move's `effect_` script. An
+  effect that ends at a finite frame also shows the two **End flags** its
+  `EFFECT_OFF_KIND` was written with; the vanilla scripts do not agree on them,
+  so they are carried per call rather than defaulted.
 
-The **Visual effects** panel is independent, so it can remain open beside the
-primary editor on a wide window. On a narrow window, the last inspector you
-used is shown and the other one can be brought forward with its focus button.
 Section names use plain language first and show the native macro name where it
 matters. Hover any section name to see what it controls, including engine terms
 such as **Work flags** and **kinetic energy**.
@@ -483,23 +485,37 @@ The section also offers **Move here**, **Remove**, and **Add sound**. A flat cal
 move between frame blocks; calls inside loops or runtime branches can be removed
 as authored, but are not retimed because that would change their control flow.
 Adding, removing, and retiming are structural: generated export applies them,
-linked-source sync reports them instead of guessing, and the live plugin keeps
-only exact in-place name replacements. `SET_PLAY_INHIVIT`'s suppression window
-is shown beside its call and is not editable.
+linked-source sync reports them instead of guessing, and the live plugin applies
+safe flat changes by suppressing the original call and injecting the edited call
+at its new frame. Name-only changes continue to use argument overrides. A
+symbolic or malformed suppression-window tail remains source/export-only so the
+base call is not silenced without a complete typed replacement. `SET_PLAY_INHIVIT`'s
+suppression window is shown beside its call and is not editable.
 
 The complete edited `sound_` tree is saved in `modproject.json`, including the
 unknown lines around calls and an intentional empty replacement when every call
 was removed. Loading a project stages every saved sound and expression script
 before publishing the final live-rule union, so a move that has not been edited
-does not replace the fighter's own category script.
+does not replace the fighter's own category script. Structural sound suppression
+and injection rules are included in that same coalesced project-import batch.
 
 **Expression scripts** share the **Sound & feedback** tab. Measured `RUMBLE_HIT`,
 `QUAKE`, `FT_ATTACK_ABS_CAMERA_QUAKE`, and `ControlModule::set_rumble` calls can
-be retimed, added, removed, and have their authored arguments edited. Unknown
-lines remain visible in the generated/source paths. Structural edits are
-export/source edits; live replay sends only safe in-place argument changes with
-a measured capture identity, and refuses loop/branch retimes or ambiguous
-call alignment.
+be retimed, added, removed, and have their authored arguments edited. Each call shows its
+editable values directly in one compact row: rumble presets use a searchable selector, camera
+kinds use named selectors, numeric values use drag controls, and the direct controller-rumble
+repeat flag is a checkbox. `RUMBLE_HIT` has a preset plus a game-defined integer; that integer is
+shown as **Value** rather than being given a misleading profile or duration name. Direct
+`ControlModule::set_rumble` has a preset, native duration, repeat flag, and target. A captured
+zero duration remains `0 · preset` and is passed through as authored; it does not disable rumble.
+Unrecognized project-local tokens retain a compact source-expression fallback, and changed calls
+offer Reset values without hiding the controls behind nested panels.
+Unknown lines remain visible in the generated/source paths. Flat structural edits suppress
+the measured base call and inject the typed replacement during live replay when a
+safe identity and argument vector are available; generated export still writes the
+complete edited function, and linked-source sync reports structural operations
+rather than guessing at a user's source layout. Loop/branch retimes, unmeasured
+calls, and ambiguous source tokens remain export/source-only.
 
 Selecting a hitbox in the collision list, timeline, or viewport gives it the
 same bright outline while retaining its attack, grab, search, or wind family
@@ -527,6 +543,7 @@ matching editor tab:
 - `MotionModule::set_rate` edits the whole animation's playback rate.
 - `MotionModule::set_helper_calculation` edits the direct helper-calculation toggle.
 - `MotionModule::set_rate_partial` edits the playback rate of a named partial-animation part while preserving that part token.
+- `MotionModule::set_frame_partial` edits the seek frame and `sync` flag of a named partial-animation part. The native binding uses `sync = true` when the source omits that optional argument; linked-source sync preserves the original three- or four-argument spelling.
 - `WorkModule::on_flag` and `WorkModule::off_flag` edit the authored flag token for the supported direct calls.
 - `WorkModule::enable_transition_term`, `unable_transition_term`, `enable_transition_term_group`, and `unable_transition_term_group_ex` edit the authored transition-term or group token for the supported direct calls.
 - `WorkModule::inc_int` increments the named stored integer counter.
@@ -562,7 +579,9 @@ only exposes x/y for editing.
 source, while live replacements require a finite positive captured rate. The partial
 part token is preserved for export and source sync; changing it or changing the call's
 structure is reported rather than guessed. `MotionModule::set_helper_calculation`
-source sync changes only an existing boolean argument. Partial-frame and status/getter
+source sync changes only an existing boolean argument. Partial-frame edits require a unique
+numeric capture of the original part and seek frame for live replay; changing the source
+part, frame placement, or optional-argument arity is reported rather than guessed. Status/getter
 kinetic calls that are not shown remain preserved in the source and are not rewritten
 until their complete source and runtime signatures are verified. Direct `WorkModule` flag
 controls preserve numeric and dereferenced source tokens in export and source sync; live

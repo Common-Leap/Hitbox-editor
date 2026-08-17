@@ -77,6 +77,7 @@ enum PrimaryEditorTab {
     Hurtboxes,
     MotionState,
     AudioFeedback,
+    Effects,
 }
 
 impl PrimaryEditorTab {
@@ -86,6 +87,7 @@ impl PrimaryEditorTab {
             Self::Hurtboxes => "Hurtboxes",
             Self::MotionState => "Motion & state",
             Self::AudioFeedback => "Sound & feedback",
+            Self::Effects => "Visual effects",
         }
     }
 
@@ -103,6 +105,7 @@ impl PrimaryEditorTab {
             Self::AudioFeedback => {
                 "Sounds plus camera shake, controller rumble, and the supported animation controls from the move's sound_ and expression_ scripts."
             }
+            Self::Effects => VISUAL_EFFECTS_DESCRIPTION,
         }
     }
 }
@@ -166,12 +169,6 @@ fn editor_collapsing(
 ) {
     let response = ui.collapsing(title, add_contents);
     response.header_response.on_hover_text(description);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InspectorFocus {
-    Primary,
-    Effects,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,6 +572,7 @@ fn timeline_content_height_with_change_kinetic(
     motion_module_set_rate: usize,
     motion_module_set_helper_calculation: usize,
     motion_module_set_rate_partial: usize,
+    motion_module_set_frame_partial: usize,
     work_flag: usize,
     work_transition_term: usize,
     work_module_inc_int: usize,
@@ -611,6 +609,7 @@ fn timeline_content_height_with_change_kinetic(
         + band(motion_module_set_rate)
         + band(motion_module_set_helper_calculation)
         + band(motion_module_set_rate_partial)
+        + band(motion_module_set_frame_partial)
         + band(work_flag)
         + band(work_transition_term)
         + band(work_module_inc_int)
@@ -650,6 +649,7 @@ fn timeline_content_height(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        0,
         0,
         0,
         0,
@@ -752,6 +752,9 @@ fn adopt_captured_expressions(
     state.expression_motion_module_set_rate_partial_pristine = state
         .expression_script
         .to_motion_module_set_rate_partial_events();
+    state.expression_motion_module_set_frame_partial_pristine = state
+        .expression_script
+        .to_motion_module_set_frame_partial_events();
     true
 }
 
@@ -858,6 +861,7 @@ fn timeline_frame_extent_with_change_kinetic(
     motion_module_set_rate: &[crate::data::MotionModuleSetRateEvent],
     motion_module_set_helper_calculation: &[crate::data::MotionModuleSetHelperCalculationEvent],
     motion_module_set_rate_partial: &[crate::data::MotionModuleSetRatePartialEvent],
+    motion_module_set_frame_partial: &[crate::data::MotionModuleSetFramePartialEvent],
     work_flags: &[crate::data::WorkFlagEvent],
     work_transition_terms: &[crate::data::WorkTransitionTermEvent],
     work_module_inc_ints: &[crate::data::WorkModuleIncIntEvent],
@@ -913,6 +917,9 @@ fn timeline_frame_extent_with_change_kinetic(
     let motion_module_set_rate_partial_frames = motion_module_set_rate_partial
         .iter()
         .map(|event| event.frame);
+    let motion_module_set_frame_partial_frames = motion_module_set_frame_partial
+        .iter()
+        .map(|event| event.frame);
     let work_flag_frames = work_flags.iter().map(|event| event.frame);
     let work_transition_term_frames = work_transition_terms.iter().map(|event| event.frame);
     let work_module_inc_int_frames = work_module_inc_ints.iter().map(|event| event.frame);
@@ -938,6 +945,7 @@ fn timeline_frame_extent_with_change_kinetic(
         .chain(motion_module_set_rate_frames)
         .chain(motion_module_set_helper_calculation_frames)
         .chain(motion_module_set_rate_partial_frames)
+        .chain(motion_module_set_frame_partial_frames)
         .chain(work_flag_frames)
         .chain(work_transition_term_frames)
         .chain(work_module_set_frames)
@@ -978,6 +986,7 @@ fn timeline_frame_extent(
         ft_start_adjust_motion_frame,
         clr_speed,
         set_air,
+        &[],
         &[],
         &[],
         &[],
@@ -2024,6 +2033,32 @@ fn is_null_effect_sentinel(call: &crate::data::EffectCall) -> bool {
             .is_none_or(|alternate| alternate.eq_ignore_ascii_case("null"))
 }
 
+/// The two `EFFECT_OFF_KIND` booleans as one grid row, returning whether either changed.
+///
+/// Shared by the spawn that a kill closes and by a standalone kill control, so the two cannot
+/// drift apart in wording or in which argument sits where. Both are labelled by position as
+/// well as by name: `macros.rs` calls them `unk` and `unk2`, and the names below are the
+/// plugin's reading of them, not a documented contract.
+fn effect_off_kind_flags(ui: &mut egui::Ui, fade: &mut bool, detach: &mut bool) -> bool {
+    ui.label("End flags");
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui
+            .checkbox(fade, "fade")
+            .on_hover_text("EFFECT_OFF_KIND argument 2.")
+            .changed();
+        changed |= ui
+            .checkbox(detach, "detach")
+            .on_hover_text(
+                "EFFECT_OFF_KIND argument 3. The vanilla scripts disagree about this pair — \
+                 Ganondorf's sword smashes write false, false — so it is kept per call rather \
+                 than defaulted.",
+            )
+            .changed();
+    });
+    changed
+}
+
 fn effect_call_display_name(call: &crate::data::EffectCall) -> String {
     if let Some(control) = &call.control {
         return match control {
@@ -2183,6 +2218,8 @@ type SourceMirror = (
     Vec<crate::data::MotionModuleSetHelperCalculationEvent>,
     Vec<crate::data::MotionModuleSetRatePartialEvent>,
     Vec<crate::data::MotionModuleSetRatePartialEvent>,
+    Vec<crate::data::MotionModuleSetFramePartialEvent>,
+    Vec<crate::data::MotionModuleSetFramePartialEvent>,
     Vec<crate::data::WorkFlagEvent>,
     Vec<crate::data::WorkTransitionTermEvent>,
     Vec<crate::data::WorkModuleIncIntEvent>,
@@ -2436,10 +2473,9 @@ pub struct VisionaryApp {
     hurtbox_condition_edit_end: u32,
     hurtbox_condition_edit_mode: String,
     hurtbox_condition_edit_value: String,
-    /// Which primary editing surface is open.  Effects remain an independent panel, but the
-    /// compact layout uses the same focus value to decide which inspector gets the scarce width.
+    /// Which editing surface is open in the right panel, visual effects included: they are a tab
+    /// beside the others rather than a second panel competing for the same width.
     primary_tab: PrimaryEditorTab,
-    inspector_focus: InspectorFocus,
     timeline_filters: TimelineFilters,
     /// The selected source command for the non-collision tabs.  The command site is stable for a
     /// source statement, including loop repetitions; the current frame still identifies which
@@ -2816,7 +2852,6 @@ impl VisionaryApp {
             hurtbox_condition_edit_mode: "*DAMAGE_NO_REACTION_MODE_ALWAYS".into(),
             hurtbox_condition_edit_value: "0".into(),
             primary_tab: PrimaryEditorTab::Collisions,
-            inspector_focus: InspectorFocus::Primary,
             timeline_filters: load_timeline_filters(),
             selected_command: None,
             show_effect_advanced: false,
@@ -3615,7 +3650,8 @@ impl VisionaryApp {
                     // special, throw, catch, cliff, final — which hid 65% of the corpus's sound
                     // scripts and every `PLAY_FLY_VOICE` in the game. It was a guard against the
                     // `AnimData` parse below, not a statement about relevance, and that parse is
-                    // now deferred instead. See [R5](../TODO.md).
+                    // now deferred instead; the animation path remains the authoritative lookup
+                    // when the selected motion has a matching animation hash.
                     // The animation hash includes the `.nuanmb` suffix. It is the authoritative
                     // path because one motion can select an animation from a sibling part, as
                     // Kirby's copied specials do. The body-only lookup remains the compatibility
@@ -3723,7 +3759,6 @@ impl VisionaryApp {
         self.state.selected_effect_call = None;
         self.selected_command = None;
         self.primary_tab = PrimaryEditorTab::Collisions;
-        self.inspector_focus = InspectorFocus::Primary;
         self.show_add_hitbox = false;
         // The frame count is parsed here rather than when the list was built. Reading ~460
         // `.nuanmb` files up front is what the old six-substring family filter existed to avoid,
@@ -4343,6 +4378,8 @@ impl VisionaryApp {
                 motion_module_set_helper_calculation,
                 motion_module_set_rate_partial,
                 expression_motion_module_set_rate_partial,
+                motion_module_set_frame_partial,
+                expression_motion_module_set_frame_partial,
                 work_flags,
                 work_transition_terms,
                 work_module_inc_ints,
@@ -4386,6 +4423,16 @@ impl VisionaryApp {
                             .state
                             .expression_script
                             .to_motion_module_set_rate_partial_events()
+                    && *motion_module_set_frame_partial
+                        == self
+                            .state
+                            .script
+                            .to_motion_module_set_frame_partial_events()
+                    && *expression_motion_module_set_frame_partial
+                        == self
+                            .state
+                            .expression_script
+                            .to_motion_module_set_frame_partial_events()
                     && *work_flags == self.state.script.to_work_flag_events()
                     && *work_transition_terms == self.state.script.to_work_transition_term_events()
                     && *work_module_inc_ints == self.state.script.to_work_module_inc_int_events()
@@ -4426,6 +4473,12 @@ impl VisionaryApp {
             self.state
                 .expression_script
                 .to_motion_module_set_rate_partial_events(),
+            self.state
+                .script
+                .to_motion_module_set_frame_partial_events(),
+            self.state
+                .expression_script
+                .to_motion_module_set_frame_partial_events(),
             self.state.script.to_work_flag_events(),
             self.state.script.to_work_transition_term_events(),
             self.state.script.to_work_module_inc_int_events(),
@@ -4492,6 +4545,9 @@ impl VisionaryApp {
             self.state
                 .expression_motion_module_set_rate_partial_pristine =
                 expression_script.to_motion_module_set_rate_partial_events();
+            self.state
+                .expression_motion_module_set_frame_partial_pristine =
+                expression_script.to_motion_module_set_frame_partial_events();
             self.state.expression_script = expression_script;
             None
         } else {
@@ -4529,6 +4585,10 @@ impl VisionaryApp {
                         .script
                         .to_motion_module_set_helper_calculation_events(),
                     &self.state.script.to_motion_module_set_rate_partial_events(),
+                    &self
+                        .state
+                        .script
+                        .to_motion_module_set_frame_partial_events(),
                     &self.state.script.to_work_flag_events(),
                     &self.state.script.to_work_transition_term_events(),
                     &self.state.script.to_work_module_inc_int_events(),
@@ -4655,6 +4715,34 @@ impl VisionaryApp {
                             report.changed += partial_rate_report.changed;
                             report.files.extend(partial_rate_report.files);
                             report.skipped.extend(partial_rate_report.skipped);
+                            Ok((updated, report))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            outcome
+        };
+        let outcome = if buffer.is_expression_script() {
+            match outcome {
+                Ok((updated, mut report)) => {
+                    match crate::acmd_src::rewrite_motion_module_set_frame_partial(
+                        &updated,
+                        &label,
+                        &self
+                            .state
+                            .expression_motion_module_set_frame_partial_pristine,
+                        &self
+                            .state
+                            .expression_script
+                            .to_motion_module_set_frame_partial_events(),
+                    ) {
+                        Ok((updated, partial_frame_report)) => {
+                            report.changed += partial_frame_report.changed;
+                            report.files.extend(partial_frame_report.files);
+                            report.skipped.extend(partial_frame_report.skipped);
                             Ok((updated, report))
                         }
                         Err(error) => Err(error),
@@ -4877,6 +4965,32 @@ impl VisionaryApp {
                             report.changed += partial_rate_report.changed;
                             report.files.extend(partial_rate_report.files);
                             report.skipped.extend(partial_rate_report.skipped);
+                            Ok((updated, report))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            outcome
+        };
+        let outcome = if buffer.is_game_script() {
+            match outcome {
+                Ok((updated, mut report)) => {
+                    match crate::acmd_src::rewrite_motion_module_set_frame_partial(
+                        &updated,
+                        &label,
+                        &self.state.motion_module_set_frame_partial_pristine,
+                        &self
+                            .state
+                            .script
+                            .to_motion_module_set_frame_partial_events(),
+                    ) {
+                        Ok((updated, partial_frame_report)) => {
+                            report.changed += partial_frame_report.changed;
+                            report.files.extend(partial_frame_report.files);
+                            report.skipped.extend(partial_frame_report.skipped);
                             Ok((updated, report))
                         }
                         Err(error) => Err(error),
@@ -5290,6 +5404,24 @@ impl VisionaryApp {
                 Err(e) => notes.push(e.to_string()),
             }
             refresh_acmd_index(&mut index, &mut notes);
+            match crate::acmd_src::sync_motion_module_set_frame_partial(
+                &index,
+                &fighter,
+                &move_name,
+                &self.state.motion_module_set_frame_partial_pristine,
+                &self
+                    .state
+                    .script
+                    .to_motion_module_set_frame_partial_events(),
+            ) {
+                Ok(report) => {
+                    changed += report.changed;
+                    files.extend(report.files);
+                    notes.extend(report.skipped);
+                }
+                Err(e) => notes.push(e.to_string()),
+            }
+            refresh_acmd_index(&mut index, &mut notes);
             match crate::acmd_src::sync_clr_speed(
                 &index,
                 &fighter,
@@ -5541,6 +5673,35 @@ impl VisionaryApp {
                     Err(e) => notes.push(e.to_string()),
                 }
             }
+            if self
+                .state
+                .expression_script
+                .to_motion_module_set_frame_partial_events()
+                != self
+                    .state
+                    .expression_motion_module_set_frame_partial_pristine
+            {
+                refresh_acmd_index(&mut index, &mut notes);
+                match crate::acmd_src::sync_expression_motion_module_set_frame_partial(
+                    &index,
+                    &fighter,
+                    &move_name,
+                    &self
+                        .state
+                        .expression_motion_module_set_frame_partial_pristine,
+                    &self
+                        .state
+                        .expression_script
+                        .to_motion_module_set_frame_partial_events(),
+                ) {
+                    Ok(report) => {
+                        changed += report.changed;
+                        files.extend(report.files);
+                        notes.extend(report.skipped);
+                    }
+                    Err(e) => notes.push(e.to_string()),
+                }
+            }
         }
 
         if !ran {
@@ -5595,6 +5756,8 @@ impl VisionaryApp {
                 != state.motion_module_set_helper_calculation_pristine
             || state.script.to_motion_module_set_rate_partial_events()
                 != state.motion_module_set_rate_partial_pristine
+            || state.script.to_motion_module_set_frame_partial_events()
+                != state.motion_module_set_frame_partial_pristine
             || state.script.to_clr_speed_events() != state.clr_speed_pristine
             || state.script.to_set_air_events() != state.set_air_pristine
             || state.script.to_change_kinetic_events() != state.change_kinetic_pristine
@@ -5624,6 +5787,10 @@ impl VisionaryApp {
                 .expression_script
                 .to_motion_module_set_rate_partial_events()
                 != state.expression_motion_module_set_rate_partial_pristine
+            || state
+                .expression_script
+                .to_motion_module_set_frame_partial_events()
+                != state.expression_motion_module_set_frame_partial_pristine
         {
             edited.push("expression_");
         }
@@ -5938,6 +6105,7 @@ impl VisionaryApp {
                     self.push_motion_module_set_rate_rules();
                     self.push_motion_module_set_helper_calculation_rules();
                     self.push_motion_module_set_rate_partial_rules();
+                    self.push_motion_module_set_frame_partial_rules();
                     self.push_expression_rules();
                     self.push_clr_speed_rules();
                     self.push_set_air_rules();
@@ -5982,6 +6150,10 @@ impl VisionaryApp {
                                     .script
                                     .to_motion_module_set_helper_calculation_events(),
                                 &self.state.script.to_motion_module_set_rate_partial_events(),
+                                &self
+                                    .state
+                                    .script
+                                    .to_motion_module_set_frame_partial_events(),
                                 &self.state.script.to_work_flag_events(),
                                 &self.state.script.to_work_transition_term_events(),
                                 &self.state.script.to_work_module_inc_int_events(),
@@ -6021,6 +6193,8 @@ impl VisionaryApp {
                 self.state.expressions_pristine = Vec::new();
                 self.state
                     .expression_motion_module_set_rate_partial_pristine = Vec::new();
+                self.state
+                    .expression_motion_module_set_frame_partial_pristine = Vec::new();
                 self.state.speed_ex_pristine = Vec::new();
                 self.state.speed_pristine = Vec::new();
                 self.state.add_speed_no_limit_pristine = Vec::new();
@@ -6029,6 +6203,7 @@ impl VisionaryApp {
                 self.state.ft_start_adjust_motion_frame_pristine = Vec::new();
                 self.state.motion_module_set_rate_pristine = Vec::new();
                 self.state.motion_module_set_rate_partial_pristine = Vec::new();
+                self.state.motion_module_set_frame_partial_pristine = Vec::new();
                 self.state.clr_speed_pristine = Vec::new();
                 self.state.set_air_pristine = Vec::new();
                 self.state.change_kinetic_pristine = Vec::new();
@@ -7071,6 +7246,11 @@ impl VisionaryApp {
                 != self.state.motion_module_set_helper_calculation_pristine
             || self.state.script.to_motion_module_set_rate_partial_events()
                 != self.state.motion_module_set_rate_partial_pristine
+            || self
+                .state
+                .script
+                .to_motion_module_set_frame_partial_events()
+                != self.state.motion_module_set_frame_partial_pristine
             || self.state.script.to_clr_speed_events() != self.state.clr_speed_pristine
             || self.state.script.to_set_air_events() != self.state.set_air_pristine
             || self.state.script.to_change_kinetic_events() != self.state.change_kinetic_pristine
@@ -7522,6 +7702,7 @@ impl VisionaryApp {
                 PrimaryEditorTab::Hurtboxes,
                 PrimaryEditorTab::MotionState,
                 PrimaryEditorTab::AudioFeedback,
+                PrimaryEditorTab::Effects,
             ] {
                 if ui
                     .selectable_label(self.primary_tab == tab, tab.title())
@@ -7529,20 +7710,8 @@ impl VisionaryApp {
                     .clicked()
                 {
                     self.primary_tab = tab;
-                    self.inspector_focus = InspectorFocus::Primary;
                     self.show_add_hitbox = false;
                 }
-            }
-            if self.state.show_effects_panel
-                && ui
-                    .selectable_label(
-                        self.inspector_focus == InspectorFocus::Effects,
-                        "Visual effects",
-                    )
-                    .on_hover_text(VISUAL_EFFECTS_DESCRIPTION)
-                    .clicked()
-            {
-                self.inspector_focus = InspectorFocus::Effects;
             }
         });
 
@@ -7892,6 +8061,10 @@ impl VisionaryApp {
                                         .script
                                         .to_motion_module_set_helper_calculation_events(),
                                     &self.state.script.to_motion_module_set_rate_partial_events(),
+                                    &self
+                                        .state
+                                        .script
+                                        .to_motion_module_set_frame_partial_events(),
                                     &self.state.script.to_work_flag_events(),
                                     &self.state.script.to_work_transition_term_events(),
                                     &self.state.script.to_work_module_inc_int_events(),
@@ -8518,6 +8691,7 @@ impl VisionaryApp {
             self.draw_ft_start_adjust_motion_frame_section(ui);
             self.draw_motion_module_set_rate_section(ui);
             self.draw_motion_module_set_rate_partial_section(ui);
+            self.draw_motion_module_set_frame_partial_section(ui);
             self.draw_motion_module_set_helper_calculation_section(ui);
             self.draw_clr_speed_section(ui);
             self.draw_change_kinetic_section(ui);
@@ -8535,6 +8709,11 @@ impl VisionaryApp {
         if matches!(self.primary_tab, PrimaryEditorTab::AudioFeedback) {
             self.draw_sound_section(ui);
             self.draw_expression_section(ui);
+        }
+        if matches!(self.primary_tab, PrimaryEditorTab::Effects) {
+            let t = self.perf.start();
+            self.draw_effects_panel(ui);
+            self.perf.end("effects_panel", t);
         }
     }
 
@@ -8840,7 +9019,7 @@ impl VisionaryApp {
                         .sound_script_edits
                         .insert(key, self.state.sound_script.clone());
                 }
-                self.state.status = "Sound structural edit staged — generated export includes the complete sound_ tree; linked-source sync will report frame/add/remove operations, and live replay remains limited to safe value edits.".into();
+                self.state.status = "Sound structural edit staged — generated export and linked-source sync preserve the complete sound_ tree, and live replay uses safe suppress/inject rules when the call shape is measurable.".into();
                 self.push_sound_rules();
             }
         }
@@ -8848,14 +9027,14 @@ impl VisionaryApp {
 
     /// Send the sounds the editor has changed to the running game.
     ///
-    /// Diffed by site against `sounds_pristine`, on the same terms as the hurtbox and modifier
-    /// rules, and stored under its own key in the shared rule store so that renaming a sound
-    /// does not wipe another family's rules on the way out.
+    /// Diffed against `sounds_pristine` on the same terms as the hurtbox and modifier rules, and
+    /// stored under its own key in the shared rule store so that renaming, moving, or removing a
+    /// sound does not wipe another family's rules on the way out.
     ///
-    /// **Keyed on the hash of the sound the script names, not the one the user typed.** The rule
-    /// has to match the call the *game* makes; keying on the edit would never fire. That is the
-    /// same rule the hurtbox path states for its target, and the reason both of them keep a
-    /// pristine list at all.
+    /// Name-only edits are keyed on the hash of the sound the script names, not the one the user
+    /// typed. Structural edits instead pair frame-scoped suppression of the old call with a
+    /// typed injection of the new call. Both paths retain the pristine list because the game
+    /// still executes the original script.
     ///
     /// Two calls in one move can legally name the same sound, so the frame window is what tells
     /// them apart — exactly the `COL_PRI` situation. A looped call is one site and several
@@ -8871,6 +9050,13 @@ impl VisionaryApp {
         let structural =
             Self::sound_structure_changed(&self.state.sounds_pristine, &self.state.sounds);
         let rules = Self::sound_rules_for(motion, &self.state.sounds_pristine, &self.state.sounds);
+        let structural_live_supported = !structural
+            || Self::sound_structural_rules_for(
+                motion,
+                &self.state.sounds_pristine,
+                &self.state.sounds,
+            )
+            .is_some();
 
         let key = format!("{mv_key}#sound");
         if rules.is_empty() {
@@ -8886,13 +9072,17 @@ impl VisionaryApp {
             .collect();
         self.game_link.send_hitbox_rules(&all);
         if structural {
-            self.state.status = "Sound structural edit staged for generated export/source sync; the live plugin keeps only exact in-place sound-name edits, so no unsafe frame/add/remove rule was sent.".into();
+            self.state.status = if structural_live_supported {
+                "Sound structural edit staged for export, source sync, and live suppress/inject rules."
+                    .into()
+            } else {
+                "Sound structural edit staged for export/source sync; its symbolic or malformed tail is not safe to replay live, so the original sound remains active.".into()
+            };
         }
     }
 
-    /// Structural sound changes cannot be represented by the value-only sound hook. Treat the
-    /// whole list as source/export-only when its source ordinals, frames, or macro shapes move;
-    /// this also prevents a stale site match from retuning the wrong call after an insertion.
+    /// Structural sound changes use a source-order alignment instead of a site-only match. This
+    /// prevents an insertion or removal from shifting a later call onto the wrong live rule.
     fn sound_structure_changed(
         pristine: &[crate::data::SoundEvent],
         shown: &[crate::data::SoundEvent],
@@ -8921,7 +9111,7 @@ impl VisionaryApp {
         shown: &[crate::data::SoundEvent],
     ) -> Vec<crate::game_link::HitboxRuleWire> {
         if Self::sound_structure_changed(pristine, shown) {
-            return Vec::new();
+            return Self::sound_structural_rules_for(motion, pristine, shown).unwrap_or_default();
         }
         let mut rules = Vec::new();
         for now in shown {
@@ -8972,6 +9162,138 @@ impl VisionaryApp {
         rules
     }
 
+    /// Build the live replacement for structural sound edits.
+    ///
+    /// Source sites are ordinals, so deleting one line shifts every later site. Align the
+    /// flattened event streams by their actual frame and complete call payload rather than by
+    /// site. Unmatched pristine events are suppressed; unmatched edited events are replayed from
+    /// the per-frame injector. This keeps later calls alive when one earlier call is removed and
+    /// handles a flat move as one suppress-plus-inject pair.
+    fn sound_structural_rules_for(
+        motion: u64,
+        pristine: &[crate::data::SoundEvent],
+        shown: &[crate::data::SoundEvent],
+    ) -> Option<Vec<crate::game_link::HitboxRuleWire>> {
+        let n = pristine.len();
+        let m = shown.len();
+        let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if Self::sound_event_live_equal(&pristine[i], &shown[j]) {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+
+        let mut matched_old = vec![false; n];
+        let mut matched_new = vec![false; m];
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < n && j < m {
+            if Self::sound_event_live_equal(&pristine[i], &shown[j]) {
+                matched_old[i] = true;
+                matched_new[j] = true;
+                i += 1;
+                j += 1;
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        let mut rules = Vec::new();
+        for event in pristine
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| (!matched_old[index]).then_some(event))
+        {
+            let key_name = event.call.sounds.first()?;
+            let (frame_start, frame_end) = Self::rule_frame_window(event.frame);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_SOUND,
+                hitbox_id: Some(effect_name_hash(key_name)),
+                suppress: true,
+                frame_start,
+                frame_end,
+                overrides: None,
+                inject: None,
+                func: Some(event.call.func.clone()),
+            });
+        }
+
+        for (index, event) in shown
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| (!matched_new[index]).then_some((index, event)))
+        {
+            let args = Self::sound_call_live_args(&event.call)?;
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_SOUND,
+                // Injection matching does not use the id as a sound key. It is a stable per-list
+                // discriminator so two identical calls on one frame are both replayed.
+                hitbox_id: Some(Self::sound_injection_key(index)),
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(crate::game_link::InjectRuleWire {
+                    frame: Self::script_to_motion_frame(event.frame),
+                    args,
+                    command: Some(event.call.func.clone()),
+                }),
+                func: Some(event.call.func.clone()),
+            });
+        }
+        Some(rules)
+    }
+
+    fn sound_event_live_equal(
+        before: &crate::data::SoundEvent,
+        now: &crate::data::SoundEvent,
+    ) -> bool {
+        before.frame == now.frame && before.call == now.call
+    }
+
+    /// Convert a complete authored sound call into the typed Lua stack that its native macro
+    /// expects. Symbolic suppression-window tails cannot be replayed safely, so the caller keeps
+    /// the original source call alive instead of sending a partial structural replacement.
+    fn sound_call_live_args(
+        call: &crate::data::SoundCall,
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::game_link::LuaArgWire as A;
+
+        if call.sounds.is_empty() {
+            return None;
+        }
+        let mut args: Vec<A> = call
+            .sounds
+            .iter()
+            .map(|name| A::Hash(effect_name_hash(name)))
+            .collect();
+        if let Some(tail) = call.tail.as_deref().map(str::trim) {
+            if let Ok(value) = tail.parse::<i64>() {
+                args.push(A::Int(value));
+            } else if let Ok(value) = tail.parse::<f32>() {
+                if value.is_finite() {
+                    args.push(A::Num(value));
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        Some(args)
+    }
+
+    fn sound_injection_key(index: usize) -> u64 {
+        0x5355_4e44_0000_0000u64.wrapping_add(index as u64)
+    }
+
     /// The frame window a sound rule covers: every event that came from the given source line.
     ///
     /// One event for an ordinary call, and `count` of them for a call inside a `for`. Widening
@@ -9007,6 +9329,16 @@ impl VisionaryApp {
         use crate::game_link::LuaArgWire as A;
         let token = token.trim();
         let unstarred = token.strip_prefix('*').unwrap_or(token);
+        if unstarred == "BATTLE_OBJECT_ID_INVALID as u32" {
+            return match donor {
+                // `*BATTLE_OBJECT_ID_INVALID as u32` is the native all/default-target
+                // sentinel, not object id 0. Sending zero can address a different fighter and
+                // makes a newly injected rumble look as if its duration or pattern did nothing.
+                A::Int(_) => Some(A::Int(u32::MAX as i64)),
+                A::Num(_) => Some(A::Num(u32::MAX as f32)),
+                _ => None,
+            };
+        }
         let constant = match unstarred {
             "CAMERA_QUAKE_KIND_NONE" => Some(0),
             "CAMERA_QUAKE_KIND_S_HALF" | "CAMERA_QUAKE_KIND_SMALL_HF" => Some(2),
@@ -9089,6 +9421,170 @@ impl VisionaryApp {
             .nth(occurrence)
     }
 
+    /// A live expression rule keys on the native function and resolved argument vector. If the
+    /// same call occurs twice on one frame, that key cannot identify one source row: a suppress
+    /// rule would silence both calls and a value override would rewrite both. Refuse that live
+    /// edit instead of creating the intermittent missing-rumble behavior that an over-broad rule
+    /// produces.
+    fn expression_capture_is_unique(
+        captures: &[crate::game_link::CaptureLine],
+        event: &crate::data::ExpressionEvent,
+        donor: &crate::game_link::CaptureLine,
+    ) -> bool {
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == event.call.func()
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+                    && line.args == donor.args
+            })
+            .count()
+            == 1
+    }
+
+    fn expression_structure_changed(
+        pristine: &[crate::data::ExpressionEvent],
+        shown: &[crate::data::ExpressionEvent],
+    ) -> bool {
+        pristine.len() != shown.len()
+            || pristine.iter().zip(shown).any(|(before, now)| {
+                before.site != now.site
+                    || before.frame != now.frame
+                    || before.call.func() != now.call.func()
+            })
+    }
+
+    fn expression_event_live_equal(
+        before: &crate::data::ExpressionEvent,
+        now: &crate::data::ExpressionEvent,
+    ) -> bool {
+        before.frame == now.frame && before.call == now.call
+    }
+
+    /// A discriminator for expression injections that do not have a pristine native call to key
+    /// against. It is included in the plugin's injection fingerprint so two identical additions
+    /// on one frame still fire independently.
+    fn expression_injection_key(index: usize) -> u64 {
+        0x4558_5052_0000_0000u64.wrapping_add(index as u64)
+    }
+
+    /// Convert a newly added expression call's authored tokens into the measured native types.
+    /// Structural live replay is all-or-nothing: an unrecognized source token must leave the
+    /// original script active instead of suppressing it without a typed replacement.
+    fn expression_injection_args(
+        call: &crate::data::ExpressionCall,
+    ) -> Option<Vec<crate::game_link::LuaArgWire>> {
+        use crate::game_link::LuaArgWire as A;
+
+        let expected = match call {
+            crate::data::ExpressionCall::RumbleHit { .. } => vec![A::Hash(0), A::Int(0)],
+            crate::data::ExpressionCall::Quake { .. } => vec![A::Int(0)],
+            crate::data::ExpressionCall::FtAttackAbsCameraQuake { .. } => {
+                vec![A::Int(0), A::Int(0)]
+            }
+            crate::data::ExpressionCall::ControlModuleSetRumble { .. } => {
+                vec![A::Hash(0), A::Int(0), A::Bool(false), A::Int(0)]
+            }
+        };
+        call.tokens()
+            .into_iter()
+            .enumerate()
+            .map(|(slot, token)| {
+                Self::expression_arg_wire(token, &expected[slot], call.func(), slot)
+            })
+            .collect()
+    }
+
+    /// Build live suppression/injection rules for expression additions, removals, and flat
+    /// retimes. The old expression hook only supported value overrides, which made the panel's
+    /// structural buttons look like they worked while the game continued to run the base call.
+    /// Every unmatched old call must have a measured native identity, and every unmatched new
+    /// call must have a fully typed argument vector, before any suppression is published.
+    fn expression_structural_rules_for(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::ExpressionEvent],
+        shown: &[crate::data::ExpressionEvent],
+    ) -> Option<Vec<crate::game_link::HitboxRuleWire>> {
+        let n = pristine.len();
+        let m = shown.len();
+        let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if Self::expression_event_live_equal(&pristine[i], &shown[j]) {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+
+        let mut matched_old = vec![false; n];
+        let mut matched_new = vec![false; m];
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < n && j < m {
+            if Self::expression_event_live_equal(&pristine[i], &shown[j]) {
+                matched_old[i] = true;
+                matched_new[j] = true;
+                i += 1;
+                j += 1;
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        let mut rules = Vec::new();
+        for (index, event) in pristine.iter().enumerate() {
+            if matched_old[index] {
+                continue;
+            }
+            let donor = Self::expression_capture_for(captures, pristine, index, event)?;
+            if !Self::expression_capture_is_unique(captures, event, donor) {
+                return None;
+            }
+            let (frame_start, frame_end) = Self::rule_frame_window(event.frame);
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_EXPRESSION,
+                hitbox_id: Some(crate::game_link::expression_key(
+                    event.call.func(),
+                    &donor.args,
+                )),
+                suppress: true,
+                frame_start,
+                frame_end,
+                overrides: None,
+                inject: None,
+                func: Some(event.call.func().into()),
+            });
+        }
+
+        for (index, event) in shown.iter().enumerate() {
+            if matched_new[index] {
+                continue;
+            }
+            let args = Self::expression_injection_args(&event.call)?;
+            rules.push(crate::game_link::HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_EXPRESSION,
+                hitbox_id: Some(Self::expression_injection_key(index)),
+                suppress: false,
+                frame_start: None,
+                frame_end: None,
+                overrides: None,
+                inject: Some(crate::game_link::InjectRuleWire {
+                    frame: Self::script_to_motion_frame(event.frame),
+                    args,
+                    command: Some(event.call.func().into()),
+                }),
+                func: Some(event.call.func().into()),
+            });
+        }
+        Some(rules)
+    }
+
     fn expression_rules_for(
         motion: u64,
         captures: &[crate::game_link::CaptureLine],
@@ -9096,20 +9592,10 @@ impl VisionaryApp {
         shown: &[crate::data::ExpressionEvent],
     ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
         use crate::game_link::HitboxRuleWire;
-        if pristine.len() != shown.len() {
-            // The plugin can replace arguments in an observed call, but it cannot safely add,
-            // remove, or reorder a source call. Keep the whole live update out rather than
-            // applying a partial zip and making the staged project disagree with the game.
-            return (Vec::new(), pristine.len().abs_diff(shown.len()));
-        }
-        if pristine.iter().zip(shown).any(|(was, now)| {
-            was.site != now.site || was.frame != now.frame || was.call.func() != now.call.func()
-        }) {
-            // A structural expression operation changes the source-to-capture alignment. Do
-            // not partially apply unrelated argument edits from the same staged script: the
-            // whole expression update is source/export-only until a fresh measured baseline is
-            // available.
-            return (Vec::new(), 1);
+        if Self::expression_structure_changed(pristine, shown) {
+            return Self::expression_structural_rules_for(motion, captures, pristine, shown)
+                .map(|rules| (rules, 0))
+                .unwrap_or_else(|| (Vec::new(), 1));
         }
         let mut rules = Vec::new();
         let mut unrepresentable = 0;
@@ -9125,6 +9611,10 @@ impl VisionaryApp {
                 unrepresentable += 1;
                 continue;
             };
+            if !Self::expression_capture_is_unique(captures, was, donor) {
+                unrepresentable += 1;
+                continue;
+            }
             let pristine_tokens = was.call.tokens();
             let tokens = now.call.tokens();
             let Some(args) = tokens
@@ -9171,7 +9661,8 @@ impl VisionaryApp {
         (rules, unrepresentable)
     }
 
-    /// Send changed camera/rumble arguments to the plugin, keyed on the pristine Lua call.
+    /// Send changed camera/rumble arguments or safe structural replacements to the plugin,
+    /// keyed on the pristine Lua call when one exists.
     fn push_expression_rules(&mut self) {
         let Some(mv_key) = self.current_move_key() else {
             return;
@@ -9180,6 +9671,10 @@ impl VisionaryApp {
             return;
         };
         let captures = self.captures_for_selected_fighter(motion);
+        let structural = Self::expression_structure_changed(
+            &self.state.expressions_pristine,
+            &self.state.expressions,
+        );
         let (rules, unrepresentable) = Self::expression_rules_for(
             motion,
             &captures,
@@ -9213,6 +9708,27 @@ impl VisionaryApp {
         } else {
             self.hitbox_rules_store.insert(partial_key, partial_rules);
         }
+        let expression_frame_pristine = &self
+            .state
+            .expression_motion_module_set_frame_partial_pristine;
+        let expression_frame_shown = self
+            .state
+            .expression_script
+            .to_motion_module_set_frame_partial_events();
+        let (frame_rules, frame_unrepresentable) =
+            Self::motion_module_set_frame_partial_rules_for_category(
+                motion,
+                &captures,
+                expression_frame_pristine,
+                &expression_frame_shown,
+                &self.state.motion_module_set_frame_partial_pristine,
+            );
+        let frame_key = format!("{mv_key}#expression_motion_module_set_frame_partial");
+        if frame_rules.is_empty() {
+            self.hitbox_rules_store.remove(&frame_key);
+        } else {
+            self.hitbox_rules_store.insert(frame_key, frame_rules);
+        }
         let all: Vec<crate::game_link::HitboxRuleWire> = self
             .hitbox_rules_store
             .values()
@@ -9220,16 +9736,25 @@ impl VisionaryApp {
             .cloned()
             .collect();
         self.game_link.send_hitbox_rules(&all);
-        if unrepresentable > 0 || partial_unrepresentable > 0 {
+        if unrepresentable > 0 || partial_unrepresentable > 0 || frame_unrepresentable > 0 {
             if unrepresentable > 0 {
                 self.note_live_replay_capture_limit("expression");
             }
             if partial_unrepresentable > 0 {
                 self.note_live_replay_capture_limit("expression partial rate");
             }
-            self.state.status = format!(
-                "Expression edit staged, but {unrepresentable} camera/rumble and {partial_unrepresentable} partial-rate call(s) need a safe live identity or numeric/hash value"
-            );
+            if frame_unrepresentable > 0 {
+                self.note_live_replay_capture_limit("expression partial frame");
+            }
+            self.state.status = if structural {
+                format!(
+                    "Expression structural edit staged for export/source sync, but live replay needs measured identities and typed arguments for {unrepresentable} call(s)"
+                )
+            } else {
+                format!(
+                    "Expression edit staged, but {unrepresentable} camera/rumble, {partial_unrepresentable} partial-rate, and {frame_unrepresentable} partial-frame call(s) need a safe live identity or numeric/hash value"
+                )
+            };
         }
     }
 
@@ -9250,15 +9775,18 @@ impl VisionaryApp {
             .state
             .expression_script
             .to_motion_module_set_rate_partial_events();
+        let partial_frame_events = self
+            .state
+            .expression_script
+            .to_motion_module_set_frame_partial_events();
         ui.separator();
         editor_section_heading_with_badge(
             ui,
-            "Camera & rumble",
-            "Camera shake, controller rumble, and supported partial-animation controls from the expression_ script. Unknown expression commands stay in the source rather than being guessed or silently regenerated.",
+            "Camera shake & rumble",
+            "Edit measured expression calls without guessing unknown source values. Camera shake and rumble values are sent back through their native argument types.",
             egui::Color32::from_rgb(210, 180, 245),
             "expression_ script",
         );
-        ui.weak("Edit authored source tokens; their spelling is kept for export and source sync.");
 
         let mut partial_rate_edit: Option<(usize, f32)> = None;
         if !partial_rate_events.is_empty() {
@@ -9298,6 +9826,54 @@ impl VisionaryApp {
                     .inner;
                 if changed {
                     partial_rate_edit = Some((event.site, rate));
+                }
+            }
+        }
+
+        let mut partial_frame_edit: Option<(usize, f32, bool)> = None;
+        if !partial_frame_events.is_empty() {
+            editor_command_subsection_heading(
+                ui,
+                "Partial animation seek",
+                "Seeks one named animation part from an expression_ script call. The native binding supplies sync=true when the source omits that optional argument.",
+                egui::Color32::from_rgb(170, 210, 220),
+                "MotionModule::set_frame_partial",
+            );
+            ui.label(
+                "Edit the seek frame and sync flag. Live replacement requires a unique native (part kind, pristine seek frame, script frame) capture identity; shared or unresolved identities stay source-only.",
+            );
+            for event in &partial_frame_events {
+                let active = event.frame == self.state.current_frame;
+                let mut seek = event.call.frame;
+                let mut sync = event.call.effective_sync();
+                let changed = ui
+                    .horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            if active {
+                                egui::Color32::from_rgb(170, 210, 220)
+                            } else {
+                                egui::Color32::from_gray(140)
+                            },
+                            if active { "◆" } else { "◇" },
+                        );
+                        ui.label(format!("f{} · {}", event.frame, event.call.part_kind));
+                        let mut changed = ui
+                            .add(
+                                egui::DragValue::new(&mut seek)
+                                    .speed(0.5)
+                                    .range(0.0..=600.0)
+                                    .prefix("seek f "),
+                            )
+                            .changed();
+                        changed |= ui.checkbox(&mut sync, "sync").changed();
+                        if event.call.sync.is_none() {
+                            ui.colored_label(egui::Color32::from_gray(140), "(source omits sync)");
+                        }
+                        changed
+                    })
+                    .inner;
+                if changed {
+                    partial_frame_edit = Some((event.site, seek, sync));
                 }
             }
         }
@@ -9351,6 +9927,32 @@ impl VisionaryApp {
             }
         }
 
+        if let Some((site, seek, sync)) = partial_frame_edit {
+            if let Some(call) = self
+                .state
+                .expression_script
+                .motion_module_set_frame_partial_stmt_mut(site)
+            {
+                let omitted = call.sync.is_none();
+                call.frame = seek;
+                // Keep an omitted optional argument omitted while its effective value remains the
+                // native default. This preserves source spelling through export and lets source
+                // sync report, rather than silently rewrite, an arity change.
+                call.sync = (!omitted
+                    || sync != crate::data::MotionModuleSetFramePartialCall::OMITTED_SYNC)
+                    .then_some(sync);
+                if let Some(key) = self.current_move_key() {
+                    self.state
+                        .expression_script_edits
+                        .insert(key, self.state.expression_script.clone());
+                }
+                self.state.status =
+                    "Expression MotionModule::set_frame_partial edit staged — live replacement is sent only when its exact native (part kind, pristine seek frame, frame) identity is unique; otherwise export or sync it into the linked source project."
+                        .into();
+                self.push_expression_motion_module_set_frame_partial_rules();
+            }
+        }
+
         enum StructuralAction {
             Move { site: usize, frame: u32 },
             Remove { site: usize },
@@ -9358,11 +9960,51 @@ impl VisionaryApp {
         }
 
         let mut edit: Option<(usize, ExpressionCall)> = None;
+        let mut reset_edit: Option<(usize, ExpressionCall)> = None;
+        let mut displayed_expression_sites = BTreeSet::new();
         let mut structural: Option<StructuralAction> = None;
+        let rumble_patterns = rumble_kind_candidates(&self.state.labels);
         for event in &self.state.expressions {
-            let active = event.frame == self.state.current_frame;
+            // A loop is one source call but several flattened timeline events. Render its
+            // editable row once so the fields do not share duplicate egui IDs and the Remove
+            // action cannot look like it targets only one iteration.
+            if !displayed_expression_sites.insert(event.site) {
+                continue;
+            }
+            let occurrences: Vec<_> = self
+                .state
+                .expressions
+                .iter()
+                .filter(|occurrence| occurrence.site == event.site)
+                .collect();
+            let active = occurrences
+                .iter()
+                .any(|occurrence| occurrence.frame == self.state.current_frame);
+            let frame_label = if occurrences.len() == 1 {
+                format!("f{}", event.frame)
+            } else {
+                let first = occurrences
+                    .first()
+                    .map(|occurrence| occurrence.frame)
+                    .unwrap_or(event.frame);
+                let last = occurrences
+                    .last()
+                    .map(|occurrence| occurrence.frame)
+                    .unwrap_or(event.frame);
+                format!("f{first}–f{last} ×{}", occurrences.len())
+            };
             let mut call = event.call.clone();
             let mut changed = false;
+            let call_title = expression_call_title(&call);
+            let pristine_call = self
+                .state
+                .expressions_pristine
+                .iter()
+                .find(|candidate| candidate.site == event.site)
+                .map(|candidate| candidate.call.clone());
+            let values_changed = pristine_call
+                .as_ref()
+                .is_some_and(|original| original != &event.call);
             ui.push_id(("expression_row", event.site), |ui| {
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -9374,7 +10016,12 @@ impl VisionaryApp {
                             },
                             if active { "◆" } else { "◇" },
                         );
-                        ui.label(format!("f{} · {}", event.frame, call.func()));
+                        ui.label(format!("{frame_label} · {call_title}"))
+                            .on_hover_text(format!(
+                                "Native call: {} · source call #{}",
+                                call.func(),
+                                event.site + 1
+                            ));
                         let flat = self
                             .state
                             .expression_script
@@ -9382,7 +10029,7 @@ impl VisionaryApp {
                         if ui
                             .add_enabled(
                                 flat && event.frame != self.state.current_frame,
-                                egui::Button::new("Move here"),
+                                egui::Button::new("Move"),
                             )
                             .on_hover_text(if flat {
                                 "Move this expression call to the current playhead frame."
@@ -9398,35 +10045,71 @@ impl VisionaryApp {
                         }
                         if ui
                             .small_button("Remove")
-                            .on_hover_text("Remove this measured expression call from the exported script.")
+                            .on_hover_text("Remove this source expression call, including every loop iteration, from the exported script.")
                             .clicked()
                         {
                             structural = Some(StructuralAction::Remove { site: event.site });
                         }
+                        if values_changed
+                            && ui
+                                .small_button("Reset")
+                                .on_hover_text(
+                                    "Restore this call's arguments to the measured/source baseline.",
+                                )
+                                .clicked()
+                        {
+                            if let Some(original) = pristine_call.clone() {
+                                reset_edit = Some((event.site, original));
+                            }
+                        }
                     });
                     ui.horizontal_wrapped(|ui| match &mut call {
                         ExpressionCall::RumbleHit { kind, unk } => {
-                            changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
-                            changed |= expression_token_edit(ui, "arg2", unk, (event.site, 1));
+                            changed |= rumble_kind_picker(
+                                ui,
+                                "Preset",
+                                kind,
+                                (event.site, 0),
+                                &rumble_patterns,
+                                "The complete game-defined rumble preset. The name is the effect; there is no separate strength control.",
+                            );
+                            changed |= expression_integer_edit(
+                                ui,
+                                "Value",
+                                unk,
+                                (event.site, 1),
+                                "The second RUMBLE_HIT argument. The native binding exposes it only as a game-defined integer, so it is preserved and passed through unchanged in type.",
+                            );
                         }
                         ExpressionCall::Quake { kind } => {
-                            changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
+                            changed |= expression_selector(
+                                ui,
+                                "Shake",
+                                kind,
+                                (event.site, 0),
+                                EXPRESSION_QUAKE_KIND_OPTIONS,
+                                "Camera shake size. The numeric value is preserved for live replay.",
+                            );
                         }
                         ExpressionCall::FtAttackAbsCameraQuake {
                             attack_abs_kind,
                             quake_kind,
                         } => {
-                            changed |= expression_token_edit(
+                            changed |= expression_selector(
                                 ui,
-                                "attack kind",
+                                "Attack",
                                 attack_abs_kind,
                                 (event.site, 0),
+                                EXPRESSION_ATTACK_ABS_KIND_OPTIONS,
+                                "Absolute attack kind used by the throw/catch camera shake.",
                             );
-                            changed |= expression_token_edit(
+                            changed |= expression_selector(
                                 ui,
-                                "quake kind",
+                                "Shake",
                                 quake_kind,
                                 (event.site, 1),
+                                EXPRESSION_QUAKE_KIND_OPTIONS,
+                                "Camera shake size.",
                             );
                         }
                         ExpressionCall::ControlModuleSetRumble {
@@ -9436,24 +10119,35 @@ impl VisionaryApp {
                             target,
                             ..
                         } => {
-                            changed |= expression_token_edit(ui, "kind", kind, (event.site, 0));
-                            changed |=
-                                expression_token_edit(ui, "duration", duration, (event.site, 1));
-                            changed |= expression_token_edit(ui, "looped", looped, (event.site, 2));
-                            let target_hint = if target.contains("BATTLE_OBJECT_ID_INVALID") {
-                                "Valid source expression: BATTLE_OBJECT_ID_INVALID is the \
-                                 invalid/default battle-object sentinel, and `as u32` is the \
-                                 type cast required by this binding."
-                            } else {
-                                "Target battle-object expression, preserved as authored source \
-                                 text for export and source sync."
-                            };
-                            changed |= expression_token_edit_with_hint(
+                            changed |= rumble_kind_picker(
                                 ui,
-                                "target",
+                                "Preset",
+                                kind,
+                                (event.site, 0),
+                                &rumble_patterns,
+                                "The complete game-defined rumble preset. The name is the effect; there is no separate strength control.",
+                            );
+                            changed |= expression_integer_edit(
+                                ui,
+                                "Duration",
+                                duration,
+                                (event.site, 1),
+                                "The native duration argument. Zero is a valid value and uses the preset's native timing; it does not disable the rumble.",
+                            );
+                            changed |= expression_bool_edit(
+                                ui,
+                                "Repeat",
+                                looped,
+                                (event.site, 2),
+                                "Repeat the preset while the native duration is active.",
+                            );
+                            changed |= expression_selector(
+                                ui,
+                                "Target",
                                 target,
                                 (event.site, 3),
-                                target_hint,
+                                EXPRESSION_TARGET_OPTIONS,
+                                "The battle object receiving the rumble. Default target is the normal authored value; custom source expressions stay editable.",
                             );
                         }
                     });
@@ -9464,32 +10158,40 @@ impl VisionaryApp {
             }
         }
 
+        if reset_edit.is_some() {
+            edit = reset_edit;
+        }
+
         ui.menu_button("＋ Add expression call", |ui| {
-            ui.label("Add a measured expression family at the playhead:");
             for (label, call) in [
                 (
-                    "RUMBLE_HIT",
+                    "Hit rumble",
                     ExpressionCall::RumbleHit {
-                        kind: "0".into(),
+                        kind: "Hash40::new(\"rbkind_attackm\")".into(),
                         unk: "0".into(),
                     },
                 ),
-                ("QUAKE", ExpressionCall::Quake { kind: "0".into() }),
                 (
-                    "FT_ATTACK_ABS_CAMERA_QUAKE",
-                    ExpressionCall::FtAttackAbsCameraQuake {
-                        attack_abs_kind: "0".into(),
-                        quake_kind: "0".into(),
+                    "Camera shake",
+                    ExpressionCall::Quake {
+                        kind: "*CAMERA_QUAKE_KIND_M".into(),
                     },
                 ),
                 (
-                    "ControlModule::set_rumble",
+                    "Throw shake",
+                    ExpressionCall::FtAttackAbsCameraQuake {
+                        attack_abs_kind: "*FIGHTER_ATTACK_ABSOLUTE_KIND_THROW".into(),
+                        quake_kind: "*CAMERA_QUAKE_KIND_L".into(),
+                    },
+                ),
+                (
+                    "Timed rumble",
                     ExpressionCall::ControlModuleSetRumble {
                         receiver: "agent.module_accessor".into(),
-                        kind: "0".into(),
-                        duration: "0".into(),
+                        kind: "Hash40::new(\"rbkind_attackm\")".into(),
+                        duration: "6".into(),
                         looped: "false".into(),
-                        target: "0".into(),
+                        target: "*BATTLE_OBJECT_ID_INVALID as u32".into(),
                     },
                 ),
             ] {
@@ -9561,7 +10263,7 @@ impl VisionaryApp {
                         .expression_script_edits
                         .insert(key, self.state.expression_script.clone());
                 }
-                self.state.status = "Expression structural edit staged — generated export includes the complete expression_ tree; linked-source sync will report frame/add/remove operations, and live replay keeps only safe in-place argument edits.".into();
+                self.state.status = "Expression structural edit staged — live replay suppresses the measured base call and injects the typed edited call when safe; generated export keeps the complete expression_ tree, and linked-source sync reports structural operations.".into();
                 self.push_expression_rules();
             }
         }
@@ -9675,6 +10377,10 @@ impl VisionaryApp {
                                 .script
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
+                            &self
+                                .state
+                                .script
+                                .to_motion_module_set_frame_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
                             &self.state.script.to_work_module_inc_int_events(),
@@ -10149,6 +10855,88 @@ impl VisionaryApp {
         }
     }
 
+    /// Editable seek frames and sync flags from direct `MotionModule::set_frame_partial` calls.
+    ///
+    /// The sync checkbox is shown for every call, including the three-argument corpus form that
+    /// omits the argument: the game passes `true` for it, so there is a real value to see and
+    /// change. Ticking or clearing it on an omitted call is a live and export edit; the linked
+    /// source keeps its three-argument spelling and the sync change is reported there instead,
+    /// because writing it back would change the call's arity.
+    fn draw_motion_module_set_frame_partial_section(&mut self, ui: &mut Ui) {
+        let events = self
+            .state
+            .script
+            .to_motion_module_set_frame_partial_events();
+        if events.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        editor_command_subsection_heading(
+            ui,
+            "Partial animation seek",
+            "MotionModule::set_frame_partial jumps one named animation part to a frame. The seek frame and the sync flag are editable; the authored part name, script frame, and execution context stay intact.",
+            egui::Color32::from_rgb(170, 210, 220),
+            "MotionModule::set_frame_partial",
+        );
+
+        let mut edit: Option<(usize, f32, bool)> = None;
+        for event in &events {
+            let active = event.frame == self.state.current_frame;
+            let mut seek = event.call.frame;
+            let mut sync = event.call.effective_sync();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.colored_label(
+                        if active {
+                            egui::Color32::from_rgb(170, 210, 220)
+                        } else {
+                            egui::Color32::from_gray(140)
+                        },
+                        if active { "◆" } else { "◇" },
+                    );
+                    ui.label(format!("f{} {}", event.frame, event.call.part_kind));
+                    let mut changed = ui
+                        .add(
+                            egui::DragValue::new(&mut seek)
+                                .speed(0.5)
+                                .range(0.0..=600.0)
+                                .prefix("seek f"),
+                        )
+                        .changed();
+                    changed |= ui.checkbox(&mut sync, "sync").changed();
+                    if event.call.sync.is_none() {
+                        ui.colored_label(egui::Color32::from_gray(140), "(source omits sync)");
+                    }
+                    changed
+                })
+                .inner;
+            if changed {
+                edit = Some((event.site, seek, sync));
+            }
+        }
+
+        if let Some((site, seek, sync)) = edit {
+            if let Some(call) = self
+                .state
+                .script
+                .motion_module_set_frame_partial_stmt_mut(site)
+            {
+                let omitted = call.sync.is_none();
+                call.frame = seek;
+                // An omitted `sync` stays omitted while its value is unchanged, so untouched
+                // corpus calls keep their exact source spelling through export and write-back.
+                call.sync = (!omitted
+                    || sync != crate::data::MotionModuleSetFramePartialCall::OMITTED_SYNC)
+                    .then_some(sync);
+                self.state.status =
+                    "MotionModule::set_frame_partial edit staged — export or sync it into the linked source project."
+                        .into();
+                self.push_motion_module_set_frame_partial_rules();
+            }
+        }
+    }
+
     /// Editable boolean values from direct `MotionModule::set_helper_calculation` point calls.
     fn draw_motion_module_set_helper_calculation_section(&mut self, ui: &mut Ui) {
         let events = self
@@ -10555,6 +11343,10 @@ impl VisionaryApp {
                                 .script
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
+                            &self
+                                .state
+                                .script
+                                .to_motion_module_set_frame_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
                             &self.state.script.to_work_module_inc_int_events(),
@@ -10737,6 +11529,10 @@ impl VisionaryApp {
                                 .script
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
+                            &self
+                                .state
+                                .script
+                                .to_motion_module_set_frame_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
                             &self.state.script.to_work_module_inc_int_events(),
@@ -11111,6 +11907,10 @@ impl VisionaryApp {
                                 .script
                                 .to_motion_module_set_helper_calculation_events(),
                             &self.state.script.to_motion_module_set_rate_partial_events(),
+                            &self
+                                .state
+                                .script
+                                .to_motion_module_set_frame_partial_events(),
                             &self.state.script.to_work_flag_events(),
                             &self.state.script.to_work_transition_term_events(),
                             &self.state.script.to_work_module_inc_int_events(),
@@ -11803,19 +12603,12 @@ impl VisionaryApp {
     fn draw_effects_panel(&mut self, ui: &mut Ui) {
         let current = self.state.current_frame;
 
+        // The tab this is drawn under already carries the "Visual effects" heading and its
+        // description, so start at the frame the list is filtered to rather than repeating them.
         ui.horizontal(|ui| {
-            editor_section_heading(ui, "Visual effects", VISUAL_EFFECTS_DESCRIPTION);
             ui.label(
-                egui::RichText::new(format!("— Frame {}", current))
-                    .color(egui::Color32::LIGHT_GRAY),
+                egui::RichText::new(format!("Frame {}", current)).color(egui::Color32::LIGHT_GRAY),
             );
-            if ui
-                .small_button("Primary editor")
-                .on_hover_text("Focus the Collisions, Motion & state, or Sound & feedback editor.")
-                .clicked()
-            {
-                self.inspector_focus = InspectorFocus::Primary;
-            }
             if let Some((family, site)) = &self.selected_command {
                 ui.separator();
                 ui.label(
@@ -11935,7 +12728,7 @@ impl VisionaryApp {
                                 {
                                     self.state.selected_effect_call =
                                         if selected { None } else { Some(i) };
-                                    self.inspector_focus = InspectorFocus::Effects;
+                                    self.primary_tab = PrimaryEditorTab::Effects;
                                 }
                             });
                         }
@@ -11973,6 +12766,8 @@ impl VisionaryApp {
                     raw_line: None,
                     trail_command: None,
                     trail_off: None,
+                    off_fade: None,
+                    off_detach: None,
                     trail_bone2: None,
                     rate: None,
                     work_int: None,
@@ -12032,6 +12827,8 @@ impl VisionaryApp {
                     raw_line: None,
                     trail_command: None,
                     trail_off: None,
+                    off_fade: None,
+                    off_detach: None,
                     trail_bone2: None,
                     // A new spawn sets no rate, so no `LAST_EFFECT_SET_RATE` is written for
                     // it until the user turns one on in the properties panel.
@@ -13134,6 +13931,34 @@ impl VisionaryApp {
                             }
                             ui.end_row();
 
+                            // Only a follow effect that the export actually closes has these,
+                            // and only then is the pair reachable by an edit.
+                            if ec.ends_early() {
+                                let (default_fade, default_detach) =
+                                    crate::data::EFFECT_OFF_KIND_DEFAULT;
+                                let mut fade = ec.off_fade.unwrap_or(default_fade);
+                                let mut detach = ec.off_detach.unwrap_or(default_detach);
+                                if effect_off_kind_flags(ui, &mut fade, &mut detach) {
+                                    ec.off_fade = Some(fade);
+                                    ec.off_detach = Some(detach);
+                                    changed = true;
+                                }
+                                match pristine.as_ref().filter(|p| p.ends_early()) {
+                                    Some(p) => orig(
+                                        ui,
+                                        format!(
+                                            "orig {}, {}",
+                                            p.off_fade.unwrap_or(default_fade),
+                                            p.off_detach.unwrap_or(default_detach)
+                                        ),
+                                    ),
+                                    None => {
+                                        ui.label("");
+                                    }
+                                }
+                                ui.end_row();
+                            }
+
                             ui.label("Disabled");
                             changed |= ui
                                 .checkbox(&mut ec.disabled, if is_control { "don't run" } else { "don't spawn" })
@@ -13783,6 +14608,8 @@ impl VisionaryApp {
         self.push_motion_module_set_helper_calculation_rules();
         self.push_motion_module_set_rate_partial_rules();
         self.push_expression_motion_module_set_rate_partial_rules();
+        self.push_motion_module_set_frame_partial_rules();
+        self.push_expression_motion_module_set_frame_partial_rules();
         self.push_clr_speed_rules();
         self.push_set_air_rules();
         self.push_change_kinetic_rules();
@@ -13939,9 +14766,40 @@ impl VisionaryApp {
         self.state.expressions_pristine = context.expression_pristine.to_expression_events();
         self.state.expressions = self.state.expression_script.to_expression_events();
         self.state
+            .expression_motion_module_set_frame_partial_pristine = context
+            .expression_pristine
+            .to_motion_module_set_frame_partial_events();
+        self.state
             .expression_motion_module_set_rate_partial_pristine = context
             .expression_pristine
             .to_motion_module_set_rate_partial_events();
+    }
+
+    /// Publish the complete flattened ACMD live-rule union currently staged in the keyed stores.
+    /// Project loading calls this only after its all-family send barrier is lifted; ordinary
+    /// rebuilds use it after their narrower rule batch ends.
+    fn publish_live_rule_union(&self) {
+        let hitboxes: Vec<_> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let effects: Vec<_> = self
+            .effect_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let controls: Vec<_> = self
+            .effect_control_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&hitboxes);
+        self.game_link.send_spawn_rules(&effects);
+        self.game_link.send_effect_control_rules(&controls);
     }
 
     /// Rehydrate every move represented by a loaded project through the same source parser and
@@ -14087,30 +14945,10 @@ impl VisionaryApp {
             .missing_runtime_constant
             .extend(std::mem::take(&mut self.replay_missing_constant));
 
-        // Every pusher normally sends as it updates its keyed store. These final sends guarantee
-        // the complete union is present after the last move has been materialized.
-        let hitboxes: Vec<_> = self
-            .hitbox_rules_store
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
-        let effects: Vec<_> = self
-            .effect_rules_store
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
-        let controls: Vec<_> = self
-            .effect_control_rules_store
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
         self.game_link.end_rule_batch();
-        self.game_link.send_hitbox_rules(&hitboxes);
-        self.game_link.send_spawn_rules(&effects);
-        self.game_link.send_effect_control_rules(&controls);
+        // Every pusher normally sends as it updates its keyed store. This final publish
+        // guarantees the complete union is present after the last move has been materialized.
+        self.publish_live_rule_union();
         report
     }
 
@@ -14292,6 +15130,11 @@ impl VisionaryApp {
                 .state
                 .expression_script
                 .to_motion_module_set_rate_partial_events();
+            self.state
+                .expression_motion_module_set_frame_partial_pristine = self
+                .state
+                .expression_script
+                .to_motion_module_set_frame_partial_events();
             self.record_dropped_effect_lines();
         } else if let Some(baseline) = session_baseline {
             if !self.restore_edit_snapshot(&key, &baseline) {
@@ -14342,6 +15185,10 @@ impl VisionaryApp {
             .state
             .expression_script
             .to_motion_module_set_rate_partial_events();
+        let partial_frame_baseline = self
+            .state
+            .expression_script
+            .to_motion_module_set_frame_partial_events();
         let (script, shown, baseline) =
             resolve_expression_state(&self.state.expression_script, saved);
         self.state.expression_script = script;
@@ -14349,6 +15196,8 @@ impl VisionaryApp {
         self.state.expressions_pristine = baseline;
         self.state
             .expression_motion_module_set_rate_partial_pristine = partial_baseline;
+        self.state
+            .expression_motion_module_set_frame_partial_pristine = partial_frame_baseline;
     }
 
     /// Rebuild `state.effects` from the pristine parse + this move's saved edits.
@@ -14518,6 +15367,10 @@ impl VisionaryApp {
             .to_motion_module_set_helper_calculation_events();
         let source_motion_module_set_rate_partial =
             self.state.script.to_motion_module_set_rate_partial_events();
+        let source_motion_module_set_frame_partial = self
+            .state
+            .script
+            .to_motion_module_set_frame_partial_events();
         let source_clr_speed = self.state.script.to_clr_speed_events();
         let source_set_air = self.state.script.to_set_air_events();
         let source_change_kinetic = self.state.script.to_change_kinetic_events();
@@ -14555,6 +15408,8 @@ impl VisionaryApp {
                 source_motion_module_set_helper_calculation;
             self.state.motion_module_set_rate_partial_pristine =
                 source_motion_module_set_rate_partial;
+            self.state.motion_module_set_frame_partial_pristine =
+                source_motion_module_set_frame_partial;
             self.state.clr_speed_pristine = source_clr_speed;
             self.state.set_air_pristine = source_set_air;
             self.state.change_kinetic_pristine = source_change_kinetic;
@@ -14995,7 +15850,10 @@ impl VisionaryApp {
 
         // Loading is replacement, not an undocumented merge. Clear the previous project's
         // runtime rules/carrier first, then replace every local edit store so saving immediately
-        // after a load reproduces exactly the file that was opened.
+        // after a load reproduces exactly the file that was opened. The project barrier covers
+        // the clear as well as the rebuild: the plugin must not observe the old project being
+        // cleared before the replacement has been materialized.
+        self.game_link.begin_project_batch();
         self.clear_all_game_edits();
         let previously_loaded_eff = self
             .eff_editor
@@ -15159,7 +16017,6 @@ impl VisionaryApp {
         // when the JSON was opened.
         self.normalize_effect_call_storage();
         let live_report = self.rebuild_all_saved_live_rules();
-        self.live_overrides.flush_all(&self.game_link);
         self.push_effect_aliases();
         // Rebuild merged views for every fighter with transplant ops so the eff editor and
         // viewport show them (character-centric overlays survive project reloads).
@@ -15184,10 +16041,19 @@ impl VisionaryApp {
         for fighter in deployable {
             self.deploy_live_eff(&fighter);
         }
+
+        // All project-owned files and in-memory stores are complete now. Release the barrier and
+        // publish the replacement state in full-list protocol messages: reset old pins first,
+        // then ACMD rules, modifiers, the carrier/aliases, and the final served-EFF reload.
+        self.game_link.end_project_batch();
+        self.game_link.send_reset_pins();
+        self.publish_live_rule_union();
+        self.live_overrides.flush_all(&self.game_link);
         // Loading is synchronous from the editor's point of view. Publish the coalesced carrier
         // aliases now rather than waiting for the next egui frame, so restored effect redirects
         // and previews are available together with the staged merged files.
         self.flush_effect_aliases();
+        self.game_link.send_live_eff_reload();
         if let Some(fighter) = self
             .state
             .selected_fighter
@@ -16021,6 +16887,8 @@ impl VisionaryApp {
             hurt.to_motion_module_set_helper_calculation_events().len();
         let n_motion_module_set_rate_partial =
             hurt.to_motion_module_set_rate_partial_events().len();
+        let n_motion_module_set_frame_partial =
+            hurt.to_motion_module_set_frame_partial_events().len();
 
         if let Some(message) = nothing_to_load_with_kinetics(
             hitboxes.len(),
@@ -16049,6 +16917,7 @@ impl VisionaryApp {
             n_motion_module_set_rate,
             n_motion_module_set_helper_calculation,
             n_motion_module_set_rate_partial,
+            n_motion_module_set_frame_partial,
         ) {
             self.state.status = message;
             return;
@@ -16201,6 +17070,10 @@ impl VisionaryApp {
                         .script
                         .to_motion_module_set_helper_calculation_events(),
                     &self.state.script.to_motion_module_set_rate_partial_events(),
+                    &self
+                        .state
+                        .script
+                        .to_motion_module_set_frame_partial_events(),
                     &self.state.script.to_work_flag_events(),
                     &self.state.script.to_work_transition_term_events(),
                     &self.state.script.to_work_module_inc_int_events(),
@@ -16246,6 +17119,7 @@ impl VisionaryApp {
              + {n_motion_module_set_rate} direct MotionModule::set_rate point(s) \
              + {n_motion_module_set_helper_calculation} direct MotionModule::set_helper_calculation point(s) \
              + {n_motion_module_set_rate_partial} direct MotionModule::set_rate_partial point(s) \
+             + {n_motion_module_set_frame_partial} direct MotionModule::set_frame_partial point(s) \
              + {n_work_flag} WorkModule flag observation(s) + {n_work_transition_term} transition-term observation(s) \
              + {n_work_module_inc_int} WorkModule increment observation(s) + {n_work_module_set} WorkModule value-set observation(s) from live game capture"
         );
@@ -16273,6 +17147,7 @@ impl VisionaryApp {
                 + n_motion_module_set_rate
                 + n_motion_module_set_helper_calculation
                 + n_motion_module_set_rate_partial
+                + n_motion_module_set_frame_partial
                 + n_work_flag
                 + n_work_transition_term
                 + n_work_module_inc_int
@@ -16855,6 +17730,8 @@ impl VisionaryApp {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             // A spawn call carries none of the seven modifiers of its own — each arrives as its
             // own `LAST_EFFECT_SET_*` capture line following this one, and is attached in
@@ -16920,6 +17797,8 @@ impl VisionaryApp {
             raw_line: trail_capture_raw_line(func, args),
             trail_command: Some(func.to_string()),
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: bone2_hash.and_then(|hash| {
                 bone_rev
                     .get(&hash)
@@ -16990,6 +17869,8 @@ impl VisionaryApp {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
@@ -17060,6 +17941,8 @@ impl VisionaryApp {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
@@ -17551,6 +18434,26 @@ impl VisionaryApp {
                     (rate.is_finite() && rate >= 0.0).then_some(
                         ExcuteStmt::MotionModuleSetRatePartial(
                             crate::data::MotionModuleSetRatePartialCall { part_kind, rate },
+                        ),
+                    )
+                }
+                "MotionModule::set_frame_partial" if line.args.len() == 3 => {
+                    let part_kind = match line.args.first()? {
+                        crate::game_link::LuaArgWire::Int(value) => value.to_string(),
+                        _ => return None,
+                    };
+                    let frame = line.args.get(1)?.as_f32()?;
+                    let sync = match line.args.get(2)? {
+                        crate::game_link::LuaArgWire::Bool(value) => *value,
+                        _ => return None,
+                    };
+                    (frame.is_finite() && frame >= 0.0).then_some(
+                        ExcuteStmt::MotionModuleSetFramePartial(
+                            crate::data::MotionModuleSetFramePartialCall {
+                                part_kind,
+                                frame,
+                                sync: Some(sync),
+                            },
                         ),
                     )
                 }
@@ -18072,6 +18975,16 @@ impl VisionaryApp {
                 continue;
             };
             let stop_frame = Self::motion_to_script_frame(line.frame);
+            // The kill's own booleans, so a captured move exports the call the game ran rather
+            // than the export's default pair. Read together or not at all, for the same reason
+            // the source parser reads them that way.
+            let (fade, detach) = match (
+                line.args.get(1).and_then(|arg| arg.as_bool()),
+                line.args.get(2).and_then(|arg| arg.as_bool()),
+            ) {
+                (Some(fade), Some(detach)) => (Some(fade), Some(detach)),
+                _ => (None, None),
+            };
             // EffectModule::kill_kind terminates every live instance of the kind.
             for effect in effects.iter_mut().filter(|effect| {
                 effect.active_end == crate::data::OPEN_ENDED_EFFECT_FRAME
@@ -18081,6 +18994,8 @@ impl VisionaryApp {
                     && effect_name_hash(&effect.effect_name) == stop_hash
             }) {
                 effect.active_end = stop_frame.max(effect.active_start);
+                effect.off_fade = fade;
+                effect.off_detach = detach;
             }
         }
         effects
@@ -19762,6 +20677,359 @@ impl VisionaryApp {
             self.note_live_replay_capture_limit("MotionModule::set_helper_calculation");
             self.state.status = format!(
                 "MotionModule::set_helper_calculation edit staged, but {unrepresentable} point(s) need a boolean live capture and a unique same-frame value"
+            );
+        }
+    }
+
+    fn motion_module_set_frame_partial_capture_by_occurrence<'a>(
+        captures: &'a [crate::game_link::CaptureLine],
+        pristine: &[crate::data::MotionModuleSetFramePartialEvent],
+        index: usize,
+        event: &crate::data::MotionModuleSetFramePartialEvent,
+    ) -> Option<&'a crate::game_link::CaptureLine> {
+        let occurrence = pristine[..index]
+            .iter()
+            .filter(|other| other.frame == event.frame)
+            .count();
+        captures
+            .iter()
+            .filter(|line| {
+                line.func == crate::data::MotionModuleSetFramePartialCall::FUNC
+                    && Self::motion_to_script_frame(line.frame) == event.frame
+            })
+            .filter(|line| line.args.len() == 3)
+            .nth(occurrence)
+    }
+
+    /// Return the sole direct partial-frame capture with the exact native identity at one script
+    /// frame. Same contract as the partial-rate family: the hook has no ACMD category, so the
+    /// integer part kind and the pristine seek frame carry the identity instead.
+    fn motion_module_set_frame_partial_capture_for_identity(
+        captures: &[crate::game_link::CaptureLine],
+        frame: u32,
+        part_kind: i64,
+        pristine_frame: f32,
+    ) -> Option<&crate::game_link::CaptureLine> {
+        let mut matches = captures.iter().filter(|line| {
+            if line.func != crate::data::MotionModuleSetFramePartialCall::FUNC
+                || Self::motion_to_script_frame(line.frame) != frame
+                || line.args.len() != 3
+            {
+                return false;
+            }
+            let Some(captured_part_kind) = line
+                .args
+                .first()
+                .and_then(Self::motion_module_set_rate_partial_capture_part_kind)
+            else {
+                return false;
+            };
+            let Some(captured_frame) = line.args.get(1).and_then(|arg| arg.as_f32()) else {
+                return false;
+            };
+            captured_part_kind == part_kind && captured_frame.to_bits() == pristine_frame.to_bits()
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    /// The `sync` boolean the capture reports for a partial-frame call.
+    ///
+    /// The native hook always has one, including for the three-argument source form: the game's
+    /// Lua reader supplies `true` when the call omits it. That is what makes an authored
+    /// omission editable at all — the live surface has a concrete value to replace.
+    fn motion_module_set_frame_partial_capture_sync(
+        arg: &crate::game_link::LuaArgWire,
+    ) -> Option<bool> {
+        match arg {
+            crate::game_link::LuaArgWire::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn motion_module_set_frame_partial_source_id(
+        event: &crate::data::MotionModuleSetFramePartialEvent,
+    ) -> Option<(i64, u32)> {
+        Some((
+            Self::motion_module_set_rate_partial_source_part_kind(&event.call.part_kind)?,
+            event.call.frame.to_bits(),
+        ))
+    }
+
+    /// Whether two source points may address the same category-free native hook key.
+    ///
+    /// An unresolved part token overlaps any point at the same frame, exactly as in the
+    /// partial-rate family: the editor cannot prove the native integer identities differ.
+    fn motion_module_set_frame_partial_may_share_identity(
+        left: &crate::data::MotionModuleSetFramePartialEvent,
+        right: &crate::data::MotionModuleSetFramePartialEvent,
+    ) -> bool {
+        if left.frame != right.frame {
+            return false;
+        }
+        match (
+            Self::motion_module_set_frame_partial_source_id(left),
+            Self::motion_module_set_frame_partial_source_id(right),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        }
+    }
+
+    fn motion_module_set_frame_partial_capture_identity_for(
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::MotionModuleSetFramePartialEvent],
+        index: usize,
+        event: &crate::data::MotionModuleSetFramePartialEvent,
+    ) -> Option<(i64, u32)> {
+        let donor = if let Some(part_kind) =
+            Self::motion_module_set_rate_partial_source_part_kind(&event.call.part_kind)
+        {
+            Self::motion_module_set_frame_partial_capture_for_identity(
+                captures,
+                event.frame,
+                part_kind,
+                event.call.frame,
+            )
+        } else {
+            Self::motion_module_set_frame_partial_capture_by_occurrence(
+                captures, pristine, index, event,
+            )
+        }?;
+        Some((
+            donor
+                .args
+                .first()
+                .and_then(Self::motion_module_set_rate_partial_capture_part_kind)?,
+            donor.args.get(1).and_then(|arg| arg.as_f32())?.to_bits(),
+        ))
+    }
+
+    /// Build direct partial-frame rules for one ACMD category.
+    ///
+    /// Same category-free identity problem as the partial-rate family, and the same resolution:
+    /// the measured integer part kind plus the pristine seek frame separate distinct same-frame
+    /// calls, and anything that might collide stays source/export-only.
+    ///
+    /// A `sync` edit is representable here even when the source omitted the argument, because the
+    /// native call always carries one. Adding or removing it in *source* is still structural —
+    /// that boundary lives in the write-back path, not in this one.
+    fn motion_module_set_frame_partial_rules_for_category(
+        motion: u64,
+        captures: &[crate::game_link::CaptureLine],
+        pristine: &[crate::data::MotionModuleSetFramePartialEvent],
+        shown: &[crate::data::MotionModuleSetFramePartialEvent],
+        opposite_category: &[crate::data::MotionModuleSetFramePartialEvent],
+    ) -> (Vec<crate::game_link::HitboxRuleWire>, usize) {
+        use crate::game_link::{HbOverridesWire, HitboxRuleWire};
+        if pristine.len() != shown.len() {
+            return (Vec::new(), pristine.len().abs_diff(shown.len()));
+        }
+        let mut rules = Vec::new();
+        let mut unrepresentable = 0;
+        for (index, (was, now)) in pristine.iter().zip(shown).enumerate() {
+            if was == now {
+                continue;
+            }
+            if was.frame != now.frame || was.call.part_kind != now.call.part_kind {
+                unrepresentable += 1;
+                continue;
+            }
+            if opposite_category
+                .iter()
+                .any(|other| Self::motion_module_set_frame_partial_may_share_identity(was, other))
+            {
+                unrepresentable += 1;
+                continue;
+            }
+            if pristine.iter().enumerate().any(|(other_index, other)| {
+                other_index != index
+                    && Self::motion_module_set_frame_partial_may_share_identity(was, other)
+            }) {
+                unrepresentable += 1;
+                continue;
+            }
+            if !now.call.frame.is_finite() || now.call.frame < 0.0 {
+                unrepresentable += 1;
+                continue;
+            }
+            let donor = if let Some(part_kind) =
+                Self::motion_module_set_rate_partial_source_part_kind(&was.call.part_kind)
+            {
+                Self::motion_module_set_frame_partial_capture_for_identity(
+                    captures,
+                    was.frame,
+                    part_kind,
+                    was.call.frame,
+                )
+            } else {
+                Self::motion_module_set_frame_partial_capture_by_occurrence(
+                    captures, pristine, index, was,
+                )
+            };
+            let Some(donor) = donor else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(part_kind) = donor
+                .args
+                .first()
+                .and_then(Self::motion_module_set_rate_partial_capture_part_kind)
+            else {
+                unrepresentable += 1;
+                continue;
+            };
+            let Some(captured_frame) = donor.args.get(1).and_then(|arg| arg.as_f32()) else {
+                unrepresentable += 1;
+                continue;
+            };
+            if !captured_frame.is_finite() || captured_frame < 0.0 {
+                unrepresentable += 1;
+                continue;
+            }
+            let Some(captured_sync) = donor
+                .args
+                .get(2)
+                .and_then(Self::motion_module_set_frame_partial_capture_sync)
+            else {
+                // The boolean is part of the native identity contract even when source omitted
+                // it. A capture with a missing or non-boolean slot cannot prove which binding
+                // call the rule would replace.
+                unrepresentable += 1;
+                continue;
+            };
+            let duplicate_key = pristine
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| *other_index != index && other.frame == was.frame)
+                .filter_map(|(other_index, other)| {
+                    Self::motion_module_set_frame_partial_capture_identity_for(
+                        captures,
+                        pristine,
+                        other_index,
+                        other,
+                    )
+                })
+                .filter(|(part, seek)| *part == part_kind && *seek == captured_frame.to_bits())
+                .count();
+            if duplicate_key != 0 {
+                unrepresentable += 1;
+                continue;
+            }
+            // Send `sync` only when the user actually moved it away from what the game is
+            // passing. An omitted-source call whose effective value already matches the capture
+            // has nothing to override, and sending it anyway would make every seek-frame edit
+            // look like a sync edit in the plugin's report.
+            let sync = (now.call.effective_sync() != was.call.effective_sync()
+                || captured_sync != now.call.effective_sync())
+            .then(|| now.call.effective_sync());
+            let (frame_start, frame_end) = Self::rule_frame_window(was.frame);
+            rules.push(HitboxRuleWire {
+                motion,
+                category: crate::game_link::CAT_MOTION_MODULE_SET_FRAME_PARTIAL,
+                hitbox_id: Some(crate::game_link::numeric_point_key(
+                    crate::data::MotionModuleSetFramePartialCall::FUNC,
+                    &[part_kind as f32, captured_frame],
+                )),
+                suppress: false,
+                frame_start,
+                frame_end,
+                overrides: Some(HbOverridesWire {
+                    motion_module_frame_partial: Some(now.call.frame),
+                    motion_module_frame_partial_sync: sync,
+                    ..Default::default()
+                }),
+                inject: None,
+                func: Some(crate::data::MotionModuleSetFramePartialCall::FUNC.into()),
+            });
+        }
+        (rules, unrepresentable)
+    }
+
+    fn push_motion_module_set_frame_partial_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let expression_pristine = self
+            .state
+            .expression_motion_module_set_frame_partial_pristine
+            .as_slice();
+        let (rules, unrepresentable) = Self::motion_module_set_frame_partial_rules_for_category(
+            motion,
+            &captures,
+            &self.state.motion_module_set_frame_partial_pristine,
+            &self
+                .state
+                .script
+                .to_motion_module_set_frame_partial_events(),
+            expression_pristine,
+        );
+        let key = format!("{mv_key}#motion_module_set_frame_partial");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("MotionModule::set_frame_partial");
+            self.state.status = format!(
+                "MotionModule::set_frame_partial edit staged, but {unrepresentable} point(s) need a numeric part/frame live capture and a unique same-frame key"
+            );
+        }
+    }
+
+    /// Send expression partial-frame edits when the category-free native hook has an exact
+    /// `(part_kind, pristine_frame, frame)` identity for the point.
+    fn push_expression_motion_module_set_frame_partial_rules(&mut self) {
+        let Some(mv_key) = self.current_move_key() else {
+            return;
+        };
+        let Some(motion) = self.current_motion_hash() else {
+            return;
+        };
+        let captures = self.captures_for_selected_fighter(motion);
+        let expression_pristine = &self
+            .state
+            .expression_motion_module_set_frame_partial_pristine;
+        let expression_shown = self
+            .state
+            .expression_script
+            .to_motion_module_set_frame_partial_events();
+        let (rules, unrepresentable) = Self::motion_module_set_frame_partial_rules_for_category(
+            motion,
+            &captures,
+            expression_pristine,
+            &expression_shown,
+            &self.state.motion_module_set_frame_partial_pristine,
+        );
+        let key = format!("{mv_key}#expression_motion_module_set_frame_partial");
+        if rules.is_empty() {
+            self.hitbox_rules_store.remove(&key);
+        } else {
+            self.hitbox_rules_store.insert(key, rules);
+        }
+        let all: Vec<crate::game_link::HitboxRuleWire> = self
+            .hitbox_rules_store
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        self.game_link.send_hitbox_rules(&all);
+        if unrepresentable > 0 {
+            self.note_live_replay_capture_limit("expression partial frame");
+            self.state.status = format!(
+                "Expression partial-frame edit staged, but {unrepresentable} point(s) need an exact numeric part/frame capture and a unique same-frame native key"
             );
         }
     }
@@ -22109,6 +23377,8 @@ impl VisionaryApp {
             motion_module_rate: None,
             motion_module_helper_calculation: None,
             motion_module_rate_partial: None,
+            motion_module_frame_partial: None,
+            motion_module_frame_partial_sync: None,
             clr_speed_kinetic_kind: None,
             change_kinetic_type: None,
             kinetic_energy_id: None,
@@ -25037,7 +26307,7 @@ impl VisionaryApp {
                         if self.use_scan.is_some() {
                             "No uses found yet — the scan is still running."
                         } else {
-                            "No known uses — retarget calls later in the Visual effects panel."
+                            "No known uses — retarget calls later in the Visual effects tab."
                         },
                     );
                 } else {
@@ -26226,13 +27496,18 @@ impl VisionaryApp {
                 )],
             };
         }
+        // The retimed kill must be the SAME call at a different frame. Sending a fixed pair
+        // here made a live retime of Ganondorf's `ganon_sword_flare` — vanilla `false, false` —
+        // run as `false, true` in the game, which is a behaviour change the user never asked
+        // for and cannot see in the panel.
+        let (default_fade, default_detach) = crate::data::EFFECT_OFF_KIND_DEFAULT;
         crate::game_link::SpawnInjectWire {
             frame: Self::script_to_motion_frame(ec.active_end.max(ec.active_start)),
             func: "EFFECT_OFF_KIND".into(),
             args: vec![
                 A::Hash(effect_name_hash(&ec.effect_name)),
-                A::Bool(false),
-                A::Bool(true),
+                A::Bool(ec.off_fade.unwrap_or(default_fade)),
+                A::Bool(ec.off_detach.unwrap_or(default_detach)),
             ],
         }
     }
@@ -26269,6 +27544,10 @@ impl VisionaryApp {
                         .script
                         .to_motion_module_set_helper_calculation_events(),
                     &self.state.script.to_motion_module_set_rate_partial_events(),
+                    &self
+                        .state
+                        .script
+                        .to_motion_module_set_frame_partial_events(),
                     &self.state.script.to_work_flag_events(),
                     &self.state.script.to_work_transition_term_events(),
                     &self.state.script.to_work_module_inc_int_events(),
@@ -26635,12 +27914,10 @@ impl VisionaryApp {
             TimelineSelection::Hitbox(index) => {
                 self.selected_hitbox = Some(*index);
                 self.primary_tab = PrimaryEditorTab::Collisions;
-                self.inspector_focus = InspectorFocus::Primary;
             }
             TimelineSelection::Effect(index) => {
                 self.state.selected_effect_call = Some(*index);
-                self.state.show_effects_panel = true;
-                self.inspector_focus = InspectorFocus::Effects;
+                self.primary_tab = PrimaryEditorTab::Effects;
             }
             TimelineSelection::Command { family, site } => {
                 self.selected_command = Some((family.clone(), *site));
@@ -26679,7 +27956,6 @@ impl VisionaryApp {
                         TimelineCategory::Effects => self.primary_tab,
                     }
                 };
-                self.inspector_focus = InspectorFocus::Primary;
             }
         }
     }
@@ -26917,6 +28193,10 @@ impl VisionaryApp {
                     .script
                     .to_motion_module_set_helper_calculation_events(),
                 &self.state.script.to_motion_module_set_rate_partial_events(),
+                &self
+                    .state
+                    .script
+                    .to_motion_module_set_frame_partial_events(),
                 &self.state.script.to_work_flag_events(),
                 &self.state.script.to_work_transition_term_events(),
                 &self.state.script.to_work_module_inc_int_events(),
@@ -26979,6 +28259,10 @@ impl VisionaryApp {
             .to_motion_module_set_helper_calculation_events();
         let motion_module_set_rate_partial =
             self.state.script.to_motion_module_set_rate_partial_events();
+        let motion_module_set_frame_partial = self
+            .state
+            .script
+            .to_motion_module_set_frame_partial_events();
         let work_flags = self.state.script.to_work_flag_events();
         let work_transition_terms = self.state.script.to_work_transition_term_events();
         let work_module_inc_ints = self.state.script.to_work_module_inc_int_events();
@@ -27005,6 +28289,7 @@ impl VisionaryApp {
             motion_module_set_rate.len(),
             motion_module_set_helper_calculation.len(),
             motion_module_set_rate_partial.len(),
+            motion_module_set_frame_partial.len(),
             work_flags.len(),
             work_transition_terms.len(),
             work_module_inc_ints.len(),
@@ -27961,7 +29246,6 @@ impl VisionaryApp {
                             Some(row)
                         };
                         self.primary_tab = PrimaryEditorTab::Collisions;
-                        self.inspector_focus = InspectorFocus::Primary;
                     } else {
                         // Scrub the playhead
                         let t = ((pos.x - rect.left()) / w).clamp(0.0, 1.0);
@@ -28110,7 +29394,7 @@ impl eframe::App for VisionaryApp {
 
         // History is captured only after background loading and playback have settled.  This
         // keeps navigation and animation state out of the edit stack while still covering every
-        // main-window editor, including the independently visible Visual effects panel.
+        // main-window editor, the Visual effects tab included.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Z)) {
             self.apply_history_action(HistoryAction::Undo);
             self.history_suppress_frame = true;
@@ -28251,8 +29535,6 @@ impl eframe::App for VisionaryApp {
                             self.eff_editor.queue_load(&p);
                         }
                     }
-                    ui.checkbox(&mut self.state.show_effects_panel, "Visual effects panel")
-                        .on_hover_text(VISUAL_EFFECTS_DESCRIPTION);
                     ui.checkbox(&mut self.show_transplant, "Transplant Effects")
                         .on_hover_text(
                             "Transplant any effect from another EFF into the current fighter's \
@@ -28970,39 +30252,6 @@ impl eframe::App for VisionaryApp {
             self.preview_transplant_result(&fighter);
         }
 
-        // On a narrow main window the viewport gets a usable minimum width by showing only the
-        // inspector that was focused most recently.  Wide windows keep the two panels separate
-        // and visible together, as before.
-        let compact_inspectors = ui.available_width() < 1180.0;
-        let show_effects_here = self.state.show_effects_panel
-            && (!compact_inspectors || self.inspector_focus == InspectorFocus::Effects);
-        let show_primary_here = !compact_inspectors
-            || self.inspector_focus == InspectorFocus::Primary
-            || !self.state.show_effects_panel;
-
-        // Visual effects panel (right side, shown when toggled)
-        if show_effects_here {
-            let t = self.perf.start();
-            egui::Panel::right("effects_panel_layout_v2")
-                // Start at a useful width, but let the user drag the divider as far as the
-                // window allows. Long editor rows scroll horizontally inside the panel, so the
-                // panel's contents never force it wider or get compressed to fit.
-                .default_size(320.0)
-                .min_size(240.0)
-                .resizable(true)
-                .show_inside(ui, |ui| {
-                    self.draw_effects_panel(ui);
-                });
-            self.perf.end("effects_panel", t);
-        } else {
-            // Keep the auto-generated ids of every panel below identical whether or not this
-            // panel is shown. Skipping a child `Ui` shifts the id of everything drawn after it,
-            // and egui reacts by outlining all the "moved" widgets in red for a frame or two —
-            // that is the red flash seen when the effects panel is toggled. egui's own
-            // `Panel::show_animated_inside` does exactly this for the same reason.
-            ui.skip_ahead_auto_ids(1);
-        }
-
         // Left panel
         let t = self.perf.start();
         egui::Panel::left("left_panel_layout_v2")
@@ -29019,25 +30268,21 @@ impl eframe::App for VisionaryApp {
             });
         self.perf.end("left_panel", t);
 
-        // Right panel
-        if show_primary_here {
-            let t = self.perf.start();
-            egui::Panel::right("right_panel_layout_v2")
-                .default_size(400.0)
-                .min_size(72.0)
-                .resizable(true)
-                .show_inside(ui, |ui| {
-                    // The toolbar above the editor is intentionally a single horizontal row.
-                    // Keep its overflowing buttons inside an unallocated child so the row can be
-                    // clipped at a compact sidebar width instead of enlarging the Panel frame.
-                    show_fixed_panel_contents(ui, "right_panel_content", |ui| {
-                        self.draw_right_panel(ui);
-                    });
+        // Right panel — every editing surface, visual effects included, lives in here.
+        let t = self.perf.start();
+        egui::Panel::right("right_panel_layout_v2")
+            .default_size(400.0)
+            .min_size(72.0)
+            .resizable(true)
+            .show_inside(ui, |ui| {
+                // The toolbar above the editor is intentionally a single horizontal row.
+                // Keep its overflowing buttons inside an unallocated child so the row can be
+                // clipped at a compact sidebar width instead of enlarging the Panel frame.
+                show_fixed_panel_contents(ui, "right_panel_content", |ui| {
+                    self.draw_right_panel(ui);
                 });
-            self.perf.end("right_panel", t);
-        } else {
-            ui.skip_ahead_auto_ids(1);
-        }
+            });
+        self.perf.end("right_panel", t);
 
         // Commit any edits made this frame to the log
         let t = self.perf.start();
@@ -29660,19 +30905,16 @@ impl eframe::App for VisionaryApp {
                         }
                         if let Some((i, _)) = best_pick {
                             self.state.selected_effect_call = Some(i);
-                            self.state.show_effects_panel = true;
-                            self.inspector_focus = InspectorFocus::Effects;
+                            self.primary_tab = PrimaryEditorTab::Effects;
                         } else if let Some((i, _)) = best_hitbox_pick {
                             self.selected_hitbox = Some(i);
                             self.state.selected_effect_call = None;
                             self.primary_tab = PrimaryEditorTab::Collisions;
-                            self.inspector_focus = InspectorFocus::Primary;
                         } else if let Some((i, _)) = best_hurtbox_pick {
                             self.selected_hurtbox = Some(i);
                             self.selected_hitbox = None;
                             self.state.selected_effect_call = None;
                             self.primary_tab = PrimaryEditorTab::Hurtboxes;
-                            self.inspector_focus = InspectorFocus::Primary;
                         }
                     }
                 }
@@ -30224,6 +31466,7 @@ fn rebuild_script_from_hitboxes(
                 | ExcuteStmt::MotionModuleSetRate(_)
                 | ExcuteStmt::MotionModuleSetHelperCalculation(_)
                 | ExcuteStmt::MotionModuleSetRatePartial(_)
+                | ExcuteStmt::MotionModuleSetFramePartial(_)
                 | ExcuteStmt::ClrSpeed(_)
                 | ExcuteStmt::SetAir
                 | ExcuteStmt::ChangeKinetic(_)
@@ -30791,6 +32034,9 @@ fn clear_move_state(state: &mut crate::data::AppState) {
     state
         .expression_motion_module_set_rate_partial_pristine
         .clear();
+    state
+        .expression_motion_module_set_frame_partial_pristine
+        .clear();
     state.acmd_source = String::new();
     state.loaded_body.clear();
 }
@@ -30832,6 +32078,7 @@ fn nothing_to_load_with_kinetics(
     motion_module_set_rate: usize,
     motion_module_set_helper_calculation: usize,
     motion_module_set_rate_partial: usize,
+    motion_module_set_frame_partial: usize,
 ) -> Option<String> {
     if hitboxes == 0
         && effects == 0
@@ -30859,11 +32106,12 @@ fn nothing_to_load_with_kinetics(
         && motion_module_set_rate == 0
         && motion_module_set_helper_calculation == 0
         && motion_module_set_rate_partial == 0
+        && motion_module_set_frame_partial == 0
     {
         return Some(
             "Capture has no hitbox, effect, hurtbox, sound, expression, facing-reversal, speed, \
              direct-speed, speed-addition, correction, catch-stop, motion-frame adjustment, \
-             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, WorkModule flag, WorkModule transition-term, WorkModule increment, WorkModule value-set, clear-speed-all, ground-friction, MotionModule::set_rate, MotionModule::set_helper_calculation or MotionModule::set_rate_partial lines for this move yet."
+             CLR_SPEED, SET_AIR, change_kinetic, kinetic-energy, kinetic-vector, WorkModule flag, WorkModule transition-term, WorkModule increment, WorkModule value-set, clear-speed-all, ground-friction, MotionModule::set_rate, MotionModule::set_helper_calculation MotionModule::set_rate_partial or MotionModule::set_frame_partial lines for this move yet."
                 .into(),
         );
     }
@@ -30916,6 +32164,7 @@ fn nothing_to_load(
         0,
         0,
         0,
+        0,
     )
 }
 
@@ -30942,23 +32191,427 @@ fn compact_source_field_width_for_text(text_width: f32) -> f32 {
     )
 }
 
-/// Edit one camera/rumble source token while preserving its authored spelling for export.
-fn expression_token_edit(
+struct ExpressionSelectorOption {
+    token: &'static str,
+    label: &'static str,
+    aliases: &'static [&'static str],
+}
+
+/// A small offline fallback keeps the picker useful before ParamLabels.csv finishes loading.
+/// When labels are available, [`rumble_kind_candidates`] adds every `rbkind_` entry as well.
+const COMMON_RUMBLE_KIND_NAMES: &[&str] = &[
+    "rbkind_attacks",
+    "rbkind_attackss",
+    "rbkind_attackm",
+    "rbkind_attackl",
+    "rbkind_nohits",
+    "rbkind_nohitl",
+    "rbkind_walk",
+    "rbkind_loop",
+    "rbkind_nohitm",
+];
+
+fn expression_call_title(call: &crate::data::ExpressionCall) -> &'static str {
+    match call {
+        crate::data::ExpressionCall::RumbleHit { .. } => "Hit rumble",
+        crate::data::ExpressionCall::Quake { .. } => "Camera shake",
+        crate::data::ExpressionCall::FtAttackAbsCameraQuake { .. } => "Throw shake",
+        crate::data::ExpressionCall::ControlModuleSetRumble { .. } => "Timed rumble",
+    }
+}
+
+const EXPRESSION_QUAKE_KIND_OPTIONS: &[ExpressionSelectorOption] = &[
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_NONE",
+        label: "None",
+        aliases: &["0"],
+    },
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_S_HALF",
+        label: "Small · half",
+        aliases: &["2"],
+    },
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_S",
+        label: "Small",
+        aliases: &["3"],
+    },
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_M",
+        label: "Medium",
+        aliases: &["5"],
+    },
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_L",
+        label: "Large",
+        aliases: &["7"],
+    },
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_MORE_LARGE",
+        label: "Very large",
+        aliases: &["9"],
+    },
+    ExpressionSelectorOption {
+        token: "*CAMERA_QUAKE_KIND_MAX",
+        label: "Maximum",
+        aliases: &["14"],
+    },
+];
+
+const EXPRESSION_ATTACK_ABS_KIND_OPTIONS: &[ExpressionSelectorOption] = &[
+    ExpressionSelectorOption {
+        token: "*FIGHTER_ATTACK_ABSOLUTE_KIND_THROW",
+        label: "Throw",
+        aliases: &["0"],
+    },
+    ExpressionSelectorOption {
+        token: "*FIGHTER_ATTACK_ABSOLUTE_KIND_CATCH",
+        label: "Catch",
+        aliases: &["1"],
+    },
+    ExpressionSelectorOption {
+        token: "*FIGHTER_ATTACK_ABSOLUTE_KIND_THROW_MEWTWO",
+        label: "Mewtwo throw",
+        aliases: &["2"],
+    },
+];
+
+const EXPRESSION_TARGET_OPTIONS: &[ExpressionSelectorOption] = &[ExpressionSelectorOption {
+    token: "*BATTLE_OBJECT_ID_INVALID as u32",
+    label: "Default target",
+    aliases: &["0", "4294967295"],
+}];
+
+/// A known expression token is edited as a readable selector. Unknown tokens stay available as
+/// a small source-text fallback so a project-local constant is never silently replaced.
+fn expression_selector(
     ui: &mut Ui,
     field: &str,
     token: &mut String,
     salt: (usize, usize),
+    options: &[ExpressionSelectorOption],
+    hint: &str,
 ) -> bool {
-    expression_token_edit_with_hint(
-        ui,
-        field,
-        token,
-        salt,
-        "Authored source token. It is kept verbatim so named constants and casts survive export and source sync.",
-    )
+    let before = token.clone();
+    let current_option = options
+        .iter()
+        .find(|option| option.token == token.as_str() || option.aliases.contains(&token.as_str()));
+    let known = current_option.is_some();
+    let mode_id = ui.make_persistent_id(("expression_custom_mode", salt.0, salt.1));
+    let mut custom_mode: bool = ui.data(|data| data.get_temp(mode_id).unwrap_or(!known));
+    if !known {
+        custom_mode = true;
+    }
+    let selected_label = current_option
+        .map(|option| {
+            if option.token == token.as_str() {
+                option.label.to_string()
+            } else {
+                format!("{} · {}", option.label, token.trim())
+            }
+        })
+        .unwrap_or_else(|| token.trim().to_string());
+    let selected = if custom_mode && known {
+        format!("Custom · {selected_label}")
+    } else {
+        selected_label
+    };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(field).small().color(Color32::from_gray(170)))
+            .on_hover_text(hint);
+        let mut selected_known = false;
+        egui::ComboBox::from_id_salt(("expression_selector", salt.0, salt.1))
+            .selected_text(if selected.is_empty() {
+                "Choose…"
+            } else {
+                &selected
+            })
+            .show_ui(ui, |ui| {
+                if !known && !token.trim().is_empty() {
+                    let current = token.clone();
+                    ui.selectable_value(token, current.clone(), format!("Custom · {current}"));
+                    ui.separator();
+                }
+                if ui.selectable_label(custom_mode, "Custom source…").clicked() {
+                    custom_mode = true;
+                }
+                ui.separator();
+                for option in options {
+                    if ui
+                        .selectable_value(token, option.token.to_string(), option.label)
+                        .clicked()
+                    {
+                        selected_known = true;
+                    }
+                }
+            });
+        if selected_known {
+            custom_mode = false;
+        }
+        if custom_mode {
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(token)
+                        .id_salt(("expression_custom", salt.0, salt.1))
+                        .desired_width(150.0)
+                        .hint_text("custom source"),
+                )
+                .on_hover_text(hint)
+                .changed();
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(mode_id, custom_mode));
+    changed || *token != before
 }
 
-fn expression_token_edit_with_hint(
+/// The short label for a native `rbkind_` name. These are complete game-defined presets, not
+/// independent intensity controls. The exact native name remains available as a tooltip.
+fn rumble_kind_display(name: &str) -> String {
+    match name {
+        "rbkind_attacks" => "Attack · small".to_string(),
+        "rbkind_attackss" => "Attack · very small".to_string(),
+        "rbkind_attackm" => "Attack · medium".to_string(),
+        "rbkind_attackl" => "Attack · large".to_string(),
+        "rbkind_nohits" => "No hit · small".to_string(),
+        "rbkind_nohitl" => "No hit · large".to_string(),
+        "rbkind_walk" => "Walk".to_string(),
+        "rbkind_loop" => "Loop".to_string(),
+        "rbkind_nohitm" => "No hit · medium".to_string(),
+        other => {
+            let readable = other
+                .strip_prefix("rbkind_")
+                .unwrap_or(other)
+                .replace('_', " ");
+            readable
+        }
+    }
+}
+
+/// All labeled rumble patterns, with a few common offline fallbacks. This is intentionally a
+/// searchable suggestion list rather than a validator: a project can still type a custom
+/// `Hash40` expression when its pattern is not in the label dump.
+fn rumble_kind_candidates(labels: &HashMap<u64, String>) -> Vec<String> {
+    let mut out: Vec<String> = COMMON_RUMBLE_KIND_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    out.extend(
+        labels
+            .values()
+            .filter(|label| label.starts_with("rbkind_"))
+            .cloned(),
+    );
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn rumble_kind_source_token(name: &str) -> String {
+    format!("Hash40::new(\"{name}\")")
+}
+
+/// Resolve the name represented by a rumble source token when the label dump knows it. Raw
+/// Hash40 tokens are recognized too, so a captured call does not become a confusing custom field
+/// merely because the parser preserved its raw spelling.
+fn rumble_kind_name<'a>(token: &str, candidates: &'a [String]) -> Option<&'a str> {
+    let trimmed = token.trim();
+    if let Some(name) = trimmed
+        .strip_prefix("Hash40::new(\"")
+        .and_then(|value| value.strip_suffix("\")"))
+    {
+        return candidates
+            .iter()
+            .find(|candidate| candidate.as_str() == name)
+            .map(String::as_str);
+    }
+    let raw = trimmed
+        .strip_prefix("Hash40::new_raw(")
+        .and_then(|value| value.strip_suffix(')'))
+        .map(|value| value.trim().replace('_', ""))?;
+    let value = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .or_else(|| raw.parse::<u64>().ok())?;
+    candidates
+        .iter()
+        .find(|candidate| hash40::hash40(candidate).0 == value)
+        .map(String::as_str)
+}
+
+/// Searchable selector for the `Hash40` pattern shared by both rumble APIs. It keeps custom
+/// source text as an explicit mode, so selecting a label never overwrites an unusual token by
+/// accident and the list does not become a wall of unrelated textboxes.
+fn rumble_kind_picker(
+    ui: &mut Ui,
+    field: &str,
+    token: &mut String,
+    salt: (usize, usize),
+    candidates: &[String],
+    hint: &str,
+) -> bool {
+    let before = token.clone();
+    let known_name = rumble_kind_name(token, candidates).map(str::to_owned);
+    let known = known_name.is_some();
+    let mode_id = ui.make_persistent_id(("rumble_custom_mode", salt.0, salt.1));
+    let mut custom_mode: bool = ui.data(|data| data.get_temp(mode_id).unwrap_or(!known));
+    if !known {
+        custom_mode = true;
+    }
+    let selected_label = known_name
+        .as_deref()
+        .map(rumble_kind_display)
+        .unwrap_or_else(|| token.trim().to_string());
+    let selected = if custom_mode && known {
+        format!("Custom · {selected_label}")
+    } else {
+        selected_label
+    };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(field).small().color(Color32::from_gray(170)))
+            .on_hover_text(hint);
+        let mut selected_known = false;
+        egui::ComboBox::from_id_salt(("rumble_selector", salt.0, salt.1))
+            .selected_text(if selected.is_empty() {
+                "Choose…"
+            } else {
+                &selected
+            })
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(300.0);
+                if !known && !token.trim().is_empty() {
+                    let current = token.clone();
+                    ui.selectable_value(token, current.clone(), format!("Custom · {current}"));
+                    ui.separator();
+                }
+                if ui.selectable_label(custom_mode, "Custom source…").clicked() {
+                    custom_mode = true;
+                }
+                ui.separator();
+                let filter_id = ui.make_persistent_id(("rumble_filter", salt.0, salt.1));
+                let mut filter: String =
+                    ui.data(|data| data.get_temp(filter_id).unwrap_or_default());
+                let filter_response = ui.add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text("type to filter patterns…")
+                        .desired_width(f32::INFINITY),
+                );
+                if filter_response.changed() {
+                    ui.data_mut(|data| data.insert_temp(filter_id, filter.clone()));
+                }
+                let matches = matching_candidates(candidates, &filter);
+                ui.weak(format!(
+                    "{} of {} labeled patterns",
+                    matches.len(),
+                    candidates.len()
+                ));
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        if matches.is_empty() {
+                            ui.weak("No labeled pattern matches that filter.");
+                        }
+                        for candidate in matches {
+                            let response = ui.selectable_label(
+                                known_name.as_deref() == Some(candidate.as_str()),
+                                rumble_kind_display(candidate),
+                            );
+                            let response = response.on_hover_text(candidate);
+                            if response.clicked() {
+                                *token = rumble_kind_source_token(candidate);
+                                selected_known = true;
+                            }
+                        }
+                    });
+            });
+        if selected_known {
+            custom_mode = false;
+        }
+        if custom_mode {
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(token)
+                        .id_salt(("rumble_custom", salt.0, salt.1))
+                        .desired_width(150.0)
+                        .hint_text("custom source"),
+                )
+                .on_hover_text(hint)
+                .changed();
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(mode_id, custom_mode));
+    changed || *token != before
+}
+
+/// Numeric expression arguments use a drag control when they are real numbers. A malformed or
+/// symbolic token falls back to source text instead of being coerced into a guessed value.
+fn expression_integer_edit(
+    ui: &mut Ui,
+    field: &str,
+    token: &mut String,
+    salt: (usize, usize),
+    hint: &str,
+) -> bool {
+    let Ok(mut number) = token.trim().parse::<i64>() else {
+        return expression_source_edit(ui, field, token, salt, hint);
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(field).small().color(Color32::from_gray(170)))
+            .on_hover_text(hint);
+        let suffix = if field == "Duration" {
+            if number == 0 {
+                " · preset"
+            } else {
+                " frames"
+            }
+        } else {
+            ""
+        };
+        if ui
+            .add(egui::DragValue::new(&mut number).speed(1.0).suffix(suffix))
+            .on_hover_text(hint)
+            .changed()
+        {
+            *token = number.to_string();
+            true
+        } else {
+            false
+        }
+    })
+    .inner
+}
+
+/// A boolean expression argument is a checkbox when the source is a normal bool, with the same
+/// source fallback used for unusual project expressions.
+fn expression_bool_edit(
+    ui: &mut Ui,
+    field: &str,
+    token: &mut String,
+    salt: (usize, usize),
+    hint: &str,
+) -> bool {
+    let Ok(mut checked) = token.trim().parse::<bool>() else {
+        return expression_source_edit(ui, field, token, salt, hint);
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut checked, field)
+            .on_hover_text(hint)
+            .changed()
+        {
+            *token = checked.to_string();
+            true
+        } else {
+            false
+        }
+    })
+    .inner
+}
+
+fn expression_source_edit(
     ui: &mut Ui,
     field: &str,
     token: &mut String,
@@ -31043,7 +32696,7 @@ fn sound_name_picker(
             if field.changed() {
                 ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
             }
-            let matches = matching_sounds(candidates, &filter);
+            let matches = matching_candidates(candidates, &filter);
             ui.weak(format!("{} of {}", matches.len(), candidates.len()));
             ui.separator();
             egui::ScrollArea::vertical()
@@ -31072,7 +32725,7 @@ fn sound_name_picker(
 ///
 /// Capped, because the unfiltered list is hundreds of entries and egui builds every row it is
 /// handed. The cap is generous enough that a real search is never truncated.
-fn matching_sounds<'a>(candidates: &'a [String], query: &str) -> Vec<&'a String> {
+fn matching_candidates<'a>(candidates: &'a [String], query: &str) -> Vec<&'a String> {
     let query = query.to_lowercase();
     let tokens: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
     candidates
@@ -32646,6 +34299,155 @@ mod live_effect_capture_tests {
         );
     }
 
+    #[test]
+    fn duplicate_expression_identities_are_not_given_an_overbroad_live_rule() {
+        let pristine = vec![
+            crate::data::ExpressionEvent {
+                frame: 5,
+                site: 0,
+                call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+            },
+            crate::data::ExpressionEvent {
+                frame: 5,
+                site: 1,
+                call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+            },
+        ];
+        let shown = vec![
+            crate::data::ExpressionEvent {
+                frame: 5,
+                site: 0,
+                call: crate::data::ExpressionCall::Quake { kind: "7".into() },
+            },
+            pristine[1].clone(),
+        ];
+        let captures = vec![
+            expression_capture("QUAKE", 4.0, vec![A::Int(5)]),
+            expression_capture("QUAKE", 4.0, vec![A::Int(5)]),
+        ];
+
+        let (rules, unrepresentable) = VisionaryApp::expression_rules_for(
+            hash40::hash40("throw_hi").0,
+            &captures,
+            &pristine,
+            &shown,
+        );
+
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
+    fn a_structural_expression_move_suppresses_the_old_call_and_injects_the_new_frame() {
+        let pristine = vec![crate::data::ExpressionEvent {
+            frame: 5,
+            site: 0,
+            call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+        }];
+        let shown = vec![crate::data::ExpressionEvent {
+            frame: 8,
+            site: 0,
+            call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+        }];
+        let captures = vec![expression_capture("QUAKE", 4.0, vec![A::Int(5)])];
+
+        let (rules, unrepresentable) = VisionaryApp::expression_rules_for(
+            hash40::hash40("throw_hi").0,
+            &captures,
+            &pristine,
+            &shown,
+        );
+
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 2);
+        let old = rules
+            .iter()
+            .find(|rule| rule.suppress)
+            .expect("old expression call must be suppressed");
+        assert_eq!(old.func.as_deref(), Some("QUAKE"));
+        assert_eq!(
+            old.hitbox_id,
+            Some(crate::game_link::expression_key("QUAKE", &[A::Int(5)]))
+        );
+        let added = rules
+            .iter()
+            .find(|rule| rule.inject.is_some())
+            .expect("moved expression call must be injected");
+        assert_eq!(
+            added.inject.as_ref().unwrap().frame,
+            VisionaryApp::script_to_motion_frame(8)
+        );
+        assert_eq!(added.inject.as_ref().unwrap().args, vec![A::Int(5)]);
+    }
+
+    #[test]
+    fn a_structural_expression_addition_uses_typed_native_arguments() {
+        let shown = vec![crate::data::ExpressionEvent {
+            frame: 6,
+            site: 0,
+            call: crate::data::ExpressionCall::RumbleHit {
+                kind: "Hash40::new(\"rbkind_attackm\")".into(),
+                unk: "0".into(),
+            },
+        }];
+        let (rules, unrepresentable) =
+            VisionaryApp::expression_rules_for(hash40::hash40("throw_hi").0, &[], &[], &shown);
+
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one expression injection, got {}", rules.len());
+        };
+        assert_eq!(rule.category, crate::game_link::CAT_EXPRESSION);
+        assert!(!rule.suppress);
+        assert_eq!(rule.func.as_deref(), Some("RUMBLE_HIT"));
+        assert_eq!(
+            rule.inject.as_ref().unwrap().args,
+            vec![A::Hash(hash40::hash40("rbkind_attackm").0), A::Int(0)]
+        );
+    }
+
+    #[test]
+    fn a_direct_rumble_default_target_selector_is_live_typed() {
+        let shown = vec![crate::data::ExpressionEvent {
+            frame: 6,
+            site: 0,
+            call: crate::data::ExpressionCall::ControlModuleSetRumble {
+                receiver: "agent.module_accessor".into(),
+                kind: "Hash40::new(\"rbkind_attackm\")".into(),
+                duration: "0".into(),
+                looped: "false".into(),
+                target: "*BATTLE_OBJECT_ID_INVALID as u32".into(),
+            },
+        }];
+        let (rules, unrepresentable) =
+            VisionaryApp::expression_rules_for(hash40::hash40("throw_hi").0, &[], &[], &shown);
+
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(
+            rules[0].inject.as_ref().unwrap().args,
+            vec![
+                A::Hash(hash40::hash40("rbkind_attackm").0),
+                A::Int(0),
+                A::Bool(false),
+                A::Int(u32::MAX as i64),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expression_removal_without_a_measured_donor_stays_live_safe() {
+        let pristine = vec![crate::data::ExpressionEvent {
+            frame: 5,
+            site: 0,
+            call: crate::data::ExpressionCall::Quake { kind: "5".into() },
+        }];
+        let (rules, unrepresentable) =
+            VisionaryApp::expression_rules_for(hash40::hash40("throw_hi").0, &[], &pristine, &[]);
+
+        assert_eq!(unrepresentable, 1);
+        assert!(rules.is_empty());
+    }
+
     // ── D1f: sound capture and live rules ────────────────────────────────────
 
     fn sound_capture(func: &str, frame: f32, args: Vec<A>) -> CaptureLine {
@@ -32897,6 +34699,18 @@ mod live_effect_capture_tests {
         }
     }
 
+    fn sound_event_with_tail(
+        site: usize,
+        frame: u32,
+        func: &str,
+        sounds: &[&str],
+        tail: &str,
+    ) -> crate::data::SoundEvent {
+        let mut event = sound_event(site, frame, func, sounds);
+        event.call.tail = Some(tail.to_string());
+        event
+    }
+
     /// A renamed sound sends a rule keyed on the sound the SCRIPT names, carrying the new one.
     ///
     /// The single most important property here and the one nothing else can observe. The rule is
@@ -32966,6 +34780,136 @@ mod live_effect_capture_tests {
         );
     }
 
+    /// Removing an earlier call must not make the later source call inherit its frame rule.
+    ///
+    /// The source ordinal changes when the first call disappears, so a site-only diff would
+    /// either leave the removed base sound active or silence the later call. The live structural
+    /// path aligns the complete events and suppresses only the unmatched pristine call.
+    #[test]
+    fn removing_a_sound_suppresses_only_the_removed_call() {
+        let pristine = vec![
+            sound_event(0, 6, "PLAY_SE", &["se_kirby_swing_l"]),
+            sound_event(1, 9, "STOP_SE", &["se_kirby_swing_l"]),
+        ];
+        // The surviving call is now site 0 after the first line is removed.
+        let shown = vec![sound_event(0, 9, "STOP_SE", &["se_kirby_swing_l"])];
+
+        let rules = VisionaryApp::sound_rules_for(0x99, &pristine, &shown);
+
+        let [rule] = &rules[..] else {
+            panic!(
+                "only the removed call should need a live rule, got {}",
+                rules.len()
+            );
+        };
+        assert!(rule.suppress);
+        assert_eq!(rule.func.as_deref(), Some("PLAY_SE"));
+        assert_eq!(rule.hitbox_id, Some(effect_name_hash("se_kirby_swing_l")));
+        assert_eq!(
+            rule.frame_start,
+            Some(VisionaryApp::script_to_motion_frame(6) - 0.5)
+        );
+        assert_eq!(
+            rule.frame_end,
+            Some(VisionaryApp::script_to_motion_frame(6) + 0.5)
+        );
+        assert!(rule.inject.is_none());
+    }
+
+    /// Moving a flat call is represented as suppression at the old frame plus injection at the
+    /// new frame, so the original base call cannot play alongside the edited one.
+    #[test]
+    fn moving_a_sound_suppresses_the_old_call_and_injects_the_new_one() {
+        let pristine = vec![sound_event(0, 6, "PLAY_SE", &["se_kirby_swing_l"])];
+        let shown = vec![sound_event(0, 10, "PLAY_SE", &["se_kirby_swing_l"])];
+
+        let rules = VisionaryApp::sound_rules_for(0x99, &pristine, &shown);
+
+        assert_eq!(
+            rules.len(),
+            2,
+            "a move needs one suppress and one inject rule"
+        );
+        let suppressed = rules
+            .iter()
+            .find(|rule| rule.suppress)
+            .expect("the old call must be suppressed");
+        assert_eq!(suppressed.func.as_deref(), Some("PLAY_SE"));
+        assert_eq!(
+            suppressed.frame_start,
+            Some(VisionaryApp::script_to_motion_frame(6) - 0.5)
+        );
+        let injected = rules
+            .iter()
+            .find(|rule| rule.inject.is_some())
+            .expect("the moved call must be injected");
+        let injection = injected.inject.as_ref().expect("injection payload");
+        assert_eq!(injection.command.as_deref(), Some("PLAY_SE"));
+        assert_eq!(injection.frame, VisionaryApp::script_to_motion_frame(10));
+        assert_eq!(
+            injection.args,
+            vec![crate::game_link::LuaArgWire::Hash(effect_name_hash(
+                "se_kirby_swing_l"
+            ))]
+        );
+    }
+
+    /// Repeated calls on one frame get distinct injection discriminators, even when their full
+    /// payloads are identical.
+    #[test]
+    fn added_identical_sounds_are_injected_independently() {
+        let shown = vec![
+            sound_event(0, 6, "PLAY_SE", &["se_kirby_swing_l"]),
+            sound_event(1, 6, "PLAY_SE", &["se_kirby_swing_l"]),
+        ];
+
+        let rules = VisionaryApp::sound_rules_for(0x99, &[], &shown);
+
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|rule| rule.inject.is_some()));
+        assert_ne!(rules[0].hitbox_id, rules[1].hitbox_id);
+        assert_eq!(
+            rules[0].inject.as_ref().unwrap().args,
+            rules[1].inject.as_ref().unwrap().args
+        );
+    }
+
+    /// Structural injection keeps the editor's sound arity table: paired footsteps have two
+    /// hashes, while `SET_PLAY_INHIVIT` has one hash and a numeric suppression duration.
+    #[test]
+    fn structural_sound_injection_preserves_typed_macro_arguments() {
+        let shown = vec![
+            sound_event(0, 12, "PLAY_STEP_FLIPPABLE", &["se_left", "se_right"]),
+            sound_event_with_tail(1, 15, "SET_PLAY_INHIVIT", &["se_left"], "5"),
+        ];
+
+        let rules = VisionaryApp::sound_rules_for(0x99, &[], &shown);
+
+        assert_eq!(rules.len(), 2);
+        let footsteps = rules
+            .iter()
+            .find(|rule| rule.func.as_deref() == Some("PLAY_STEP_FLIPPABLE"))
+            .expect("paired footsteps injection");
+        assert_eq!(
+            footsteps.inject.as_ref().unwrap().args,
+            vec![
+                crate::game_link::LuaArgWire::Hash(effect_name_hash("se_left")),
+                crate::game_link::LuaArgWire::Hash(effect_name_hash("se_right")),
+            ]
+        );
+        let inhibit = rules
+            .iter()
+            .find(|rule| rule.func.as_deref() == Some("SET_PLAY_INHIVIT"))
+            .expect("inhibit injection");
+        assert_eq!(
+            inhibit.inject.as_ref().unwrap().args,
+            vec![
+                crate::game_link::LuaArgWire::Hash(effect_name_hash("se_left")),
+                crate::game_link::LuaArgWire::Int(5),
+            ]
+        );
+    }
+
     /// An unedited move sends no rules at all.
     ///
     /// The paired positive for the assertions above: without it, a `sound_rules_for` that always
@@ -32980,11 +34924,15 @@ mod live_effect_capture_tests {
         assert!(VisionaryApp::sound_rules_for(0x99, &events, &events).is_empty());
     }
 
-    /// A site with no baseline is left alone rather than sent as a rule against a guessed key.
+    /// A newly added call with no pristine counterpart is sent as a typed injection.
     #[test]
-    fn a_sound_site_with_no_baseline_sends_no_rule() {
+    fn a_sound_site_with_no_baseline_is_injected() {
         let shown = vec![sound_event(7, 6, "PLAY_SE", &["se_common_swing_m"])];
-        assert!(VisionaryApp::sound_rules_for(0x99, &[], &shown).is_empty());
+        let [rule] = &VisionaryApp::sound_rules_for(0x99, &[], &shown)[..] else {
+            panic!("the added sound should produce one injection");
+        };
+        assert!(rule.inject.is_some());
+        assert!(!rule.suppress);
     }
 
     /// Adopting a live capture sets the baseline equal to what it adopted.
@@ -33140,6 +35088,32 @@ mod live_effect_capture_tests {
         assert_eq!(got, vec!["se_common_smash_start".to_string()]);
     }
 
+    #[test]
+    fn rumble_picker_uses_labeled_patterns_and_resolves_raw_hash_tokens() {
+        let labels: HashMap<u64, String> = [
+            (1, "rbkind_attackm".to_string()),
+            (2, "rbkind_special_large".to_string()),
+            (3, "se_common_smash_start".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let got = rumble_kind_candidates(&labels);
+
+        assert!(got.contains(&"rbkind_attackm".to_string()));
+        assert!(got.contains(&"rbkind_special_large".to_string()));
+        assert!(!got.contains(&"se_common_smash_start".to_string()));
+        assert_eq!(
+            rumble_kind_name(
+                &format!(
+                    "Hash40::new_raw({:#x})",
+                    hash40::hash40("rbkind_special_large").0
+                ),
+                &got,
+            ),
+            Some("rbkind_special_large")
+        );
+    }
+
     /// A capture carrying only sounds still loads.
     ///
     /// The walk cycle: no hitbox, no effect, two footsteps. This is the case the guard used to
@@ -33288,6 +35262,12 @@ mod live_effect_capture_tests {
                 .is_empty(),
             "expression_motion_module_set_rate_partial_pristine"
         );
+        assert!(
+            state
+                .expression_motion_module_set_frame_partial_pristine
+                .is_empty(),
+            "expression_motion_module_set_frame_partial_pristine"
+        );
         assert!(state.hurtboxes_pristine.0.is_empty(), "hurtboxes_pristine");
         assert!(
             state.attack_mods_pristine.is_empty(),
@@ -33378,8 +35358,9 @@ mod live_effect_capture_tests {
         .map(|s| s.to_string())
         .collect();
 
-        let names =
-            |q: &str| -> Vec<String> { matching_sounds(&all, q).into_iter().cloned().collect() };
+        let names = |q: &str| -> Vec<String> {
+            matching_candidates(&all, q).into_iter().cloned().collect()
+        };
 
         // A token from the middle of the name.
         assert_eq!(names("swing"), vec!["se_kirby_swing_l".to_string()]);
@@ -33406,8 +35387,8 @@ mod live_effect_capture_tests {
     #[test]
     fn the_sound_filter_caps_an_unfiltered_list() {
         let all: Vec<String> = (0..1000).map(|i| format!("se_kirby_{i:04}")).collect();
-        assert_eq!(matching_sounds(&all, "").len(), 300);
-        assert_eq!(matching_sounds(&all, "se_kirby_0001").len(), 1);
+        assert_eq!(matching_candidates(&all, "").len(), 300);
+        assert_eq!(matching_candidates(&all, "se_kirby_0001").len(), 1);
     }
 
     /// What frame window a rename of Kirby's walk footstep actually goes out with.
@@ -34453,6 +36434,133 @@ mod live_effect_capture_tests {
         }];
         let (rules, unrepresentable) =
             VisionaryApp::motion_module_set_rate_partial_rules_for_category(
+                motion,
+                &malformed_capture,
+                &pristine,
+                &edited,
+                &[],
+            );
+        assert!(rules.is_empty());
+        assert_eq!(unrepresentable, 1);
+    }
+
+    #[test]
+    fn a_captured_motion_module_set_frame_partial_becomes_an_editable_game_statement() {
+        let motion = hash40::hash40("attack_air_n").0;
+        let captures = vec![CaptureLine {
+            kind: 6,
+            motion,
+            frame: 5.0,
+            func: "MotionModule::set_frame_partial".into(),
+            args: vec![A::Int(5), A::Num(2.0), A::Bool(true)],
+            run: 1,
+        }];
+        let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
+        assert_eq!(
+            script.to_motion_module_set_frame_partial_events(),
+            vec![crate::data::MotionModuleSetFramePartialEvent {
+                frame: 6,
+                call: crate::data::MotionModuleSetFramePartialCall {
+                    part_kind: "5".into(),
+                    frame: 2.0,
+                    sync: Some(true),
+                },
+                site: 0,
+            }]
+        );
+        let exported = crate::acmd::export_acmd_source(&script, "pacman", "attack_air_n");
+        assert!(exported
+            .contains("MotionModule::set_frame_partial(agent.module_accessor, 5, 2.0, true);"));
+    }
+
+    #[test]
+    fn motion_module_set_frame_partial_live_rules_key_the_pristine_part_and_seek() {
+        let motion = hash40::hash40("appeal_lw_l").0;
+        let captures = vec![CaptureLine {
+            kind: 9,
+            motion,
+            frame: 7.0,
+            func: "MotionModule::set_frame_partial".into(),
+            args: vec![A::Int(5), A::Num(2.0), A::Bool(true)],
+            run: 1,
+        }];
+        let pristine = crate::acmd::parse_expression_script(
+            r#"unsafe extern "C" fn expression_appeallwl(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 8.0);
+    if macros::is_excute(agent) {
+        MotionModule::set_frame_partial(agent.module_accessor, *FIGHTER_PACMAN_MOTION_PART_SET_KIND_MATERIAL, 2);
+    }
+}
+"#,
+        )
+        .to_motion_module_set_frame_partial_events();
+        let mut edited = pristine.clone();
+        edited[0].call.frame = 4.0;
+        edited[0].call.sync = Some(false);
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_frame_partial_rules_for_category(
+                motion,
+                &captures,
+                &pristine,
+                &edited,
+                &[],
+            );
+        assert_eq!(unrepresentable, 0);
+        let [rule] = &rules[..] else {
+            panic!("expected one partial-frame rule, got {}", rules.len());
+        };
+        assert_eq!(
+            rule.category,
+            crate::game_link::CAT_MOTION_MODULE_SET_FRAME_PARTIAL
+        );
+        assert_eq!(
+            rule.hitbox_id,
+            Some(crate::game_link::numeric_point_key(
+                crate::data::MotionModuleSetFramePartialCall::FUNC,
+                &[5.0, 2.0]
+            ))
+        );
+        assert_eq!(
+            rule.overrides.as_ref().unwrap().motion_module_frame_partial,
+            Some(4.0)
+        );
+        assert_eq!(
+            rule.overrides
+                .as_ref()
+                .unwrap()
+                .motion_module_frame_partial_sync,
+            Some(false)
+        );
+
+        // Seeking an omitted-sync source call does not manufacture a boolean override when its
+        // native default already matches the capture.
+        let mut seek_only = pristine.clone();
+        seek_only[0].call.frame = 6.0;
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_frame_partial_rules_for_category(
+                motion,
+                &captures,
+                &pristine,
+                &seek_only,
+                &[],
+            );
+        assert_eq!(unrepresentable, 0);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0]
+                .overrides
+                .as_ref()
+                .unwrap()
+                .motion_module_frame_partial_sync,
+            None
+        );
+
+        let malformed_capture = vec![CaptureLine {
+            args: vec![A::Int(5), A::Num(2.0), A::Int(1)],
+            ..captures[0].clone()
+        }];
+        let (rules, unrepresentable) =
+            VisionaryApp::motion_module_set_frame_partial_rules_for_category(
                 motion,
                 &malformed_capture,
                 &pristine,
@@ -36326,6 +38434,8 @@ mod live_effect_capture_tests {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
@@ -36445,6 +38555,8 @@ mod live_effect_capture_tests {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
@@ -38118,35 +40230,35 @@ mod live_effect_capture_tests {
             );
         }
         let direct_kinetic = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         );
         assert!((direct_kinetic - none - band).abs() < 0.01);
         let motion_module_set_rate = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
         );
         assert!((motion_module_set_rate - none - band).abs() < 0.01);
         let motion_module_set_helper_calculation = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0,
         );
         assert!((motion_module_set_helper_calculation - none - band).abs() < 0.01);
         let motion_module_set_rate_partial = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0,
         );
         assert!((motion_module_set_rate_partial - none - band).abs() < 0.01);
         let work_flag = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
         );
         assert!((work_flag - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         let work_transition_term = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
         );
         assert!((work_transition_term - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         let work_module_inc_int = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
         );
         assert!((work_module_inc_int - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         let work_module_set = timeline_content_height_with_change_kinetic(
-            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
         );
         assert!((work_module_set - none - (4.0 + timeline_thin_row())).abs() < 0.01);
         // And they stack rather than sharing space.
@@ -38475,6 +40587,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &[],
+                &[],
             ),
             127
         );
@@ -38504,6 +40617,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &motion_module_set_rate,
+                &[],
                 &[],
                 &[],
                 &[],
@@ -38546,6 +40660,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &[],
+                &[],
             ),
             137
         );
@@ -38580,6 +40695,7 @@ mod live_effect_capture_tests {
                 &[],
                 &[],
                 &motion_module_set_rate_partial,
+                &[],
                 &[],
                 &[],
                 &[],

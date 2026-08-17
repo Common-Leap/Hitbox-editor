@@ -493,6 +493,14 @@ pub const SEARCH_DEFAULT_HIT_STATUS: &str = "HIT_STATUS_MASK_ALL";
 /// trail stops here". A trail read from a script keeps its own value and never reaches this.
 pub const TRAIL_OFF_DEFAULT: f32 = 0.0;
 
+/// The `EFFECT_OFF_KIND` booleans used when the editor ends an effect no script closed.
+///
+/// `(fade, detach)`. Also a choice rather than a discovered fact, but unlike the trail argument
+/// this one has a plurality behind it: 2852 of the 6918 corpus kills write `false, true`, more
+/// than any other pair. It is the value the export has always written, kept here so a call read
+/// from a script — which now carries its own — cannot silently fall back to it.
+pub const EFFECT_OFF_KIND_DEFAULT: (bool, bool) = (false, true);
+
 /// The `CATCH` arguments that are not editable properties of a grab box.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CatchExtras {
@@ -1944,6 +1952,12 @@ pub enum ExcuteStmt {
     /// The authored part token remains source-owned because the public corpus uses fighter- and
     /// weapon-specific constants. The live surface keys it by the captured numeric part kind.
     MotionModuleSetRatePartial(MotionModuleSetRatePartialCall),
+    /// `MotionModule::set_frame_partial` — seek one partial animation to a frame.
+    ///
+    /// Same source-ownership rule as the partial-rate family above: the authored part token
+    /// stays source text and the live surface keys the call by its captured numeric part kind
+    /// and pristine seek frame.
+    MotionModuleSetFramePartial(MotionModuleSetFramePartialCall),
     /// `CLR_SPEED` — clear one named kinetic-energy reserve.
     ///
     /// The checked-in macro layer has no safe `CLR_SPEED` wrapper, so the authored kinetic ID is
@@ -2170,6 +2184,41 @@ pub struct MotionModuleSetRatePartialCall {
 
 impl MotionModuleSetRatePartialCall {
     pub const FUNC: &'static str = "MotionModule::set_rate_partial";
+}
+
+/// A parsed direct `MotionModule::set_frame_partial(receiver, part_kind, frame[, sync])` call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MotionModuleSetFramePartialCall {
+    /// Authored partial-motion kind, usually a dereferenced fighter or weapon constant.
+    pub part_kind: String,
+    /// The frame this partial animation is seeked to.
+    pub frame: f32,
+    /// The authored `sync` argument, or `None` when the call omits it.
+    ///
+    /// `None` is not "false". The corpus writes only the three-argument form, and the
+    /// version-matched Lua reader counts the arguments and supplies
+    /// [`OMITTED_SYNC`](Self::OMITTED_SYNC) when the fourth is absent — so the omission is a
+    /// spelling that has to survive export and source sync, not a value to be filled in.
+    #[serde(default)]
+    pub sync: Option<bool>,
+}
+
+impl MotionModuleSetFramePartialCall {
+    pub const FUNC: &'static str = "MotionModule::set_frame_partial";
+    /// The effective `sync` of a call that does not write one.
+    ///
+    /// Used only to decide whether an edited value can stay omitted; an omitted argument is
+    /// never emitted just because this is known.
+    pub const OMITTED_SYNC: bool = true;
+
+    /// What this call's `sync` actually is at runtime, written or not.
+    ///
+    /// The distinction the panel and the live surface need is *behavioural*, and an omitted
+    /// argument and an authored `true` behave identically. `None` and `Some(false)` must never
+    /// collapse into each other, which is what comparing `sync` directly would do.
+    pub fn effective_sync(&self) -> bool {
+        self.sync.unwrap_or(Self::OMITTED_SYNC)
+    }
 }
 
 /// A parsed direct `MotionModule::set_helper_calculation(receiver, bool)` call.
@@ -2524,6 +2573,15 @@ pub struct MotionModuleSetHelperCalculationEvent {
 pub struct MotionModuleSetRatePartialEvent {
     pub frame: u32,
     pub call: MotionModuleSetRatePartialCall,
+    #[serde(default)]
+    pub site: usize,
+}
+
+/// A resolved direct `MotionModule::set_frame_partial` point at the one-based game frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MotionModuleSetFramePartialEvent {
+    pub frame: u32,
+    pub call: MotionModuleSetFramePartialCall,
     #[serde(default)]
     pub site: usize,
 }
@@ -3044,6 +3102,16 @@ impl AcmdScript {
         let mut acc = WalkAccum::default();
         eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
         acc.motion_module_set_rate_partials
+    }
+
+    /// Flatten direct `MotionModule::set_frame_partial` calls into editable point events.
+    pub fn to_motion_module_set_frame_partial_events(
+        &self,
+    ) -> Vec<MotionModuleSetFramePartialEvent> {
+        let mut hitboxes: Vec<Hitbox> = Vec::new();
+        let mut acc = WalkAccum::default();
+        eval_stmts(&self.stmts, 0.0, &mut hitboxes, &mut acc);
+        acc.motion_module_set_frame_partials
     }
 
     /// Flatten `CLR_SPEED` calls into source-token kinetic point events.
@@ -4068,6 +4136,50 @@ impl AcmdScript {
         walk(&mut self.stmts, site, &mut 0)
     }
 
+    /// The direct `MotionModule::set_frame_partial` call an event site's ordinal refers to.
+    pub fn motion_module_set_frame_partial_stmt_mut(
+        &mut self,
+        site: usize,
+    ) -> Option<&mut MotionModuleSetFramePartialCall> {
+        fn walk<'a>(
+            stmts: &'a mut [AcmdStmt],
+            site: usize,
+            seen: &mut usize,
+        ) -> Option<&'a mut MotionModuleSetFramePartialCall> {
+            for stmt in stmts {
+                match stmt {
+                    AcmdStmt::Excute(inner) => {
+                        for call in inner.iter_mut().filter_map(|stmt| match stmt {
+                            ExcuteStmt::MotionModuleSetFramePartial(call) => Some(call),
+                            _ => None,
+                        }) {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Bare(inner) => {
+                        if let ExcuteStmt::MotionModuleSetFramePartial(call) = inner.as_mut() {
+                            if *seen == site {
+                                return Some(call);
+                            }
+                            *seen += 1;
+                        }
+                    }
+                    AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                        if let Some(found) = walk(body, site, seen) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        walk(&mut self.stmts, site, &mut 0)
+    }
+
     /// The `CLR_SPEED` call an event site's ordinal refers to.
     pub fn clr_speed_stmt_mut(&mut self, site: usize) -> Option<&mut ClrSpeedCall> {
         fn walk<'a>(
@@ -4967,6 +5079,7 @@ struct WalkAccum {
     motion_module_set_rates: Vec<MotionModuleSetRateEvent>,
     motion_module_set_helper_calculations: Vec<MotionModuleSetHelperCalculationEvent>,
     motion_module_set_rate_partials: Vec<MotionModuleSetRatePartialEvent>,
+    motion_module_set_frame_partials: Vec<MotionModuleSetFramePartialEvent>,
     clr_speeds: Vec<ClrSpeedEvent>,
     set_airs: Vec<SetAirEvent>,
     kinetic_clear_speed_alls: Vec<KineticClearSpeedAllEvent>,
@@ -5017,6 +5130,7 @@ struct WalkAccum {
     /// Site for the next direct `MotionModule::set_rate_partial`, independent of every other
     /// point event family.
     next_motion_module_set_rate_partial_site: usize,
+    next_motion_module_set_frame_partial_site: usize,
     /// Site for the next `CLR_SPEED`, independent of every other point event family.
     next_clr_speed_site: usize,
     /// Site for the next `SET_AIR`, independent of every other point event family.
@@ -5359,6 +5473,28 @@ fn count_motion_module_set_rate_partial_stmts(stmts: &[AcmdStmt]) -> usize {
             )),
             AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
                 count_motion_module_set_rate_partial_stmts(body)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Direct `MotionModule::set_frame_partial` calls in a subtree, counted in source order for
+/// loop/site resolution.
+fn count_motion_module_set_frame_partial_stmts(stmts: &[AcmdStmt]) -> usize {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            AcmdStmt::Excute(inner) => inner
+                .iter()
+                .filter(|s| matches!(s, ExcuteStmt::MotionModuleSetFramePartial(_)))
+                .count(),
+            AcmdStmt::Bare(inner) => usize::from(matches!(
+                inner.as_ref(),
+                ExcuteStmt::MotionModuleSetFramePartial(_)
+            )),
+            AcmdStmt::Loop { body, .. } | AcmdStmt::RawBlock { body, .. } => {
+                count_motion_module_set_frame_partial_stmts(body)
             }
             _ => 0,
         })
@@ -5773,6 +5909,12 @@ impl WalkAccum {
         site
     }
 
+    fn take_motion_module_set_frame_partial_site(&mut self) -> usize {
+        let site = self.next_motion_module_set_frame_partial_site;
+        self.next_motion_module_set_frame_partial_site += 1;
+        site
+    }
+
     fn take_clr_speed_site(&mut self) -> usize {
         let site = self.next_clr_speed_site;
         self.next_clr_speed_site += 1;
@@ -6145,6 +6287,15 @@ fn eval_excute_stmt(s: &ExcuteStmt, frame: f32, hitboxes: &mut Vec<Hitbox>, hurt
                     site,
                 });
         }
+        ExcuteStmt::MotionModuleSetFramePartial(call) => {
+            let site = hurt.take_motion_module_set_frame_partial_site();
+            hurt.motion_module_set_frame_partials
+                .push(MotionModuleSetFramePartialEvent {
+                    frame: script_frame(frame),
+                    call: call.clone(),
+                    site,
+                });
+        }
         ExcuteStmt::ClrSpeed(call) => {
             let site = hurt.take_clr_speed_site();
             hurt.clr_speeds.push(ClrSpeedEvent {
@@ -6285,6 +6436,8 @@ fn eval_stmts(
                     hurt.next_motion_module_set_helper_calculation_site;
                 let motion_module_set_rate_partial_site_at_entry =
                     hurt.next_motion_module_set_rate_partial_site;
+                let motion_module_set_frame_partial_site_at_entry =
+                    hurt.next_motion_module_set_frame_partial_site;
                 let clr_speed_site_at_entry = hurt.next_clr_speed_site;
                 let set_air_site_at_entry = hurt.next_set_air_site;
                 let kinetic_clear_speed_all_site_at_entry = hurt.next_kinetic_clear_speed_all_site;
@@ -6316,6 +6469,8 @@ fn eval_stmts(
                         motion_module_set_helper_calculation_site_at_entry;
                     hurt.next_motion_module_set_rate_partial_site =
                         motion_module_set_rate_partial_site_at_entry;
+                    hurt.next_motion_module_set_frame_partial_site =
+                        motion_module_set_frame_partial_site_at_entry;
                     hurt.next_clr_speed_site = clr_speed_site_at_entry;
                     hurt.next_set_air_site = set_air_site_at_entry;
                     hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry;
@@ -6354,6 +6509,9 @@ fn eval_stmts(
                 hurt.next_motion_module_set_rate_partial_site =
                     motion_module_set_rate_partial_site_at_entry
                         + count_motion_module_set_rate_partial_stmts(body);
+                hurt.next_motion_module_set_frame_partial_site =
+                    motion_module_set_frame_partial_site_at_entry
+                        + count_motion_module_set_frame_partial_stmts(body);
                 hurt.next_clr_speed_site = clr_speed_site_at_entry + count_clr_speed_stmts(body);
                 hurt.next_set_air_site = set_air_site_at_entry + count_set_air_stmts(body);
                 hurt.next_kinetic_clear_speed_all_site = kinetic_clear_speed_all_site_at_entry
@@ -6565,6 +6723,7 @@ pub struct AppState {
     /// Direct `MotionModule::set_rate_partial` points from the current `expression_` function,
     /// kept separately because the live capture stream does not identify an ACMD category.
     pub expression_motion_module_set_rate_partial_pristine: Vec<MotionModuleSetRatePartialEvent>,
+    pub expression_motion_module_set_frame_partial_pristine: Vec<MotionModuleSetFramePartialEvent>,
     /// Hitboxes as loaded (GitHub fetch or live capture) — live hitbox rules diff vs this.
     pub hitboxes_pristine: Vec<Hitbox>,
     /// Hurtbox spans as loaded, for source syncing to diff against.
@@ -6603,6 +6762,7 @@ pub struct AppState {
     /// Direct `MotionModule::set_rate_partial` point events as loaded, for sparse live rules and
     /// source syncing.
     pub motion_module_set_rate_partial_pristine: Vec<MotionModuleSetRatePartialEvent>,
+    pub motion_module_set_frame_partial_pristine: Vec<MotionModuleSetFramePartialEvent>,
     /// `CLR_SPEED` point events as loaded, for sparse live kinetic rules and source syncing.
     pub clr_speed_pristine: Vec<ClrSpeedEvent>,
     /// `SET_AIR` point events as loaded, for sparse live kinetic rules and source syncing.
@@ -6678,7 +6838,6 @@ pub struct AppState {
     pub selected_effect_call: Option<usize>,
     /// Effects panel: show every call, not just the ones active on the current frame.
     pub show_all_effect_calls: bool,
-    pub show_effects_panel: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -6716,6 +6875,7 @@ impl Default for AppState {
             expressions: Vec::new(),
             expressions_pristine: Vec::new(),
             expression_motion_module_set_rate_partial_pristine: Vec::new(),
+            expression_motion_module_set_frame_partial_pristine: Vec::new(),
             hitboxes_pristine: Vec::new(),
             hurtboxes_pristine: (Vec::new(), Vec::new()),
             hurtbox_conditions_pristine: Vec::new(),
@@ -6730,6 +6890,7 @@ impl Default for AppState {
             motion_module_set_rate_pristine: Vec::new(),
             motion_module_set_helper_calculation_pristine: Vec::new(),
             motion_module_set_rate_partial_pristine: Vec::new(),
+            motion_module_set_frame_partial_pristine: Vec::new(),
             clr_speed_pristine: Vec::new(),
             set_air_pristine: Vec::new(),
             kinetic_clear_speed_all_pristine: Vec::new(),
@@ -6752,7 +6913,6 @@ impl Default for AppState {
             expression_script_edits: HashMap::new(),
             selected_effect_call: None,
             show_all_effect_calls: false,
-            show_effects_panel: false,
         }
     }
 }
@@ -6780,6 +6940,8 @@ impl AppState {
             script.to_motion_module_set_helper_calculation_events();
         self.motion_module_set_rate_partial_pristine =
             script.to_motion_module_set_rate_partial_events();
+        self.motion_module_set_frame_partial_pristine =
+            script.to_motion_module_set_frame_partial_events();
         self.clr_speed_pristine = script.to_clr_speed_events();
         self.set_air_pristine = script.to_set_air_events();
         self.kinetic_clear_speed_all_pristine = script.to_kinetic_clear_speed_all_events();
@@ -7285,7 +7447,25 @@ pub enum EffectMacro {
     /// corpus writes `0` twice and `3` twice, so it is carried rather than normalised.
     AfterImageOff { arg: f32 },
     /// EFFECT_OFF_KIND — terminates a following effect by name.
-    EffectOffKind { effect_name: String },
+    ///
+    /// Carries its two trailing booleans, for the same reason [`AfterImageOff`] carries its
+    /// argument: the corpus does not agree on them. Of 6918 kills inside `effect_` functions
+    /// only 2852 are `false, true` — 2040 are `true, true`, 1978 `false, false`, 48
+    /// `true, false` — so a hardcoded pair rewrites 59% of them. All four of Ganondorf's
+    /// `ganon_sword_flare` kills, the moves that generate and remove his sword article, are
+    /// `false, false`.
+    ///
+    /// A call whose two booleans are not both written as literals is not modelled here at all —
+    /// it stays a [`Raw`](EffectMacro::Raw) line, verbatim, and closes nothing. No corpus call
+    /// has that shape, and the alternative is to complete a half-read call with a default,
+    /// which is how the wrong pair got written in the first place.
+    ///
+    /// [`AfterImageOff`]: EffectMacro::AfterImageOff
+    EffectOffKind {
+        effect_name: String,
+        fade: bool,
+        detach: bool,
+    },
     /// LAST_EFFECT_SET_RATE — modifies the rate of the last spawned effect.
     LastEffectSetRate { rate: f32 },
     /// LAST_EFFECT_SET_WORK_INT — stores the last effect handle in a WorkModule slot.
@@ -7549,6 +7729,18 @@ pub struct EffectCall {
     /// the corpus does not agree on it: two calls write `0` and two write `3`.
     #[serde(default)]
     pub trail_off: Option<f32>,
+    /// The two trailing arguments of the `EFFECT_OFF_KIND` that closed this effect.
+    ///
+    /// The stop half of [`trail_off`](Self::trail_off), and `None` means the same thing: the
+    /// editor is ending this effect itself — a retimed follow, or one whose finite end the user
+    /// just turned on — so the export supplies [`EFFECT_OFF_KIND_DEFAULT`]. A value here is the
+    /// author's own, and every surface that re-issues the kill must write it back rather than
+    /// its own default. See [`EffectMacro::EffectOffKind`] for what the corpus says about
+    /// inventing them.
+    #[serde(default)]
+    pub off_fade: Option<bool>,
+    #[serde(default)]
+    pub off_detach: Option<bool>,
     /// The trail's second joint — `trail_bone2`, argument 8 — when the call's layout is known.
     ///
     /// A trail is a ribbon stretched between *two* edges, each an offset from a named joint, so
@@ -7991,6 +8183,8 @@ fn eval_effect_stmts(
                                 raw_line: None,
                                 trail_command: None,
                                 trail_off: None,
+                                off_fade: None,
+                                off_detach: None,
                                 trail_bone2: None,
                                 rate: None,
                                 work_int: None,
@@ -8008,13 +8202,39 @@ fn eval_effect_stmts(
                             anchor = Some(calls.len() - 1);
                             walk.last_spawn = anchor;
                         }
-                        EffectMacro::EffectOffKind { effect_name } => {
+                        EffectMacro::EffectOffKind {
+                            effect_name,
+                            fade,
+                            detach,
+                        } => {
                             // EffectModule::kill_kind closes every live instance of this kind.
+                            let mut closed = false;
                             for call in calls.iter_mut().filter(|call| {
                                 &call.effect_name == effect_name
                                     && call.active_end == OPEN_ENDED_EFFECT_FRAME
                             }) {
                                 call.active_end = script_frame(frame);
+                                call.off_fade = Some(*fade);
+                                call.off_detach = Some(*detach);
+                                closed = true;
+                            }
+                            // An effect this script did not start, exactly as an unmatched
+                            // `AFTER_IMAGE_OFF` below is — a status began it, or the other half
+                            // of a two-part special did. **Half the corpus's kills are this
+                            // shape** (3455 of 6918), and dropping the line left the effect
+                            // running, so it is carried verbatim. It deliberately does not
+                            // become an `EffectCall`: the call ordinals index the source's
+                            // spawn sites lexically, and a call that appeared only when a name
+                            // happened not to match would shift every later call onto the wrong
+                            // line of source.
+                            if !closed {
+                                walk.residue(
+                                    &format!(
+                                        "macros::EFFECT_OFF_KIND(agent, {}, {fade}, {detach});",
+                                        crate::acmd::hash_arg(effect_name)
+                                    ),
+                                    calls,
+                                );
                             }
                             anchor = None;
                         }
@@ -8043,6 +8263,8 @@ fn eval_effect_stmts(
                                 raw_line: (!raw.is_empty()).then(|| raw.clone()),
                                 trail_command: (!command.is_empty()).then(|| command.clone()),
                                 trail_off: None,
+                                off_fade: None,
+                                off_detach: None,
                                 trail_bone2: bone_name2.clone(),
                                 rate: None,
                                 work_int: None,
@@ -8209,6 +8431,8 @@ fn eval_effect_stmts(
                                 raw_line: None,
                                 trail_command: None,
                                 trail_off: None,
+                                off_fade: None,
+                                off_detach: None,
                                 trail_bone2: None,
                                 rate: None,
                                 work_int: None,
@@ -8248,6 +8472,8 @@ fn eval_effect_stmts(
                                 raw_line: None,
                                 trail_command: None,
                                 trail_off: None,
+                                off_fade: None,
+                                off_detach: None,
                                 trail_bone2: None,
                                 rate: None,
                                 work_int: None,
@@ -9052,6 +9278,8 @@ mod tests {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
@@ -9122,6 +9350,8 @@ mod tests {
             raw_line: None,
             trail_command: None,
             trail_off: None,
+            off_fade: None,
+            off_detach: None,
             trail_bone2: None,
             rate: None,
             work_int: None,
