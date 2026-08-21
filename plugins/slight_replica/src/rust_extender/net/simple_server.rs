@@ -62,7 +62,7 @@ fn sender_loop() {
 
 /// Messages queued and not yet sent (diagnostic — growth = sender thread dead/stuck).
 pub fn outbox_depth() -> usize {
-    OUTBOX.lock().len()
+    OUTBOX.try_lock().map(|out| out.len()).unwrap_or_default()
 }
 
 fn server_loop(port: u16) {

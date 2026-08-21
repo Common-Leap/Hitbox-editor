@@ -1041,16 +1041,162 @@ unsafe fn control_suppressed(
     crate::slight::effect_viewer::control_rules::suppressed(func, args, motion, frame)
 }
 
-/// `EFFECT_DETACH_KIND` is a point action, not the kill-kind path used by `EFFECT_OFF_KIND`.
-#[skyline::hook(replace = smash::app::sv_animcmd::EFFECT_DETACH_KIND)]
-unsafe fn hook_effect_detach_kind(lua_state: u64) {
+// `EFFECT_DETACH_KIND` is deliberately NOT hooked at its shared game entry point.
+//
+// One Slot Effects installs an `A64InlineHook` named `effect_detach_hook` on this exact
+// sv_animcmd entry point. Combining that one-instruction inline patch with Skyline's replacement
+// hook leaves the inline trampoline returning to the replacement stub's second instruction. That
+// instruction branches through x17 after the trampoline has loaded x17 with its own address, so
+// the game loops there forever when a script detaches an effect (Ganon's forward smash does this
+// after the hit).
+//
+// Fighter lua2cpp NROs call the shared function through their own JUMP_SLOT relocation. Patch that
+// data pointer as each fighter module loads instead: Visionary receives the pristine Lua stack,
+// then forwards through its own untouched import to One Slot Effects and the game. This preserves
+// capture, suppression, and exact-frame injection without either plugin rewriting the other's
+// instructions. `EFFECT_DETACH_KIND_WORK` is a distinct entry point and remains a normal Skyline
+// hook below.
+
+const EFFECT_DETACH_KIND_SYMBOL: &str = "_ZN3app10sv_animcmd18EFFECT_DETACH_KINDEP9lua_State";
+const R_AARCH64_JUMP_SLOT: u32 = 1026;
+
+/// Per-fighter import wrapper for the shared command One Slot Effects owns.
+///
+/// This must call the generated binding, not a saved fighter GOT value. Visionary's own import is
+/// never rewritten by the NRO-load callback, so this forwards into One Slot Effects' inline hook
+/// exactly once and preserves its slot remapping.
+unsafe extern "C" fn imported_effect_detach_kind(lua_state: u64) {
     let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, 2);
     crate::slight::hitbox_viewer::record(lua_state, "EFFECT_DETACH_KIND", &typed);
     inject_before_acmd_wait(lua_state, CoroutineBoundary::Control);
     if control_suppressed(lua_state, "EFFECT_DETACH_KIND", &typed) {
         return;
     }
-    original!()(lua_state);
+    smash::app::sv_animcmd::EFFECT_DETACH_KIND(lua_state);
+}
+
+unsafe fn patch_jump_slot(
+    module: *mut nnsdk::root::rtld::ModuleObject,
+    symbol: &str,
+    replacement: *const (),
+) -> usize {
+    if module.is_null() {
+        return 0;
+    }
+    let module = &mut *module;
+    if module.module_base == 0
+        || module.dynsym.is_null()
+        || module.dynstr.is_null()
+        || module.rela_or_rel_plt_size == 0
+    {
+        return 0;
+    }
+
+    unsafe fn patch_entry(
+        module: &mut nnsdk::root::rtld::ModuleObject,
+        offset: u64,
+        info: u64,
+        wanted: &[u8],
+        replacement: *const (),
+    ) -> bool {
+        if info as u32 != R_AARCH64_JUMP_SLOT {
+            return false;
+        }
+        let symbol_index = (info >> 32) as usize;
+        if symbol_index >= module.hash_nchain_value as usize {
+            return false;
+        }
+        let symbol = &*module.dynsym.add(symbol_index);
+        let name_offset = symbol.st_name as usize;
+        if name_offset >= module.dynstr_size as usize {
+            return false;
+        }
+        let remaining = module.dynstr_size as usize - name_offset;
+        let name = std::slice::from_raw_parts(module.dynstr.add(name_offset), remaining);
+        if name.len() <= wanted.len() || &name[..wanted.len()] != wanted || name[wanted.len()] != 0
+        {
+            return false;
+        }
+
+        let slot = (module.module_base as usize).wrapping_add(offset as usize) as *mut *const ();
+        if slot.is_null() {
+            return false;
+        }
+        std::ptr::write_volatile(slot, replacement);
+        true
+    }
+
+    let wanted = symbol.as_bytes();
+    let mut patched = 0;
+    if module.is_rela {
+        let entries =
+            module.rela_or_rel_plt_size as usize / std::mem::size_of::<nnsdk::root::Elf64_Rela>();
+        let table = module.rela_or_rel_plt.rela;
+        if table.is_null() {
+            return 0;
+        }
+        for index in 0..entries {
+            let entry = &*table.add(index);
+            patched +=
+                patch_entry(module, entry.r_offset, entry.r_info, wanted, replacement) as usize;
+        }
+    } else {
+        let entries =
+            module.rela_or_rel_plt_size as usize / std::mem::size_of::<nnsdk::root::Elf64_Rel>();
+        let table = module.rela_or_rel_plt.rel;
+        if table.is_null() {
+            return 0;
+        }
+        for index in 0..entries {
+            let entry = &*table.add(index);
+            patched +=
+                patch_entry(module, entry.r_offset, entry.r_info, wanted, replacement) as usize;
+        }
+    }
+    patched
+}
+
+extern "Rust" fn hook_effect_detach_kind_import(info: &skyline::nro::NroInfo) {
+    // Game lua2cpp modules are the authored ACMD callers. Do not redirect arbitrary plugin
+    // imports: a plugin may call the command outside an ACMD coroutine and should not be captured
+    // as fighter source.
+    if !info.name.contains("lua2cpp_") {
+        return;
+    }
+
+    let module_object = info.module.ModuleObject;
+    if module_object.is_null() {
+        return;
+    }
+
+    let patched = unsafe {
+        patch_jump_slot(
+            module_object,
+            EFFECT_DETACH_KIND_SYMBOL,
+            imported_effect_detach_kind as *const (),
+        )
+    };
+    if patched != 0 {
+        skyline::println!(
+            "[SLight] EFFECT_DETACH_KIND import wrapped for {}",
+            info.name
+        );
+        crate::slight::diag::note(format!(
+            "EFFECT_DETACH_KIND import=wrapped module={}",
+            info.name
+        ));
+    }
+}
+
+fn install_effect_detach_kind_import_hook() {
+    // The standard mod stack already includes libnro_hook. Keeping registration beside the ACMD
+    // hooks makes the dependency and the one exceptional command explicit.
+    if skyline::nro::add_hook(hook_effect_detach_kind_import).is_ok() {
+        skyline::println!("[SLight] EFFECT_DETACH_KIND fighter-import hook registered");
+    } else {
+        skyline::println!("[SLight] EFFECT_DETACH_KIND import hook unavailable");
+        crate::slight::diag::note("EFFECT_DETACH_KIND import=unavailable");
+    }
 }
 
 /// The wrapper resolves `EFFECT_DETACH_KIND_WORK`'s WorkModule slot before reaching this
@@ -2099,28 +2245,169 @@ impl CoroutineBoundary {
 /// A motion transition publishes its new ACMD coroutines before `MotionModule::motion_kind`
 /// becomes observable from every native callback.  Keep the requested hash per battle object so
 /// the first command boundary cannot accidentally select the previous move's replacement list.
+/// The ACMD scheduler is reached concurrently from the game, effect, sound, and expression
+/// coroutines. Horizon's parking path is not safe for those workers: a contended
+/// `parking_lot::Mutex` can leave the waiter spinning forever. These small tables therefore use
+/// atomics and tolerate a lost hint rather than ever parking a game worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MotionHint {
     motion: u64,
 }
 
-static MOTION_HINTS: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<u32, MotionHint>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+const ACMD_STATE_SLOTS: usize = 128;
+const ACMD_STATE_RESERVED: u64 = 1;
+
+struct MotionHintSlot {
+    /// 0 = empty, 1 = being published, otherwise battle-object id + 2.
+    owner: std::sync::atomic::AtomicU64,
+    motion: std::sync::atomic::AtomicU64,
+}
+
+impl MotionHintSlot {
+    const fn new() -> Self {
+        Self {
+            owner: std::sync::atomic::AtomicU64::new(0),
+            motion: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+static MOTION_HINTS: [MotionHintSlot; ACMD_STATE_SLOTS] =
+    [const { MotionHintSlot::new() }; ACMD_STATE_SLOTS];
 
 /// `start_coroutine` enters the authored function before its hook returns.  Keep a bounded marker
 /// for that first execution so a frame-zero request can be retried from the first real command
 /// boundary if the pre-start native dispatch did not create a handle.
-static ACMD_STARTUP_PENDING: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashSet<(u32, u64)>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+static ACMD_STARTUP_PENDING: [std::sync::atomic::AtomicU64; ACMD_STATE_SLOTS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; ACMD_STATE_SLOTS];
 
 /// A motion transition normally resets the latch, but some native replay paths restart an ACMD
 /// coroutine without going through a visible MotionModule change. Collapse the several category
 /// starts at frame zero into one playback edge and reset once there as well.
-static ACMD_PLAYBACK_STARTED: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashSet<u32>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+static ACMD_PLAYBACK_STARTED: [std::sync::atomic::AtomicU64; ACMD_STATE_SLOTS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; ACMD_STATE_SLOTS];
+
+fn acmd_owner_key(boid: u32) -> u64 {
+    boid as u64 + 2
+}
+
+fn startup_key(boid: u32, lua_state: u64) -> u64 {
+    let mut key = 0xcbf29ce484222325_u64;
+    for value in [boid as u64, lua_state] {
+        for byte in value.to_le_bytes() {
+            key ^= byte as u64;
+            key = key.wrapping_mul(0x100000001b3);
+        }
+    }
+    if key <= ACMD_STATE_RESERVED {
+        key + 2
+    } else {
+        key
+    }
+}
+
+fn remember_motion_hint_atomic(boid: u32, motion: u64) {
+    use std::sync::atomic::Ordering;
+
+    let owner = acmd_owner_key(boid);
+    let home = owner as usize % ACMD_STATE_SLOTS;
+    for offset in 0..ACMD_STATE_SLOTS {
+        let slot = &MOTION_HINTS[(home + offset) % ACMD_STATE_SLOTS];
+        let current = slot.owner.load(Ordering::Acquire);
+        if current == owner {
+            slot.motion.store(motion, Ordering::Release);
+            return;
+        }
+        if current == 0
+            && slot
+                .owner
+                .compare_exchange(0, ACMD_STATE_RESERVED, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            slot.motion.store(motion, Ordering::Relaxed);
+            slot.owner.store(owner, Ordering::Release);
+            return;
+        }
+    }
+
+    // Stale hints must not make the table permanently full. Replacing the home slot can only
+    // lose another object's startup optimization; it cannot alter the native motion call.
+    let slot = &MOTION_HINTS[home];
+    slot.owner.store(ACMD_STATE_RESERVED, Ordering::Release);
+    slot.motion.store(motion, Ordering::Relaxed);
+    slot.owner.store(owner, Ordering::Release);
+}
+
+fn motion_hint_atomic(boid: u32) -> Option<u64> {
+    use std::sync::atomic::Ordering;
+
+    let owner = acmd_owner_key(boid);
+    let home = owner as usize % ACMD_STATE_SLOTS;
+    for offset in 0..ACMD_STATE_SLOTS {
+        let slot = &MOTION_HINTS[(home + offset) % ACMD_STATE_SLOTS];
+        if slot.owner.load(Ordering::Acquire) == owner {
+            return Some(slot.motion.load(Ordering::Acquire));
+        }
+    }
+    None
+}
+
+fn clear_motion_hint_atomic(boid: u32) {
+    use std::sync::atomic::Ordering;
+
+    let owner = acmd_owner_key(boid);
+    let home = owner as usize % ACMD_STATE_SLOTS;
+    for offset in 0..ACMD_STATE_SLOTS {
+        let slot = &MOTION_HINTS[(home + offset) % ACMD_STATE_SLOTS];
+        if slot
+            .owner
+            .compare_exchange(owner, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+fn insert_atomic_set(slots: &[std::sync::atomic::AtomicU64], key: u64) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let home = key as usize % slots.len();
+    for offset in 0..slots.len() {
+        let slot = &slots[(home + offset) % slots.len()];
+        let current = slot.load(Ordering::Acquire);
+        if current == key {
+            return false;
+        }
+        if current == 0
+            && slot
+                .compare_exchange(0, key, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            return true;
+        }
+    }
+    // Bounded stale-state recovery. As above, losing one marker means a retry is skipped; it
+    // never changes or suppresses the game's authored call.
+    slots[home].store(key, Ordering::Release);
+    true
+}
+
+fn remove_atomic_set(slots: &[std::sync::atomic::AtomicU64], key: u64) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let home = key as usize % slots.len();
+    for offset in 0..slots.len() {
+        let slot = &slots[(home + offset) % slots.len()];
+        if slot
+            .compare_exchange(key, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
 
 unsafe fn remember_motion_hint(boma: *mut smash::app::BattleObjectModuleAccessor, motion: u64) {
     if boma.is_null() {
@@ -2132,9 +2419,7 @@ unsafe fn remember_motion_hint(boma: *mut smash::app::BattleObjectModuleAccessor
     // loop. Reset both rule families before publishing the new startup hint.
     reset_effect_injection_latches();
     reset_control_injection_latches();
-    MOTION_HINTS
-        .lock()
-        .insert((*boma).battle_object_id, MotionHint { motion });
+    remember_motion_hint_atomic((*boma).battle_object_id, motion);
 }
 
 unsafe fn remember_acmd_startup(agent: *mut smash::lua2cpp::L2CAgentBase) {
@@ -2145,11 +2430,8 @@ unsafe fn remember_acmd_startup(agent: *mut smash::lua2cpp::L2CAgentBase) {
     if boma.is_null() {
         return;
     }
-    let mut pending = ACMD_STARTUP_PENDING.lock();
-    if pending.len() >= 128 {
-        pending.clear();
-    }
-    pending.insert(((*boma).battle_object_id, (*agent).agent.lua_state_agent));
+    let key = startup_key((*boma).battle_object_id, (*agent).agent.lua_state_agent);
+    insert_atomic_set(&ACMD_STARTUP_PENDING, key);
 }
 
 unsafe fn begin_acmd_playback(boma: *mut smash::app::BattleObjectModuleAccessor) {
@@ -2159,21 +2441,22 @@ unsafe fn begin_acmd_playback(boma: *mut smash::app::BattleObjectModuleAccessor)
     let boid = (*boma).battle_object_id;
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
     if frame.is_finite() && frame <= STARTUP_FRAME_MAX {
-        let first_category = ACMD_PLAYBACK_STARTED.lock().insert(boid);
+        let first_category = insert_atomic_set(&ACMD_PLAYBACK_STARTED, acmd_owner_key(boid));
         if first_category {
             reset_effect_injection_latches();
             reset_control_injection_latches();
         }
     } else if frame.is_finite() {
-        ACMD_PLAYBACK_STARTED.lock().remove(&boid);
+        remove_atomic_set(&ACMD_PLAYBACK_STARTED, acmd_owner_key(boid));
     }
 }
 
 unsafe fn note_acmd_progress(boma: *mut smash::app::BattleObjectModuleAccessor, frame: f32) {
     if !boma.is_null() && frame.is_finite() && frame > STARTUP_FRAME_MAX {
-        ACMD_PLAYBACK_STARTED
-            .lock()
-            .remove(&(*boma).battle_object_id);
+        remove_atomic_set(
+            &ACMD_PLAYBACK_STARTED,
+            acmd_owner_key((*boma).battle_object_id),
+        );
     }
 }
 
@@ -2184,9 +2467,10 @@ unsafe fn take_acmd_startup(
     if lua_state == 0 || boma.is_null() {
         return false;
     }
-    ACMD_STARTUP_PENDING
-        .lock()
-        .remove(&((*boma).battle_object_id, lua_state))
+    remove_atomic_set(
+        &ACMD_STARTUP_PENDING,
+        startup_key((*boma).battle_object_id, lua_state),
+    )
 }
 
 fn choose_motion_hint(
@@ -2233,17 +2517,23 @@ unsafe fn resolve_injection_motion(
 ) -> (u64, u64) {
     let observed = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let boid = (*boma).battle_object_id;
-    let hint = MOTION_HINTS.lock().get(&boid).copied();
+    let hint = motion_hint_atomic(boid);
     let hint_has_rules = hint.is_some_and(|hint| {
-        crate::slight::effect_viewer::spawn_rules::has_inject_for(hint.motion)
-            || crate::slight::effect_viewer::control_rules::has_inject_for(hint.motion)
+        crate::slight::effect_viewer::spawn_rules::has_inject_for(hint)
+            || crate::slight::effect_viewer::control_rules::has_inject_for(hint)
     });
-    let resolved = choose_motion_hint(observed, hint, boundary, observed_frame, hint_has_rules);
-    if hint.is_some_and(|hint| hint.motion == observed) {
+    let resolved = choose_motion_hint(
+        observed,
+        hint.map(|motion| MotionHint { motion }),
+        boundary,
+        observed_frame,
+        hint_has_rules,
+    );
+    if hint.is_some_and(|hint| hint == observed) {
         // Keep the hint alive while the native accessor still publishes the old motion. This
         // covers the entire startup window, including authored suppression and paired stops;
         // discard it as soon as the accessor agrees with the requested hash.
-        MOTION_HINTS.lock().remove(&boid);
+        clear_motion_hint_atomic(boid);
     }
     (resolved, observed)
 }
@@ -2992,6 +3282,15 @@ unsafe fn inject_for_lua_state_at_frame(
     service_pending_latch_resets();
     crate::slight::effect_viewer::spawn_rules::service_pending();
     crate::slight::effect_viewer::control_rules::service_pending();
+    // Without a structural retime there is nothing for the boundary scheduler to do. In
+    // particular, ordinary capture must not enter native motion queries or scheduler state just
+    // because an effect command happened to run. Suppression/value rules are handled locally by
+    // their command hooks and do not need this path.
+    if !crate::slight::effect_viewer::spawn_rules::any_inject()
+        && !crate::slight::effect_viewer::control_rules::any_inject()
+    {
+        return;
+    }
     if boma.is_null()
         || agent.agent.lua_state_agent == 0
         || crate::slight::hitbox_viewer::is_injecting()
@@ -3056,6 +3355,11 @@ unsafe fn inject_for_acmd_at_frame(
 /// from the captured state.
 unsafe fn inject_before_acmd_wait(lua_state: u64, boundary: CoroutineBoundary) {
     if lua_state == 0 || crate::slight::hitbox_viewer::is_injecting() {
+        return;
+    }
+    if !crate::slight::effect_viewer::spawn_rules::any_inject()
+        && !crate::slight::effect_viewer::control_rules::any_inject()
+    {
         return;
     }
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
@@ -3261,6 +3565,7 @@ unsafe fn hook_resume_coroutine(
 }
 
 pub fn install() {
+    install_effect_detach_kind_import_hook();
     skyline::install_hooks!(
         hook_motion_change,
         hook_motion_change_inherit_frame,
@@ -3302,7 +3607,6 @@ pub fn install() {
         hook_raw_effect,
         hook_after_image_off,
         hook_effect_off_kind,
-        hook_effect_detach_kind,
         hook_effect_detach_kind_work,
         hook_enable_area,
         hook_unable_area,

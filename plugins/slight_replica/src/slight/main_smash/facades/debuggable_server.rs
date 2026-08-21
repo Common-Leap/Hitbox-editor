@@ -58,6 +58,9 @@ impl Facade for DebuggableServerFacade {
             for end in crate::slight::hitbox_viewer::take_pending_ends(MAX_NOTIFY_PER_TICK) {
                 crate::rust_extender::debuggable_server::notify_acmd_capture_end(&end);
             }
+            for snapshot in crate::slight::hitbox_viewer::take_capture_debug(MAX_NOTIFY_PER_TICK) {
+                crate::rust_extender::debuggable_server::notify_acmd_capture_debug(&snapshot);
+            }
         }
         crate::slight::pending::process();
 

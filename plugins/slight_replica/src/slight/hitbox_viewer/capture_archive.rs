@@ -5,12 +5,14 @@
 //! truth. Keeping the file append and replay work off the game thread avoids trading a heap crash
 //! for a filesystem stall.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::thread;
+
+use parking_lot::Mutex as ParkingMutex;
 
 use super::{CaptureEnd, CaptureLine};
 
@@ -34,7 +36,12 @@ enum ArchiveCommand {
     PrepareReplay,
 }
 
-static WRITER: OnceLock<Sender<ArchiveCommand>> = OnceLock::new();
+/// Hook workers must never enter std mpsc's internal wait path. A fixed queue with `try_lock`
+/// makes archive delivery explicitly lossy under contention instead of parking the match.
+const MAX_QUEUED: usize = 8192;
+static STARTED: AtomicBool = AtomicBool::new(false);
+static COMMANDS: ParkingMutex<VecDeque<ArchiveCommand>> = ParkingMutex::new(VecDeque::new());
+static DROPPED: AtomicU64 = AtomicU64::new(0);
 static REPLAY_REQUESTED: AtomicBool = AtomicBool::new(false);
 static REPLAY_READY: AtomicBool = AtomicBool::new(false);
 static REPLAY: LazyLock<Mutex<Option<BufReader<File>>>> = LazyLock::new(|| Mutex::new(None));
@@ -43,7 +50,7 @@ static REPLAY: LazyLock<Mutex<Option<BufReader<File>>>> = LazyLock::new(|| Mutex
 /// file is left readable until the next boot, which is useful after a crash; the next boot then
 /// starts a clean archive instead of replaying stale run ids into a new editor session.
 pub fn init() {
-    if WRITER.get().is_some() {
+    if STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
     let _ = std::fs::create_dir_all("sd:/slight/user/");
@@ -53,22 +60,18 @@ pub fn init() {
         .truncate(true)
         .open(ARCHIVE_FILE);
 
-    let (tx, rx) = mpsc::channel();
-    if WRITER.set(tx).is_err() {
-        return;
-    }
-    thread::spawn(move || writer_loop(rx));
+    thread::spawn(writer_loop);
 }
 
 pub fn append_line(line: CaptureLine) {
-    if let Some(writer) = WRITER.get() {
-        let _ = writer.send(ArchiveCommand::Record(ArchiveRecord::Line(line)));
+    if !enqueue(ArchiveCommand::Record(ArchiveRecord::Line(line))) {
+        DROPPED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 pub fn append_end(end: CaptureEnd) {
-    if let Some(writer) = WRITER.get() {
-        let _ = writer.send(ArchiveCommand::Record(ArchiveRecord::End(end)));
+    if !enqueue(ArchiveCommand::Record(ArchiveRecord::End(end))) {
+        DROPPED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -76,9 +79,7 @@ pub fn clear() {
     REPLAY_REQUESTED.store(false, Ordering::Release);
     REPLAY_READY.store(false, Ordering::Release);
     *REPLAY.lock().unwrap() = None;
-    if let Some(writer) = WRITER.get() {
-        let _ = writer.send(ArchiveCommand::Clear);
-    }
+    let _ = enqueue(ArchiveCommand::Clear);
 }
 
 /// Ask the writer to flush every record accepted before this request, then replay the resulting
@@ -88,9 +89,11 @@ pub fn begin_replay() {
     *REPLAY.lock().unwrap() = None;
     REPLAY_READY.store(false, Ordering::Release);
     REPLAY_REQUESTED.store(true, Ordering::Release);
-    if let Some(writer) = WRITER.get() {
-        let _ = writer.send(ArchiveCommand::PrepareReplay);
-    }
+    let _ = enqueue(ArchiveCommand::PrepareReplay);
+}
+
+pub fn dropped() -> u64 {
+    DROPPED.load(Ordering::Relaxed)
 }
 
 pub fn replay_active() -> bool {
@@ -137,12 +140,41 @@ pub fn take_replay(max: usize) -> Vec<String> {
     out
 }
 
-fn writer_loop(rx: Receiver<ArchiveCommand>) {
+fn enqueue(command: ArchiveCommand) -> bool {
+    let Some(mut commands) = COMMANDS.try_lock() else {
+        return false;
+    };
+    if commands.len() >= MAX_QUEUED {
+        return false;
+    }
+    commands.push_back(command);
+    true
+}
+
+fn sleep_ms(ms: u64) {
+    unsafe {
+        nnsdk::nn::os::SleepThread(nnsdk::nn::TimeSpan {
+            nanoseconds: ms * 1_000_000,
+        });
+    }
+}
+
+fn writer_loop() {
     let mut file: Option<BufWriter<File>> = None;
-    while let Ok(first) = rx.recv() {
-        process(first, &mut file);
-        while let Ok(next) = rx.try_recv() {
-            process(next, &mut file);
+    loop {
+        let batch: Vec<ArchiveCommand> = match COMMANDS.try_lock() {
+            Some(mut commands) => {
+                let count = commands.len().min(256);
+                commands.drain(..count).collect()
+            }
+            None => Vec::new(),
+        };
+        if batch.is_empty() {
+            sleep_ms(4);
+            continue;
+        }
+        for command in batch {
+            process(command, &mut file);
         }
         if let Some(file) = file.as_mut() {
             let _ = file.flush();

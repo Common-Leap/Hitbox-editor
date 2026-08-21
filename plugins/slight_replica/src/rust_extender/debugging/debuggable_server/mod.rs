@@ -157,6 +157,18 @@ pub fn notify_acmd_capture_end(end: &crate::slight::hitbox_viewer::CaptureEnd) {
     );
 }
 
+/// Send one aggregate capture-outcome row. Hook workers only update atomics; JSON allocation and
+/// socket work stay on the existing throttled facade path.
+pub fn notify_acmd_capture_debug(snapshot: &crate::slight::hitbox_viewer::CaptureDebugSnapshot) {
+    if !crate::rust_extender::net::simple_server::has_client() {
+        return;
+    }
+    emit(
+        "AcmdCaptureDebug",
+        &serde_json::json!({ "AcmdCaptureDebug": snapshot }),
+    );
+}
+
 /// Replay one validated record from the disk-backed capture archive. Keeping the archive format
 /// private to the plugin avoids deserializing a lifetime-bound `func` field just to send the same
 /// JSON back over the wire.

@@ -340,15 +340,6 @@ fn next_run() -> u32 {
     NEXT_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Dedupe keys within each claimed run.
-static CAPTURE_SEEN: LazyLock<Mutex<HashMap<u32, HashSet<u64>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-/// Not-yet-sent lines. The durable archive is the reconnect source; this queue is only the live
-/// network delivery buffer.
-static CAPTURE_PENDING: LazyLock<Mutex<Vec<CaptureLine>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-/// Completed motions not yet sent (drained strictly AFTER the lines they terminate).
-static END_PENDING: LazyLock<Mutex<Vec<CaptureEnd>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 /// One immutable capture owner per fighter-kind + motion. The claim exists as soon as the first
 /// line lands, so another battle object cannot interleave a second run while the move is still
 /// executing. It remains after completion so later activity cannot supersede the snapshot.
@@ -372,9 +363,6 @@ struct CaptureClaim {
 
 /// Bounded report budget for the claim-collision drop in `mark_capture_motion`.
 static CLAIM_DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-static CAPTURE_CLAIMS: LazyLock<Mutex<HashMap<(i32, u64), CaptureClaim>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Set by the TCP server thread and consumed on the game thread before the next capture drain.
 static CLEAR_CAPTURES_REQUESTED: std::sync::atomic::AtomicBool =
@@ -404,8 +392,189 @@ struct MotionWatch {
 }
 
 /// boid → current motion playback. Bounded by the live battle-object count.
-static MOTION_WATCH: LazyLock<Mutex<HashMap<u32, MotionWatch>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Capture ownership, deduplication, completion, and delivery are one transaction.
+///
+/// Hooks can run from more than one game worker. Parking one worker on a mutex is not safe in
+/// Skyline: the waiter may never be scheduled again even after the holder releases it. Keeping
+/// these related maps under one mutex also prevents the old partial-update cases where a claim
+/// was installed but its motion watch was not. Every game-facing access uses `try_lock`; losing
+/// one contended sample is recoverable, while parking the game thread freezes the match.
+#[derive(Default)]
+struct CaptureState {
+    seen: HashMap<u32, HashSet<u64>>,
+    pending: Vec<CaptureLine>,
+    ends: Vec<CaptureEnd>,
+    claims: HashMap<(i32, u64), CaptureClaim>,
+    watch: HashMap<u32, MotionWatch>,
+}
+
+static CAPTURE_STATE: LazyLock<Mutex<CaptureState>> =
+    LazyLock::new(|| Mutex::new(CaptureState::default()));
+
+/// Capture operations skipped instead of parking a game worker under contention.
+static CAPTURE_CONTENTION_DROPS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Compact, lock-free capture accounting keyed exactly like the capture cache: fighter kind +
+/// motion. Hook workers only touch atomics; the low-frequency network facade snapshots changed
+/// rows for the desktop. This must never acquire `CAPTURE_STATE`, especially on the failure path
+/// whose whole purpose is reporting that `CAPTURE_STATE` was contended.
+const CAPTURE_DEBUG_SLOTS: usize = 256;
+const CAPTURE_DEBUG_RESERVED: u64 = 1;
+
+struct CaptureDebugSlot {
+    fingerprint: std::sync::atomic::AtomicU64,
+    kind: std::sync::atomic::AtomicI32,
+    motion: std::sync::atomic::AtomicU64,
+    attempted: std::sync::atomic::AtomicU64,
+    succeeded: std::sync::atomic::AtomicU64,
+    contention: std::sync::atomic::AtomicU64,
+    claim_conflicts: std::sync::atomic::AtomicU64,
+    duplicates: std::sync::atomic::AtomicU64,
+    last_frame: std::sync::atomic::AtomicU32,
+    last_sent: std::sync::atomic::AtomicU64,
+}
+
+impl CaptureDebugSlot {
+    const fn new() -> Self {
+        Self {
+            fingerprint: std::sync::atomic::AtomicU64::new(0),
+            kind: std::sync::atomic::AtomicI32::new(0),
+            motion: std::sync::atomic::AtomicU64::new(0),
+            attempted: std::sync::atomic::AtomicU64::new(0),
+            succeeded: std::sync::atomic::AtomicU64::new(0),
+            contention: std::sync::atomic::AtomicU64::new(0),
+            claim_conflicts: std::sync::atomic::AtomicU64::new(0),
+            duplicates: std::sync::atomic::AtomicU64::new(0),
+            last_frame: std::sync::atomic::AtomicU32::new(0),
+            last_sent: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+static CAPTURE_DEBUG: [CaptureDebugSlot; CAPTURE_DEBUG_SLOTS] =
+    [const { CaptureDebugSlot::new() }; CAPTURE_DEBUG_SLOTS];
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct CaptureDebugSnapshot {
+    pub kind: i32,
+    pub motion: u64,
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub contention: u64,
+    pub claim_conflicts: u64,
+    pub duplicates: u64,
+    pub last_frame: f32,
+}
+
+fn capture_debug_fingerprint(kind: i32, motion: u64) -> u64 {
+    // Reserve 0 for empty and 1 while a writer publishes the stable key fields.
+    let fingerprint = fnv(fnv(0xcbf29ce484222325, kind as u64), motion);
+    if fingerprint <= CAPTURE_DEBUG_RESERVED {
+        fingerprint + 2
+    } else {
+        fingerprint
+    }
+}
+
+fn capture_debug_attempt(kind: i32, motion: u64, frame: f32) -> Option<&'static CaptureDebugSlot> {
+    use std::sync::atomic::Ordering;
+
+    let fingerprint = capture_debug_fingerprint(kind, motion);
+    let start = fingerprint as usize % CAPTURE_DEBUG_SLOTS;
+    for offset in 0..CAPTURE_DEBUG_SLOTS {
+        let slot = &CAPTURE_DEBUG[(start + offset) % CAPTURE_DEBUG_SLOTS];
+        let found = slot.fingerprint.load(Ordering::Acquire);
+        if found == fingerprint
+            && slot.kind.load(Ordering::Relaxed) == kind
+            && slot.motion.load(Ordering::Relaxed) == motion
+        {
+            slot.attempted.fetch_add(1, Ordering::Relaxed);
+            slot.last_frame.store(frame.to_bits(), Ordering::Relaxed);
+            return Some(slot);
+        }
+        if found == 0
+            && slot
+                .fingerprint
+                .compare_exchange(
+                    0,
+                    CAPTURE_DEBUG_RESERVED,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            slot.kind.store(kind, Ordering::Relaxed);
+            slot.motion.store(motion, Ordering::Relaxed);
+            slot.last_frame.store(frame.to_bits(), Ordering::Relaxed);
+            slot.attempted.store(1, Ordering::Relaxed);
+            slot.fingerprint.store(fingerprint, Ordering::Release);
+            return Some(slot);
+        }
+    }
+    None
+}
+
+/// Snapshot changed rows for the desktop. This runs on the throttled facade, never a hook stack.
+pub fn take_capture_debug(max: usize) -> Vec<CaptureDebugSnapshot> {
+    use std::sync::atomic::Ordering;
+
+    let mut rows = Vec::new();
+    for slot in &CAPTURE_DEBUG {
+        if rows.len() >= max {
+            break;
+        }
+        if slot.fingerprint.load(Ordering::Acquire) <= CAPTURE_DEBUG_RESERVED {
+            continue;
+        }
+        let attempted = slot.attempted.load(Ordering::Relaxed);
+        if attempted == 0 || attempted == slot.last_sent.load(Ordering::Relaxed) {
+            continue;
+        }
+        rows.push(CaptureDebugSnapshot {
+            kind: slot.kind.load(Ordering::Relaxed),
+            motion: slot.motion.load(Ordering::Relaxed),
+            attempted,
+            succeeded: slot.succeeded.load(Ordering::Relaxed),
+            contention: slot.contention.load(Ordering::Relaxed),
+            claim_conflicts: slot.claim_conflicts.load(Ordering::Relaxed),
+            duplicates: slot.duplicates.load(Ordering::Relaxed),
+            last_frame: f32::from_bits(slot.last_frame.load(Ordering::Relaxed)),
+        });
+        slot.last_sent.store(attempted, Ordering::Relaxed);
+    }
+    rows
+}
+
+fn reset_capture_debug_sent() {
+    for slot in &CAPTURE_DEBUG {
+        slot.last_sent
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn clear_capture_debug() {
+    use std::sync::atomic::Ordering;
+
+    for slot in &CAPTURE_DEBUG {
+        slot.attempted.store(0, Ordering::Relaxed);
+        slot.succeeded.store(0, Ordering::Relaxed);
+        slot.contention.store(0, Ordering::Relaxed);
+        slot.claim_conflicts.store(0, Ordering::Relaxed);
+        slot.duplicates.store(0, Ordering::Relaxed);
+        slot.last_frame.store(0, Ordering::Relaxed);
+        slot.last_sent.store(0, Ordering::Relaxed);
+        slot.fingerprint.store(0, Ordering::Release);
+    }
+}
+
+fn try_capture_state() -> Option<parking_lot::MutexGuard<'static, CaptureState>> {
+    let state = CAPTURE_STATE.try_lock();
+    if state.is_none() {
+        CAPTURE_CONTENTION_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    state
+}
 /// Mirrors `!MOTION_WATCH.is_empty()` so the per-frame watch can bail on one relaxed load.
 ///
 /// `capture_tick` runs for EVERY fighter and article on EVERY frame. Until something is
@@ -428,11 +597,13 @@ static CAPTURE_LAST_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 fn write_capture_diag(stage: &str) {
     use std::sync::atomic::Ordering;
 
-    let pending = CAPTURE_PENDING.lock().len();
+    let pending = try_capture_state()
+        .map(|state| state.pending.len())
+        .unwrap_or_default();
     let _ = std::fs::write(
         "sd:/effect_viewer_capture.txt",
         format!(
-            "stage={stage}\nrecorded={}\neffect_recorded={}\nsound_recorded={}\nsound_hooks={}\nrate_hook={}\ndrained={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
+            "stage={stage}\nrecorded={}\neffect_recorded={}\nsound_recorded={}\nsound_hooks={}\nrate_hook={}\ndrained={}\ncontention_drops={}\narchive_drops={}\npending={pending}\nlast_kind={}\nlast_motion={:#x}\nlast_frame={}\n",
             CAPTURE_RECORDED.load(Ordering::Relaxed),
             EFFECT_CAPTURE_RECORDED.load(Ordering::Relaxed),
             SOUND_CAPTURE_RECORDED.load(Ordering::Relaxed),
@@ -442,6 +613,8 @@ fn write_capture_diag(stage: &str) {
             sound_hooks::installed(),
             rate_hooks::installed(),
             CAPTURE_DRAINED.load(Ordering::Relaxed),
+            CAPTURE_CONTENTION_DROPS.load(Ordering::Relaxed),
+            capture_archive::dropped(),
             CAPTURE_LAST_KIND.load(Ordering::Relaxed) as i64,
             CAPTURE_LAST_MOTION.load(Ordering::Relaxed),
             f32::from_bits(CAPTURE_LAST_FRAME.load(Ordering::Relaxed) as u32),
@@ -449,15 +622,123 @@ fn write_capture_diag(stage: &str) {
     );
 }
 
-/// Non-zero while a replacement dispatch replays a captured line through the (hooked) sv_animcmd
-/// functions. The replay re-enters the capture hooks, so without this gate every live
-/// retime/inject would be recorded as if the SCRIPT contained it — the editor would then
-/// treat the user's own edit as a pristine spawn on the next capture load.
-///
-/// This is a depth counter rather than a boolean. A replacement can enter a modifier, carrier,
-/// or trail hook which itself performs another guarded dispatch; dropping the inner guard must
-/// not re-enable authored suppression while the outer replacement is still running.
-static INJECTING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Lock-free scopes use a fingerprint of the native Switch thread plus the scoped identity.
+/// Direct module hooks can run concurrently for different fighters, so neither ACMD execution
+/// nor replacement replay may be represented by a process-wide flag.
+const HOOK_SCOPE_SLOT_COUNT: usize = 32;
+const HOOK_SCOPE_DEPTH_SHIFT: u32 = 56;
+const HOOK_SCOPE_KEY_MASK: u64 = (1_u64 << HOOK_SCOPE_DEPTH_SHIFT) - 1;
+const HOOK_SCOPE_MAX_DEPTH: u8 = u8::MAX;
+
+fn hook_scope_state(key: u64, depth: u8) -> u64 {
+    ((depth as u64) << HOOK_SCOPE_DEPTH_SHIFT) | (key & HOOK_SCOPE_KEY_MASK)
+}
+
+fn hook_scope_depth(state: u64) -> u8 {
+    (state >> HOOK_SCOPE_DEPTH_SHIFT) as u8
+}
+
+fn current_thread_key(identity: u64) -> u64 {
+    // `GetCurrentThread` returns the stable nn::os ThreadType for the calling native worker.
+    // Hashing that pointer with the scoped identity keeps the atomic entry to one machine word.
+    let thread = unsafe { nnsdk::nn::os::GetCurrentThread() } as usize as u64;
+    let mut hash = 0xcbf29ce484222325_u64;
+    for value in [thread, identity] {
+        for byte in value.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    let key = hash & HOOK_SCOPE_KEY_MASK;
+    // Zero denotes an empty slot, so keep the vanishingly rare zero hash representable.
+    if key == 0 {
+        1
+    } else {
+        key
+    }
+}
+
+fn enter_hook_scope(
+    slots: &[std::sync::atomic::AtomicU64; HOOK_SCOPE_SLOT_COUNT],
+    key: u64,
+) -> Option<usize> {
+    use std::sync::atomic::Ordering;
+
+    // Prefer the current thread's existing slot so nested dispatches share a depth counter.
+    for (index, slot) in slots.iter().enumerate() {
+        let mut observed = slot.load(Ordering::Acquire);
+        loop {
+            let depth = hook_scope_depth(observed);
+            if depth == 0 || observed & HOOK_SCOPE_KEY_MASK != key || depth == HOOK_SCOPE_MAX_DEPTH
+            {
+                break;
+            }
+            let next = hook_scope_state(key, depth + 1);
+            match slot.compare_exchange_weak(observed, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(index),
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    for (index, slot) in slots.iter().enumerate() {
+        if slot
+            .compare_exchange(
+                0,
+                hook_scope_state(key, 1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn leave_hook_scope(
+    slots: &[std::sync::atomic::AtomicU64; HOOK_SCOPE_SLOT_COUNT],
+    index: usize,
+    key: u64,
+) {
+    use std::sync::atomic::Ordering;
+
+    let slot = &slots[index];
+    let mut observed = slot.load(Ordering::Acquire);
+    loop {
+        let depth = hook_scope_depth(observed);
+        if depth == 0 || observed & HOOK_SCOPE_KEY_MASK != key {
+            return;
+        }
+        let next = if depth == 1 {
+            0
+        } else {
+            hook_scope_state(key, depth - 1)
+        };
+        match slot.compare_exchange_weak(observed, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
+fn hook_scope_is_active(
+    slots: &[std::sync::atomic::AtomicU64; HOOK_SCOPE_SLOT_COUNT],
+    key: u64,
+) -> bool {
+    slots.iter().any(|slot| {
+        let state = slot.load(std::sync::atomic::Ordering::Acquire);
+        hook_scope_depth(state) != 0 && state & HOOK_SCOPE_KEY_MASK == key
+    })
+}
+
+/// Replacement dispatches re-enter hooked sv_animcmd functions. This per-thread scope prevents
+/// those calls from being captured as authored script lines without suppressing another game
+/// worker that happens to execute at the same time.
+static INJECTION_SLOTS: [std::sync::atomic::AtomicU64; HOOK_SCOPE_SLOT_COUNT] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; HOOK_SCOPE_SLOT_COUNT];
+const INJECTION_SCOPE_IDENTITY: u64 = 0x494e_4a45_4354_494f;
 
 /// Whether the current ACMD hook call is the replacement side of a live injection.
 ///
@@ -466,24 +747,41 @@ static INJECTING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 /// authored script lines, and an authored suppression rule must not suppress the replacement
 /// itself.
 pub fn is_injecting() -> bool {
-    INJECTING.load(std::sync::atomic::Ordering::Relaxed) != 0
+    hook_scope_is_active(
+        &INJECTION_SLOTS,
+        current_thread_key(INJECTION_SCOPE_IDENTITY),
+    )
 }
 
 /// RAII guard: capture recording is suspended while this is alive.
-pub struct InjectGuard;
+pub struct InjectGuard {
+    slot: Option<usize>,
+    key: u64,
+}
 
 impl InjectGuard {
     pub fn new() -> Self {
-        INJECTING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        InjectGuard
+        let key = current_thread_key(INJECTION_SCOPE_IDENTITY);
+        Self {
+            slot: enter_hook_scope(&INJECTION_SLOTS, key),
+            key,
+        }
     }
 }
 
 impl Drop for InjectGuard {
     fn drop(&mut self) {
-        let previous = INJECTING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        debug_assert!(previous > 0, "InjectGuard dropped without a matching guard");
+        if let Some(index) = self.slot {
+            leave_hook_scope(&INJECTION_SLOTS, index, self.key);
+        }
     }
+}
+
+/// A direct rule is still narrowed by fighter motion, command, argument identity, and frame.
+/// Coroutine start/resume calls cannot provide an additional execution-scope gate: on the
+/// pinned runtime they return before the authored body later reaches its direct bindings.
+pub(super) unsafe fn any_direct_rules(boma: *mut smash::app::BattleObjectModuleAccessor) -> bool {
+    !boma.is_null() && any_rules()
 }
 
 fn fnv(mut h: u64, v: u64) -> u64 {
@@ -501,12 +799,20 @@ fn fnv(mut h: u64, v: u64) -> u64 {
 pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
         as *mut smash::app::BattleObjectModuleAccessor;
-    record_for_boma(boma, func, args);
+    record_for_boma_inner(boma, func, args);
 }
 
 /// As [`record`], for hooks that receive a module accessor rather than a lua state —
 /// `AttackModule::clear_all` is a lua_bind call, not an sv_animcmd script primitive.
 pub unsafe fn record_for_boma(
+    boma: *mut smash::app::BattleObjectModuleAccessor,
+    func: &'static str,
+    args: &[LuaArg],
+) {
+    record_for_boma_inner(boma, func, args);
+}
+
+unsafe fn record_for_boma_inner(
     boma: *mut smash::app::BattleObjectModuleAccessor,
     func: &'static str,
     args: &[LuaArg],
@@ -528,17 +834,8 @@ pub unsafe fn record_for_boma(
     let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
     let frame = smash::app::lua_bind::MotionModule::frame(boma);
     let kind = smash::app::utility::get_kind(&mut *boma);
-
-    // Resolve the run BEFORE the dedupe key — the key is scoped to it, and a new playback
-    // must not be silently folded into the previous one's key set.
-    let Some(run) = mark_capture_motion((*boma).battle_object_id, motion, kind, frame, func) else {
-        return;
-    };
-
-    // Arm the clear-all gate: a clear is only worth capturing once something is out to clear.
-    if is_collision_func(func) {
-        note_collision((*boma).battle_object_id, true);
-    }
+    let boid = (*boma).battle_object_id;
+    let debug = capture_debug_attempt(kind, motion, frame);
 
     let mut key = fnv(0xcbf29ce484222325, motion);
     key = fnv(key, kind as u64);
@@ -549,23 +846,76 @@ pub unsafe fn record_for_boma(
     for a in args {
         key = fnv(key, a.dedupe_bits());
     }
-    if !CAPTURE_SEEN.lock().entry(run).or_default().insert(key) {
-        return;
-    }
-    let line = CaptureLine {
-        kind,
-        motion,
-        frame,
-        func,
-        args: args.to_vec(),
-        run,
+
+    let (line, completed) = {
+        // Never park a game worker here. The captured call still reaches its original hook when
+        // another worker owns the state; only this diagnostic/cache sample is skipped.
+        let Some(mut state) = try_capture_state() else {
+            if let Some(debug) = debug {
+                debug
+                    .contention
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return;
+        };
+
+        // Resolve the run BEFORE dedupe — the key is scoped to it, and a new playback must not
+        // be silently folded into the previous one's key set.
+        let (run, completed) = mark_capture_motion(&mut state, boid, motion, kind, frame, func);
+        if let Some(run) = run {
+            // Arm the clear-all gate: a clear is only worth capturing once something is out to
+            // clear.
+            if is_collision_func(func) {
+                note_collision(&mut state, boid, true);
+            }
+
+            if state.seen.entry(run).or_default().insert(key) {
+                let line = CaptureLine {
+                    kind,
+                    motion,
+                    frame,
+                    func,
+                    args: args.to_vec(),
+                    run,
+                };
+                // The archive owns the complete session history. The pending queue is only needed
+                // while there is somewhere to stream it; avoiding a second owned copy is important
+                // on the no-editor path, which is also the path that can run for a long match.
+                if capture_stream_wanted() {
+                    state.pending.push(line.clone());
+                }
+                if let Some(debug) = debug {
+                    debug
+                        .succeeded
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                (Some(line), completed)
+            } else {
+                if let Some(debug) = debug {
+                    debug
+                        .duplicates
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                (None, completed)
+            }
+        } else {
+            // A previous watch may have completed just before this call lost a claim to another
+            // object. Preserve that completion even though the incoming line cannot be owned.
+            if let Some(debug) = debug {
+                debug
+                    .claim_conflicts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            (None, completed)
+        }
     };
-    // The archive owns the complete session history. The pending queue is only needed while
-    // there is somewhere to stream it; avoiding a second owned copy is important on the no-editor
-    // path, which is also the path that can run for an entire long match.
-    if capture_stream_wanted() {
-        CAPTURE_PENDING.lock().push(line.clone());
+
+    if let Some(end) = completed {
+        capture_archive::append_end(end);
     }
+    let Some(line) = line else {
+        return;
+    };
     capture_archive::append_line(line);
     CAPTURE_RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if func.contains("EFFECT") {
@@ -591,11 +941,18 @@ fn clear_captures_if_requested() {
     if !CLEAR_CAPTURES_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    CAPTURE_SEEN.lock().clear();
-    CAPTURE_PENDING.lock().clear();
-    END_PENDING.lock().clear();
-    CAPTURE_CLAIMS.lock().clear();
-    MOTION_WATCH.lock().clear();
+    let Some(mut state) = try_capture_state() else {
+        // A hook owns the state for a short transaction. Retry next tick instead of parking.
+        CLEAR_CAPTURES_REQUESTED.store(true, std::sync::atomic::Ordering::Release);
+        return;
+    };
+    state.seen.clear();
+    state.pending.clear();
+    state.ends.clear();
+    state.claims.clear();
+    state.watch.clear();
+    drop(state);
+    clear_capture_debug();
     MOTION_WATCH_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     capture_archive::clear();
     // A fresh capture window is a fresh thing to debug. The archive is cleared in the same
@@ -608,13 +965,15 @@ fn clear_captures_if_requested() {
 /// Drain up to `max` unsent capture lines (game thread, per-frame flush).
 pub fn take_pending(max: usize) -> Vec<CaptureLine> {
     clear_captures_if_requested();
-    let mut pending = CAPTURE_PENDING.lock();
-    if pending.is_empty() {
+    let Some(mut state) = try_capture_state() else {
+        return Vec::new();
+    };
+    if state.pending.is_empty() {
         return Vec::new();
     }
-    let n = pending.len().min(max);
-    let lines: Vec<CaptureLine> = pending.drain(..n).collect();
-    drop(pending);
+    let n = state.pending.len().min(max);
+    let lines: Vec<CaptureLine> = state.pending.drain(..n).collect();
+    drop(state);
     if !lines.is_empty() {
         CAPTURE_DRAINED.fetch_add(lines.len() as u64, std::sync::atomic::Ordering::Relaxed);
         write_capture_diag("drained");
@@ -626,20 +985,23 @@ pub fn take_pending(max: usize) -> Vec<CaptureLine> {
 /// has already been handed out, so the editor never sees "motion finished" ahead of the
 /// lines that motion produced (the facade drains at most 32 lines per notify tick).
 pub fn take_pending_ends(max: usize) -> Vec<CaptureEnd> {
-    if !CAPTURE_PENDING.lock().is_empty() || capture_archive::replay_active() {
+    if capture_archive::replay_active() {
         return Vec::new();
     }
-    let mut q = END_PENDING.lock();
-    if q.is_empty() {
+    let Some(mut state) = try_capture_state() else {
+        return Vec::new();
+    };
+    if !state.pending.is_empty() || state.ends.is_empty() {
         return Vec::new();
     }
-    let n = q.len().min(max);
-    q.drain(..n).collect()
+    let n = state.ends.len().min(max);
+    state.ends.drain(..n).collect()
 }
 
 /// Replay the complete disk-backed capture archive (new editor client connected).
 pub fn requeue_all() {
     capture_archive::begin_replay();
+    reset_capture_debug_sent();
 }
 
 /// Drain a small archive replay batch for the facade. Keeping this separate from the live typed
@@ -660,6 +1022,7 @@ pub fn archive_replay_active() -> bool {
 /// motion it replaces — otherwise a cancelled move's end marker would be dropped, and its
 /// lines would be filed under the incoming motion's run.
 fn mark_capture_motion(
+    state: &mut CaptureState,
     boid: u32,
     motion: u64,
     kind: i32,
@@ -667,111 +1030,110 @@ fn mark_capture_motion(
     // Only for the drop report below — a claim collision is far easier to read when it names
     // the call that was discarded.
     func: &'static str,
-) -> Option<u32> {
+) -> (Option<u32>, Option<CaptureEnd>) {
     let mut finished: Option<(i32, u64, u32)> = None;
-    {
-        let mut watch = MOTION_WATCH.lock();
-        // Battle object ids are reused across matches; keep the map from growing unbounded.
-        if watch.len() > 128 {
-            watch.clear();
-        }
-        let continuing = watch
-            .get(&boid)
-            .is_some_and(|w| w.motion == motion && !w.ended && frame + 0.5 >= w.frame);
-        if continuing {
-            let w = watch.get_mut(&boid).expect("continuing implies present");
-            w.captured = true;
-            w.kind = kind;
-            w.frame = frame;
-            return Some(w.run);
-        }
-        if let Some(w) = watch.remove(&boid) {
-            if w.captured && !w.ended {
-                finished = Some((w.kind, w.motion, w.run));
-            }
-        }
-        MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
+    // Battle object ids are reused across matches; keep the map from growing unbounded.
+    if state.watch.len() > 128 {
+        state.watch.clear();
     }
-    if let Some((kind, motion, run)) = finished {
-        finish_capture(boid, kind, motion, run);
+    let continuing = state
+        .watch
+        .get(&boid)
+        .is_some_and(|w| w.motion == motion && !w.ended && frame + 0.5 >= w.frame);
+    if continuing {
+        let w = state
+            .watch
+            .get_mut(&boid)
+            .expect("continuing implies present");
+        w.captured = true;
+        w.kind = kind;
+        w.frame = frame;
+        return (Some(w.run), None);
     }
+    if let Some(w) = state.watch.remove(&boid) {
+        if w.captured && !w.ended {
+            finished = Some((w.kind, w.motion, w.run));
+        }
+    }
+    MOTION_WATCH_ACTIVE.store(
+        !state.watch.is_empty(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let completed =
+        finished.and_then(|(kind, motion, run)| finish_capture(state, boid, kind, motion, run));
 
-    let run = {
-        let mut claims = CAPTURE_CLAIMS.lock();
-        // Copied out so the refusal arm can read the holder while the insert arms take a
-        // mutable borrow.
-        let held = claims.get(&(kind, motion)).copied();
-        match held {
-            // **The same object returning to a motion it already owns — resume its run.**
-            //
-            // This is what a charged smash attack does. `attack_lw4` sets
-            // `START_SMASH_HOLD` on frame 5, and the hold either rewinds the motion frame or
-            // parks in a separate motion; either way the tests above read it as "the playback
-            // ended". The claim then blocked a new run, so **everything after the charge was
-            // discarded**: the `ATTACK` on frame 10, the `ATK_POWER` on frame 15, and the
-            // sounds. Only `FT_MOTION_RATE` on frames 0 and 4 survived, because it runs before
-            // the hold — which is exactly the pattern that was reported, three times, as
-            // "hitboxes and tuning are missing but the GitHub script has them".
-            //
-            // A tilt has no hold and never hit this, which is why the same fetch looked correct
-            // on one move and broken on the next.
-            //
-            // **Only while that playback is still going.** The first version of this resumed on
-            // `boid` alone, reasoning that the dedupe key (motion, frame, func, args) would fold
-            // a genuine repeat into the lines already held. **That is false for exactly the move
-            // this fix exists for:** a charged smash releases at a different motion frame every
-            // time, so the frame in the key differs, nothing collapses, and each extra
-            // performance stacks another copy of every effect onto the timeline. Reported
-            // immediately as "doing both directions adds a whole bunch of junk effects".
-            //
-            // So a finished playback starts a fresh run instead. The editor reads only the
-            // newest run for a motion (`latest_run_for`), so the last complete performance wins
-            // and a capture is always one performance — which is also the only thing a script
-            // can faithfully represent.
-            Some(h) if h.boid == boid && !h.ended => h.run,
-            // Same object, previous playback finished: a new performance, so a new run.
-            Some(h) if h.boid == boid => {
-                let run = next_run();
-                claims.insert(
-                    (kind, motion),
-                    CaptureClaim {
-                        boid,
-                        run,
-                        ended: false,
-                        end_sent: false,
-                    },
-                );
-                run
-            }
-            Some(h) => {
-                // The remaining drop, now genuinely rare. Bounded, and it names the call so a
-                // whole family going missing can never again be silent.
-                if CLAIM_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
-                    crate::slight::diag::note(format!(
-                        "CAP drop {func} motion={motion:#x} frame={frame:.2} boid={boid} — \
+    // Copied out so the refusal arm can read the holder while the insert arms take a mutable
+    // borrow.
+    let held = state.claims.get(&(kind, motion)).copied();
+    let run = match held {
+        // **The same object returning to a motion it already owns — resume its run.**
+        //
+        // This is what a charged smash attack does. `attack_lw4` sets
+        // `START_SMASH_HOLD` on frame 5, and the hold either rewinds the motion frame or
+        // parks in a separate motion; either way the tests above read it as "the playback
+        // ended". The claim then blocked a new run, so **everything after the charge was
+        // discarded**: the `ATTACK` on frame 10, the `ATK_POWER` on frame 15, and the
+        // sounds. Only `FT_MOTION_RATE` on frames 0 and 4 survived, because it runs before
+        // the hold — which is exactly the pattern that was reported, three times, as
+        // "hitboxes and tuning are missing but the GitHub script has them".
+        //
+        // A tilt has no hold and never hit this, which is why the same fetch looked correct
+        // on one move and broken on the next.
+        //
+        // **Only while that playback is still going.** The first version of this resumed on
+        // `boid` alone, reasoning that the dedupe key (motion, frame, func, args) would fold
+        // a genuine repeat into the lines already held. **That is false for exactly the move
+        // this fix exists for:** a charged smash releases at a different motion frame every
+        // time, so the frame in the key differs, nothing collapses, and each extra
+        // performance stacks another copy of every effect onto the timeline. Reported
+        // immediately as "doing both directions adds a whole bunch of junk effects".
+        //
+        // So a finished playback starts a fresh run instead. The editor reads only the
+        // newest run for a motion (`latest_run_for`), so the last complete performance wins
+        // and a capture is always one performance — which is also the only thing a script
+        // can faithfully represent.
+        Some(h) if h.boid == boid && !h.ended => h.run,
+        // Same object, previous playback finished: a new performance, so a new run.
+        Some(h) if h.boid == boid => {
+            let run = next_run();
+            state.claims.insert(
+                (kind, motion),
+                CaptureClaim {
+                    boid,
+                    run,
+                    ended: false,
+                    end_sent: false,
+                },
+            );
+            run
+        }
+        Some(h) => {
+            // The remaining drop, now genuinely rare. Bounded, and it names the call so a
+            // whole family going missing can never again be silent.
+            if CLAIM_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
+                crate::slight::diag::note(format!(
+                    "CAP drop {func} motion={motion:#x} frame={frame:.2} boid={boid} — \
                          claimed by another object boid={} run={}; not in any capture",
-                        h.boid, h.run
-                    ));
-                }
-                return None;
+                    h.boid, h.run
+                ));
             }
-            None => {
-                let run = next_run();
-                claims.insert(
-                    (kind, motion),
-                    CaptureClaim {
-                        boid,
-                        run,
-                        ended: false,
-                        end_sent: false,
-                    },
-                );
-                run
-            }
+            return (None, completed);
+        }
+        None => {
+            let run = next_run();
+            state.claims.insert(
+                (kind, motion),
+                CaptureClaim {
+                    boid,
+                    run,
+                    ended: false,
+                    end_sent: false,
+                },
+            );
+            run
         }
     };
-    let mut watch = MOTION_WATCH.lock();
-    watch.insert(
+    state.watch.insert(
         boid,
         MotionWatch {
             motion,
@@ -784,7 +1146,7 @@ fn mark_capture_motion(
         },
     );
     MOTION_WATCH_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
-    Some(run)
+    (Some(run), completed)
 }
 
 /// Does this captured function put a collision out? Kept in step with the editor, which
@@ -803,9 +1165,8 @@ fn is_collision_func(func: &str) -> bool {
 
 /// Note that a collision came out (or was cleared) on `boid`, and report whether a clear is
 /// worth recording — i.e. whether anything was actually open to clear.
-fn note_collision(boid: u32, open: bool) -> bool {
-    let mut watch = MOTION_WATCH.lock();
-    let Some(w) = watch.get_mut(&boid) else {
+fn note_collision(state: &mut CaptureState, boid: u32, open: bool) -> bool {
+    let Some(w) = state.watch.get_mut(&boid) else {
         return false;
     };
     let was_open = w.open_collisions;
@@ -813,41 +1174,53 @@ fn note_collision(boid: u32, open: bool) -> bool {
     was_open
 }
 
-fn push_end(kind: i32, motion: u64, run: u32) {
-    let mut q = END_PENDING.lock();
-    // Collapse duplicate completion paths for the same claimed run (end frame and motion switch
-    // can be observed on adjacent callbacks).
-    if q.iter().any(|e| e.run == run) {
-        return;
-    }
-    let end = CaptureEnd { kind, motion, run };
-    q.push(end);
-    capture_archive::append_end(end);
+fn close_collision_if_open(boid: u32) -> bool {
+    let Some(mut state) = try_capture_state() else {
+        return false;
+    };
+    note_collision(&mut state, boid, false)
 }
 
-fn finish_capture(boid: u32, kind: i32, motion: u64, run: u32) {
+fn push_end(state: &mut CaptureState, kind: i32, motion: u64, run: u32) -> Option<CaptureEnd> {
+    // Collapse duplicate completion paths for the same claimed run (end frame and motion switch
+    // can be observed on adjacent callbacks).
+    if state.ends.iter().any(|e| e.run == run) {
+        return None;
+    }
+    let end = CaptureEnd { kind, motion, run };
+    state.ends.push(end);
+    Some(end)
+}
+
+fn finish_capture(
+    state: &mut CaptureState,
+    boid: u32,
+    kind: i32,
+    motion: u64,
+    run: u32,
+) -> Option<CaptureEnd> {
     let (naturally_ended, should_emit) = {
-        let mut claims = CAPTURE_CLAIMS.lock();
-        let Some(claim) = claims.get_mut(&(kind, motion)) else {
-            return;
+        let Some(claim) = state.claims.get_mut(&(kind, motion)) else {
+            return None;
         };
         if claim.boid != boid || claim.run != run {
-            return;
+            return None;
         }
         let should_emit = !claim.end_sent;
         let naturally_ended = claim.ended;
         claim.end_sent = true;
         (naturally_ended, should_emit)
     };
-    if should_emit {
-        push_end(kind, motion, run);
-    }
+    let end = should_emit
+        .then(|| push_end(state, kind, motion, run))
+        .flatten();
     // A naturally completed run can never receive another authored line. Drop only its
     // in-memory dedupe set; an interrupted run may resume on the same motion and still needs its
     // keys. The complete line history is already in the disk archive either way.
     if naturally_ended {
-        CAPTURE_SEEN.lock().remove(&run);
+        state.seen.remove(&run);
     }
+    end
 }
 
 /// Per-agent, per-frame end-of-motion watch (agent_extender line callback).
@@ -872,58 +1245,76 @@ pub unsafe fn capture_tick(lua_state: u64) {
     }
     let boid = (*boma).battle_object_id;
 
+    // Resolve the entry before querying MotionModule, then release the capture state. Native
+    // getters can themselves enter hooked game code on some fighters; calling them while the
+    // state is held would turn that re-entry into a self-deadlock.
+    let watched = {
+        let Some(state) = try_capture_state() else {
+            return;
+        };
+        state.watch.get(&boid).copied()
+    };
+    let Some(watched) = watched else {
+        return;
+    };
+    let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
+    let frame = smash::app::lua_bind::MotionModule::frame(boma);
+    let end = smash::app::lua_bind::MotionModule::end_frame(boma);
+
     let mut finished: Option<(i32, u64, u32)> = None;
     // Set only when the playback reached `end_frame` — a charge hold must not look like this.
     let mut ended_naturally: Option<(i32, u64, u32)> = None;
-    {
-        let mut watch = MOTION_WATCH.lock();
-        // Resolve the entry BEFORE querying MotionModule: an object nobody captured from
-        // must not pay for motion_kind/frame/end_frame.
-        if !watch.contains_key(&boid) {
-            return;
-        }
-        let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
-        let frame = smash::app::lua_bind::MotionModule::frame(boma);
-        let end = smash::app::lua_bind::MotionModule::end_frame(boma);
-        let Some(w) = watch.get_mut(&boid) else {
+    let completed = {
+        let Some(mut state) = try_capture_state() else {
             return;
         };
-        if w.motion != motion || frame + 0.5 < w.frame {
+        // Another worker may have advanced this object between the snapshot and this update.
+        // Never apply stale native values to the replacement watch.
+        let Some(current) = state.watch.get(&boid).copied() else {
+            return;
+        };
+        if current.run != watched.run || current.motion != watched.motion {
+            return;
+        }
+        if current.motion != motion || frame + 0.5 < current.frame {
             // Switched away (or looped back to frame 0): the previous playback is over.
-            if w.captured && !w.ended {
-                finished = Some((w.kind, w.motion, w.run));
+            if current.captured && !current.ended {
+                finished = Some((current.kind, current.motion, current.run));
             }
-            watch.remove(&boid);
+            state.watch.remove(&boid);
         } else {
+            let w = state
+                .watch
+                .get_mut(&boid)
+                .expect("the run identity was checked above");
             w.frame = frame;
             // `>=` (not `end - rate`) so the marker is never EARLY: a hitbox on the very
             // last frame still gets recorded before the editor is told to adopt.
             if w.captured && !w.ended && end > 0.0 && frame >= end {
                 w.ended = true;
-                // Applied *after* this block, not here: taking `CAPTURE_CLAIMS` while holding
-                // `MOTION_WATCH` would be the only nested acquisition of that pair anywhere, and
-                // a lock-order hazard on a game thread is a frozen console rather than a failed
-                // test. Recorded as a value and spent below.
                 ended_naturally = Some((w.kind, w.motion, w.run));
                 finished = Some((w.kind, w.motion, w.run));
             }
         }
-        MOTION_WATCH_ACTIVE.store(!watch.is_empty(), std::sync::atomic::Ordering::Relaxed);
-    }
-    // The claim outlives the watch entry, and that is the point: the entry is dropped the moment
-    // the motion frame steps backwards, so by the time the *next* playback records a line there
-    // is nothing left to say whether the previous one finished or was only suspended by a charge.
-    // Only the claim can answer, and that answer decides between resuming this run and opening a
-    // fresh one.
-    if let Some((kind, motion, run)) = ended_naturally {
-        if let Some(claim) = CAPTURE_CLAIMS.lock().get_mut(&(kind, motion)) {
-            if claim.run == run {
-                claim.ended = true;
+        MOTION_WATCH_ACTIVE.store(
+            !state.watch.is_empty(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // The claim outlives the watch entry, and that is the point: the entry is dropped the
+        // moment the motion frame steps backwards, so only the claim can distinguish a finished
+        // playback from one suspended by a charge hold.
+        if let Some((kind, motion, run)) = ended_naturally {
+            if let Some(claim) = state.claims.get_mut(&(kind, motion)) {
+                if claim.run == run {
+                    claim.ended = true;
+                }
             }
         }
-    }
-    if let Some((kind, motion, run)) = finished {
-        finish_capture(boid, kind, motion, run);
+        finished.and_then(|(kind, motion, run)| finish_capture(&mut state, boid, kind, motion, run))
+    };
+    if let Some(end) = completed {
+        capture_archive::append_end(end);
     }
 }
 
@@ -1463,7 +1854,7 @@ unsafe fn hook_set_air(lua_state: u64) {
 #[skyline::hook(replace = smash::app::lua_bind::KineticModule::clear_speed_all)]
 unsafe fn hook_kinetic_clear_speed_all(boma: *mut smash::app::BattleObjectModuleAccessor) -> u64 {
     record_for_boma(boma, "KineticModule::clear_speed_all", &[]);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         if let Some((suppress, _)) = action_for(
@@ -1494,7 +1885,7 @@ unsafe fn hook_kinetic_set_consider_ground_friction(
         LuaArg::Int(kinetic_energy_attribute as i64),
     ];
     record_for_boma(boma, "KineticModule::set_consider_ground_friction", &args);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = numeric_point_key(
@@ -1545,7 +1936,7 @@ unsafe fn hook_change_kinetic(
         "KineticModule::change_kinetic",
         &[LuaArg::Int(kinetic_type as i64)],
     );
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = numeric_point_key("KineticModule::change_kinetic", &[kinetic_type as f32]);
@@ -1574,7 +1965,7 @@ macro_rules! kinetic_energy_hook {
             kinetic_energy_id: i32,
         ) -> u64 {
             record_for_boma(boma, $func, &[LuaArg::Int(kinetic_energy_id as i64)]);
-            if any_rules() && !boma.is_null() {
+            if any_direct_rules(boma) {
                 let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
                 let frame = smash::app::lua_bind::MotionModule::frame(boma);
                 let key = numeric_point_key($func, &[kinetic_energy_id as f32]);
@@ -1638,7 +2029,7 @@ unsafe fn hook_kinetic_add_speed(
         LuaArg::Num(vector.z),
     ];
     record_for_boma(boma, "KineticModule::add_speed", &args);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = numeric_point_key("KineticModule::add_speed", &[vector.x, vector.y, vector.z]);
@@ -1676,7 +2067,7 @@ macro_rules! work_flag_hook {
         #[skyline::hook(replace = $target)]
         unsafe fn $hook_name(boma: *mut smash::app::BattleObjectModuleAccessor, flag: i32) {
             record_for_boma(boma, $func, &[LuaArg::Int(flag as i64)]);
-            if any_rules() && !boma.is_null() {
+            if any_direct_rules(boma) {
                 let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
                 let frame = smash::app::lua_bind::MotionModule::frame(boma);
                 let key = numeric_point_key($func, &[flag as f32]);
@@ -1722,7 +2113,7 @@ macro_rules! work_transition_term_hook {
             transition_term: i32,
         ) {
             record_for_boma(boma, $func, &[LuaArg::Int(transition_term as i64)]);
-            if any_rules() && !boma.is_null() {
+            if any_direct_rules(boma) {
                 let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
                 let frame = smash::app::lua_bind::MotionModule::frame(boma);
                 let key = numeric_point_key($func, &[transition_term as f32]);
@@ -1772,7 +2163,7 @@ work_transition_term_hook!(
 #[skyline::hook(replace = smash::app::lua_bind::WorkModule::inc_int)]
 unsafe fn hook_work_module_inc_int(boma: *mut smash::app::BattleObjectModuleAccessor, slot: i32) {
     record_for_boma(boma, "WorkModule::inc_int", &[LuaArg::Int(slot as i64)]);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = integer_point_key("WorkModule::inc_int", &[slot as i64]);
@@ -1812,7 +2203,7 @@ unsafe fn hook_work_module_set_int(
 ) {
     let args = [LuaArg::Int(value as i64), LuaArg::Int(slot as i64)];
     record_for_boma(boma, "WorkModule::set_int", &args);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = numeric_point_key("WorkModule::set_int", &[value as f32, slot as f32]);
@@ -1856,7 +2247,7 @@ unsafe fn hook_work_module_set_int64(
 ) {
     let args = [LuaArg::Int(value), LuaArg::Int(slot as i64)];
     record_for_boma(boma, "WorkModule::set_int64", &args);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = integer_point_key("WorkModule::set_int64", &[value, slot as i64]);
@@ -1894,7 +2285,7 @@ unsafe fn hook_work_module_set_float(
 ) {
     let args = [LuaArg::Num(value), LuaArg::Int(slot as i64)];
     record_for_boma(boma, "WorkModule::set_float", &args);
-    if any_rules() && !boma.is_null() {
+    if any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = numeric_point_key("WorkModule::set_float", &[value, slot as f32]);
@@ -2244,7 +2635,7 @@ unsafe fn hook_control_set_rumble(
     // Direct rumble injections enter this hook through the same native binding. They must pass
     // straight to the original call; applying authored rules again can suppress or rewrite a
     // replacement that happens to share a frame and payload with another call.
-    if any_rules() && !is_injecting() && !boma.is_null() {
+    if any_direct_rules(boma) && !is_injecting() {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         if let Some((suppress, overrides)) =
@@ -2595,7 +2986,7 @@ unsafe fn hook_attack_fp(lua_state: u64) {
 /// would be mostly clears.
 #[skyline::hook(replace = smash::app::lua_bind::AttackModule::clear_all)]
 unsafe fn hook_attack_clear_all(boma: *mut smash::app::BattleObjectModuleAccessor) {
-    if !boma.is_null() && note_collision((*boma).battle_object_id, false) {
+    if !boma.is_null() && close_collision_if_open((*boma).battle_object_id) {
         record_for_boma(boma, "ATTACK_CLEAR_ALL", &[]);
     }
     original!()(boma)

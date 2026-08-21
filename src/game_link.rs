@@ -398,6 +398,26 @@ pub struct CaptureLine {
     pub run: u32,
 }
 
+/// Aggregate capture outcomes for one cache key. Counts are cumulative for the current plugin
+/// capture session and replace the previous row whenever a newer snapshot arrives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureDebugSnapshot {
+    pub kind: i32,
+    pub motion: u64,
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub contention: u64,
+    pub claim_conflicts: u64,
+    pub duplicates: u64,
+    pub last_frame: f32,
+}
+
+impl CaptureDebugSnapshot {
+    pub fn failed(self) -> u64 {
+        self.contention + self.claim_conflicts
+    }
+}
+
 /// Rule key for `COL_PRI`, which is per fighter rather than per target.
 ///
 /// The hurtbox category matches a rule on motion + key + frame, and this call has no target to
@@ -1070,6 +1090,8 @@ struct Shared {
     capture_claimed_runs: BTreeMap<(i32, u64), u32>,
     /// Bumped on every new capture line — lets the app cheaply notice new data.
     captures_seq: u64,
+    /// Compact outcome rows keyed exactly like the plugin capture cache.
+    capture_debug: BTreeMap<(i32, u64), CaptureDebugSnapshot>,
     /// Live-carrier readiness reported by the plugin: 0 = none, 1 = staged/building, 2 = live.
     carrier_state: u8,
     /// The carrier battle object exists and is active — the real "can spawn now" signal.
@@ -1140,6 +1162,7 @@ impl Default for Shared {
             captures: BTreeMap::new(),
             capture_claimed_runs: BTreeMap::new(),
             captures_seq: 0,
+            capture_debug: BTreeMap::new(),
             carrier_state: 0,
             carrier_spawned: false,
             carrier_kinds: 0,
@@ -1452,6 +1475,7 @@ impl GameLink {
         if let Ok(mut s) = self.shared.lock() {
             s.captures.clear();
             s.capture_claimed_runs.clear();
+            s.capture_debug.clear();
             s.capture_ends.clear();
             s.capture_completed_runs.clear();
             s.captures_seq += 1;
@@ -1472,6 +1496,8 @@ impl GameLink {
             }
             s.captures.retain(|_, lines| !lines.is_empty());
             s.capture_claimed_runs
+                .retain(|(capture_kind, _), _| *capture_kind != kind);
+            s.capture_debug
                 .retain(|(capture_kind, _), _| *capture_kind != kind);
             s.capture_ends
                 .retain(|(capture_kind, _), _| *capture_kind != kind);
@@ -1500,6 +1526,14 @@ impl GameLink {
                     .flat_map(|(m, lines)| lines.iter().map(move |l| (*m, l.clone())))
                     .collect()
             })
+            .unwrap_or_default()
+    }
+
+    /// Current per-character/per-motion capture outcome cache for the diagnostics window.
+    pub fn capture_debug(&self) -> Vec<CaptureDebugSnapshot> {
+        self.shared
+            .lock()
+            .map(|s| s.capture_debug.values().copied().collect())
             .unwrap_or_default()
     }
 
@@ -1855,12 +1889,25 @@ fn handle_frame(shared: &Arc<Mutex<Shared>>, payload: &str) {
                 *s.capture_ends.entry((kind as i32, motion)).or_insert(0) += 1;
             }
         }
+        "AcmdCaptureDebug" => {
+            let Some(row) = body.get("AcmdCaptureDebug") else {
+                return;
+            };
+            let Ok(row) = serde_json::from_value::<CaptureDebugSnapshot>(row.clone()) else {
+                return;
+            };
+            if s.ignored_capture_kinds.contains(&row.kind) {
+                return;
+            }
+            s.capture_debug.insert((row.kind, row.motion), row);
+        }
         "AcmdCaptureCleared" => {
             // The acknowledgement is emitted only after the game thread has discarded its
             // pending queue and ownership claims. Clear again here so no pre-command line that
             // was already in flight can repopulate the editor after the user requested reset.
             s.captures.clear();
             s.capture_claimed_runs.clear();
+            s.capture_debug.clear();
             s.capture_ends.clear();
             s.capture_completed_runs.clear();
             s.captures_seq += 1;
@@ -2255,6 +2302,74 @@ mod tests {
             &[capture_frame(8, 0x1234, 3.0), capture_frame(8, 0x1234, 9.0)],
         );
         assert_eq!(link.latest_run_for(0x1234, Some(8)).len(), 2);
+    }
+
+    #[test]
+    fn capture_debug_snapshots_replace_the_matching_character_motion_row() {
+        let link = GameLink::default();
+        let debug = |attempted: u64, succeeded: u64, contention: u64| {
+            plugin_frame(
+                "AcmdCaptureDebug",
+                &serde_json::json!({
+                    "AcmdCaptureDebug": {
+                        "kind": 0x18,
+                        "motion": 0x1234u64,
+                        "attempted": attempted,
+                        "succeeded": succeeded,
+                        "contention": contention,
+                        "claim_conflicts": 1,
+                        "duplicates": 2,
+                        "last_frame": 14.0
+                    }
+                }),
+            )
+        };
+
+        feed(&link, &[debug(4, 1, 0), debug(9, 3, 3)]);
+        assert_eq!(
+            link.capture_debug(),
+            vec![CaptureDebugSnapshot {
+                kind: 0x18,
+                motion: 0x1234,
+                attempted: 9,
+                succeeded: 3,
+                contention: 3,
+                claim_conflicts: 1,
+                duplicates: 2,
+                last_frame: 14.0,
+            }]
+        );
+        assert_eq!(link.capture_debug()[0].failed(), 4);
+
+        link.clear_captures();
+        assert!(link.capture_debug().is_empty());
+    }
+
+    #[test]
+    fn capture_debug_window_uses_only_character_kinds_present_in_the_cache() {
+        let app = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"),
+        )
+        .expect("read the desktop app");
+        let window = app
+            .split_once("fn draw_capture_debug_window")
+            .expect("capture debug window exists")
+            .1
+            .split_once("/// The ACMD Source window")
+            .expect("capture debug window stays a bounded method")
+            .0;
+        assert!(
+            window.contains("by_kind.entry(row.kind)")
+                && window.contains("let kinds: Vec<i32> = by_kind.keys()")
+                && window.contains("selectable_label")
+                && window.contains("row.failed()")
+                && window.contains("capture_motion_names"),
+            "the compact window must tab cache rows by character and surface failed outcomes"
+        );
+        assert!(
+            app.contains("((kind, entry.hash), entry.name.clone())"),
+            "capture names must use authoritative motion-list hashes and survive character tabs"
+        );
     }
 
     /// `AcmdCaptureEnd` is the "this move finished, its script is fully streamed" signal the
@@ -2756,52 +2871,232 @@ mod tests {
         );
     }
 
-    /// The collision hook's Rust ABI must stay aligned with the 13.0.4 native target.
-    ///
-    /// The plugin is a separate Skyline crate, so the desktop workspace cannot type-check it as
-    /// part of `cargo test`. The plugin release build catches compiler-level drift, while this
-    /// source assertion makes the important native argument classes visible to the desktop gate:
-    /// the manager receiver, two object IDs, a float hit value, an i32 collision ID, and a bool.
+    /// Capture hooks run on game workers, where parking on shared state can freeze the match.
+    /// Charged moves make this especially easy to hit because several scripts keep recording at
+    /// one held motion frame while the per-agent completion callback touches the same state.
     #[test]
-    fn the_plugin_collision_hook_keeps_the_1304_native_abi() {
+    fn the_plugin_capture_cache_never_parks_a_game_worker() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs"),
+        )
+        .expect("read the plugin's hitbox_viewer");
+
+        assert!(
+            source.contains("struct CaptureState")
+                && source.contains("CAPTURE_STATE.try_lock()")
+                && source.contains("CAPTURE_CONTENTION_DROPS"),
+            "capture ownership and dedupe must use one non-blocking transaction state"
+        );
+        for removed_lock in [
+            "CAPTURE_SEEN.lock()",
+            "CAPTURE_PENDING.lock()",
+            "END_PENDING.lock()",
+            "CAPTURE_CLAIMS.lock()",
+            "MOTION_WATCH.lock()",
+            "CAPTURE_STATE.lock()",
+        ] {
+            assert!(
+                !source.contains(removed_lock),
+                "game-facing capture path can park at {removed_lock}"
+            );
+        }
+
+        let tick = source
+            .split_once("pub unsafe fn capture_tick")
+            .expect("capture_tick still exists")
+            .1
+            .split_once("// ── Rules")
+            .expect("capture_tick ends before the rules section")
+            .0;
+        let first_state = tick
+            .find("try_capture_state()")
+            .expect("capture_tick snapshots the state");
+        let frame_query = tick
+            .find("MotionModule::frame(boma)")
+            .expect("capture_tick reads the native motion frame");
+        let second_state = tick[first_state + 1..]
+            .find("try_capture_state()")
+            .map(|offset| offset + first_state + 1)
+            .expect("capture_tick reacquires state after native queries");
+        assert!(
+            first_state < frame_query && frame_query < second_state,
+            "native MotionModule queries must run outside the capture-state guard"
+        );
+
+        let debug_hook = source
+            .split_once("fn capture_debug_attempt")
+            .expect("capture outcome accounting still exists")
+            .1
+            .split_once("pub fn take_capture_debug")
+            .expect("the hook-side accounting ends before facade snapshots")
+            .0;
+        assert!(
+            source.contains("static CAPTURE_DEBUG: [CaptureDebugSlot;")
+                && source.contains(".contention")
+                && source.contains(".succeeded")
+                && !debug_hook.contains("Mutex")
+                && !debug_hook.contains(".lock()"),
+            "reporting a capture failure must remain fixed-size, atomic, and non-blocking"
+        );
+
+        let facade = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/main_smash/facades/debuggable_server.rs"),
+        )
+        .expect("read the plugin's debuggable facade");
+        assert!(
+            facade.contains("take_capture_debug(MAX_NOTIFY_PER_TICK)")
+                && facade.contains("notify_acmd_capture_debug(&snapshot)"),
+            "capture outcomes must leave hook workers through the throttled facade"
+        );
+
+        let archive = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/capture_archive.rs"),
+        )
+        .expect("read the capture archive worker");
+        assert!(
+            archive.contains("COMMANDS.try_lock()")
+                && archive.contains("DROPPED.fetch_add")
+                && !archive.contains("writer.send(")
+                && !archive.contains("mpsc::channel"),
+            "archive handoff from a capture hook must drop under contention instead of waiting"
+        );
+
+        let server = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/rust_extender/net/simple_server.rs"),
+        )
+        .expect("read the plugin server");
+        assert!(
+            server.contains("pub fn outbox_depth() -> usize")
+                && server.contains("OUTBOX.try_lock().map"),
+            "periodic game-thread diagnostics must not park on the sender outbox"
+        );
+    }
+
+    /// Effect, sound, game, and expression ACMD coroutines can enter the live-retime scheduler
+    /// from different game workers. Its startup markers and motion hints used to share three
+    /// blocking `parking_lot` collections; a contended waiter can spin forever on Horizon even
+    /// after the holder leaves. The scheduler must keep that cross-coroutine state lock-free and
+    /// skip its native-query path entirely when no structural retime exists.
+    #[test]
+    fn the_plugin_acmd_scheduler_never_parks_without_live_retimes() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/effect_viewer/acmd_hooks.rs"),
+        )
+        .expect("read the plugin's ACMD effect hooks");
+
+        let lifecycle = source
+            .split_once("struct MotionHintSlot")
+            .expect("lock-free motion-hint table still exists")
+            .1
+            .split_once("fn choose_motion_hint")
+            .expect("startup lifecycle ends before motion selection")
+            .0;
+        assert!(
+            lifecycle.contains("static MOTION_HINTS: [MotionHintSlot;")
+                && lifecycle.contains("static ACMD_STARTUP_PENDING: [")
+                && lifecycle.contains("static ACMD_PLAYBACK_STARTED: [")
+                && lifecycle.contains("compare_exchange")
+                && !lifecycle.contains("Mutex")
+                && !lifecycle.contains(".lock()"),
+            "cross-coroutine startup state must remain fixed-size and lock-free"
+        );
+
+        let boundary = source
+            .split_once("unsafe fn inject_before_acmd_wait")
+            .expect("direct ACMD boundary still exists")
+            .1
+            .split_once("unsafe fn inject_after_acmd_frame")
+            .expect("direct boundary ends before the post-frame helper")
+            .0;
+        assert!(
+            boundary.contains("spawn_rules::any_inject()")
+                && boundary.contains("control_rules::any_inject()")
+                && boundary.find("return;").expect("no-retime fast return")
+                    < boundary
+                        .find("battle_object_module_accessor(lua_state)")
+                        .expect("native module lookup remains below the gate"),
+            "ordinary capture must not enter the live-retime scheduler or native motion queries"
+        );
+    }
+
+    /// The pinned coroutine entry points return before the authored body later reaches direct
+    /// lua_bind calls. A stack guard around those entry points therefore rejects every real
+    /// direct capture and rule, including `AttackModule::clear_all`.
+    #[test]
+    fn direct_acmd_calls_do_not_depend_on_an_expired_coroutine_guard() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs"),
+        )
+        .expect("read the plugin's hitbox hooks");
+
+        let direct_record = source
+            .split_once("pub unsafe fn record_for_boma")
+            .expect("direct capture entry exists")
+            .1
+            .split_once("unsafe fn record_for_boma_inner")
+            .expect("direct capture entry ends before implementation")
+            .0;
+        let direct_rules = source
+            .split_once("pub(super) unsafe fn any_direct_rules")
+            .expect("direct rule gate exists")
+            .1
+            .split_once("fn fnv")
+            .expect("direct rule gate ends before capture hashing")
+            .0;
+        assert!(
+            direct_record.contains("record_for_boma_inner(boma, func, args)")
+                && !direct_record.contains("is_acmd_execution_for")
+                && direct_rules.contains("!boma.is_null() && any_rules()")
+                && !source.contains("AcmdExecutionGuard")
+                && !source.contains("ACMD_EXECUTION_SLOTS"),
+            "direct capture and rules must remain reachable after coroutine entry returns"
+        );
+        assert!(
+            source.contains("static INJECTION_SLOTS:")
+                && source.contains("current_thread_key(INJECTION_SCOPE_IDENTITY)"),
+            "replacement suppression must not leak across native game workers"
+        );
+    }
+
+    /// ACMD capture must not patch the game's post-hit collision dispatcher.
+    ///
+    /// Both the manual A64 trampoline and the generated binding detour have stopped Eden during
+    /// ordinary attacks. Neither is needed to observe ATTACK commands, and the collision queues
+    /// have no runtime consumer, so keep the facade inert.
+    #[test]
+    fn the_plugin_does_not_patch_collision_dispatch() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/slight_replica/src/slight/systems/skyline_hook.rs");
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for needle in [
-            "type CollisionHitTrampoline =",
-            "unsafe extern \"C\" fn(",
-            "*mut smash::app::FighterManager",
-            "damage: f32",
-            "collision_id: i32",
-            "flags: bool",
-            "#[skyline::hook(\n    replace = smash::app::lua_bind::FighterManager::notify_log_event_collision_hit\n)]",
-            "skyline::install_hook!(fallback_collision_hit_hook);",
-            "let mut match_offset = None;",
-            "if match_offset.is_some()",
-            "body pattern missing or ambiguous",
-            "COLLISION_HOOK mode=wrapper-fallback coverage=partial",
-            "COLLISION attacker=",
-            "note_collision()",
-            "const ENABLE_INLINE_COLLISION_HOOK: bool = true;",
-            "DEBUG_INLINE_COLLISION",
-            "consume_sd_trigger",
-            "orig(",
+            "COLLISION_HOOK mode=disabled reason=unused-and-unsafe",
+            "collision detours disabled",
+            "ACMD capture observes ATTACK commands directly",
         ] {
             assert!(
                 source.contains(needle),
-                "collision hook ABI guard is missing {needle:?}"
+                "disabled collision-hook guard is missing {needle:?}"
             );
         }
-        let compact_source: String = source.split_whitespace().collect();
-        assert!(
-            compact_source.contains("f32,i32,bool)->u64;"),
-            "collision hook ABI guard is missing the float, collision-id, and bool tail"
-        );
-        assert!(
-            !source.contains("type CollisionHitHook =") && !source.contains("param_1: u32"),
-            "the obsolete six-integer collision hook ABI is still present"
-        );
+        for forbidden in [
+            "A64HookFunction",
+            "#[skyline::hook(",
+            "skyline::install_hook!",
+            "COLLISION_PATTERN",
+            "CollisionHitTrampoline",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "collision dispatch must remain unpatched: found {forbidden:?}"
+            );
+        }
 
         let diag_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("plugins/slight_replica/src/slight/diag.rs");
@@ -2815,25 +3110,6 @@ mod tests {
             assert!(
                 diag_source.contains(needle),
                 "collision diagnostic counter is missing {needle:?}"
-            );
-        }
-
-        let disabled_start = source
-            .find("if !inline_requested")
-            .expect("collision hook must keep an explicit inline-hook gate");
-        let scan_start = source[disabled_start..]
-            .find("\n    let offset = match scan_collision_pattern()")
-            .map(|offset| disabled_start + offset)
-            .expect("collision hook inline gate must precede pattern scanning");
-        let disabled_block = &source[disabled_start..scan_start];
-        for needle in [
-            "inline collision hook disabled (Eden-unsafe); installing wrapper fallback (partial coverage)",
-            "skyline::install_hook!(fallback_collision_hit_hook);",
-            "*INSTALLED.lock() = true;",
-        ] {
-            assert!(
-                disabled_block.contains(needle),
-                "disabled collision hook path is missing {needle:?}"
             );
         }
 
@@ -2853,6 +3129,33 @@ mod tests {
             assert!(
                 !clear_body.contains(needle),
                 "fight-start clear must not tear down the boot-lifetime hook state: {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_plugin_effect_kill_hook_preserves_the_native_return() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/slight_replica/src/slight/effect_viewer/mod.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let start = source
+            .find("fn hook_kill(")
+            .expect("EffectModule::kill hook must exist");
+        let end = source[start..]
+            .find("\n}\n\n/// Bounded trace")
+            .map(|offset| start + offset)
+            .expect("locate EffectModule::kill hook body");
+        let hook = &source[start..end];
+        for needle in [
+            ") -> u64 {",
+            "return original!()(module_accessor, handle, a3, a4);",
+            "let result = original!()(owner, handle, a3, a4);",
+            "result",
+        ] {
+            assert!(
+                hook.contains(needle),
+                "EffectModule::kill ABI/passthrough guard is missing {needle:?}"
             );
         }
     }

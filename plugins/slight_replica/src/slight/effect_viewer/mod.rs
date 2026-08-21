@@ -730,13 +730,21 @@ fn hook_kill(
     handle: u32,
     a3: bool,
     a4: bool,
-) {
-    let owner = proxy_owner_for_handle(module_accessor, handle).unwrap_or(module_accessor);
-    original!()(owner, handle, a3, a4);
+) -> u64 {
+    // The native binding returns u64. Declaring this hook as `()` discarded that ABI return and
+    // then left whatever the tracker cleanup happened to put in x0 for the caller. Ordinary hit
+    // effects enter this path during contact, so keep their overwhelmingly common case a true
+    // passthrough. Proxy-owned effects alone need owner correction and bookkeeping here; normal
+    // tracker entries are removed by reconciliation once the native effect disappears.
+    let Some(owner) = proxy_owner_for_handle(module_accessor, handle) else {
+        return original!()(module_accessor, handle, a3, a4);
+    };
+    let result = original!()(owner, handle, a3, a4);
     handle_kill(owner, handle);
     PROXY_HANDLES
         .lock()
         .remove(&(module_accessor as usize, handle));
+    result
 }
 
 /// Bounded trace of every stop we see, one line per (function, kind). Which function actually

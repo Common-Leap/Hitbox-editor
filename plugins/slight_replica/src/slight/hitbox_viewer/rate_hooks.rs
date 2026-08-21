@@ -194,7 +194,7 @@ unsafe fn hook_motion_module_set_rate(
 ) {
     let args = [LuaArg::Num(rate)];
     record_for_boma(boma, "MotionModule::set_rate", &args);
-    if any_rules() && !boma.is_null() {
+    if super::any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = super::numeric_point_key("MotionModule::set_rate", &[rate]);
@@ -225,7 +225,7 @@ unsafe fn hook_motion_module_set_helper_calculation(
 ) {
     let args = [LuaArg::Bool(enabled)];
     record_for_boma(boma, "MotionModule::set_helper_calculation", &args);
-    if any_rules() && !boma.is_null() {
+    if super::any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key = super::numeric_point_key(
@@ -260,7 +260,7 @@ unsafe fn hook_motion_module_set_rate_partial(
 ) {
     let args = [LuaArg::Int(part_kind as i64), LuaArg::Num(rate)];
     record_for_boma(boma, "MotionModule::set_rate_partial", &args);
-    if any_rules() && !boma.is_null() {
+    if super::any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         let key =
@@ -301,7 +301,7 @@ unsafe fn hook_motion_module_set_frame_partial(
         LuaArg::Bool(sync),
     ];
     record_for_boma(boma, "MotionModule::set_frame_partial", &args);
-    if any_rules() && !boma.is_null() {
+    if super::any_direct_rules(boma) {
         let motion = smash::app::lua_bind::MotionModule::motion_kind(boma);
         let frame = smash::app::lua_bind::MotionModule::frame(boma);
         // Keyed on the part kind and the pristine seek frame only. `sync` stays out of the key

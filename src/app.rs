@@ -2449,6 +2449,10 @@ pub struct VisionaryApp {
     _wayland_icon: Option<crate::wayland_icon::WaylandIcon>,
     state: AppState,
     move_list: Vec<MoveEntry>,
+    /// Motion names learned from each character's authoritative motion list. Unlike the visible
+    /// `move_list`, this survives character switches so every Capture Debug tab can resolve its
+    /// cache keys without re-hashing labels or rescanning files.
+    capture_motion_names: HashMap<(i32, u64), String>,
     fetching_acmd: bool,
     acmd_error: Option<String>,
     show_add_hitbox: bool,
@@ -2524,6 +2528,8 @@ pub struct VisionaryApp {
     /// no parameter data, while the checkbox itself is disabled for that fighter.
     show_hurtboxes: bool,
     show_debug: bool,
+    show_capture_debug: bool,
+    capture_debug_kind: Option<i32>,
     credits: crate::credits::CreditsWindow,
     show_edit_log: bool,
     export_dir: Option<PathBuf>,
@@ -2830,6 +2836,7 @@ impl VisionaryApp {
             _wayland_icon: wayland_icon,
             state: AppState::default(),
             move_list: Vec::new(),
+            capture_motion_names: HashMap::new(),
             fetching_acmd: false,
             acmd_error: None,
             show_add_hitbox: false,
@@ -2875,6 +2882,8 @@ impl VisionaryApp {
             hurtbox_warnings: Vec::new(),
             show_hurtboxes: load_hurtbox_visibility(),
             show_debug: false,
+            show_capture_debug: false,
+            capture_debug_kind: None,
             credits: crate::credits::CreditsWindow::default(),
             show_edit_log: false,
             export_dir: saved_export_dir,
@@ -6219,6 +6228,194 @@ impl VisionaryApp {
             }
         }
         self.fetching_acmd = false;
+    }
+
+    fn draw_capture_debug_window(&mut self, ctx: &egui::Context) {
+        let rows = self.game_link.capture_debug();
+        let mut by_kind: BTreeMap<i32, Vec<crate::game_link::CaptureDebugSnapshot>> =
+            BTreeMap::new();
+        for row in rows {
+            by_kind.entry(row.kind).or_default().push(row);
+        }
+
+        let mut labels = BTreeMap::new();
+        let mut fighter_names = BTreeMap::new();
+        for kind in by_kind.keys().copied() {
+            let internal = self
+                .state
+                .fighters
+                .iter()
+                .find(|fighter| fighter_kind_id(&fighter.name) == Some(kind))
+                .map(|fighter| fighter.name.clone());
+            labels.insert(
+                kind,
+                internal
+                    .as_deref()
+                    .map(fighter_display_name)
+                    .unwrap_or_else(|| format!("kind {kind:#x}")),
+            );
+            if let Some(internal) = internal {
+                fighter_names.insert(kind, internal);
+            }
+        }
+
+        let mut motion_labels = BTreeMap::new();
+        for (kind, rows) in &by_kind {
+            let fighter = fighter_names.get(kind);
+            for row in rows {
+                let authoritative = self
+                    .capture_motion_names
+                    .get(&(*kind, row.motion))
+                    .cloned()
+                    .or_else(|| self.state.labels.get(&row.motion).cloned());
+                let cached_source = fighter.and_then(|fighter| {
+                    self.move_source_cache.keys().find_map(|key| {
+                        let (owner, motion_name) = key.split_once('/')?;
+                        (owner.eq_ignore_ascii_case(fighter)
+                            && hash40::hash40(&motion_name.to_ascii_lowercase()).0 == row.motion)
+                            .then(|| motion_name.to_string())
+                    })
+                });
+                motion_labels.insert(
+                    (*kind, row.motion),
+                    authoritative
+                        .or(cached_source)
+                        .unwrap_or_else(|| format!("{:#x}", row.motion)),
+                );
+            }
+        }
+
+        let kinds: Vec<i32> = by_kind.keys().copied().collect();
+        let mut selected = self
+            .capture_debug_kind
+            .filter(|kind| by_kind.contains_key(kind))
+            .or_else(|| kinds.first().copied());
+        let mut open = self.show_capture_debug;
+        egui::Window::new("Capture Debug")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([520.0, 300.0])
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                if kinds.is_empty() {
+                    ui.label(
+                        RichText::new(
+                            "No capture attempts received. Connect the game and perform a move.",
+                        )
+                        .small()
+                        .color(Color32::GRAY),
+                    );
+                    return;
+                }
+
+                ScrollArea::horizontal()
+                    .id_salt("capture_debug_characters")
+                    .max_height(28.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for kind in &kinds {
+                                if ui
+                                    .selectable_label(
+                                        selected == Some(*kind),
+                                        labels.get(kind).map(String::as_str).unwrap_or("?"),
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(*kind);
+                                }
+                            }
+                        });
+                    });
+                ui.separator();
+
+                let Some(rows) = selected.and_then(|kind| by_kind.get(&kind)) else {
+                    return;
+                };
+                let attempted: u64 = rows.iter().map(|row| row.attempted).sum();
+                let succeeded: u64 = rows.iter().map(|row| row.succeeded).sum();
+                let failed: u64 = rows.iter().map(|row| row.failed()).sum();
+                let duplicates: u64 = rows.iter().map(|row| row.duplicates).sum();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{attempted} attempted")).small());
+                    ui.colored_label(
+                        Color32::from_rgb(90, 210, 110),
+                        RichText::new(format!("{succeeded} succeeded")).small(),
+                    );
+                    ui.colored_label(
+                        if failed == 0 {
+                            Color32::GRAY
+                        } else {
+                            Color32::from_rgb(235, 100, 100)
+                        },
+                        RichText::new(format!("{failed} failed")).small(),
+                    );
+                    ui.label(RichText::new(format!("{duplicates} duplicates")).small())
+                        .on_hover_text("Repeated held-frame calls already present in the cache");
+                });
+
+                ScrollArea::vertical()
+                    .id_salt("capture_debug_rows")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("capture_debug_grid")
+                            .striped(true)
+                            .min_col_width(42.0)
+                            .show(ui, |ui| {
+                                ui.label("");
+                                ui.label(RichText::new("move").small().strong());
+                                ui.label(RichText::new("try").small().strong());
+                                ui.label(RichText::new("ok").small().strong());
+                                ui.label(RichText::new("fail").small().strong());
+                                ui.label(RichText::new("dup").small().strong());
+                                ui.label(RichText::new("last").small().strong());
+                                ui.end_row();
+                                for row in rows {
+                                    let failed = row.failed();
+                                    let color = if failed > 0 {
+                                        Color32::from_rgb(235, 100, 100)
+                                    } else if row.succeeded > 0 {
+                                        Color32::from_rgb(90, 210, 110)
+                                    } else {
+                                        Color32::YELLOW
+                                    };
+                                    ui.colored_label(color, "●").on_hover_text(format!(
+                                        "lock contention: {}\nclaim conflicts: {}",
+                                        row.contention, row.claim_conflicts
+                                    ));
+                                    ui.label(
+                                        RichText::new(
+                                            motion_labels
+                                                .get(&(row.kind, row.motion))
+                                                .map(String::as_str)
+                                                .unwrap_or("?"),
+                                        )
+                                        .small()
+                                        .monospace(),
+                                    )
+                                    .on_hover_text(format!("motion {:#x}", row.motion));
+                                    ui.label(RichText::new(row.attempted.to_string()).small());
+                                    ui.label(RichText::new(row.succeeded.to_string()).small());
+                                    ui.colored_label(
+                                        color,
+                                        RichText::new(failed.to_string()).small(),
+                                    )
+                                    .on_hover_text(format!(
+                                        "{} lock contention, {} claim conflict",
+                                        row.contention, row.claim_conflicts
+                                    ));
+                                    ui.label(RichText::new(row.duplicates.to_string()).small());
+                                    ui.label(
+                                        RichText::new(format!("{:.1}", row.last_frame))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        self.capture_debug_kind = selected;
+        self.show_capture_debug = open;
     }
 
     /// The ACMD Source window: link a project, read the open move's script out of it, edit
@@ -29270,6 +29467,13 @@ impl eframe::App for VisionaryApp {
         if let Some(rx) = &self.move_list_receiver {
             if let Ok(moves) = rx.try_recv() {
                 let count = moves.len();
+                if let Some(kind) = self.current_fighter_kind() {
+                    self.capture_motion_names.extend(
+                        moves
+                            .iter()
+                            .map(|entry| ((kind, entry.hash), entry.name.clone())),
+                    );
+                }
                 self.move_list = moves;
                 self.move_list_receiver = None;
                 self.state.status = format!("Loaded {} moves.", count);
@@ -29420,6 +29624,12 @@ impl eframe::App for VisionaryApp {
             self.perf.end("acmd_source_window", t);
         }
 
+        if self.show_capture_debug {
+            let t = self.perf.start();
+            self.draw_capture_debug_window(&ctx);
+            self.perf.end("capture_debug_window", t);
+        }
+
         self.credits.show(&ctx);
 
         // Top menu bar: File / Windows / Mod + status
@@ -29551,6 +29761,10 @@ impl eframe::App for VisionaryApp {
                              instead of the online archive of vanilla scripts",
                         );
                     ui.checkbox(&mut self.show_debug, "Debug");
+                    ui.checkbox(&mut self.show_capture_debug, "Capture Debug")
+                        .on_hover_text(
+                            "Show attempted, successful, and failed live captures by character",
+                        );
                     ui.checkbox(&mut self.credits.open, "Credits")
                         .on_hover_text("The people who helped make Visionary possible");
                 });
