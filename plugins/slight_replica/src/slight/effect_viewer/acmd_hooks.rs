@@ -11,6 +11,58 @@
 use smash::lib::{L2CValue, L2CValueType};
 use smash::phx::Vector3f;
 
+// `L2CFighterAnimcmdEffectCommon` owns the game's shared status colouring (damage burn,
+// invincibility flash, etc.). It is not the fighter's selected move effect script. Remember its
+// persistent Lua state without taking a lock on a game worker; colour hooks use this boundary to
+// keep common status noise out of the live ACMD capture while leaving fighter-authored commands
+// alone.
+const COMMON_EFFECT_LUA_SLOTS: usize = 64;
+static COMMON_EFFECT_LUA_STATES: [std::sync::atomic::AtomicU64; COMMON_EFFECT_LUA_SLOTS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; COMMON_EFFECT_LUA_SLOTS];
+
+fn remember_common_effect_lua_state(lua_state: u64) {
+    if lua_state == 0 {
+        return;
+    }
+
+    // This is a small open-addressed set rather than one hash slot per state. A collision must
+    // fail open (some common feedback may appear) rather than replace a known state and risk
+    // treating a move's state as common.
+    let start = lua_state as usize % COMMON_EFFECT_LUA_SLOTS;
+    for offset in 0..COMMON_EFFECT_LUA_SLOTS {
+        let slot = &COMMON_EFFECT_LUA_STATES[(start + offset) % COMMON_EFFECT_LUA_SLOTS];
+        match slot.compare_exchange(
+            0,
+            lua_state,
+            std::sync::atomic::Ordering::Release,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(current) if current == lua_state => return,
+            Err(_) => {}
+        }
+    }
+}
+
+fn is_common_effect_lua_state(lua_state: u64) -> bool {
+    if lua_state == 0 {
+        return false;
+    }
+
+    let start = lua_state as usize % COMMON_EFFECT_LUA_SLOTS;
+    for offset in 0..COMMON_EFFECT_LUA_SLOTS {
+        let current = COMMON_EFFECT_LUA_STATES[(start + offset) % COMMON_EFFECT_LUA_SLOTS]
+            .load(std::sync::atomic::Ordering::Acquire);
+        if current == lua_state {
+            return true;
+        }
+        if current == 0 {
+            return false;
+        }
+    }
+    false
+}
+
 /// Reserved prefix the editor gives an AUTHORED EDIT's carrier clone.
 ///
 /// Must stay in step with `mod_project::EDIT_CLONE_PREFIX` on the editor side. It is the one
@@ -2000,61 +2052,69 @@ macro_rules! color_hook {
         #[skyline::hook(replace = $target)]
         unsafe fn $hook_name(lua_state: u64) {
             let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, $argc);
-            crate::slight::hitbox_viewer::record(lua_state, $command, &typed);
-            inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
+            // The common effect agent drives status feedback such as invincibility flashing and
+            // damage burn while the selected move is playing. It shares fighter/motion/frame
+            // with the move but is not that move's `effect_` script, so recording it makes live
+            // fetch invent editable rows. The native command must still run unchanged.
+            if !is_common_effect_lua_state(lua_state) {
+                crate::slight::hitbox_viewer::record(lua_state, $command, &typed);
+                inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
 
-            let cmd_hash = smash::hash40($lower);
-            if crate::slight::effect_viewer::spawn_rules::any_for(cmd_hash) {
-                let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
-                    as *mut smash::app::BattleObjectModuleAccessor;
-                let (motion, frame) = if boma.is_null() {
-                    (0u64, -1.0f32)
-                } else {
-                    let frame = smash::app::lua_bind::MotionModule::frame(boma);
-                    (
-                        resolve_injection_motion(boma, CoroutineBoundary::Effect, frame).0,
-                        frame,
-                    )
-                };
-                // A disabled colour command skips original entirely, so the tint never
-                // happens — the same meaning suppression has for a spawn.
-                let preserve_authored = !crate::slight::hitbox_viewer::is_injecting()
-                    && preserve_authored_effect(boma, cmd_hash, motion, frame);
-                if !crate::slight::hitbox_viewer::is_injecting()
-                    && crate::slight::effect_viewer::spawn_rules::suppressed(
-                        cmd_hash, motion, frame,
-                    )
-                    && !preserve_authored
-                {
-                    return;
-                }
-                if let Some((color, transition)) =
-                    crate::slight::effect_viewer::spawn_rules::color_for(cmd_hash, motion, frame)
-                {
-                    let mut agent = smash::lib::L2CAgent::new(lua_state);
-                    let mut vals = read_all_args(&mut agent, $argc);
-                    let mut wrote = false;
-                    if let Some(frames) = transition.filter(|_| $slot_base == 1) {
-                        if let Some(slot) = vals.get_mut(0) {
-                            *slot = L2CValue::new_num(frames);
-                            wrote = true;
-                        }
+                let cmd_hash = smash::hash40($lower);
+                if crate::slight::effect_viewer::spawn_rules::any_for(cmd_hash) {
+                    let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
+                        as *mut smash::app::BattleObjectModuleAccessor;
+                    let (motion, frame) = if boma.is_null() {
+                        (0u64, -1.0f32)
+                    } else {
+                        let frame = smash::app::lua_bind::MotionModule::frame(boma);
+                        (
+                            resolve_injection_motion(boma, CoroutineBoundary::Effect, frame).0,
+                            frame,
+                        )
+                    };
+                    // A disabled colour command skips original entirely, so the tint never
+                    // happens — the same meaning suppression has for a spawn.
+                    let preserve_authored = !crate::slight::hitbox_viewer::is_injecting()
+                        && preserve_authored_effect(boma, cmd_hash, motion, frame);
+                    if !crate::slight::hitbox_viewer::is_injecting()
+                        && crate::slight::effect_viewer::spawn_rules::suppressed(
+                            cmd_hash, motion, frame,
+                        )
+                        && !preserve_authored
+                    {
+                        return;
                     }
-                    if let Some(rgba) = color {
-                        for (offset, component) in rgba.iter().enumerate() {
-                            if let Some(slot) = vals.get_mut($slot_base + offset) {
-                                *slot = L2CValue::new_num(*component);
+                    if let Some((color, transition)) =
+                        crate::slight::effect_viewer::spawn_rules::color_for(
+                            cmd_hash, motion, frame,
+                        )
+                    {
+                        let mut agent = smash::lib::L2CAgent::new(lua_state);
+                        let mut vals = read_all_args(&mut agent, $argc);
+                        let mut wrote = false;
+                        if let Some(frames) = transition.filter(|_| $slot_base == 1) {
+                            if let Some(slot) = vals.get_mut(0) {
+                                *slot = L2CValue::new_num(frames);
                                 wrote = true;
                             }
                         }
-                    }
-                    // Only touch the stack if something was actually replaced: clearing and
-                    // repushing an unchanged argument list is work the game does not need, and
-                    // a short read would otherwise drop arguments the script did pass.
-                    if wrote {
-                        agent.clear_lua_stack();
-                        for v in vals.iter_mut() {
-                            agent.push_lua_stack(v);
+                        if let Some(rgba) = color {
+                            for (offset, component) in rgba.iter().enumerate() {
+                                if let Some(slot) = vals.get_mut($slot_base + offset) {
+                                    *slot = L2CValue::new_num(*component);
+                                    wrote = true;
+                                }
+                            }
+                        }
+                        // Only touch the stack if something was actually replaced: clearing and
+                        // repushing an unchanged argument list is work the game does not need, and
+                        // a short read would otherwise drop arguments the script did pass.
+                        if wrote {
+                            agent.clear_lua_stack();
+                            for v in vals.iter_mut() {
+                                agent.push_lua_stack(v);
+                            }
                         }
                     }
                 }
@@ -3564,6 +3624,21 @@ unsafe fn hook_resume_coroutine(
     result
 }
 
+/// Mark the persistent Lua state used by the game's common effect script bank. Fighter-specific
+/// effect agents are distinct objects and intentionally do not enter this set.
+#[skyline::hook(replace = smash::lua2cpp::L2CFighterAnimcmdEffectCommon_L2CFighterAnimcmdEffectCommon)]
+unsafe fn hook_common_effect_agent_ctor(
+    this: *mut smash::lua2cpp::L2CFighterAnimcmdEffectCommon,
+    battle_object: *mut smash::app::BattleObject,
+    module_accessor: *mut smash::app::BattleObjectModuleAccessor,
+    lua_state: *mut smash::lua_State,
+) {
+    original!()(this, battle_object, module_accessor, lua_state);
+    if !this.is_null() {
+        remember_common_effect_lua_state((*this).agent.lua_state_agent);
+    }
+}
+
 pub fn install() {
     install_effect_detach_kind_import_hook();
     skyline::install_hooks!(
@@ -3578,6 +3653,7 @@ pub fn install() {
         hook_call_coroutine,
         hook_start_coroutine,
         hook_resume_coroutine,
+        hook_common_effect_agent_ctor,
         hook_eff,
         hook_eff_alpha,
         hook_eff_attr,
