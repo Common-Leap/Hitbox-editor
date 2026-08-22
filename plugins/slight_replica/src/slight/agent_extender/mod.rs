@@ -19,11 +19,7 @@
 //!   L2CFighter{Common,Base}_RESET                       -> per-fighter/agent reset
 //! Init is handled lazily on first frame (idempotent via `agents::has_initialized`).
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-
-use parking_lot::Mutex;
-use std::sync::LazyLock;
 
 use smash::app::sv_system;
 use smash::lua2cpp::L2CFighterBase;
@@ -37,11 +33,6 @@ static FIGHT_STARTED: AtomicBool = AtomicBool::new(false);
 /// Live fighter (category 0) count, tracked via Initialize/Finalize. When it returns
 /// to zero the match has ended → run SLight teardown (replaces the old polling).
 static LIVE_FIGHTERS: AtomicI64 = AtomicI64::new(0);
-
-/// Boids whose `Main` line callback has fired since the last frame edge. A repeat means
-/// the per-frame status loop has wrapped → a new game frame began. This drives the
-/// once-per-frame batch dispatch off smashline's per-agent callbacks.
-static FRAME_SEEN: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 pub fn install() {
     if INSTALLED
@@ -86,14 +77,6 @@ unsafe extern "C" fn fighter_line_main(agent: &mut L2CFighterBase) {
         crate::slight::effect_viewer::effect_reload::pump_auto_carrier(boma);
         crate::slight::effect_viewer::acmd_hooks::pump_carrier_follows(boma);
     }
-    // Queued donor eff co-loads must run HERE (game thread) — load_effects from the TCP
-    // thread never completes its async resource work.
-    crate::slight::effect_viewer::effect_reload::pump_donor_queue();
-    // Drive the co-loaded set's per-frame update so its resource state machine advances + its
-    // textures get set up (inactive synthetic-handle sets are never ticked otherwise).
-    crate::slight::effect_viewer::effect_reload::pump_coload_tick();
-    // Report carrier readiness to the editor (emits only on change).
-    crate::slight::effect_viewer::effect_reload::pump_carrier_status();
     // Live hitbox injection still runs from the per-agent callback. Effect/control retiming is
     // dispatched from the effect ACMD's call/frame/wait boundaries in acmd_hooks, not from this
     // status callback.
@@ -104,8 +87,8 @@ unsafe extern "C" fn fighter_line_main(agent: &mut L2CFighterBase) {
     handle_frame(lua_state);
 }
 
-/// Per-weapon/agent `StatusLine::Main` callback. Same job as the fighter one (the frame edge is
-/// driven by whichever agents tick; `FRAME_SEEN` collapses them to one `run_one_frame` per frame).
+/// Per-weapon/agent `StatusLine::Main` callback. Global work is deliberately driven only by a
+/// stable fighter callback; a weapon's Main line may re-enter while its owner is busy.
 unsafe extern "C" fn weapon_line_main(agent: &mut L2CFighterBase) {
     let lua_state = agent.agent.lua_state_agent;
     handle_init(lua_state);
@@ -165,23 +148,13 @@ unsafe fn handle_init(lua_state: u64) {
     }
 }
 
-/// Once-per-frame SLight dispatch. The line-system control function fires every frame for each
-/// live agent; the first call of each new game frame (FRAME_SEEN wrap) drives run_one_frame.
+/// Once-per-frame SLight dispatch. `StatusLine::Main` fires for every live agent, so only the
+/// deterministic primary fighter selected by `agents::is_frame_driver` may drive global work.
 unsafe fn handle_frame(lua_state: u64) {
     let Some(boid) = boid_from_lua(lua_state) else {
         return;
     };
-    let new_frame = {
-        let mut seen = FRAME_SEEN.lock();
-        if seen.insert(boid) {
-            false
-        } else {
-            seen.clear();
-            seen.insert(boid);
-            true
-        }
-    };
-    if new_frame {
+    if agents::is_frame_driver(boid) {
         run_one_frame();
     }
 }
@@ -191,6 +164,13 @@ unsafe fn handle_frame(lua_state: u64) {
 fn run_one_frame() {
     let frame_start = unsafe { skyline::nn::os::GetSystemTick() };
     agents::refresh_all();
+
+    // These pumps use shared state and are independent of the fighter whose Main callback
+    // happened to run.  Calling them from every fighter turned an eight-CPU match into eight
+    // donor retries/status probes per game frame; keep them on the single global frame pass.
+    crate::slight::effect_viewer::effect_reload::pump_donor_queue();
+    crate::slight::effect_viewer::effect_reload::pump_coload_tick();
+    crate::slight::effect_viewer::effect_reload::pump_carrier_status();
 
     let after_win = crate::slight::frame_context::is_after_win();
     if !after_win && !FIGHT_STARTED.swap(true, Ordering::Relaxed) {
@@ -256,7 +236,6 @@ pub fn driver_has_ticked() -> bool {
 
 fn teardown_match() {
     FIGHT_STARTED.store(false, Ordering::Relaxed);
-    FRAME_SEEN.lock().clear();
     crate::slight::pending::process();
     crate::rust_extender::debuggable_server::remove_all();
     crate::slight::main_smash::uninstall();

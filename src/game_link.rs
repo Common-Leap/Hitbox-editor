@@ -3549,6 +3549,41 @@ mod tests {
     }
 
     #[test]
+    fn plugin_uses_one_stable_fighter_to_drive_global_frame_work() {
+        // The plugin is built for Skyline rather than this host target. Keep a source contract
+        // here for the CPU-match regression: every agent receives a Main callback, but only one
+        // stable fighter is allowed to run the complete global fighter/weapon dispatch.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let extender = std::fs::read_to_string(
+            root.join("plugins/slight_replica/src/slight/agent_extender/mod.rs"),
+        )
+        .expect("read plugin agent extender");
+        let agents =
+            std::fs::read_to_string(root.join("plugins/slight_replica/src/slight/agents.rs"))
+                .expect("read plugin agent registry");
+
+        assert!(agents.contains("pub fn is_frame_driver(boid: u32) -> bool"));
+        assert!(agents.contains("min_by_key(|rec| (rec.entry_id, rec.boid))"));
+        assert!(extender.contains("if agents::is_frame_driver(boid)"));
+        assert!(!extender.contains("FRAME_SEEN"));
+
+        let global = extender
+            .split_once("fn run_one_frame()")
+            .expect("global frame dispatch")
+            .1;
+        for pump in [
+            "pump_donor_queue",
+            "pump_coload_tick",
+            "pump_carrier_status",
+        ] {
+            assert!(
+                global.contains(pump),
+                "global frame dispatch must own {pump}"
+            );
+        }
+    }
+
+    #[test]
     fn outbound_stop_suppression_is_typed_and_serialized_only_when_present() {
         let link = GameLink::default();
         link.send_spawn_rules(&[SpawnRuleWire {

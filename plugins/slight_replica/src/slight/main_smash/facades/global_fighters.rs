@@ -12,7 +12,4 @@ impl Facade for GlobalFightersFacade {
     fn global_only(&self) -> bool {
         true
     }
-    fn on_frame(&mut self) {
-        crate::slight::agents::refresh_all();
-    }
 }

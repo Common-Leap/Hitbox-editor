@@ -104,6 +104,25 @@ pub fn lookup(boid: u32) -> Option<AgentRecord> {
     AGENTS.lock().get(boid).cloned()
 }
 
+/// Return whether `boid` is the one fighter callback that drives the global frame pass.
+///
+/// `StatusLine::Main` is per agent, not a frame clock.  Treating the first repeated battle
+/// object id as a frame edge was fragile: an agent may re-enter its Main line before every
+/// weapon has run, especially in busy CPU matches, and each false edge re-ran the complete
+/// global fighter and weapon dispatch.  Use the lowest live fighter entry instead.  Smash
+/// assigns stable non-negative entry ids for the entire match, so exactly that fighter's Main
+/// callback is a reliable once-per-game-frame driver.  The BOID tie-breaker keeps malformed or
+/// transient duplicate entries deterministic.
+pub fn is_frame_driver(boid: u32) -> bool {
+    let registry = AGENTS.lock();
+    registry
+        .by_boid
+        .values()
+        .filter(|rec| rec.category == 0 && rec.entry_id >= 0)
+        .min_by_key(|rec| (rec.entry_id, rec.boid))
+        .is_some_and(|rec| rec.boid == boid)
+}
+
 /// Jorge FUN_71000db2b4 — lookup live fighter by founder entry id.
 pub fn lookup_by_founder(founder_id: i32) -> Option<AgentRecord> {
     if founder_id < 0 {

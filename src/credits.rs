@@ -46,6 +46,10 @@ const TESTING: &[CreditEntry] = &[
     CreditEntry::person("195577361033330688"),
     CreditEntry::person("188362544283516928"),
     CreditEntry::person("1377069620434960404"),
+    CreditEntry::person("439855899805220903"),
+    CreditEntry::person("320724335960653824"),
+    CreditEntry::person("249271964307292171"),
+    CreditEntry::person("121315875499409408"),
 ];
 
 const ART: &[CreditEntry] = &[CreditEntry::person("385629478308806666")];
@@ -687,7 +691,7 @@ mod tests {
             SECTIONS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             ["Support", "Testing", "Art", "Upstream Development"]
         );
-        assert_eq!(unique_ids().len(), 12);
+        assert_eq!(unique_ids().len(), 16);
         assert!(SUPPORT.iter().any(|entry| entry.id == "340711847420231691"));
         assert!(UPSTREAM_DEVELOPMENT
             .iter()
