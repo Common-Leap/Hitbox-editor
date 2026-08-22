@@ -298,7 +298,22 @@ fn parse_stmts(lines: &[&str], mut pos: usize) -> (Vec<AcmdStmt>, usize) {
                 header: line.to_string(),
                 body,
             });
-            pos = body_end + 1;
+            // Dumped scripts often put the closing brace and the following branch opener on
+            // one physical line (`} else {`). `find_block_end` stops at the first closing brace,
+            // so parse that sibling block here rather than feeding the combined line back into
+            // the recursive walker (which would otherwise produce an inverted slice).
+            if let Some(else_header) = combined_else_header(lines[body_end]) {
+                let else_body_start = body_end + 1;
+                let (else_body_end, _) = find_else_block_end(lines, body_end);
+                let (else_body, _) = parse_stmts(&lines[else_body_start..else_body_end], 0);
+                stmts.push(AcmdStmt::RawBlock {
+                    header: else_header,
+                    body: else_body,
+                });
+                pos = else_body_end + 1;
+            } else {
+                pos = body_end + 1;
+            }
             continue;
         }
 
@@ -541,12 +556,44 @@ fn find_block_end(lines: &[&str], start: usize) -> (usize, i32) {
         for ch in line.chars() {
             match ch {
                 '{' => depth += 1,
-                '}' => depth -= 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (start + i, 0);
+                    }
+                }
                 _ => {}
             }
         }
-        if depth == 0 {
-            return (start + i, 0);
+    }
+    (lines.len().saturating_sub(1), depth)
+}
+
+/// Return the branch opener after a closing brace on the same physical line.
+fn combined_else_header(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let suffix = trimmed.strip_prefix('}')?.trim_start();
+    suffix
+        .strip_prefix("else")
+        .filter(|rest| rest.trim_start().starts_with('{') || rest.trim_start().starts_with("if "))
+        .map(|_| suffix.to_string())
+}
+
+/// Find the closing brace for an `else` whose opening `{` shares a line with the prior `}`.
+fn find_else_block_end(lines: &[&str], combined_line: usize) -> (usize, i32) {
+    let mut depth = 1i32;
+    for (i, line) in lines.iter().enumerate().skip(combined_line + 1) {
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (i, 0);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     (lines.len().saturating_sub(1), depth)
@@ -10202,6 +10249,40 @@ unsafe extern "C" fn game_test(agent: &mut L2CAgentBase) {
             2,
             "both arms are still there:\n{emitted}"
         );
+    }
+
+    #[test]
+    fn a_combined_else_after_cut_in_condition_does_not_panic_or_drift() {
+        let source = r#"
+unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
+    if FighterCutInManager::is_one_on_one() {
+        if macros::is_excute(agent) {
+            macros::ATTACK_ABS(agent, 0, 0, 2.0, 40, 125, 0, 70, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_THROW);
+        }
+    } else {
+        if macros::is_excute(agent) {
+            macros::ATTACK_ABS(agent, 0, 0, 3.0, 40, 125, 0, 70, 0.0, 1.0, *ATTACK_LR_CHECK_F, 0.0, true, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_S, *COLLISION_SOUND_ATTR_NONE, *ATTACK_REGION_THROW);
+        }
+    }
+}
+"#;
+        let script = parse_acmd_script(source);
+        let emitted = preview_game_fn(&script, "throw_f");
+        assert_eq!(emitted.matches('{').count(), emitted.matches('}').count());
+        assert!(emitted.contains("    }\n    else {"));
+        assert_eq!(script.to_hitboxes().len(), 2);
+
+        let reparsed = parse_acmd_script(&emitted);
+        let reemitted = preview_game_fn(&reparsed, "throw_f");
+        assert_eq!(emitted, reemitted);
+
+        let else_if_source = source.replace(
+            "} else {",
+            "} else if FighterCutInManager::is_one_on_one() {",
+        );
+        let else_if = preview_game_fn(&parse_acmd_script(&else_if_source), "throw_f");
+        assert_eq!(else_if.matches('{').count(), else_if.matches('}').count());
+        assert!(else_if.contains("    else if FighterCutInManager::is_one_on_one() {"));
     }
 
     /// Read-only module calls are condition inputs, not editable mutation points yet. They must

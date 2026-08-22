@@ -3955,7 +3955,7 @@ impl VisionaryApp {
                 else {
                     return;
                 };
-                let motion = hash40::hash40(&move_name.to_lowercase()).0;
+                let motion = Self::motion_hash_from_name(move_name);
                 let captures = self.captures_for_move(fighter, motion);
                 let captures = if captures.is_empty() {
                     saved
@@ -3988,6 +3988,14 @@ impl VisionaryApp {
                 let scripts = index.script_count();
                 let fighters = index.fighters.len();
                 let conflicts = index.conflict_count();
+                let ownership = if index.has_unattributed_scripts() {
+                    "from one unlabelled source set".to_string()
+                } else {
+                    format!(
+                        "across {fighters} fighter{}",
+                        if fighters == 1 { "" } else { "s" }
+                    )
+                };
                 if !index.has_scripts() {
                     self.state.status = format!(
                         "No ACMD scripts found under {} — expected a smashline project with \
@@ -3997,9 +4005,8 @@ impl VisionaryApp {
                     return;
                 }
                 self.state.status = format!(
-                    "Linked {scripts} usable script{} across {fighters} fighter{} from {}{}",
+                    "Linked {scripts} usable script{} {ownership} from {}{}",
                     if scripts == 1 { "" } else { "s" },
-                    if fighters == 1 { "" } else { "s" },
                     root.display(),
                     if conflicts == 0 {
                         String::new()
@@ -4023,12 +4030,19 @@ impl VisionaryApp {
     fn rescan_acmd_source(&mut self) {
         if self.refresh_linked_acmd_source_index() {
             if let Some(index) = self.acmd_src.as_ref() {
+                let ownership = if index.has_unattributed_scripts() {
+                    "from one unlabelled source set".to_string()
+                } else {
+                    format!(
+                        "across {} fighter{}",
+                        index.fighters.len(),
+                        if index.fighters.len() == 1 { "" } else { "s" }
+                    )
+                };
                 self.state.status = format!(
-                    "Re-scanned {} usable script{} across {} fighter{} from {}{}",
+                    "Re-scanned {} usable script{} {ownership} from {}{}",
                     index.script_count(),
                     if index.script_count() == 1 { "" } else { "s" },
-                    index.fighters.len(),
-                    if index.fighters.len() == 1 { "" } else { "s" },
                     index.root.display(),
                     if index.conflict_count() == 0 {
                         String::new()
@@ -14902,7 +14916,7 @@ impl VisionaryApp {
         let hitboxes = record
             .map(|record| record.hitboxes.clone())
             .unwrap_or_else(|| hitboxes_pristine.clone());
-        let motion = hash40::hash40(&move_name.to_lowercase()).0;
+        let motion = Self::motion_hash_from_name(move_name);
         let captures = source
             .captures
             .iter()
@@ -16746,14 +16760,34 @@ impl VisionaryApp {
         self.game_link.send_hitbox_rules(&all);
     }
 
-    /// hash40 of the current move's motion name (what MotionModule::motion_kind reports).
+    /// The authoritative `motion_list.bin` hash for a visible move (what
+    /// `MotionModule::motion_kind` reports).
+    ///
+    /// A move whose hash has no label is displayed as `0x…`; that display fallback is not a
+    /// motion name and must never be hashed again for a live lookup.
+    fn live_motion_hash(move_entry: &MoveEntry) -> u64 {
+        move_entry.hash
+    }
+
+    /// Resolve a persisted move name back to its live-motion key. Capture-only motions without
+    /// a ParamLabels name are persisted as the `0x…` fallback shown in the move list; retain
+    /// that raw key instead of hashing its display text on project replay.
+    fn motion_hash_from_name(name: &str) -> u64 {
+        let name = name.trim();
+        name.strip_prefix("0x")
+            .or_else(|| name.strip_prefix("0X"))
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .unwrap_or_else(|| hash40::hash40(&name.to_lowercase()).0)
+    }
+
+    /// Hash for the current live-capture target.
     ///
     /// (Frame-space helpers live just below — see [`Self::motion_to_script_frame`].)
     fn current_motion_hash(&self) -> Option<u64> {
         self.state
             .selected_move
             .as_ref()
-            .map(|m| hash40::hash40(&m.name.to_lowercase()).0)
+            .map(Self::live_motion_hash)
     }
 
     fn current_fighter_kind(&self) -> Option<i32> {
@@ -23302,7 +23336,7 @@ impl VisionaryApp {
                 incomplete.insert(key);
                 continue;
             }
-            let motion = hash40::hash40(&move_name.to_lowercase()).0;
+            let motion = Self::motion_hash_from_name(&move_name);
             let captures = self
                 .move_source_cache
                 .get(&Self::move_key(&fighter, &move_name))
@@ -41478,5 +41512,40 @@ mod effect_flip_axis_tests {
         assert_eq!(effect_flip_axis_live_value("EF_FLIP_XY"), Some(3));
         assert_eq!(effect_flip_axis_live_value("5"), Some(5));
         assert_eq!(effect_flip_axis_live_value("*PROJECT_LOCAL_FLIP"), None);
+    }
+}
+
+#[cfg(test)]
+mod live_motion_hash_tests {
+    use super::*;
+
+    #[test]
+    fn unnamed_motion_uses_its_motion_list_hash_for_live_capture() {
+        let motion_hash = 0x0123_4567_89ab_cdef;
+        let entry = MoveEntry {
+            name: format!("{motion_hash:#018x}"),
+            hash: motion_hash,
+            frame_count: 0,
+            anim_path: None,
+        };
+
+        assert_eq!(VisionaryApp::live_motion_hash(&entry), motion_hash);
+        assert_ne!(
+            hash40::hash40(&entry.name).0,
+            motion_hash,
+            "the unnamed display fallback is not itself a motion name"
+        );
+    }
+
+    #[test]
+    fn persisted_unnamed_motion_recovers_its_raw_live_hash() {
+        let motion_hash = 0x0123_4567_89ab_cdef;
+        let fallback = format!("{motion_hash:#018x}");
+
+        assert_eq!(VisionaryApp::motion_hash_from_name(&fallback), motion_hash);
+        assert_eq!(
+            VisionaryApp::motion_hash_from_name("attack_air_n"),
+            hash40::hash40("attack_air_n").0
+        );
     }
 }

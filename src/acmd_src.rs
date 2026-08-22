@@ -400,6 +400,15 @@ pub struct SourceIndex {
     pub conflicts: Vec<ScriptConflict>,
 }
 
+/// A script registration found anywhere in the selected project. The owning fighter is retained
+/// when the registration's source scope identifies exactly one, which lets an installer module
+/// safely connect a function in another module.
+#[derive(Debug, Clone)]
+struct RegisteredScript {
+    script: String,
+    fighter: Option<String>,
+}
+
 impl SourceIndex {
     /// Walk `root` and index every ACMD function it can attribute to a fighter.
     pub fn build(root: &Path) -> Result<Self> {
@@ -421,9 +430,12 @@ impl SourceIndex {
             .iter()
             .filter_map(|file| Some((file.clone(), std::fs::read_to_string(file).ok()?)))
             .collect();
-        let mut by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        // A fighter declaration in `src/fighters/mario/mod.rs` owns every nested module below
+        // it, not only Rust files immediately beside it. Keep declarations as directory scopes
+        // and resolve a function against its nearest ancestor scope below.
+        let mut fighter_scopes: HashMap<PathBuf, Vec<String>> = HashMap::new();
         let mut project_wide: Vec<String> = Vec::new();
-        let mut project_registrations: HashMap<String, Vec<String>> = HashMap::new();
+        let mut project_registrations: HashMap<String, Vec<RegisteredScript>> = HashMap::new();
         for (file, text) in &sources {
             let names = scan_fighter_names(text);
             for name in &names {
@@ -432,32 +444,34 @@ impl SourceIndex {
                 }
             }
             if let Some(dir) = file.parent() {
-                let entry = by_dir.entry(dir.to_path_buf()).or_default();
-                for name in names {
-                    if !entry.contains(&name) {
-                        entry.push(name);
+                let entry = fighter_scopes.entry(dir.to_path_buf()).or_default();
+                for name in &names {
+                    if !entry.contains(name) {
+                        entry.push(name.clone());
                     }
                 }
             }
+            let registration_fighter = (names.len() == 1).then(|| names[0].clone());
             for (script, function) in scan_acmd_registrations(text) {
                 let scripts = project_registrations
                     .entry(function.to_string())
                     .or_default();
-                if !scripts.iter().any(|known| known == script) {
-                    scripts.push(script.to_string());
+                if !scripts
+                    .iter()
+                    .any(|known| known.script == script && known.fighter == registration_fighter)
+                {
+                    scripts.push(RegisteredScript {
+                        script: script.to_string(),
+                        fighter: registration_fighter.clone(),
+                    });
                 }
             }
         }
         for (file, text) in &sources {
-            let neighbours = file
-                .parent()
-                .and_then(|dir| by_dir.get(dir))
-                .map(Vec::as_slice)
-                .unwrap_or_default();
             index.index_file(
                 file,
                 text,
-                neighbours,
+                &fighter_scopes,
                 &project_wide,
                 &project_registrations,
             );
@@ -476,14 +490,6 @@ impl SourceIndex {
         self.conflicts.len()
     }
 
-    /// The duplicate locations for one fighter + ACMD script name, if any.
-    pub fn conflict(&self, fighter: &str, script_name: &str) -> Option<&ScriptConflict> {
-        let fighter = normalize_fighter(fighter);
-        self.conflicts
-            .iter()
-            .find(|conflict| conflict.fighter == fighter && conflict.script == script_name)
-    }
-
     /// Whether the scan found either an editable script or a conflict worth resolving.
     pub fn has_scripts(&self) -> bool {
         self.script_count() > 0 || self.conflict_count() > 0
@@ -491,15 +497,51 @@ impl SourceIndex {
 
     /// The site for one fighter + ACMD script name.
     pub fn script(&self, fighter: &str, script_name: &str) -> Option<&ScriptSite> {
+        let fighter = normalize_fighter(fighter);
         self.fighters
-            .get(&normalize_fighter(fighter))?
+            .get(&fighter)
+            .or_else(|| self.unattributed_scripts())?
             .scripts
             .get(script_name)
     }
 
-    /// Whether this project has anything at all for `fighter`.
+    /// A source selection without any fighter metadata can still be useful when it is the
+    /// project's *only* script set. Treat that as an explicitly unlabelled single-fighter
+    /// project, rather than hashing an arbitrary filename into a fighter identity. The empty
+    /// sentinel is exposed only while it remains the project's sole script set.
+    fn unattributed_scripts(&self) -> Option<&FighterScripts> {
+        (self.fighters.len() == 1)
+            .then(|| self.fighters.get(""))
+            .flatten()
+    }
+
+    /// Whether a selected fighter can use this index, including a single, explicitly
+    /// unlabelled source set.
     pub fn has_fighter(&self, fighter: &str) -> bool {
         self.fighters.contains_key(&normalize_fighter(fighter))
+            || self.unattributed_scripts().is_some()
+    }
+
+    /// Whether all indexed scripts are one deliberately unlabelled source set.
+    pub fn has_unattributed_scripts(&self) -> bool {
+        self.unattributed_scripts().is_some()
+    }
+
+    /// The duplicate locations for one fighter + ACMD script name, if any.
+    pub fn conflict(&self, fighter: &str, script_name: &str) -> Option<&ScriptConflict> {
+        let fighter = normalize_fighter(fighter);
+        self.conflicts
+            .iter()
+            .find(|conflict| conflict.fighter == fighter && conflict.script == script_name)
+            .or_else(|| {
+                (self.fighters.len() == 1 && self.fighters.contains_key(""))
+                    .then(|| {
+                        self.conflicts.iter().find(|conflict| {
+                            conflict.fighter.is_empty() && conflict.script == script_name
+                        })
+                    })
+                    .flatten()
+            })
     }
 
     /// The functions this project defines for a move, concatenated into one body the existing
@@ -542,9 +584,9 @@ impl SourceIndex {
         &mut self,
         file: &Path,
         text: &str,
-        neighbours: &[String],
+        fighter_scopes: &HashMap<PathBuf, Vec<String>>,
         project_wide: &[String],
-        project_registrations: &HashMap<String, Vec<String>>,
+        project_registrations: &HashMap<String, Vec<RegisteredScript>>,
     ) {
         let functions = scan_acmd_functions(text);
         if functions.is_empty() {
@@ -562,12 +604,16 @@ impl SourceIndex {
         }
 
         for function in functions {
+            let registrations = project_registrations.get(function.name.as_str());
             let script_names: Vec<String> = if let Some(script) = function.script.clone() {
                 vec![script]
             } else if let Some(scripts) = named.get(function.name.as_str()) {
                 scripts.iter().map(|script| (*script).to_string()).collect()
-            } else if let Some(scripts) = project_registrations.get(function.name.as_str()) {
-                scripts.clone()
+            } else if let Some(scripts) = registrations {
+                scripts
+                    .iter()
+                    .map(|registered| registered.script.clone())
+                    .collect()
             } else if ["game_", "effect_", "sound_", "expression_"]
                 .iter()
                 .any(|prefix| function.name.starts_with(prefix))
@@ -577,15 +623,31 @@ impl SourceIndex {
                 continue;
             };
             // Narrowest scope that names exactly ONE fighter wins: the function's own
-            // attribute, then the directory (`src/mario/mod.rs` + `src/mario/acmd.rs`), then
-            // the whole project for a single-character mod. A scope naming several fighters
-            // is ambiguous, and guessing would silently attach a move to the wrong one.
+            // attribute, then its closest enclosing source module, then the whole project for
+            // a single-character mod. A scope naming several fighters is ambiguous, and
+            // guessing would silently attach a move to the wrong one.
             let sole = |names: &[String]| (names.len() == 1).then(|| names[0].clone());
+            let registration_fighter = registrations.and_then(|registered| {
+                let mut fighters = registered
+                    .iter()
+                    .filter_map(|registration| registration.fighter.as_ref())
+                    .collect::<Vec<_>>();
+                fighters.sort_unstable();
+                fighters.dedup();
+                (fighters.len() == 1).then(|| fighters[0].clone())
+            });
             let Some(fighter) = function
                 .fighter
                 .clone()
-                .or_else(|| sole(neighbours))
+                .or_else(|| fighter_for_file(file, &self.root, fighter_scopes))
+                .or(registration_fighter)
                 .or_else(|| sole(project_wide))
+                // A folder of ACMD modules is often shared without the plugin's install
+                // module. It has no fighter label to recover, but when the entire selected
+                // source set has no labels at all it is still one safely editable set. Store
+                // it under the empty sentinel; `script` exposes it only while it remains the
+                // sole set, so it can never silently bleed into a named multi-fighter project.
+                .or_else(|| project_wide.is_empty().then(String::new))
             else {
                 continue;
             };
@@ -635,6 +697,28 @@ impl SourceIndex {
                 .scripts
                 .insert(script, site);
         }
+    }
+}
+
+/// The nearest source-directory scope that unambiguously owns `file`.
+///
+/// `mod.rs` commonly declares an agent several folders above the individual ACMD files. Walking
+/// ancestors keeps that ordinary module layout working while still refusing a nearer scope that
+/// declares more than one fighter.
+fn fighter_for_file(
+    file: &Path,
+    root: &Path,
+    fighter_scopes: &HashMap<PathBuf, Vec<String>>,
+) -> Option<String> {
+    let mut directory = file.parent()?;
+    loop {
+        if let Some(names) = fighter_scopes.get(directory) {
+            return (names.len() == 1).then(|| names[0].clone());
+        }
+        if directory == root {
+            return None;
+        }
+        directory = directory.parent()?;
     }
 }
 
@@ -8755,6 +8839,113 @@ pub fn install(agent: &mut smashline::Agent) {
             std::fs::read_to_string(&install_file).unwrap(),
             install_before
         );
+    }
+
+    #[test]
+    fn nested_modules_inherit_their_fighters_parent_source_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script_file = write(
+            tmp.path(),
+            "src/fighters/mario/acmd/aerials/neutral.rs",
+            r#"unsafe extern "C" fn custom_neutral(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+}
+"#,
+        );
+        write(
+            tmp.path(),
+            "src/fighters/mario/mod.rs",
+            r#"pub fn install() {
+    let agent = &mut smashline::Agent::new("mario");
+    agent.acmd("game_attackairn", custom_neutral, smashline::Priority::Default);
+}
+"#,
+        );
+        // A second fighter makes project-wide fallback unavailable. The nested module scope is
+        // therefore the only safe attribution route for the first function.
+        write(
+            tmp.path(),
+            "src/fighters/luigi/mod.rs",
+            r#"pub fn install() { let agent = &mut smashline::Agent::new("luigi"); }
+"#,
+        );
+
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        let site = index.script("mario", "game_attackairn").unwrap();
+        assert_eq!(site.file, script_file);
+        assert_eq!(site.function, "custom_neutral");
+        assert!(index.script("luigi", "game_attackairn").is_none());
+
+        let report = sync_script(&index, "mario", "game_attackairn", |body| {
+            Ok((
+                body.replace("5.0", "6.0"),
+                SyncReport {
+                    changed: 1,
+                    ..SyncReport::default()
+                },
+            ))
+        })
+        .unwrap();
+        assert_eq!(report.files, vec![script_file.clone()]);
+        assert!(std::fs::read_to_string(script_file)
+            .unwrap()
+            .contains("6.0"));
+    }
+
+    #[test]
+    fn one_unlabelled_source_set_is_available_without_guessing_a_fighter_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_file = write(
+            tmp.path(),
+            "scripts/combat.rs",
+            r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+}
+"#,
+        );
+        let effect_file = write(
+            tmp.path(),
+            "scripts/visuals.rs",
+            r#"unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+}
+"#,
+        );
+
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        assert!(index.has_unattributed_scripts());
+        assert!(index.has_fighter("mario"));
+        assert_eq!(
+            index.script("mario", "game_attackairn").unwrap().file,
+            game_file
+        );
+        assert_eq!(
+            index.script("mario", "effect_attackairn").unwrap().file,
+            effect_file
+        );
+        let project = index.script_source("mario", "attack_air_n").unwrap();
+        assert_eq!(project.covers, ["game_", "effect_"]);
+        assert!(project.body.contains("fn game_attackairn"));
+        assert!(project.body.contains("fn effect_attackairn"));
+    }
+
+    #[test]
+    fn a_single_named_project_remains_the_fallback_for_its_unscoped_functions() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "scripts/unowned.rs",
+            "unsafe extern \"C\" fn game_attackairn(agent: &mut L2CAgentBase) { }",
+        );
+        write(
+            tmp.path(),
+            "src/mario/mod.rs",
+            "pub fn install() { let agent = &mut smashline::Agent::new(\"mario\"); }",
+        );
+
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        assert!(!index.has_unattributed_scripts());
+        assert!(index.script("mario", "game_attackairn").is_some());
     }
 
     #[test]

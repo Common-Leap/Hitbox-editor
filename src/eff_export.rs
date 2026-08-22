@@ -291,6 +291,10 @@ pub fn rebuild_runtime_carrier_eff_bytes_with_edits(
         )
         .collect();
     silence_carrier_native_effects(&mut carrier, &transplanted);
+    // The game does not treat an ESET with zero emitters as a valid no-op.  If an entry still
+    // points at one, its loader walks into the following ESET (and can crash).  Keep the entry
+    // name/header so requests still resolve, but make the spawn handle explicitly `none`.
+    clear_empty_emitter_set_references(&mut carrier);
     // Textures an edit will SWAP TO are not sampled by anything yet — hold them back from the
     // prune, which otherwise drops them a few lines before the swap looks for them.
     let swap_targets: Vec<String> = authored
@@ -623,6 +627,7 @@ pub fn strip_donor_eff_bytes(src: &[u8], keep_entries: &[&str]) -> Result<Vec<u8
     let mut file = effect_library::NamcoEffectFile::load(src)
         .context("effect_library failed to parse the donor .eff")?;
     silence_carrier_native_effects(&mut file, keep_entries);
+    clear_empty_emitter_set_references(&mut file);
     prune_unreferenced_resources(&mut file, &[])?;
     compact_shader_containers(&mut file)?;
     file.save()
@@ -728,6 +733,38 @@ fn clear_unreachable_emitter_sets(file: &mut effect_library::NamcoEffectFile) {
     for (index, set) in ptcl.emitter_list.emitter_sets.iter_mut().enumerate() {
         if !live.contains(&index) {
             set.emitters.clear();
+        }
+    }
+}
+
+/// An empty ESET is not a safe game-side no-op: the runtime's set loader can consume the next
+/// ESET's first emitter when the referenced set has no children.  Entries and variants use
+/// 1-based set handles, with zero already defined as "none", so detach those handles while
+/// retaining the ESET and entry name.  Retaining the tables preserves all other indices and
+/// makes the operation idempotent across repeated project rebuilds.
+fn clear_empty_emitter_set_references(file: &mut effect_library::NamcoEffectFile) {
+    let Some(ptcl) = file.ptcl_file.as_ref() else {
+        return;
+    };
+    let empty: std::collections::HashSet<u32> = ptcl
+        .emitter_list
+        .emitter_sets
+        .iter()
+        .enumerate()
+        .filter(|(_, set)| set.emitters.is_empty())
+        .map(|(index, _)| index as u32 + 1)
+        .collect();
+    if empty.is_empty() {
+        return;
+    }
+    for entry in &mut file.entries {
+        if empty.contains(&entry.emitter_set_id) {
+            entry.emitter_set_id = 0;
+        }
+    }
+    for variant in &mut file.effect_variants {
+        if empty.contains(&(variant.emitter_set_id as u32)) {
+            variant.emitter_set_id = 0;
         }
     }
 }
@@ -1328,6 +1365,9 @@ fn rebuild_eff_bytes_filtered(
     for edit in &eff.entry_edits {
         apply_entry_edit(&mut namco, edit)?;
     }
+    // Apply this after spawn edits too: an entry edit can deliberately repoint a kind or part
+    // at the roster-cleared set, and that must not reintroduce the unsafe zero-emitter handle.
+    clear_empty_emitter_set_references(&mut namco);
     apply_texture_imports(&mut namco, &eff.textures, &mut warnings)?;
     apply_texture_removals(&mut namco, &eff.textures_removed, &mut warnings)?;
     for warning in &warnings {
@@ -3653,6 +3693,61 @@ mod tests {
             .emitter_sets
             .len();
         assert_eq!(other_before, other_after, "the set count changed");
+    }
+
+    /// An intentionally empty ESET must carry a NONE child offset.  The writer used to point
+    /// this offset at the byte immediately after the ESET header; the game then interpreted the
+    /// following ESET's first emitter as a child of the empty one.
+    #[test]
+    fn an_empty_roster_writes_a_none_child_offset() {
+        let Some(root) = std::env::var_os("VISIONARY_EFF_ROOT").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set VISIONARY_EFF_ROOT to the extracted effect/ tree");
+            return;
+        };
+        const SRC: &str = "effect/fighter/mario/ef_mario.eff";
+        let bytes = std::fs::read(root.join(SRC)).expect("source eff");
+        let source = effect_library::NamcoEffectFile::load(&bytes).expect("parse source");
+        let ptcl = source.ptcl_file.as_ref().expect("source PTCL");
+        let set_name = ptcl.emitter_list.emitter_sets[0].name.clone();
+        let eff = crate::mod_project::EffMod {
+            source_rel: SRC.to_string(),
+            rosters: vec![crate::mod_project::EmitterRoster {
+                set_name: set_name.clone(),
+                entry_name: String::new(),
+                set_idx: 0,
+                slots: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let rebuilt = super::rebuild_eff_bytes(&bytes, &eff, Some(&root)).expect("rebuild");
+        let out = effect_library::NamcoEffectFile::load(&rebuilt).expect("re-read");
+        assert!(out.ptcl_file.as_ref().unwrap().emitter_list.emitter_sets[0]
+            .emitters
+            .is_empty());
+
+        let mut child_offset = None;
+        for start in rebuilt
+            .windows(4)
+            .enumerate()
+            .filter_map(|(i, w)| (w == b"ESET").then_some(i))
+        {
+            let binary_offset =
+                u32::from_le_bytes(rebuilt[start + 16..start + 20].try_into().unwrap()) as usize;
+            let name_start = start + binary_offset + 16;
+            let name_end = name_start + set_name.len();
+            if rebuilt.get(name_start..name_end) == Some(set_name.as_bytes()) {
+                child_offset = Some(u32::from_le_bytes(
+                    rebuilt[start + 8..start + 12].try_into().unwrap(),
+                ));
+                break;
+            }
+        }
+        assert_eq!(
+            child_offset,
+            Some(u32::MAX),
+            "empty ESET child offset must be NONE"
+        );
     }
 
     #[test]
