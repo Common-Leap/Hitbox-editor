@@ -25,9 +25,9 @@ ssbh_data = { version = "0.19.0", features = ["serde"] }
 prc = { package = "prc-rs", version = "1.6" }
 motion_lib = { package = "motion_list_rs", version = "1.5" }
 hash40 = "1.3"
-# `.eff` parsing, editing, and export. 1.1.3 carries the BFRES and BNSH relocation-table
-# fixes, without which the game's loader follows unrebased pointers and hangs.
-effect_library = "1.1.3"
+# `.eff` parsing, editing, and export. 1.1.4 also preserves NONE child offsets for empty
+# emitter sets, while retaining the BFRES and BNSH relocation-table fixes.
+effect_library = "1.1.4"
 # BNTX encode/decode, for importing your own PNG over an effect texture. Not published on
 # crates.io, so pin the upstream commit. `image_dds` does the BCn compression and must stay
 # on the same 0.7 line bntx builds against or the `Surface` types will not unify.
