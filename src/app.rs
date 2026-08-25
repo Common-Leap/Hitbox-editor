@@ -19151,7 +19151,20 @@ impl VisionaryApp {
         bone_rev: &HashMap<u64, String>,
         eff_rev: &HashMap<u64, String>,
     ) -> Vec<crate::data::EffectCall> {
-        let mut ordered: Vec<_> = captures.iter().enumerate().collect();
+        // The common animcmd agent's calls are dropped BEFORE ordering, not filtered out of the
+        // finished rows. They are status feedback playing over the move — an invincibility flash
+        // during a throw is the usual one — and they are not in the move's `effect_` script, so
+        // a row built from one is an edit the export can never write. Dropping them here also
+        // keeps them from anchoring a `LAST_EFFECT_SET_*` modifier that belongs to the spawn
+        // above them.
+        //
+        // Only the ROWS are refused. The lines stay in the capture pool, where the plugin's
+        // injection boundaries and the donor search still see the whole run.
+        let mut ordered: Vec<_> = captures
+            .iter()
+            .filter(|line| !line.common)
+            .enumerate()
+            .collect();
         ordered.sort_by(|(ai, a), (bi, b)| a.frame.total_cmp(&b.frame).then_with(|| ai.cmp(bi)));
 
         let mut effects: Vec<crate::data::EffectCall> = Vec::new();
@@ -26365,6 +26378,8 @@ impl VisionaryApp {
                 .into_iter()
                 .filter(|(_, l)| {
                     fighter_kind.is_none_or(|kind| l.kind == kind)
+                        // Status feedback is not a use of the donor the editor can redirect.
+                        && !l.common
                         && effect_capture_layout(&l.func).is_some()
                         && l.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
                 })
@@ -27382,7 +27397,12 @@ impl VisionaryApp {
         captures
             .iter()
             .filter(|capture| {
-                capture.func == func && Self::motion_to_script_frame(capture.frame) == script_frame
+                // Occurrence is an index into the MOVE's calls. A common-agent call of the same
+                // command on the same frame is not one of them, and counting it would shift
+                // every later occurrence onto the wrong call.
+                !capture.common
+                    && capture.func == func
+                    && Self::motion_to_script_frame(capture.frame) == script_frame
             })
             .nth(occurrence)
             .map(|capture| capture.args.clone())
@@ -27647,9 +27667,17 @@ impl VisionaryApp {
     ) -> Option<crate::game_link::SpawnInjectWire> {
         use crate::game_link::LuaArgWire as A;
         let new_hash = effect_name_hash(&ec.effect_name);
+        // A common-agent line is a real observation of the game, but it belongs to status
+        // feedback rather than to this move, so it is not a shape this move's spawn may borrow.
+        // The fallback donor search — "any captured spawn of the move" — is exactly where an
+        // unrelated status effect would otherwise be picked up.
+        let captures: Vec<&crate::game_link::CaptureLine> =
+            captures.iter().filter(|line| !line.common).collect();
+        let captures = captures.as_slice();
         if effect_call_is_trail(ec) {
             let trails = captures
                 .iter()
+                .copied()
                 .filter(|capture| trail_capture_command(&capture.func));
             // A trail's payload is 29 version-specific slots of which the editor exposes three.
             // There is no measured default for the other 26, so unlike a spawn an added trail
@@ -27666,6 +27694,7 @@ impl VisionaryApp {
                     .or_else(|| {
                         captures
                             .iter()
+                            .copied()
                             .find(|capture| trail_capture_command(&capture.func))
                     }),
             }?;
@@ -27701,6 +27730,7 @@ impl VisionaryApp {
         }
         let spawns = captures
             .iter()
+            .copied()
             .filter(|c| crate::acmd::effect_spawn_layout(&c.func).is_some());
         let donor = match donor_hash {
             Some(hash) => spawns
@@ -27714,6 +27744,7 @@ impl VisionaryApp {
                 .or_else(|| {
                     captures
                         .iter()
+                        .copied()
                         .find(|c| crate::acmd::effect_spawn_layout(&c.func).is_some())
                 }),
         };
@@ -34421,6 +34452,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         }
     }
 
@@ -34456,6 +34488,7 @@ mod live_effect_capture_tests {
             func: "ATTACK_ABS".into(),
             args,
             run: 1,
+            common: false,
         }];
         let hitboxes =
             VisionaryApp::hitboxes_from_captures(&captures, &HashMap::new(), &HashMap::new());
@@ -34532,6 +34565,7 @@ mod live_effect_capture_tests {
             func: "ATTACK_FP".into(),
             args,
             run: 1,
+            common: false,
         }];
         let mut bones = HashMap::new();
         bones.insert(hash40::hash40("top").0, "top".into());
@@ -34558,6 +34592,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         }
     }
 
@@ -34869,6 +34904,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         }
     }
 
@@ -35893,6 +35929,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         };
         let captures = vec![
             line("HIT_NODE", 9.0, vec![A::Hash(bone), A::Int(2)]),
@@ -35941,6 +35978,7 @@ mod live_effect_capture_tests {
             func: "DAMAGE_NO_REACTION".into(),
             args: vec![A::Int(0), A::Int(mode), A::Num(value)],
             run: 1,
+            common: false,
         };
         let script = VisionaryApp::script_from_captures(
             &[line(2.0, 1, 0.0), line(8.0, 0, 0.0)],
@@ -35980,6 +36018,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         };
         let captures = vec![
             line("WHOLE_HIT", 0.0, vec![A::Int(2)]),
@@ -36136,6 +36175,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         };
         let captures = vec![
             line("ATK_POWER", 0.0, vec![A::Int(1), A::Num(14.0)]),
@@ -36180,6 +36220,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         };
         let captures = vec![
             line("HIT_RESET_ALL", 4.0, vec![]),
@@ -36219,6 +36260,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         };
         let captures = vec![
             line("COL_PRI", 9.0, vec![A::Int(200)]),
@@ -36256,6 +36298,7 @@ mod live_effect_capture_tests {
             func: "HIT_NODE".into(),
             args: vec![A::Hash(0xdead_beef), A::Int(2)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let (states, _) = script.to_hurtboxes();
@@ -36290,6 +36333,7 @@ mod live_effect_capture_tests {
                 func: "FT_MOTION_RATE".into(),
                 args: vec![A::Num(0.25)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -36298,6 +36342,7 @@ mod live_effect_capture_tests {
                 func: "ATK_POWER".into(),
                 args: vec![A::Int(0), A::Int(10)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -36331,6 +36376,7 @@ mod live_effect_capture_tests {
                 func: "REVERSE_LR".into(),
                 args: Vec::new(),
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -36339,6 +36385,7 @@ mod live_effect_capture_tests {
                 func: "REVERSE_LR".into(),
                 args: Vec::new(),
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -36366,6 +36413,7 @@ mod live_effect_capture_tests {
             func: "SET_SPEED_EX".into(),
             args: vec![A::Num(0.0), A::Num(-3.8), A::Int(0)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let events = script.to_speed_ex_events();
@@ -36387,6 +36435,7 @@ mod live_effect_capture_tests {
             func: "SET_SPEED".into(),
             args: vec![A::Num(0.0), A::Num(-3.8)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let events = script.to_speed_events();
@@ -36409,6 +36458,7 @@ mod live_effect_capture_tests {
                 func: "ADD_SPEED_NO_LIMIT".into(),
                 args: vec![A::Num(0.0), A::Num(-3.8)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -36417,6 +36467,7 @@ mod live_effect_capture_tests {
                 func: "CORRECT".into(),
                 args: vec![A::Int(1)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -36443,6 +36494,7 @@ mod live_effect_capture_tests {
             func: "FT_CATCH_STOP".into(),
             args: vec![A::Int(6), A::Int(1)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -36470,6 +36522,7 @@ mod live_effect_capture_tests {
             func: "FT_CATCH_STOP".into(),
             args: vec![A::Int(6), A::Int(1)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_throwf(agent: &mut L2CAgentBase) {
@@ -36512,6 +36565,7 @@ mod live_effect_capture_tests {
             func: "FT_START_ADJUST_MOTION_FRAME_arg1".into(),
             args: vec![A::Num(0.85)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -36540,6 +36594,7 @@ mod live_effect_capture_tests {
             func: "FT_START_ADJUST_MOTION_FRAME_arg1".into(),
             args: vec![A::Num(0.85)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -36591,6 +36646,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_rate".into(),
             args: vec![A::Num(0.8)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -36615,6 +36671,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_rate".into(),
             args: vec![A::Num(0.8)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -36671,6 +36728,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_helper_calculation".into(),
             args: vec![A::Bool(true)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -36697,6 +36755,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_helper_calculation".into(),
             args: vec![A::Bool(false)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -36765,6 +36824,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_rate_partial".into(),
             args: vec![A::Int(2), A::Num(0.8)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -36792,6 +36852,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_rate_partial".into(),
             args: vec![A::Int(1), A::Num(0.8)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -36865,6 +36926,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_frame_partial".into(),
             args: vec![A::Int(5), A::Num(2.0), A::Bool(true)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -36894,6 +36956,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_frame_partial".into(),
             args: vec![A::Int(5), A::Num(2.0), A::Bool(true)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_expression_script(
             r#"unsafe extern "C" fn expression_appeallwl(agent: &mut L2CAgentBase) {
@@ -37032,6 +37095,7 @@ mod live_effect_capture_tests {
             func: "MotionModule::set_rate_partial".into(),
             args: vec![A::Int(5), A::Num(0.0)],
             run: 1,
+            common: false,
         };
 
         let (rules, unrepresentable) =
@@ -37141,6 +37205,7 @@ mod live_effect_capture_tests {
                 func: "CLR_SPEED".into(),
                 args: vec![A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37149,6 +37214,7 @@ mod live_effect_capture_tests {
                 func: "SET_AIR".into(),
                 args: vec![],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -37184,6 +37250,7 @@ mod live_effect_capture_tests {
             func: "CLR_SPEED".into(),
             args: vec![A::Int(7)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
@@ -37228,6 +37295,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::change_kinetic".into(),
             args: vec![A::Int(4)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -37254,6 +37322,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::change_kinetic".into(),
             args: vec![A::Int(4)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_escapeair(agent: &mut L2CAgentBase) {
@@ -37303,6 +37372,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::suspend_energy".into(),
                 args: vec![crate::game_link::LuaArgWire::Int(2)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37311,6 +37381,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::resume_energy".into(),
                 args: vec![crate::game_link::LuaArgWire::Int(2)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -37343,6 +37414,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::enable_energy".into(),
                 args: vec![crate::game_link::LuaArgWire::Int(4)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37351,6 +37423,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::unable_energy".into(),
                 args: vec![crate::game_link::LuaArgWire::Int(5)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -37383,6 +37456,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::suspend_energy".into(),
             args: vec![crate::game_link::LuaArgWire::Int(2)],
             run: 1,
+            common: false,
         }];
         let baseline = vec![crate::data::KineticEnergyEvent {
             frame: 1,
@@ -37430,6 +37504,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::enable_energy".into(),
                 args: vec![crate::game_link::LuaArgWire::Int(4)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37438,6 +37513,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::unable_energy".into(),
                 args: vec![crate::game_link::LuaArgWire::Int(5)],
                 run: 1,
+                common: false,
             },
         ];
         let baseline = vec![
@@ -37515,6 +37591,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::add_speed".into(),
             args: vec![A::Num(0.72), A::Num(-1.5), A::Num(0.0)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -37544,6 +37621,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::add_speed".into(),
             args: vec![A::Num(0.72), A::Num(-1.5), A::Num(0.0)],
             run: 1,
+            common: false,
         }];
         let baseline = vec![crate::data::KineticAddSpeedEvent {
             frame: 1,
@@ -37583,6 +37661,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::clear_speed_all".into(),
             args: vec![],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         assert_eq!(
@@ -37604,6 +37683,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::on_flag".into(),
                 args: vec![A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37612,6 +37692,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::off_flag".into(),
                 args: vec![A::Int(8)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -37679,6 +37760,7 @@ mod live_effect_capture_tests {
                 func: "HIT_NODE".into(),
                 args: vec![A::Hash(bone), A::Int(2)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37687,6 +37769,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::on_flag".into(),
                 args: vec![A::Int(0x1234)],
                 run: 1,
+                common: false,
             },
         ];
         let bones = HashMap::from([(bone, "kneer".to_string())]);
@@ -37722,6 +37805,7 @@ mod live_effect_capture_tests {
                 func: "HIT_NODE".into(),
                 args: vec![A::Hash(bone), A::Int(2)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37730,6 +37814,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::off_flag".into(),
                 args: vec![A::Int(553648140)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37738,6 +37823,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::enable_transition_term".into(),
                 args: vec![A::Int(503316593)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37746,6 +37832,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::inc_int".into(),
                 args: vec![A::Int(285212678)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37754,6 +37841,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::change_kinetic".into(),
                 args: vec![A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -37762,6 +37850,7 @@ mod live_effect_capture_tests {
                 func: "FT_MOTION_RATE".into(),
                 args: vec![A::Num(1.0)],
                 run: 1,
+                common: false,
             },
         ];
         let bones = HashMap::from([(bone, "kneer".to_string())]);
@@ -37796,6 +37885,140 @@ mod live_effect_capture_tests {
         assert_eq!(inject.args[2], A::Num(1.0));
         assert_eq!(inject.args[3], A::Num(2.0));
         assert_eq!(inject.args[4], A::Num(3.0));
+    }
+
+    fn color_line(func: &str, frame: f32, common: bool) -> CaptureLine {
+        CaptureLine {
+            kind: 6,
+            motion: hash40::hash40("attack_air_n").0,
+            frame,
+            func: func.into(),
+            args: vec![A::Num(1.0), A::Num(0.9), A::Num(0.8), A::Num(0.7)],
+            run: 1,
+            common,
+        }
+    }
+
+    /// The common animcmd agent's status feedback — an invincibility flash during a throw is the
+    /// one testers see — plays over the move at the move's own fighter, motion, and frame. It is
+    /// not in the move's `effect_` script, so it must not become an editable row.
+    ///
+    /// The modifier is the sharp end of it: a colour row ENDS a `LAST_EFFECT_SET_*` binding, so a
+    /// stray flash landing between a spawn and its rate does not merely add a row, it silently
+    /// drops the rate off the spawn above it.
+    #[test]
+    fn a_common_agent_flash_is_not_captured_as_an_editable_row() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let rate = CaptureLine {
+            func: "LAST_EFFECT_SET_RATE".into(),
+            args: vec![A::Num(0.5)],
+            ..color_line("LAST_EFFECT_SET_RATE", 4.0, false)
+        };
+        let captures = vec![
+            spawn("EFFECT_FOLLOW", 4.0, effect),
+            color_line("FLASH", 4.0, true),
+            rate,
+        ];
+
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(
+            calls.len(),
+            1,
+            "the common flash must not appear beside the move's own spawn: {calls:#?}"
+        );
+        assert_eq!(calls[0].effect_name, "sys_attack_line");
+        assert_eq!(
+            calls[0].rate,
+            Some(0.5),
+            "the flash must not break the spawn's modifier binding"
+        );
+    }
+
+    /// The paired positive: the exact same three lines with the flash attributed to the FIGHTER's
+    /// own script keep the flash row — and the modifier binding really does end there. Without
+    /// this, the test above would pass just as well if colour capture were broken outright.
+    #[test]
+    fn a_fighter_authored_flash_is_still_captured_as_a_row() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let rate = CaptureLine {
+            func: "LAST_EFFECT_SET_RATE".into(),
+            args: vec![A::Num(0.5)],
+            ..color_line("LAST_EFFECT_SET_RATE", 4.0, false)
+        };
+        let captures = vec![
+            spawn("EFFECT_FOLLOW", 4.0, effect),
+            color_line("FLASH", 4.0, false),
+            rate,
+        ];
+
+        let calls = VisionaryApp::effect_calls_from_captures(&captures, &bones, &effects);
+        assert_eq!(calls.len(), 2, "{calls:#?}");
+        assert!(calls[1].color.is_some(), "the authored flash is a real row");
+        assert_eq!(calls[0].rate, None, "a colour row ends the binding");
+    }
+
+    /// A common-agent spawn is a real observation, but it is not a shape this move's added spawn
+    /// may borrow: the fallback donor search takes ANY captured spawn when the added call has no
+    /// original of its own, and status feedback is exactly what would be sitting there.
+    #[test]
+    fn a_common_agent_spawn_is_not_borrowed_as_a_donor() {
+        let mut donor = spawn("EFFECT_FOLLOW_FLIP", 4.0, hash40::hash40("sys_hit_elec").0);
+        donor.common = true;
+        let mut added = VisionaryApp::effect_calls_from_captures(
+            &[spawn(
+                "EFFECT_FOLLOW_FLIP",
+                4.0,
+                hash40::hash40("sys_hit_elec").0,
+            )],
+            &HashMap::from([(hash40::hash40("top").0, "top".to_string())]),
+            &HashMap::new(),
+        )
+        .remove(0);
+        added.effect_name = "sys_attack_line".into();
+        added.spawn_func = "EFFECT_FOLLOW_FLIP".into();
+        added.flip_axis = None;
+        // No authored tail: this test is about which CAPTURE the tail comes from, and a panel
+        // tail would (correctly) outrank both candidates and decide nothing.
+        added.extra_args = None;
+
+        let inject =
+            VisionaryApp::build_effect_inject_from_captures(&added, &[donor.clone()], None, 0)
+                .expect("an added spawn builds from its command's measured layout");
+        let default_tail = effect_spawn_default_live_tail("EFFECT_FOLLOW_FLIP").expect("tail");
+        // `EFFECT_FOLLOW_FLIP` carries the alternate kind, so its transform ends one slot later.
+        let tail_start = 9 + usize::from(
+            crate::acmd::effect_spawn_layout("EFFECT_FOLLOW_FLIP")
+                .expect("layout")
+                .flip,
+        );
+        assert_eq!(
+            inject.args[tail_start..].to_vec(),
+            default_tail,
+            "the common spawn's tail must not be borrowed"
+        );
+
+        // Paired positive: the same donor attributed to the fighter's own script IS borrowed,
+        // so the assertion above depends on the tag and not on the tail happening to match.
+        let fighter_donor = CaptureLine {
+            common: false,
+            ..donor
+        };
+        let borrowed = VisionaryApp::build_effect_inject_from_captures(
+            &added,
+            std::slice::from_ref(&fighter_donor),
+            None,
+            0,
+        )
+        .expect("a fighter-authored donor is borrowable");
+        assert_eq!(
+            borrowed.args[tail_start..].to_vec(),
+            fighter_donor.args[tail_start..].to_vec()
+        );
+        assert_ne!(borrowed.args[tail_start..].to_vec(), default_tail);
     }
 
     /// The point of an ADDED call: it names an effect the script never spawns, so there is no
@@ -38061,6 +38284,7 @@ mod live_effect_capture_tests {
                 func: "EFFECT_OFF_KIND".into(),
                 args: vec![A::Hash(effect), A::Bool(false), A::Bool(true)],
                 run: 1,
+                common: false,
             },
         ];
         let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
@@ -38085,6 +38309,7 @@ mod live_effect_capture_tests {
             func: "WorkModule::on_flag".into(),
             args: vec![A::Int(7)],
             run: 1,
+            common: false,
         }];
         let baseline = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -38133,6 +38358,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::enable_transition_term".into(),
                 args: vec![A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38141,6 +38367,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::unable_transition_term".into(),
                 args: vec![A::Int(8)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38149,6 +38376,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::enable_transition_term_group".into(),
                 args: vec![A::Int(9)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38157,6 +38385,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::unable_transition_term_group_ex".into(),
                 args: vec![A::Int(10)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -38216,6 +38445,7 @@ mod live_effect_capture_tests {
             func: "WorkModule::enable_transition_term".into(),
             args: vec![A::Int(7)],
             run: 1,
+            common: false,
         }];
         let baseline = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -38269,6 +38499,7 @@ mod live_effect_capture_tests {
             func: "WorkModule::enable_transition_term_group".into(),
             args: vec![A::Int(7)],
             run: 1,
+            common: false,
         }];
         let baseline = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_attackairn(agent: &mut L2CAgentBase) {
@@ -38316,6 +38547,7 @@ mod live_effect_capture_tests {
             func: "WorkModule::inc_int".into(),
             args: vec![A::Int(7)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let baseline = script.to_work_module_inc_int_events();
@@ -38365,6 +38597,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::set_int".into(),
                 args: vec![A::Int(1), A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38373,6 +38606,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::set_float".into(),
                 args: vec![A::Num(5.0), A::Int(8)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38381,6 +38615,7 @@ mod live_effect_capture_tests {
                 func: "WorkModule::set_int64".into(),
                 args: vec![A::Int(0x1000_0000_0001), A::Int(11)],
                 run: 1,
+                common: false,
             },
         ];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
@@ -38517,6 +38752,7 @@ mod live_effect_capture_tests {
             func: "KineticModule::set_consider_ground_friction".into(),
             args: vec![A::Bool(false), A::Int(7)],
             run: 1,
+            common: false,
         }];
         let script = VisionaryApp::script_from_captures(&captures, &HashMap::new());
         let baseline = script.to_kinetic_set_consider_ground_friction_events();
@@ -38560,6 +38796,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::set_consider_ground_friction".into(),
                 args: vec![A::Bool(false), A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38568,6 +38805,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::set_consider_ground_friction".into(),
                 args: vec![A::Bool(true), A::Int(7)],
                 run: 1,
+                common: false,
             },
         ];
         let pristine = vec![
@@ -38623,6 +38861,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::set_consider_ground_friction".into(),
                 args: vec![A::Bool(false), A::Int(7)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38631,6 +38870,7 @@ mod live_effect_capture_tests {
                 func: "KineticModule::set_consider_ground_friction".into(),
                 args: vec![A::Bool(true), A::Int(7)],
                 run: 1,
+                common: false,
             },
         ];
         let pristine = vec![
@@ -38700,6 +38940,7 @@ mod live_effect_capture_tests {
             func: "SET_SPEED_EX".into(),
             args: vec![A::Num(0.0), A::Num(-3.8), A::Int(7)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
@@ -38741,6 +38982,7 @@ mod live_effect_capture_tests {
             func: "SET_SPEED".into(),
             args: vec![A::Num(0.0), A::Num(-3.8)],
             run: 1,
+            common: false,
         }];
         let pristine = crate::acmd::parse_acmd_script(
             r#"unsafe extern "C" fn game_x(agent: &mut L2CAgentBase) {
@@ -38783,6 +39025,7 @@ mod live_effect_capture_tests {
                 func: "ADD_SPEED_NO_LIMIT".into(),
                 args: vec![A::Num(0.0), A::Num(-3.8)],
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -38791,6 +39034,7 @@ mod live_effect_capture_tests {
                 func: "CORRECT".into(),
                 args: vec![A::Int(1)],
                 run: 1,
+                common: false,
             },
         ];
         let script = crate::acmd::parse_acmd_script(
@@ -38860,6 +39104,7 @@ mod live_effect_capture_tests {
             func: "ATTACK".into(),
             args,
             run: 1,
+            common: false,
         }
     }
 
@@ -38871,6 +39116,7 @@ mod live_effect_capture_tests {
             func: "ATTACK_CLEAR_ALL".into(),
             args: Vec::new(),
             run: 1,
+            common: false,
         }
     }
 
@@ -38882,6 +39128,7 @@ mod live_effect_capture_tests {
             func: command.into(),
             args: args.iter().copied().map(A::Num).collect(),
             run: 1,
+            common: false,
         }
     }
 
@@ -38893,6 +39140,7 @@ mod live_effect_capture_tests {
             func: "AREA_WIND_ERASE".into(),
             args: vec![A::Int(id)],
             run: 1,
+            common: false,
         }
     }
 
@@ -39119,6 +39367,7 @@ mod live_effect_capture_tests {
             func: "LAST_EFFECT_SET_RATE".into(),
             args: vec![A::Num(value)],
             run: 1,
+            common: false,
         };
         let captures = vec![
             spawn("EFFECT", 5.0, smoke),
@@ -39161,6 +39410,7 @@ mod live_effect_capture_tests {
             func: "LAST_EFFECT_SET_WORK_INT".into(),
             args: vec![A::Int(0x1234)],
             run: 1,
+            common: false,
         };
         let captures = vec![spawn("EFFECT", 5.0, smoke), work];
         let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
@@ -39182,6 +39432,7 @@ mod live_effect_capture_tests {
             func: "LAST_EFFECT_SET_OFFSET_TO_CAMERA_FLAT".into(),
             args: vec![A::Num(value)],
             run: 1,
+            common: false,
         };
         let captures = vec![
             spawn("EFFECT", 5.0, smoke),
@@ -39214,6 +39465,7 @@ mod live_effect_capture_tests {
             func: "LAST_PARTICLE_SET_COLOR".into(),
             args: vec![A::Num(0.1), A::Num(1.2), A::Num(0.3)],
             run: 1,
+            common: false,
         };
         let captures = vec![spawn("EFFECT", 5.0, smoke), particle];
         let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
@@ -39234,6 +39486,7 @@ mod live_effect_capture_tests {
             func: "LAST_EFFECT_SET_SCALE_W".into(),
             args: vec![A::Num(1.0), A::Num(2.0)],
             run: 1,
+            common: false,
         };
         let captures = vec![spawn("EFFECT", 5.0, smoke), scale_w];
         let bones = HashMap::from([(hash40::hash40("top").0, "top".into())]);
@@ -39256,6 +39509,7 @@ mod live_effect_capture_tests {
             func: func.into(),
             args,
             run: 1,
+            common: false,
         };
         let captures = vec![
             spawn("EFFECT_FOLLOW_NO_STOP", 8.0, dash),
@@ -39419,6 +39673,7 @@ mod live_effect_capture_tests {
                 func: "AFTER_IMAGE3_ON".into(),
                 args: raw_args,
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -39427,6 +39682,7 @@ mod live_effect_capture_tests {
                 func: "AFTER_IMAGE4_ON_arg29".into(),
                 args: named_args,
                 run: 1,
+                common: false,
             },
             CaptureLine {
                 kind: 6,
@@ -39435,6 +39691,7 @@ mod live_effect_capture_tests {
                 func: "AFTER_IMAGE_OFF".into(),
                 args: vec![A::Int(3)],
                 run: 1,
+                common: false,
             },
         ];
         let bones = HashMap::from([(bone, "haver".into())]);
@@ -39495,6 +39752,7 @@ mod live_effect_capture_tests {
             func: "EFFECT_OFF_KIND".into(),
             args: vec![A::Hash(effect), A::Bool(false), A::Bool(true)],
             run: 1,
+            common: false,
         });
 
         let mut bones = HashMap::new();
@@ -40577,6 +40835,7 @@ mod live_effect_capture_tests {
             func: "ATTACK".into(),
             args: vec![A::Nil; 35],
             run: 1,
+            common: false,
         };
         assert!(VisionaryApp::build_attack_args(&Hitbox::default(), Some(&donor)).is_none());
     }
@@ -40592,6 +40851,7 @@ mod live_effect_capture_tests {
                 .map(|index| A::Int(index as i64))
                 .collect(),
             run: 1,
+            common: false,
         };
         let hitbox = Hitbox {
             id: 4,
@@ -41261,6 +41521,7 @@ mod live_effect_capture_tests {
             func: "ATTACK".into(),
             args: vec![A::Nil; 36],
             run: 1,
+            common: false,
         };
         let h = Hitbox {
             id: 7,
@@ -41619,6 +41880,7 @@ mod effect_control_rule_tests {
             func: func.into(),
             args,
             run: 0,
+            common: false,
         }
     }
 
@@ -41833,6 +42095,7 @@ mod donor_capture_tests {
             func: func.to_string(),
             args: Vec::new(),
             run: 0,
+            common: false,
         }
     }
 

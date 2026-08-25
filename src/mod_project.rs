@@ -738,6 +738,7 @@ mod tests {
                     crate::game_link::LuaArgWire::Nil,
                 ],
                 run: 9,
+                common: false,
             }],
         };
         let mut project = ModProjectFile::default();

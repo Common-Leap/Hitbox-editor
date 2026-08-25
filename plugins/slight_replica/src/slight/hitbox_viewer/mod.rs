@@ -310,6 +310,14 @@ pub struct CaptureLine {
     pub args: Vec<LuaArg>,
     /// Which PLAYBACK of the motion produced this line. See [`next_run`].
     pub run: u32,
+    /// True when the call came from the game's COMMON animcmd agent rather than the fighter's
+    /// own move script — status feedback such as invincibility flashing or damage burn, which
+    /// shares the move's fighter/motion/frame but is not part of the move.
+    ///
+    /// Tagged rather than dropped. A dropped line is also a lost injection boundary and a lost
+    /// donor, which is how filtering status noise and applying live edits ended up fighting each
+    /// other; the editor decides what a common line may be used for.
+    pub common: bool,
 }
 
 /// One completed motion playback: "every capture line this motion is going to produce has
@@ -799,7 +807,8 @@ fn fnv(mut h: u64, v: u64) -> u64 {
 pub unsafe fn record(lua_state: u64, func: &'static str, args: &[LuaArg]) {
     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)
         as *mut smash::app::BattleObjectModuleAccessor;
-    record_for_boma_inner(boma, func, args);
+    let common = crate::slight::effect_viewer::acmd_hooks::is_common_effect_lua_state(lua_state);
+    record_for_boma_inner(boma, func, args, common);
 }
 
 /// As [`record`], for hooks that receive a module accessor rather than a lua state —
@@ -809,13 +818,15 @@ pub unsafe fn record_for_boma(
     func: &'static str,
     args: &[LuaArg],
 ) {
-    record_for_boma_inner(boma, func, args);
+    // A lua_bind hook has no agent to attribute, so it is never common by construction.
+    record_for_boma_inner(boma, func, args, false);
 }
 
 unsafe fn record_for_boma_inner(
     boma: *mut smash::app::BattleObjectModuleAccessor,
     func: &'static str,
     args: &[LuaArg],
+    common: bool,
 ) {
     if is_injecting() {
         return;
@@ -846,6 +857,9 @@ unsafe fn record_for_boma_inner(
     for a in args {
         key = fnv(key, a.dedupe_bits());
     }
+    // Part of the identity: the common agent's tint at the same frame with the same arguments is
+    // a DIFFERENT line from the move's own, and must not dedupe the move's line away.
+    key = fnv(key, common as u64);
 
     let (line, completed) = {
         // Never park a game worker here. The captured call still reaches its original hook when
@@ -877,6 +891,7 @@ unsafe fn record_for_boma_inner(
                     func,
                     args: args.to_vec(),
                     run,
+                    common,
                 };
                 // The archive owns the complete session history. The pending queue is only needed
                 // while there is somewhere to stream it; avoiding a second owned copy is important

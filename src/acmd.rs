@@ -6984,12 +6984,12 @@ unsafe extern "C" fn expression_bad(agent: &mut L2CAgentBase) {
             "the measured expression calls no longer all have typed events"
         );
         assert_eq!(
-            expression_scripts, 342,
+            expression_scripts, 345,
             "the local expression corpus changed; update the measured D2 scope deliberately"
         );
         assert_eq!(
             written,
-            [71, 51, 2, 286],
+            [75, 52, 2, 292],
             "the measured expression macro counts changed; update D2 before expanding scope"
         );
     }

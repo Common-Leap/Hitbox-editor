@@ -44,7 +44,7 @@ fn remember_common_effect_lua_state(lua_state: u64) {
     }
 }
 
-fn is_common_effect_lua_state(lua_state: u64) -> bool {
+pub fn is_common_effect_lua_state(lua_state: u64) -> bool {
     if lua_state == 0 {
         return false;
     }
@@ -2054,12 +2054,19 @@ macro_rules! color_hook {
             let typed = crate::slight::hitbox_viewer::read_args_typed(lua_state, $argc);
             // The common effect agent drives status feedback such as invincibility flashing and
             // damage burn while the selected move is playing. It shares fighter/motion/frame
-            // with the move but is not that move's `effect_` script, so recording it makes live
-            // fetch invent editable rows. The native command must still run unchanged.
-            if !is_common_effect_lua_state(lua_state) {
-                crate::slight::hitbox_viewer::record(lua_state, $command, &typed);
-                inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
+            // with the move but is not that move's `effect_` script.
+            //
+            // Recording it is fine — `record` tags the line as common and the editor refuses to
+            // build an editable row from it. Skipping the record outright is what is NOT fine:
+            // this hook is also one of the boundaries a live injection fires at, and a move
+            // whose only boundary at the added spawn's frame was a status tint could not apply
+            // an added effect at all. Boundary and record are unconditional; only the live RULE
+            // rewrite below is withheld, because a colour edit authored for the move must not
+            // repaint the status flash that happens to share its frame.
+            crate::slight::hitbox_viewer::record(lua_state, $command, &typed);
+            inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);
 
+            if !is_common_effect_lua_state(lua_state) {
                 let cmd_hash = smash::hash40($lower);
                 if crate::slight::effect_viewer::spawn_rules::any_for(cmd_hash) {
                     let boma = smash::app::sv_system::battle_object_module_accessor(lua_state)

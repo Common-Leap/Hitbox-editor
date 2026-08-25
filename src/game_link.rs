@@ -396,6 +396,16 @@ pub struct CaptureLine {
     /// plugins that predate run ownership.
     #[serde(default)]
     pub run: u32,
+    /// The call came from the game's COMMON animcmd agent — invincibility flashing, damage burn,
+    /// and the rest of the status feedback that plays over the move without being part of it.
+    ///
+    /// Such a line shares the move's fighter, motion, and frame, so nothing downstream can tell
+    /// it apart after the fact; the plugin is the only place that knows. It is captured (it is a
+    /// true observation, and the plugin needs the same hook as an injection boundary) but never
+    /// promoted into an editable row or offered as a donor. Defaults to false for older plugins,
+    /// which is the pre-tag behaviour.
+    #[serde(default)]
+    pub common: bool,
 }
 
 /// Aggregate capture outcomes for one cache key. Counts are cumulative for the current plugin
@@ -2127,6 +2137,7 @@ mod tests {
                 func: "ATTACK".into(),
                 args: Vec::new(),
                 run: 1,
+                common: false,
             });
             s.capture_ends.insert((8, 0x1234), 1);
         }
@@ -2759,6 +2770,56 @@ mod tests {
         assert!(inject_tick.contains("sound_hooks::normalize_injection_args(&mut args, command)"));
     }
 
+    /// Capture attribution is the plugin's job, and the SPLIT is the whole point of it.
+    ///
+    /// The common animcmd agent's status feedback must be tagged, not dropped: the colour hook is
+    /// also one of the boundaries a live injection fires at, so a hook that returns early for the
+    /// common agent takes an added effect's chance to apply with it. Assert both halves — the
+    /// record and the boundary run unconditionally, and only the live rule rewrite sits behind
+    /// the common check.
+    #[test]
+    fn the_plugin_tags_common_agent_captures_instead_of_dropping_them() {
+        let hooks = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/effect_viewer/acmd_hooks.rs"),
+        )
+        .expect("read plugin effect hooks source");
+        let macro_body = hooks
+            .split_once("macro_rules! color_hook {")
+            .expect("the colour hook macro")
+            .1;
+        let guard = macro_body
+            .find("if !is_common_effect_lua_state(lua_state) {")
+            .expect("the colour rule guard");
+        let record = macro_body
+            .find("crate::slight::hitbox_viewer::record(lua_state, $command, &typed);")
+            .expect("the colour capture record");
+        let boundary = macro_body
+            .find("inject_before_acmd_wait(lua_state, CoroutineBoundary::Effect);")
+            .expect("the colour injection boundary");
+        assert!(
+            record < guard && boundary < guard,
+            "record and the injection boundary must run before the common check, not inside it"
+        );
+
+        let capture = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("plugins/slight_replica/src/slight/hitbox_viewer/mod.rs"),
+        )
+        .expect("read plugin hitbox viewer source");
+        assert!(
+            capture.contains(
+                "crate::slight::effect_viewer::acmd_hooks::is_common_effect_lua_state(lua_state)"
+            ),
+            "every lua-state record must carry its agent attribution, not just the colour family"
+        );
+        assert!(capture.contains("pub common: bool"));
+        assert!(
+            capture.contains("key = fnv(key, common as u64);"),
+            "a common line must not dedupe the move's own identical line away"
+        );
+    }
+
     /// Every hook reads exactly as many lua arguments as its macro declares.
     ///
     /// The arity is a literal in each `sound_hook!` invocation, separate from the table above,
@@ -3050,7 +3111,7 @@ mod tests {
             .expect("direct rule gate ends before capture hashing")
             .0;
         assert!(
-            direct_record.contains("record_for_boma_inner(boma, func, args)")
+            direct_record.contains("record_for_boma_inner(boma, func, args, false)")
                 && !direct_record.contains("is_acmd_execution_for")
                 && direct_rules.contains("!boma.is_null() && any_rules()")
                 && !source.contains("AcmdExecutionGuard")
