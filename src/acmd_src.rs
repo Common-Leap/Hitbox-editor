@@ -409,6 +409,38 @@ struct RegisteredScript {
     fighter: Option<String>,
 }
 
+/// The same function text with its header renamed to `script`, when the project calls it
+/// something else.
+///
+/// A project's function can be called anything: `agent.acmd("game_attackairn", my_nair, …)` and
+/// `#[acmd_script(script = "game_attackairn")] fn my_nair` are both ordinary. The index already
+/// knows which script such a function *is* — but everything downstream of [`SourceIndex::
+/// script_source`] (`parse_acmd_script`, `parse_effect_script`, `parse_sound_script`,
+/// `parse_expression_script`, and the category split in `create_missing_scripts`) finds a
+/// category by looking for `fn game_`/`fn effect_`/… in the header. Handing those readers the
+/// custom name makes the move read as empty: the function is present, carries no category, and
+/// once any *other* category is in the same body the headerless whole-text fallback in
+/// `parse_acmd_script` is off as well.
+///
+/// So the name the index resolved is written into the copy that goes on screen. Only this
+/// in-memory copy: writes go back through [`sync_script`], which patches the file by the site's
+/// own span and never sees this text, so the user's chosen name is left alone on disk.
+fn header_named(source: &str, script: &str) -> String {
+    let Some(fn_at) = source.find("fn ") else {
+        return source.to_string();
+    };
+    let name_at = fn_at + 3;
+    let rest = &source[name_at..];
+    let name_end = name_at
+        + rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+    if &source[name_at..name_end] == script {
+        return source.to_string();
+    }
+    format!("{}{script}{}", &source[..name_at], &source[name_end..])
+}
+
 impl SourceIndex {
     /// Walk `root` and index every ACMD function it can attribute to a fighter.
     pub fn build(root: &Path) -> Result<Self> {
@@ -566,7 +598,7 @@ impl SourceIndex {
                 if let Ok(text) = std::fs::read_to_string(&site.file) {
                     // The span came from this file's text; a concurrent edit can shrink it.
                     if let Some(source) = text.get(site.span.clone()) {
-                        body.push_str(source);
+                        body.push_str(&header_named(source, &name));
                         body.push_str("\n\n");
                         covers.push(prefix);
                     }
@@ -8814,8 +8846,12 @@ pub fn install(agent: &mut smashline::Agent) {
         assert_eq!(effect.function, "custom_neutral_effect");
         assert_eq!(index.conflict_count(), 0);
         let body = index.script_source("mario", "attack_air_n").unwrap().body;
-        assert!(body.contains("fn custom_neutral_game"));
-        assert!(body.contains("fn custom_neutral_effect"));
+        // Both functions are in the merged body, under the names they were registered as —
+        // see `custom_function_names_still_read_as_their_registered_scripts` for why the
+        // header is respelled on the way to the parsers.
+        assert!(body.contains("fn game_attackairn"));
+        assert!(body.contains("fn effect_attackairn"));
+        assert!(body.contains("frame(agent.lua_state_agent, 5.0)"));
 
         let install_before = std::fs::read_to_string(&install_file).unwrap();
         let report = sync_script(&index, "mario", "game_attackairn", |body| {
@@ -8890,6 +8926,81 @@ pub fn install(agent: &mut smashline::Agent) {
         assert!(std::fs::read_to_string(script_file)
             .unwrap()
             .contains("6.0"));
+    }
+
+    /// A project whose functions are named for the mod, not the script, has to read the same
+    /// as one that follows the convention. The registration is what says which script the
+    /// function is, and the merged body has to carry that name — the parsers split a body by
+    /// `fn game_`/`fn effect_`/…, so a custom name reads as no move at all the moment any other
+    /// category shares the body.
+    #[test]
+    fn custom_function_names_still_read_as_their_registered_scripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game_file = write(
+            tmp.path(),
+            "src/mario/nair.rs",
+            r#"unsafe extern "C" fn hudsons_nair(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 5.0);
+    if macros::is_excute(agent) {
+        macros::ATTACK(agent, 0, 0, Hash40::new("top"), 8.0, 361, 100, 0, 40, 4.5, 0.0, 8.0, 6.0, None, None, None, 1.0, 1.0, *ATTACK_SETOFF_KIND_ON, *ATTACK_LR_CHECK_POS, false, 0, 0.0, 0, false, false, false, false, false, *COLLISION_SITUATION_MASK_GA, *COLLISION_CATEGORY_MASK_ALL, *COLLISION_PART_MASK_ALL, false, Hash40::new("collision_attr_normal"), *ATTACK_SOUND_LEVEL_M, *COLLISION_SOUND_ATTR_PUNCH, *ATTACK_REGION_PUNCH);
+    }
+}
+
+unsafe extern "C" fn hudsons_nair_vfx(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 4.0);
+    if macros::is_excute(agent) {
+        macros::EFFECT_FOLLOW_FLIP(agent, Hash40::new("sys_hit_l"), Hash40::new("sys_hit_r"), Hash40::new("haver"), 1.0, 2.0, 3.0, 0.0, 90.0, 45.0, 1.5, true, *EF_FLIP_YZ);
+    }
+}
+
+pub fn install(agent: &mut smashline::Agent) {
+    agent.acmd("game_attackairn", hudsons_nair, smashline::Priority::Default);
+    agent.acmd("effect_attackairn", hudsons_nair_vfx, smashline::Priority::Default);
+}
+"#,
+        );
+
+        let index = SourceIndex::build(tmp.path()).unwrap();
+        let project = index.script_source("mario", "attack_air_n").unwrap();
+        assert_eq!(project.covers, ["game_", "effect_"]);
+        // The mirror's `sound_` joins the body, which is what turns the whole-text fallback in
+        // `parse_acmd_script` off: before the header was renamed, this is where the hitbox and
+        // the effect both disappeared.
+        let merged = crate::acmd::merge_project_over_mirror_blocked(
+            &project.body,
+            &project.covers,
+            &project.blocked,
+            r#"unsafe extern "C" fn sound_attackairn(agent: &mut L2CAgentBase) {
+    frame(agent.lua_state_agent, 2.0);
+}
+"#,
+        );
+        assert_eq!(
+            crate::acmd::parse_acmd_script(&merged).to_hitboxes().len(),
+            1
+        );
+        assert_eq!(
+            crate::acmd::parse_effect_script(&merged).stmts.len(),
+            2,
+            "the effect function is read under its registered name too"
+        );
+        assert!(!crate::acmd::parse_sound_script(&merged).stmts.is_empty());
+
+        // Renaming is for the copy on screen only: the write path patches the file by span, so
+        // the user's own names survive a sync.
+        sync_script(&index, "mario", "game_attackairn", |body| {
+            Ok((
+                body.replace("5.0", "6.0"),
+                SyncReport {
+                    changed: 1,
+                    ..SyncReport::default()
+                },
+            ))
+        })
+        .unwrap();
+        let after = std::fs::read_to_string(&game_file).unwrap();
+        assert!(after.contains("fn hudsons_nair(agent"));
+        assert!(after.contains("frame(agent.lua_state_agent, 6.0)"));
     }
 
     #[test]
