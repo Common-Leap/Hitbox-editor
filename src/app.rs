@@ -1775,6 +1775,43 @@ fn effect_flip_axis_live_value(value: &str) -> Option<i64> {
     })
 }
 
+/// The call's OWN tail tokens, typed against the target command's measured layout.
+///
+/// `None` when the panel has no tail, when it has the wrong number of tokens for this command
+/// (an effect swapped across spawn families), or when any token is symbolic. A token this cannot
+/// resolve stays source/export-only for the same reason a symbolic flip axis does: live must not
+/// invent a value the editor cannot prove.
+fn authored_effect_spawn_tail(
+    call: &crate::data::EffectCall,
+    layout: &crate::acmd::EffectSpawnLayout,
+) -> Option<Vec<crate::game_link::LuaArgWire>> {
+    use crate::acmd::EffectSpawnTailKind;
+    use crate::game_link::LuaArgWire as A;
+
+    let tokens = call.extra_args.as_ref()?;
+    if tokens.len() != layout.tail.len() {
+        return None;
+    }
+    tokens
+        .iter()
+        .zip(layout.tail)
+        .map(|(token, (_, kind))| {
+            let token = token.trim();
+            match kind {
+                EffectSpawnTailKind::Number => token.parse::<f32>().ok().map(A::Num),
+                EffectSpawnTailKind::Bool => match token {
+                    "true" => Some(A::Bool(true)),
+                    "false" => Some(A::Bool(false)),
+                    _ => None,
+                },
+                // Every measured integer tail slot is the flip axis, whose symbolic constants
+                // resolve through the same pinned table the typed field uses.
+                EffectSpawnTailKind::Integer => effect_flip_axis_live_value(token).map(A::Int),
+            }
+        })
+        .collect()
+}
+
 /// Build the live argument list for one effect spawn, optionally rebuilding a captured call for
 /// a different spawn family. A donor's transform is replaced with the editor values, while its
 /// hidden tail is reused only when the donor and target ABIs have the same verified arity;
@@ -1791,6 +1828,7 @@ fn build_effect_spawn_args(
     call: &crate::data::EffectCall,
     donor: Option<(&str, &[crate::game_link::LuaArgWire])>,
     new_hash: u64,
+    prefer_authored_tail: bool,
 ) -> Option<(String, Vec<crate::game_link::LuaArgWire>)> {
     use crate::game_link::LuaArgWire as A;
 
@@ -1839,9 +1877,18 @@ fn build_effect_spawn_args(
     args.push(A::Num(call.scale));
     debug_assert_eq!(args.len(), 9 + target_offset);
 
-    match donor_tail {
-        Some(tail) => args.extend_from_slice(tail),
-        None => args.extend(effect_spawn_default_live_tail(target_func)?),
+    // An ADDED call's tail is the panel's own, not a borrowed or default one. `extra_args` is
+    // exactly what the export writes after the transform, and the plain `EFFECT_FOLLOW` form the
+    // add button creates carries `true` there while the layout's safe default is `false`. That
+    // slot decides whether the follow ends with the animation, so taking the default made a live
+    // added follow outlive the move and never die, while the exported script ended it.
+    let authored_tail = prefer_authored_tail
+        .then(|| authored_effect_spawn_tail(call, target_layout))
+        .flatten();
+    match (authored_tail, donor_tail) {
+        (Some(tail), _) => args.extend(tail),
+        (None, Some(tail)) => args.extend_from_slice(tail),
+        (None, None) => args.extend(effect_spawn_default_live_tail(target_func)?),
     }
     if let (Some(axis), Some(axis_index)) = (
         call.flip_axis
@@ -27680,6 +27727,9 @@ impl VisionaryApp {
             ec,
             donor.map(|donor| (donor.func.as_str(), donor.args.as_slice())),
             new_hash,
+            // An addition has no authored original whose captured arguments are the truth, so
+            // the panel's own tail is what the export will write and what live must play.
+            donor_hash.is_none(),
         )?;
         Some(crate::game_link::SpawnInjectWire {
             frame: Self::script_to_motion_frame(ec.active_start),
@@ -37767,6 +37817,8 @@ mod live_effect_capture_tests {
         added.active_start = 7;
         added.offset = [1.5, -2.0, 0.25];
         added.scale = 1.5;
+        // What the "+ Add effect call" button writes, and what the export emits.
+        added.extra_args = Some(vec!["true".into()]);
 
         let inject = VisionaryApp::build_effect_inject_from_captures(&added, &[], None, 0)
             .expect("an added call must not need a donor of its own effect");
@@ -37786,6 +37838,39 @@ mod live_effect_capture_tests {
                 .tail
                 .len()
         );
+        // The panel's tail, not the layout's safe default. This slot ends the follow with the
+        // animation; the default `false` made an added follow linger after the move.
+        assert_eq!(inject.args[9], A::Bool(true));
+        assert_eq!(
+            crate::acmd::effect_spawn_layout("EFFECT_FOLLOW")
+                .expect("layout")
+                .tail[0]
+                .0,
+            "false",
+            "the default this must override"
+        );
+    }
+
+    /// A tail the editor cannot type — wrong arity for the command, or a symbolic token — is
+    /// left to the measured defaults rather than guessed into the live call.
+    #[test]
+    fn an_added_effect_falls_back_when_its_tail_does_not_fit_the_command() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let base = VisionaryApp::effect_calls_from_captures(
+            &[spawn("EFFECT_FOLLOW", 4.0, effect)],
+            &bones,
+            &effects,
+        );
+        let mut added = base[0].clone();
+        added.spawn_func = "EFFECT_FOLLOW".into();
+        added.extra_args = Some(vec!["true".into(), "*SOME_CONSTANT".into()]);
+
+        let inject = VisionaryApp::build_effect_inject_from_captures(&added, &[], None, 0)
+            .expect("the call is still built");
+        assert_eq!(inject.args.len(), 10);
+        assert_eq!(inject.args[9], A::Bool(false), "the measured default");
     }
 
     /// A REPLACEMENT is the opposite case: the call it replaces is in the script, so its captured
@@ -38880,6 +38965,7 @@ mod live_effect_capture_tests {
             &target,
             Some((donor.func.as_str(), donor.args.as_slice())),
             new,
+            false,
         )
         .expect("the shared layout must retarget an ordinary spawn");
         assert_eq!(func, "EFFECT_FOLLOW_FLIP_ALPHA");
@@ -38929,6 +39015,7 @@ mod live_effect_capture_tests {
             &reverse,
             Some((flip_donor.func.as_str(), flip_donor.args.as_slice())),
             new,
+            false,
         )
         .expect("a flip donor must retarget to a one-graphic spawn");
         assert_eq!(func, "EFFECT");
