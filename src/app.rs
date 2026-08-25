@@ -1775,32 +1775,48 @@ fn effect_flip_axis_live_value(value: &str) -> Option<i64> {
     })
 }
 
-/// Rebuild a captured effect call for a potentially different spawn family. The donor's
-/// transform is replaced with the editor values, while its hidden tail is reused only when the
-/// donor and target ABIs have the same verified arity; otherwise the target receives typed safe
-/// defaults. This prevents a command swap from passing (for example) an alpha value where a flip
-/// axis belongs.
-fn retarget_effect_capture_args(
+/// Build the live argument list for one effect spawn, optionally rebuilding a captured call for
+/// a different spawn family. A donor's transform is replaced with the editor values, while its
+/// hidden tail is reused only when the donor and target ABIs have the same verified arity;
+/// otherwise the target receives typed safe defaults. That keeps a command swap from passing
+/// (for example) an alpha value where a flip axis belongs.
+///
+/// The donor is optional because a call the script never made has nothing to borrow from, and
+/// that is the normal case for an ADDED spawn: the donor search keys on the effect's own hash,
+/// which by definition is not in a capture of the unedited move. There is nothing to guess,
+/// though — `EFFECT_SPAWN_LAYOUTS` carries each command's measured arity and its typed default
+/// tail, and the plugin dispatches the command from the argument list it is handed. So build the
+/// call outright and let the donor, when there is one, contribute only the tail it can vouch for.
+fn build_effect_spawn_args(
     call: &crate::data::EffectCall,
-    donor_func: &str,
-    donor_args: &[crate::game_link::LuaArgWire],
+    donor: Option<(&str, &[crate::game_link::LuaArgWire])>,
     new_hash: u64,
 ) -> Option<(String, Vec<crate::game_link::LuaArgWire>)> {
     use crate::game_link::LuaArgWire as A;
 
-    let donor_layout = crate::acmd::effect_spawn_layout(donor_func)?;
-    let target_func = if call.spawn_func.is_empty() {
-        donor_func
-    } else {
-        call.spawn_func.as_str()
+    // A donor whose command is not in the layout table is a donor with an unknown ABI — that is
+    // a refusal, not the same thing as having no donor at all.
+    let donor_layout = match donor {
+        Some((func, _)) => Some(crate::acmd::effect_spawn_layout(func)?),
+        None => None,
+    };
+    let target_func = match (call.spawn_func.as_str(), donor) {
+        ("", Some((donor_func, _))) => donor_func,
+        ("", None) => return None,
+        (authored, _) => authored,
     };
     let target_layout = crate::acmd::effect_spawn_layout(target_func)?;
-    let donor_flip = donor_layout.flip;
     let target_flip = target_layout.flip;
-    let donor_tail_start = 9 + usize::from(donor_flip);
-    if donor_args.len() < donor_tail_start {
-        return None;
-    }
+    // Only a donor long enough to HAVE the tail this reuses can lend one.
+    let donor_tail = match (donor, donor_layout) {
+        (Some((_, donor_args)), Some(donor_layout)) => {
+            let start = 9 + usize::from(donor_layout.flip);
+            let tail = donor_args.get(start..)?;
+            (tail.len() == donor_layout.tail.len() && tail.len() == target_layout.tail.len())
+                .then_some(tail)
+        }
+        _ => None,
+    };
 
     let mut args = Vec::with_capacity(9 + usize::from(target_flip) + target_layout.tail.len());
     args.push(A::Hash(new_hash));
@@ -1823,11 +1839,9 @@ fn retarget_effect_capture_args(
     args.push(A::Num(call.scale));
     debug_assert_eq!(args.len(), 9 + target_offset);
 
-    let donor_tail_len = donor_args.len() - donor_tail_start;
-    if donor_tail_len == donor_layout.tail.len() && donor_tail_len == target_layout.tail.len() {
-        args.extend_from_slice(&donor_args[donor_tail_start..]);
-    } else {
-        args.extend(effect_spawn_default_live_tail(target_func)?);
+    match donor_tail {
+        Some(tail) => args.extend_from_slice(tail),
+        None => args.extend(effect_spawn_default_live_tail(target_func)?),
     }
     if let (Some(axis), Some(axis_index)) = (
         call.flip_axis
@@ -2344,6 +2358,27 @@ struct MoveReplayContext {
     sound: crate::data::AcmdScript,
     expression_pristine: crate::data::AcmdScript,
     expression: crate::data::AcmdScript,
+}
+
+/// Choose the donor pool a live injection replays a spawn from.
+///
+/// Each side is produced lazily: the caller pays for a shared-state lock or a snapshot walk only
+/// for the side that is actually used. Both are cheap to describe and expensive to get wrong,
+/// which is why the policy lives here rather than inline in the accessor.
+fn select_donor_captures(
+    stored_is_authoritative: bool,
+    stored: impl FnOnce() -> Vec<crate::game_link::CaptureLine>,
+    live: impl FnOnce() -> Vec<crate::game_link::CaptureLine>,
+) -> Vec<crate::game_link::CaptureLine> {
+    if stored_is_authoritative {
+        return stored();
+    }
+    let live = live();
+    if live.is_empty() {
+        stored()
+    } else {
+        live
+    }
 }
 
 fn materialize_effect_calls(
@@ -16825,25 +16860,45 @@ impl VisionaryApp {
         }
     }
 
+    /// Captures for the selected move — the donor pool live injection replays a spawn from.
+    ///
+    /// Interactively the plugin's newest run WINS over the persisted snapshot. A stored donor is
+    /// a session-old copy: once a move had one, preferring it froze the donor pool, so an effect
+    /// call added (or retimed, or swapped) after that snapshot was taken could never find a
+    /// donor — `build_effect_inject` returned None, no rule was sent, and re-performing the move
+    /// in game could not help because the fresh run was never consulted. Edits that need no
+    /// donor (transform, rate, tint, suppress) kept applying live, which is what made the loss
+    /// look like "adding effect calls stopped working" rather than a capture problem.
+    ///
+    /// Project-wide replay keeps the opposite rule: there the stored donor IS the authority for
+    /// every move that is not the one being performed, and an empty snapshot is returned as
+    /// empty rather than borrowing an unrelated move's live run.
     fn captures_for_selected_fighter(&self, motion: u64) -> Vec<crate::game_link::CaptureLine> {
-        if let Some(key) = self.current_move_key() {
-            if let Some(snapshot) = self.move_source_cache.get(&key) {
-                let captures: Vec<_> = snapshot
-                    .captures
-                    .iter()
-                    .filter(|capture| capture.motion == motion)
-                    .cloned()
-                    .collect();
-                if !captures.is_empty()
-                    || (self.rebuilding_project_live
-                        && self.replay_live_fallback_key.as_deref() != Some(key.as_str()))
-                {
-                    return captures;
-                }
-            }
-        }
-        self.game_link
-            .latest_run_for(motion, self.current_fighter_kind())
+        let key = self.current_move_key();
+        let snapshot_captures = || {
+            key.as_ref()
+                .and_then(|key| self.move_source_cache.get(key))
+                .map(|snapshot| {
+                    snapshot
+                        .captures
+                        .iter()
+                        .filter(|capture| capture.motion == motion)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        // Only when this move actually HAS a stored donor: with no snapshot there is nothing
+        // authoritative to prefer, and the replay path fell through to the live run before.
+        let stored_is_authoritative = self.rebuilding_project_live
+            && key.as_ref().is_some_and(|key| {
+                self.move_source_cache.contains_key(key)
+                    && self.replay_live_fallback_key.as_deref() != Some(key.as_str())
+            });
+        select_donor_captures(stored_is_authoritative, snapshot_captures, || {
+            self.game_link
+                .latest_run_for(motion, self.current_fighter_kind())
+        })
     }
 
     /// Reverse-lookup maps: hash40(lowercase bone) → canonical bone name; effect hashes
@@ -26615,7 +26670,7 @@ impl VisionaryApp {
                     if let Some(mname) = u.move_key.split_once('/').map(|(_, m)| m) {
                         let motion = hash40::hash40(&mname.to_lowercase()).0;
                         if let Some(inject) =
-                            self.build_effect_inject(&call, Some(motion), donor_hash, 0)
+                            self.build_effect_inject(&call, Some(motion), Some(donor_hash), 0)
                         {
                             let (fs, fe) = Self::rule_frame_window(call.active_start);
                             let (fs, fe) = (fs.unwrap_or_default(), fe.unwrap_or_default());
@@ -26825,6 +26880,11 @@ impl VisionaryApp {
             let orig_hash = pristine
                 .map(|p| effect_name_hash(&p.effect_name))
                 .unwrap_or(hash);
+            // Deliberately NOT `orig_hash`. An added call has no authored original, so there is
+            // no captured spawn of `hash` to find and the injection must be built rather than
+            // replayed; `orig_hash` falling back to the call's own hash is only about which
+            // spawn a rule KEYS on.
+            let donor_hash = pristine.map(|p| effect_name_hash(&p.effect_name));
             let donor_occurrence = pristine
                 .map(|p| Self::effect_spawn_occurrence(&pristines, i, p))
                 .unwrap_or(0);
@@ -26917,29 +26977,35 @@ impl VisionaryApp {
                     .unwrap_or(true);
                 if start_changed {
                     if let Some(inject) =
-                        self.build_effect_inject(ec, motion, orig_hash, donor_occurrence)
+                        self.build_effect_inject(ec, motion, donor_hash, donor_occurrence)
                     {
-                        rules.push(crate::game_link::SpawnRuleWire {
-                            eff_hash: orig_hash,
-                            suppress: true,
-                            stop_func: None,
-                            motion,
-                            frame_start: window.0,
-                            frame_end: window.1,
-                            pos: None,
-                            rot: None,
-                            scale: None,
-                            rate: None,
-                            camera_offset: None,
-                            tint: None,
-                            particle_tint: None,
-                            alpha: None,
-                            scale_w: None,
-                            color: None,
-                            transition: None,
-                            inject: None,
-                            color_inject: None,
-                        });
+                        // Only an authored call has an original to suppress. An ADDED trail has
+                        // no pristine, so `orig_hash` is its own hash and this rule would
+                        // suppress the script's existing trail of that texture at that frame —
+                        // the copy would replace the original instead of joining it.
+                        if pristine.is_some() {
+                            rules.push(crate::game_link::SpawnRuleWire {
+                                eff_hash: orig_hash,
+                                suppress: true,
+                                stop_func: None,
+                                motion,
+                                frame_start: window.0,
+                                frame_end: window.1,
+                                pos: None,
+                                rot: None,
+                                scale: None,
+                                rate: None,
+                                camera_offset: None,
+                                tint: None,
+                                particle_tint: None,
+                                alpha: None,
+                                scale_w: None,
+                                color: None,
+                                transition: None,
+                                inject: None,
+                                color_inject: None,
+                            });
+                        }
                         rules.push(crate::game_link::SpawnRuleWire {
                             eff_hash: hash,
                             suppress: false,
@@ -27074,29 +27140,37 @@ impl VisionaryApp {
             }
             if retimed || swapped {
                 if let Some(inject) =
-                    self.build_effect_inject(ec, motion, orig_hash, donor_occurrence)
+                    self.build_effect_inject(ec, motion, donor_hash, donor_occurrence)
                 {
-                    rules.push(crate::game_link::SpawnRuleWire {
-                        eff_hash: orig_hash,
-                        suppress: true,
-                        stop_func: None,
-                        motion,
-                        frame_start: window.0,
-                        frame_end: window.1,
-                        pos: None,
-                        rot: None,
-                        scale: None,
-                        rate: None,
-                        camera_offset: None,
-                        tint: None,
-                        particle_tint: None,
-                        alpha: None,
-                        scale_w: None,
-                        color: None,
-                        transition: None,
-                        inject: None,
-                        color_inject: None,
-                    });
+                    // A retime or a swap replaces an authored spawn, so that spawn is suppressed
+                    // at its pristine frame. An ADDED call replaces nothing: it has no pristine,
+                    // so `orig_hash` is its own hash and `window` is its own frame, and this rule
+                    // would suppress the script's spawn of that same effect there. Duplicating a
+                    // spawn then showed ONE effect in game instead of two, which reads exactly
+                    // like the add never applied.
+                    if pristine.is_some() {
+                        rules.push(crate::game_link::SpawnRuleWire {
+                            eff_hash: orig_hash,
+                            suppress: true,
+                            stop_func: None,
+                            motion,
+                            frame_start: window.0,
+                            frame_end: window.1,
+                            pos: None,
+                            rot: None,
+                            scale: None,
+                            rate: None,
+                            camera_offset: None,
+                            tint: None,
+                            particle_tint: None,
+                            alpha: None,
+                            scale_w: None,
+                            color: None,
+                            transition: None,
+                            inject: None,
+                            color_inject: None,
+                        });
+                    }
                     rules.push(crate::game_link::SpawnRuleWire {
                         eff_hash: hash,
                         suppress: false,
@@ -27506,7 +27580,7 @@ impl VisionaryApp {
         &self,
         ec: &crate::data::EffectCall,
         motion: Option<u64>,
-        donor_hash: u64,
+        donor_hash: Option<u64>,
         donor_occurrence: usize,
     ) -> Option<crate::game_link::SpawnInjectWire> {
         let motion = motion?;
@@ -27514,22 +27588,40 @@ impl VisionaryApp {
         Self::build_effect_inject_from_captures(ec, &captures, donor_hash, donor_occurrence)
     }
 
+    /// `donor_hash` is the effect the SCRIPT spawns at this site — the call being replaced.
+    /// `None` means there is no such call: this spawn is an ADDITION, so any captured spawn of
+    /// the move may lend its argument shape, and a move with no captured spawn at all still
+    /// yields a call built from the command's measured layout.
     fn build_effect_inject_from_captures(
         ec: &crate::data::EffectCall,
         captures: &[crate::game_link::CaptureLine],
-        donor_hash: u64,
+        donor_hash: Option<u64>,
         donor_occurrence: usize,
     ) -> Option<crate::game_link::SpawnInjectWire> {
         use crate::game_link::LuaArgWire as A;
         let new_hash = effect_name_hash(&ec.effect_name);
         if effect_call_is_trail(ec) {
-            let donor = captures
+            let trails = captures
                 .iter()
-                .filter(|capture| {
-                    trail_capture_command(&capture.func)
-                        && capture.args.first().and_then(|arg| arg.as_hash()) == Some(donor_hash)
-                })
-                .nth(donor_occurrence)?;
+                .filter(|capture| trail_capture_command(&capture.func));
+            // A trail's payload is 29 version-specific slots of which the editor exposes three.
+            // There is no measured default for the other 26, so unlike a spawn an added trail
+            // still needs SOME captured trail to copy — just not one of its own texture.
+            let donor = match donor_hash {
+                Some(hash) => trails
+                    .filter(|capture| {
+                        capture.args.first().and_then(|arg| arg.as_hash()) == Some(hash)
+                    })
+                    .nth(donor_occurrence),
+                None => trails
+                    .clone()
+                    .find(|capture| Some(capture.func.as_str()) == ec.trail_command.as_deref())
+                    .or_else(|| {
+                        captures
+                            .iter()
+                            .find(|capture| trail_capture_command(&capture.func))
+                    }),
+            }?;
             let command = ec
                 .trail_command
                 .as_deref()
@@ -27560,14 +27652,35 @@ impl VisionaryApp {
                 args,
             });
         }
-        let donor = captures
+        let spawns = captures
             .iter()
-            .filter(|c| {
-                crate::acmd::effect_spawn_layout(&c.func).is_some()
-                    && c.args.first().and_then(|a| a.as_hash()) == Some(donor_hash)
-            })
-            .nth(donor_occurrence)?;
-        let (func, args) = retarget_effect_capture_args(ec, &donor.func, &donor.args, new_hash)?;
+            .filter(|c| crate::acmd::effect_spawn_layout(&c.func).is_some());
+        let donor = match donor_hash {
+            Some(hash) => spawns
+                .filter(|c| c.args.first().and_then(|a| a.as_hash()) == Some(hash))
+                .nth(donor_occurrence),
+            // Prefer a donor of the same command family, so the added call reuses a tail its own
+            // ABI can actually vouch for rather than falling back to defaults.
+            None => spawns
+                .clone()
+                .find(|c| c.func == ec.spawn_func)
+                .or_else(|| {
+                    captures
+                        .iter()
+                        .find(|c| crate::acmd::effect_spawn_layout(&c.func).is_some())
+                }),
+        };
+        // A REPLACEMENT still refuses without its donor. The call it replaces exists in the
+        // script, so its captured arguments are knowable, and inventing them instead would make
+        // the live preview differ from what the export writes.
+        if donor_hash.is_some() && donor.is_none() {
+            return None;
+        }
+        let (func, args) = build_effect_spawn_args(
+            ec,
+            donor.map(|donor| (donor.func.as_str(), donor.args.as_slice())),
+            new_hash,
+        )?;
         Some(crate::game_link::SpawnInjectWire {
             frame: Self::script_to_motion_frame(ec.active_start),
             func,
@@ -37625,13 +37738,77 @@ mod live_effect_capture_tests {
 
         let mut edited = calls[1].clone();
         edited.active_start = 12;
-        let inject = VisionaryApp::build_effect_inject_from_captures(&edited, &captures, effect, 1)
-            .expect("the second repeated effect has a captured donor");
+        let inject =
+            VisionaryApp::build_effect_inject_from_captures(&edited, &captures, Some(effect), 1)
+                .expect("the second repeated effect has a captured donor");
         assert_eq!(inject.frame, 11.0);
         assert_eq!(inject.func, "EFFECT_FOLLOW");
         assert_eq!(inject.args[2], A::Num(1.0));
         assert_eq!(inject.args[3], A::Num(2.0));
         assert_eq!(inject.args[4], A::Num(3.0));
+    }
+
+    /// The point of an ADDED call: it names an effect the script never spawns, so there is no
+    /// captured donor of that hash and there never will be, however many times the move is
+    /// performed. The command's measured layout is enough to build the call outright.
+    #[test]
+    fn an_added_effect_injects_without_any_donor_capture() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let base = VisionaryApp::effect_calls_from_captures(
+            &[spawn("EFFECT_FOLLOW", 4.0, effect)],
+            &bones,
+            &effects,
+        );
+        let mut added = base[0].clone();
+        added.effect_name = "sys_hit_elec".into();
+        added.spawn_func = "EFFECT_FOLLOW".into();
+        added.active_start = 7;
+        added.offset = [1.5, -2.0, 0.25];
+        added.scale = 1.5;
+
+        let inject = VisionaryApp::build_effect_inject_from_captures(&added, &[], None, 0)
+            .expect("an added call must not need a donor of its own effect");
+        assert_eq!(inject.func, "EFFECT_FOLLOW");
+        assert_eq!(inject.frame, 6.0);
+        assert_eq!(inject.args[0], A::Hash(hash40::hash40("sys_hit_elec").0));
+        assert_eq!(inject.args[1], A::Hash(hash40::hash40("top").0));
+        assert_eq!(inject.args[2], A::Num(1.5));
+        assert_eq!(inject.args[3], A::Num(-2.0));
+        assert_eq!(inject.args[4], A::Num(0.25));
+        assert_eq!(inject.args[8], A::Num(1.5));
+        // The complete measured contract, not a prefix the game would read past.
+        assert_eq!(
+            inject.args.len(),
+            9 + crate::acmd::effect_spawn_layout("EFFECT_FOLLOW")
+                .expect("layout")
+                .tail
+                .len()
+        );
+    }
+
+    /// A REPLACEMENT is the opposite case: the call it replaces is in the script, so its captured
+    /// arguments are knowable and inventing them would make the live preview disagree with the
+    /// export. Without its donor it still refuses.
+    #[test]
+    fn a_retime_without_its_donor_still_refuses_to_inject() {
+        let effect = hash40::hash40("sys_attack_line").0;
+        let bones = HashMap::from([(hash40::hash40("top").0, "top".to_string())]);
+        let effects = HashMap::from([(effect, "sys_attack_line".to_string())]);
+        let calls = VisionaryApp::effect_calls_from_captures(
+            &[spawn("EFFECT_FOLLOW", 4.0, effect)],
+            &bones,
+            &effects,
+        );
+        let mut retimed = calls[0].clone();
+        retimed.active_start = 12;
+
+        assert!(
+            VisionaryApp::build_effect_inject_from_captures(&retimed, &[], Some(effect), 0)
+                .is_none(),
+            "a replacement must not be synthesized from nothing"
+        );
     }
 
     #[test]
@@ -37659,7 +37836,7 @@ mod live_effect_capture_tests {
             let inject = VisionaryApp::build_effect_inject_from_captures(
                 &edited,
                 std::slice::from_ref(&capture),
-                effect,
+                Some(effect),
                 0,
             )
             .expect("the captured donor supplies the replacement arguments");
@@ -37698,7 +37875,7 @@ mod live_effect_capture_tests {
             let inject = VisionaryApp::build_effect_inject_from_captures(
                 &edited,
                 std::slice::from_ref(&capture),
-                effect,
+                Some(effect),
                 0,
             )
             .unwrap_or_else(|| panic!("captured {func} must be replayable"));
@@ -38699,8 +38876,12 @@ mod live_effect_capture_tests {
             trailing: Vec::new(),
         };
         let donor = spawn("EFFECT", 5.0, old);
-        let (func, args) = retarget_effect_capture_args(&target, &donor.func, &donor.args, new)
-            .expect("the shared layout must retarget an ordinary spawn");
+        let (func, args) = build_effect_spawn_args(
+            &target,
+            Some((donor.func.as_str(), donor.args.as_slice())),
+            new,
+        )
+        .expect("the shared layout must retarget an ordinary spawn");
         assert_eq!(func, "EFFECT_FOLLOW_FLIP_ALPHA");
         assert_eq!(args[0], A::Hash(new));
         assert_eq!(
@@ -38744,9 +38925,12 @@ mod live_effect_capture_tests {
             ..target
         };
         let flip_donor = spawn("EFFECT_FOLLOW_FLIP", 5.0, old);
-        let (func, args) =
-            retarget_effect_capture_args(&reverse, &flip_donor.func, &flip_donor.args, new)
-                .expect("a flip donor must retarget to a one-graphic spawn");
+        let (func, args) = build_effect_spawn_args(
+            &reverse,
+            Some((flip_donor.func.as_str(), flip_donor.args.as_slice())),
+            new,
+        )
+        .expect("a flip donor must retarget to a one-graphic spawn");
         assert_eq!(func, "EFFECT");
         assert_eq!(
             args.len(),
@@ -39184,7 +39368,7 @@ mod live_effect_capture_tests {
         let mut retimed = calls[0].clone();
         retimed.active_start = 1;
         let inject =
-            VisionaryApp::build_effect_inject_from_captures(&retimed, &captures, texture, 0)
+            VisionaryApp::build_effect_inject_from_captures(&retimed, &captures, Some(texture), 0)
                 .expect("a captured raw trail must be replayable at frame one");
         assert_eq!(inject.frame, 0.0);
         assert_eq!(inject.func, "AFTER_IMAGE3_ON");
@@ -41546,6 +41730,67 @@ mod live_motion_hash_tests {
         assert_eq!(
             VisionaryApp::motion_hash_from_name("attack_air_n"),
             hash40::hash40("attack_air_n").0
+        );
+    }
+}
+
+#[cfg(test)]
+mod donor_capture_tests {
+    use super::*;
+
+    fn capture(func: &str) -> crate::game_link::CaptureLine {
+        crate::game_link::CaptureLine {
+            kind: 0,
+            motion: hash40::hash40("attack_air_n").0,
+            frame: 3.0,
+            func: func.to_string(),
+            args: Vec::new(),
+            run: 0,
+        }
+    }
+
+    /// The regression: a move that already had a stored snapshot kept using it as the injection
+    /// donor pool forever, so an effect call added afterwards never found a donor and no live
+    /// rule was sent. Performing the move again in game has to be able to supply one.
+    #[test]
+    fn a_fresh_performance_outranks_the_stored_snapshot_while_editing() {
+        let chosen = select_donor_captures(
+            false,
+            || vec![capture("EFFECT_FOLLOW")],
+            || vec![capture("EFFECT")],
+        );
+        assert_eq!(
+            chosen
+                .iter()
+                .map(|line| line.func.as_str())
+                .collect::<Vec<_>>(),
+            ["EFFECT"],
+            "the newest run must win over a session-old snapshot"
+        );
+    }
+
+    #[test]
+    fn the_stored_snapshot_still_covers_a_move_that_has_not_been_performed() {
+        let chosen = select_donor_captures(false, || vec![capture("EFFECT_FOLLOW")], Vec::new);
+        assert_eq!(
+            chosen
+                .iter()
+                .map(|line| line.func.as_str())
+                .collect::<Vec<_>>(),
+            ["EFFECT_FOLLOW"],
+            "with no live run the stored donor is all there is"
+        );
+    }
+
+    /// Project-wide replay keeps the opposite rule: the stored donor is authoritative for every
+    /// move that is not the one being performed, so a live run belonging to a DIFFERENT move
+    /// cannot be adopted as this one's donor — including when the stored side is empty.
+    #[test]
+    fn project_replay_keeps_the_stored_donor_authoritative() {
+        let chosen = select_donor_captures(true, Vec::new, || vec![capture("EFFECT")]);
+        assert!(
+            chosen.is_empty(),
+            "replay must not borrow another move's live run"
         );
     }
 }
