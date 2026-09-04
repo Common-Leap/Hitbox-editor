@@ -76,6 +76,7 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
     let mut incomplete = Vec::new();
     let mut exported_effect_names = HashSet::new();
     let mut capture_warnings = Vec::new();
+    let mut slot_gates = crate::acmd::SlotGates::new();
 
     let mut fighters: Vec<_> = project.fighters.iter().collect();
     fighters.sort_by(|a, b| a.0.cmp(b.0));
@@ -83,6 +84,31 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
         let mut moves: Vec<_> = edits.acmd.iter().collect();
         moves.sort_by(|a, b| a.0.cmp(b.0));
         for (move_name, record) in moves {
+            // A move scoped to one costume needs the fighter's own script as the other arm.
+            // Without it the generated script would remove this move from every other costume
+            // of the fighter, so a missing original is refused rather than exported wide.
+            if let Some(slot) = record.slot_scope {
+                match edits
+                    .move_sources
+                    .get(move_name)
+                    .map(|snapshot| snapshot.body.trim())
+                    .filter(|body| !body.is_empty())
+                {
+                    Some(body) => {
+                        slot_gates.insert(
+                            (fighter.clone(), move_name.clone()),
+                            (slot, body.to_string()),
+                        );
+                    }
+                    None => bail!(
+                        "{fighter}'s {move_name} is set to costume c{slot:02} only, but the \
+                         fighter's own version of it was not saved with the project. Exporting \
+                         it now would remove {move_name} from every other costume of \
+                         {fighter}. Open the move in the editor once so its original is \
+                         recorded, then export again."
+                    ),
+                }
+            }
             acmd_edits.push((fighter.clone(), move_name.clone(), record.script.clone()));
         }
 
@@ -186,13 +212,14 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
     {
         return Ok(None);
     }
-    let built = crate::acmd::build_mod_project_full_with_expression(
+    let built = crate::acmd::build_mod_project_with_slot_gates(
         &acmd_edits,
         &effect_edits,
         &sound_edits,
         &expression_edits,
         &tweaks,
         &plugin_name(project),
+        &slot_gates,
     );
 
     // Nothing reaches disk until the generated code has been read back and matched against the
@@ -346,6 +373,41 @@ pub fn make_portable_project(
             texture.png_path = relative.to_string_lossy().replace('\\', "/");
         }
     }
+    // Roster UI image overrides (portraits / stock icons) — same portable asset handling.
+    let asset_ui = PathBuf::from(asset_dir_name).join("roster_ui");
+    for (roster_key, kinds) in portable.roster.ui_images.iter_mut() {
+        for (kind, ov) in kinds.iter_mut() {
+            if ov.png_path.is_empty() {
+                continue;
+            }
+            let source = PathBuf::from(&ov.png_path);
+            let extension = source
+                .extension()
+                .and_then(|part| part.to_str())
+                .unwrap_or("png");
+            let relative = asset_ui
+                .join(portable_component(&roster_key.to_string()))
+                .join(format!(
+                    "{}_{}.{}",
+                    portable_component(kind),
+                    portable_component(
+                        &source
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("image")
+                    ),
+                    extension
+                ));
+            if !used_destinations.insert(relative.clone()) {
+                bail!(
+                    "duplicate project asset destination: {}",
+                    relative.display()
+                );
+            }
+            copy_asset(&source, &project_dir.join(&relative))?;
+            ov.png_path = relative.to_string_lossy().replace('\\', "/");
+        }
+    }
     Ok(portable)
 }
 
@@ -386,6 +448,20 @@ pub fn resolve_project_assets(project: &mut ModProjectFile, project_path: &Path)
                     bail!("project texture path escapes its project folder: {path}");
                 }
                 *path = parent.join(candidate).to_string_lossy().to_string();
+            }
+        }
+    }
+    for kinds in project.roster.ui_images.values_mut() {
+        for ov in kinds.values_mut() {
+            if ov.png_path.is_empty() {
+                continue;
+            }
+            let candidate = PathBuf::from(&ov.png_path);
+            if candidate.is_relative() {
+                if !valid_relative(&candidate) {
+                    bail!("project roster UI image path escapes its project folder: {}", ov.png_path);
+                }
+                ov.png_path = parent.join(candidate).to_string_lossy().to_string();
             }
         }
     }
@@ -1088,5 +1164,107 @@ unsafe extern "C" fn effect_attackairn(agent: &mut L2CAgentBase) {
         assert!(!package.join("atmosphere").exists());
         assert!(!package.join("ultimate").exists());
         assert!(!package.join("romfs").exists());
+    }
+}
+
+/// Costume-scoped moves: the export half of the character an authored slot gets.
+///
+/// A Smashline `game_` script replaces the move for **every** costume of the fighter, so a
+/// scoped move that shipped without the fighter's own script as its other arm would delete
+/// that move from the donor and every other costume of it. These pin both directions.
+#[cfg(test)]
+mod slot_gate_tests {
+    use super::*;
+    use crate::data::EditRecord;
+    use crate::mod_project::{FighterMod, MoveSourceSnapshot};
+
+    const ORIGINAL: &str = "unsafe extern \"C\" fn game_attack11(agent: &mut L2CAgentBase) {\n    frame(agent.lua_state_agent, 2.0);\n}\n";
+
+    fn project(slot: Option<u8>, original: Option<&str>) -> ModProjectFile {
+        let record = EditRecord {
+            fighter: "mario".into(),
+            fighter_display: "Mario".into(),
+            move_name: "attack_11".into(),
+            script: crate::data::AcmdScript::default(),
+            hitboxes_pristine: Vec::new(),
+            hitboxes: Vec::new(),
+            slot_scope: slot,
+        };
+        let mut fighter = FighterMod {
+            acmd: HashMap::from([("attack_11".to_string(), record)]),
+            ..Default::default()
+        };
+        if let Some(original) = original {
+            fighter.move_sources.insert(
+                "attack_11".to_string(),
+                MoveSourceSnapshot {
+                    body: original.to_string(),
+                    captures: Vec::new(),
+                },
+            );
+        }
+        let mut project = ModProjectFile {
+            name: "gate_test".into(),
+            ..Default::default()
+        };
+        project.fighters.insert("mario".into(), fighter);
+        project
+    }
+
+    fn generated(project: &ModProjectFile) -> String {
+        let source = source_project(project)
+            .expect("export should succeed")
+            .expect("a project with one edit generates source");
+        source
+            .project
+            .files
+            .iter()
+            .find(|file| file.rel_path.ends_with("acmd.rs"))
+            .expect("a per-fighter acmd.rs")
+            .contents
+            .clone()
+    }
+
+    #[test]
+    fn a_costume_scoped_move_is_exported_behind_a_costume_gate() {
+        let source = generated(&project(Some(8), Some(ORIGINAL)));
+        assert!(
+            source.contains("FIGHTER_INSTANCE_WORK_ID_INT_COLOR"),
+            "{source}"
+        );
+        assert!(source.contains("if color == 8 {"), "{source}");
+        assert!(source.contains("_costume(agent);"), "{source}");
+        assert!(source.contains("_original(agent);"), "{source}");
+    }
+
+    /// The paired positive for the refusal below: with everything present the same project
+    /// exports, so the refusal is about the missing original and not about the fixture.
+    #[test]
+    fn an_unscoped_move_is_exported_plainly() {
+        let source = generated(&project(None, None));
+        assert!(
+            !source.contains("FIGHTER_INSTANCE_WORK_ID_INT_COLOR"),
+            "{source}"
+        );
+        assert!(!source.contains("_costume(agent);"), "{source}");
+    }
+
+    /// Exporting this would silently remove the move from every other costume of the donor.
+    /// Refusing, with a message that says what to do, is the only safe answer.
+    #[test]
+    fn a_costume_scoped_move_with_no_original_is_refused_rather_than_exported_wide() {
+        let message = match source_project(&project(Some(8), None)) {
+            Ok(_) => panic!("a scoped move with no original must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains("every other costume"), "{message}");
+        assert!(message.contains("attack_11"), "{message}");
+    }
+
+    /// An empty stored body is the same problem as a missing one, and is what a project saved
+    /// from a move that never loaded its source actually contains.
+    #[test]
+    fn an_empty_stored_original_counts_as_missing() {
+        assert!(source_project(&project(Some(8), Some("   \n"))).is_err());
     }
 }

@@ -16,7 +16,13 @@ use serde::{Deserialize, Serialize};
 use crate::data::{EditRecord, EffectCallEdit};
 
 pub const PROJECT_FILE_NAME: &str = "modproject.json";
-pub const PROJECT_VERSION: u32 = 2;
+pub const PROJECT_VERSION: u32 = 3;
+
+/// Versions this build can open. Every field added since v1 carries `#[serde(default)]`, so
+/// an older project loads with the new sections empty — which is exactly what was true when
+/// it was written. The version number is therefore a record of what wrote the file, not a
+/// gate, and [`ModProjectFile::migrate`] is what brings a loaded project up to date.
+pub const OLDEST_SUPPORTED_VERSION: u32 = 1;
 
 /// The source and runtime provenance needed to reopen one move without fetching it again.
 ///
@@ -38,6 +44,10 @@ pub struct ModProjectFile {
     /// fighter name (e.g. "mario") → all edits for that fighter
     #[serde(default)]
     pub fighters: HashMap<String, FighterMod>,
+    /// Character select screen edits: ordering, names, hidden entries, and entries this
+    /// project created. Added in v3.
+    #[serde(default, skip_serializing_if = "RosterMod::is_empty")]
+    pub roster: RosterMod,
 }
 
 /// Which ACMD portion of a saved project should be sent through the source exporter.
@@ -70,6 +80,10 @@ pub fn scope_acmd_project(project: &ModProjectFile, scope: AcmdProjectScope<'_>)
         version: project.version,
         name: project.name.clone(),
         fighters: HashMap::new(),
+        // Roster edits are dropped here for the same reason EFF records are: a Smashline
+        // source export cannot carry a character select screen. They ship through the mod
+        // folder path instead.
+        roster: RosterMod::default(),
     };
 
     // A whole-project export may have a tweak stored under one fighter while the corresponding
@@ -169,6 +183,7 @@ impl Default for ModProjectFile {
             version: PROJECT_VERSION,
             name: "unnamed_mod".into(),
             fighters: HashMap::new(),
+            roster: RosterMod::default(),
         }
     }
 }
@@ -190,8 +205,212 @@ impl ModProjectFile {
                 && f.expression_scripts.is_empty()
                 && f.eff.as_ref().map(|e| e.is_empty()).unwrap_or(true)
                 && f.live_tweaks.is_empty()
-        })
+                && f.params.is_empty()
+        }) && self.roster.is_empty()
     }
+
+    /// Bring a just-loaded project up to the current version.
+    ///
+    /// Every v1→v3 field addition is additive and defaulted, so there is no data to move;
+    /// what this does is stamp the current version so a re-export is honestly labelled, and
+    /// refuse a file from a *newer* build rather than silently dropping sections it does not
+    /// understand. Silently dropping is the dangerous direction: the project would reopen
+    /// looking complete and re-save with the user's roster work gone.
+    pub fn migrate(&mut self) -> anyhow::Result<()> {
+        if self.version > PROJECT_VERSION {
+            anyhow::bail!(
+                "this project was saved by a newer Visionary (project version {}, this build \
+                 understands {PROJECT_VERSION}). Update Visionary rather than opening it here \
+                 — saving would discard whatever it contains that this build cannot read.",
+                self.version
+            );
+        }
+        if self.version < OLDEST_SUPPORTED_VERSION {
+            anyhow::bail!("unsupported project version {}", self.version);
+        }
+        self.version = PROJECT_VERSION;
+        Ok(())
+    }
+}
+
+/// Character select screen edits.
+///
+/// Every map here is **sparse** and keyed by [`crate::roster::RosterKey`], a stable string.
+/// Sparse because two mods editing different parts of the roster must merge, and a whole-file
+/// copy of `ui_chara_db` cannot; stable-keyed because the index an entry sits at is rebuilt on
+/// every rescan and a positional key would silently retarget after installing a mod.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RosterMod {
+    /// Desired character select position, for entries the user moved.
+    ///
+    /// `i8` because that is the width of the `disp_order` field it is written into; a wider
+    /// type here would let the editor hold a position the file cannot store.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub order: std::collections::BTreeMap<crate::roster::RosterKey, i8>,
+    /// Display-name overrides (shorthand: one string writes chr0/chr1/chr2 together).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub names: std::collections::BTreeMap<crate::roster::RosterKey, String>,
+    /// Per-label name overrides: when present, these replace the corresponding chrN
+    /// label individually. Lets the user edit all three `nam_chr{0,1,2}` strings
+    /// independently instead of being forced to keep them in sync.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub name_variants: std::collections::BTreeMap<crate::roster::RosterKey, NameVariants>,
+    /// Per-costume display names for a fighter's individual slots (c00..c255),
+    /// even when those costumes are not separate roster cells. This is what lets
+    /// a vanilla fighter's alt costumes each carry their own name while the CSS
+    /// entry remains one.
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub per_costume_names:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<u8, String>>,
+    /// Entries this project created from nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authored: Vec<AuthoredEntry>,
+    /// Entries hidden from the character select screen.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hidden: std::collections::BTreeSet<crate::roster::RosterKey>,
+    /// UI image overrides: RosterKey -> (image kind -> replacement).
+    ///
+    /// `kind` is the portrait set name (`chara_0`, `chara_1`, `chara_2`, `stock_90`, …)
+    /// and the value records the PNG the user picked plus gamma toggles. Stored
+    /// per entry so each character's images are editable independently.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ui_images:
+        std::collections::BTreeMap<crate::roster::RosterKey, std::collections::BTreeMap<String, UiImageOverride>>,
+    /// Per-entry overrides for `ui_chara_db` fields beyond `disp_order`/`can_select`
+    /// (which live in `order`/`hidden`). Lets the user edit everything about a
+    /// roster row — `color_num`, etc. — without touching the file copy.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chara_overrides: std::collections::BTreeMap<crate::roster::RosterKey, CharaOverrides>,
+}
+
+impl RosterMod {
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+            && self.names.is_empty()
+            && self.name_variants.is_empty()
+            && self.per_costume_names.is_empty()
+            && self.authored.is_empty()
+            && self.hidden.is_empty()
+            && self.ui_images.is_empty()
+            && self.chara_overrides.is_empty()
+    }
+}
+
+/// Per-label name overrides for one roster entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NameVariants {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chr0: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chr1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chr2: Option<String>,
+}
+
+impl NameVariants {
+    pub fn is_empty(&self) -> bool {
+        self.chr0.is_none() && self.chr1.is_none() && self.chr2.is_none()
+    }
+}
+
+/// One UI portrait / stock / result image replacement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiImageOverride {
+    /// Filesystem path to the PNG the user picked.
+    pub png_path: String,
+    /// Apply gamma 2.2 correction when rendering the preview (brighten).
+    #[serde(default)]
+    pub gamma_render: bool,
+    /// Apply inverse gamma when encoding to BNTX (darken/linearise).
+    #[serde(default)]
+    pub gamma_upload: bool,
+}
+
+/// Sparse overrides for fields of a `ui_chara_db` row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CharaOverrides {
+    /// How many costume slots the CSS offers for this character.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_num: Option<u8>,
+    /// Save slot, when the user wants to move it independently of display order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_no: Option<i8>,
+}
+
+/// A character this project added to the roster.
+///
+/// Backed by a costume slot on `donor`; see `docs/roster/PLAN.md` for why a slot clone rather
+/// than a new engine fighter ID. The scaffold deliberately records *where the user's files go*
+/// rather than copying the donor's, so "did my model get picked up" is answerable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuthoredEntry {
+    /// Stable key, `"<donor>#c<NN>"`.
+    pub key: crate::roster::RosterKey,
+    pub donor: String,
+    pub slot: u8,
+    pub display_name: String,
+    /// The `name_id` of the `ui_chara_db` row this entry adds. Distinct from the donor's, and
+    /// what every select screen file for this character is named after.
+    #[serde(default)]
+    pub name_id: String,
+    /// Whether the slot-gated ACMD agent has been scaffolded yet.
+    #[serde(default)]
+    pub moveset_scaffolded: bool,
+    /// Where this character's files live on disk (the scaffold root the
+    /// wizard created and imported as a mod). `None` for characters from
+    /// before this was recorded — everything still works, there is just no
+    /// folder to reveal. Optional so old projects load unchanged.
+    #[serde(default)]
+    pub files_root: Option<std::path::PathBuf>,
+}
+
+/// Sparse parameter edits for one fighter.
+///
+/// Keyed by the param file's **game-relative** path and then by a dotted path scoped to this
+/// fighter's part of that file. The traits proper live in one shared file that is not under any
+/// fighter directory — `fighter/common/param/fighter_param.prc` holds a `fighter_param_table`
+/// with one row per fighter, keyed by `fighter_kind` — so a path here is relative to this
+/// fighter's row (`"weight"`), not to the file root.
+///
+/// Sparse for the same reason the ACMD edit log is, and more urgently: `fighter_param.prc` is a
+/// single file shared by every fighter in the game, so a whole-file copy from one mod would
+/// overwrite every other mod's fighter. It would also pin values from whatever base file
+/// happened to be installed when the edit was made.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ParamMod {
+    #[serde(default, flatten)]
+    pub files: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ParamValue>>,
+}
+
+impl ParamMod {
+    pub fn is_empty(&self) -> bool {
+        self.files.values().all(|fields| fields.is_empty())
+    }
+
+    pub fn field_count(&self) -> usize {
+        self.files.values().map(|fields| fields.len()).sum()
+    }
+}
+
+/// One edited parameter value, carrying the prc type it must be written back as.
+///
+/// The type is stored rather than inferred on write: `prc` files are typed, and writing a
+/// float into a field the game reads as an int produces a file that loads and behaves wrongly
+/// rather than one that fails.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ParamValue {
+    Bool(bool),
+    I8(i8),
+    U8(u8),
+    I16(i16),
+    U16(u16),
+    I32(i32),
+    U32(u32),
+    Float(f32),
+    Hash(u64),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -255,6 +474,10 @@ pub struct FighterMod {
     /// the generated effect scripts and re-applied live on project load.
     #[serde(default)]
     pub live_tweaks: Vec<LiveTweak>,
+    /// Sparse edits to this fighter's `.prc` parameter files — weight, gravity, speeds, and
+    /// the rest of the fighter-wide values. Added in v3.
+    #[serde(default, skip_serializing_if = "ParamMod::is_empty")]
+    pub params: ParamMod,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -839,6 +1062,7 @@ mod tests {
                         script: script.clone(),
                         hitboxes_pristine: Vec::new(),
                         hitboxes: Vec::new(),
+                        slot_scope: None,
                     },
                 )]),
                 ..Default::default()
@@ -939,6 +1163,7 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
                         script: crate::data::AcmdScript::default(),
                         hitboxes_pristine: Vec::new(),
                         hitboxes: Vec::new(),
+                        slot_scope: None,
                     },
                 )]),
                 eff: Some(EffMod {
@@ -986,6 +1211,7 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
             script: crate::data::AcmdScript::default(),
             hitboxes_pristine: Vec::new(),
             hitboxes: Vec::new(),
+            slot_scope: None,
         };
         let second_record = EditRecord {
             move_name: "second".into(),
@@ -1148,5 +1374,128 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
             declared, EDIT_CLONE_PREFIX,
             "editor and plugin disagree on the reserved edit-clone prefix"
         );
+    }
+}
+
+/// Project format v3 — the roster and parameter sections.
+///
+/// Version handling is the one part of the project format whose failures are silent: a file
+/// that loads with a section quietly missing looks healthy and re-saves with the user's work
+/// gone. These pin both directions of that.
+#[cfg(test)]
+mod version_three_tests {
+    use super::*;
+
+    /// A v2 project as an older build wrote it — no `roster`, no `params`.
+    const V2_PROJECT_JSON: &str = r#"{
+        "version": 2,
+        "name": "older_mod",
+        "fighters": {
+            "mario": {
+                "display": "Mario",
+                "acmd": {},
+                "live_tweaks": []
+            }
+        }
+    }"#;
+
+    #[test]
+    fn a_v2_project_loads_with_the_new_sections_empty_and_migrates_to_v3() {
+        let mut project: ModProjectFile =
+            serde_json::from_str(V2_PROJECT_JSON).expect("v2 projects must still load");
+        assert_eq!(project.version, 2);
+        assert!(project.roster.is_empty());
+        assert!(project.fighters["mario"].params.is_empty());
+        // Loading a v2 file must not invent edits — an empty project stays exportable-as-nothing.
+        assert!(project.is_empty());
+
+        project.migrate().expect("v2 is supported");
+        assert_eq!(project.version, PROJECT_VERSION);
+    }
+
+    /// Dropping sections this build does not understand is the dangerous direction: the
+    /// project would reopen looking complete and re-save with the newer build's work gone.
+    #[test]
+    fn a_project_from_a_newer_build_is_refused_rather_than_silently_downgraded() {
+        let mut project = ModProjectFile {
+            version: PROJECT_VERSION + 1,
+            ..Default::default()
+        };
+        let error = project
+            .migrate()
+            .expect_err("a newer project must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains(&(PROJECT_VERSION + 1).to_string()),
+            "the refusal has to name the version that wrote the file: {error}"
+        );
+        // And it must not have been stamped on the way out.
+        assert_eq!(project.version, PROJECT_VERSION + 1);
+    }
+
+    #[test]
+    fn roster_and_param_edits_round_trip_and_keep_the_project_non_empty() {
+        let key = crate::roster::RosterKey::slot("mario", 8);
+        let mut project = ModProjectFile::default();
+        project.roster.order.insert(key.clone(), 12);
+        project.roster.names.insert(key.clone(), "Vision".into());
+        project.roster.authored.push(AuthoredEntry {
+            key: key.clone(),
+            donor: "mario".into(),
+            slot: 8,
+            display_name: "Vision".into(),
+            name_id: "vision".into(),
+            moveset_scaffolded: false,
+            files_root: None,
+        });
+        project
+            .fighters
+            .entry("mario".into())
+            .or_default()
+            .params
+            .files
+            .entry("param/fighter_param.prc".into())
+            .or_default()
+            .insert("weight".into(), ParamValue::Float(104.0));
+
+        assert!(!project.is_empty());
+        let json = serde_json::to_string(&project).unwrap();
+        let reloaded: ModProjectFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.roster, project.roster);
+        assert_eq!(
+            reloaded.fighters["mario"].params.files["param/fighter_param.prc"]["weight"],
+            ParamValue::Float(104.0)
+        );
+    }
+
+    /// A param edit alone is a real edit. Before v3 the emptiness check listed every section
+    /// that existed at the time, which is exactly the shape that goes quietly wrong when a new
+    /// one is added — a project holding only trait edits would report "No edits to export yet".
+    #[test]
+    fn a_project_holding_only_a_param_edit_is_not_empty() {
+        let mut project = ModProjectFile::default();
+        project
+            .fighters
+            .entry("mario".into())
+            .or_default()
+            .params
+            .files
+            .entry("param/fighter_param.prc".into())
+            .or_default()
+            .insert("weight".into(), ParamValue::Float(104.0));
+        assert!(!project.is_empty());
+    }
+
+    /// Likewise for a roster-only project: hiding a character is an edit with no fighter
+    /// entry behind it at all.
+    #[test]
+    fn a_project_holding_only_a_roster_edit_is_not_empty() {
+        let mut project = ModProjectFile::default();
+        project
+            .roster
+            .hidden
+            .insert(crate::roster::RosterKey::fighter("ridley"));
+        assert!(!project.is_empty());
     }
 }

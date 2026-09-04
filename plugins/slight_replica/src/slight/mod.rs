@@ -13,3 +13,5 @@ pub mod sd_poll;
 pub mod slight_consts;
 pub mod smash_utils;
 pub mod systems;
+pub mod roster_pin;
+pub mod roster_heap;

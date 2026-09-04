@@ -18,12 +18,19 @@ mod mod_project;
 mod move_kinds;
 mod param_labels;
 mod renderer;
+mod plugin_deploy;
+mod roster;
 mod scratch_dirs;
 mod texture_import;
 #[cfg(target_os = "linux")]
 mod wayland_icon;
 
 fn main() -> anyhow::Result<()> {
+    // Best-effort auto-deploy the Skyline plugin to the local Eden install so the
+    // user only has to run Eden + Visionary to test. This is non-blocking and
+    // never fails the desktop launch — check stderr for "[visionary] Plugin auto-deploy".
+    plugin_deploy::spawn_background_check();
+
     // RADV can fail silently during wgpu's Linux auto-detection. Keep the working Vulkan
     // default there, while respecting an explicit user choice and leaving Windows to select
     // DirectX/Vulkan normally.

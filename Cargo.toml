@@ -55,6 +55,13 @@ syn = { version = "2", features = ["full"] }
 # Not used directly — `syn` reports where a parse failed only when proc-macro2 is built with
 # span locations, and "line 41, column 8" is the whole value of that report.
 proc-macro2 = { version = "1", features = ["span-locations"] }
+# Mod import. Compiled Smash mods are distributed as archives far more often than as loose
+# folders, and asking a user to extract by hand is the step where the wrong nesting level ends
+# up as the mod root. Deflate and bzip2 cover what real .zip mods use; the default feature set
+# additionally pulls in encryption and several codecs no mod archive contains.
+zip = { version = "8.6.0", default-features = false, features = ["deflate", "bzip2"] }
+# The other half of that: GameBanana serves .7z at least as often as .zip.
+sevenz-rust2 = "0.22.2"
 
 # These native window systems only exist on Linux. Keeping them out of the common eframe
 # declaration prevents Windows builds from inheriting host features they cannot use.

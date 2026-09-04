@@ -6560,6 +6560,15 @@ pub struct EditRecord {
     #[serde(default)]
     pub hitboxes_pristine: Vec<Hitbox>,
     pub hitboxes: Vec<Hitbox>,
+    /// The costume slot this edit belongs to, when it was made for a character the project
+    /// added rather than for the fighter as a whole.
+    ///
+    /// `None` — the overwhelming majority, and every project written before this field existed
+    /// — means the edit applies to every costume, which is what an ACMD replacement does by
+    /// default. `Some(slot)` makes the export emit a costume gate, so the donor's other
+    /// costumes keep their own version of the move instead of losing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_scope: Option<u8>,
 }
 
 /// Persistent log of all edits, keyed fighter_name → move_name → record.
@@ -6570,7 +6579,13 @@ pub struct EditLog {
 }
 
 impl EditLog {
-    pub fn save(
+    /// Record an edit, optionally scoped to one costume slot.
+    ///
+    /// A scoped edit keeps its scope across a re-save of the same move; an unscoped save of a
+    /// move that was scoped would silently widen it to every costume of the donor, which is
+    /// the one direction of this change nobody would notice until they played the donor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_scoped(
         &mut self,
         fighter: &str,
         fighter_display: &str,
@@ -6578,8 +6593,15 @@ impl EditLog {
         script: AcmdScript,
         hitboxes_pristine: Vec<Hitbox>,
         hitboxes: Vec<Hitbox>,
+        slot_scope: Option<u8>,
     ) {
-        self.entries.entry(fighter.to_string()).or_default().insert(
+        let moves = self.entries.entry(fighter.to_string()).or_default();
+        let slot_scope = slot_scope.or_else(|| {
+            moves
+                .get(move_name)
+                .and_then(|existing| existing.slot_scope)
+        });
+        moves.insert(
             move_name.to_string(),
             EditRecord {
                 fighter: fighter.to_string(),
@@ -6588,6 +6610,7 @@ impl EditLog {
                 script,
                 hitboxes_pristine,
                 hitboxes,
+                slot_scope,
             },
         );
     }
@@ -7293,6 +7316,7 @@ pub fn fighter_display_name(name: &str) -> String {
         ("mario", "Mario"),
         ("mariod", "Dr. Mario"),
         ("marth", "Marth"),
+        ("master", "Byleth"),
         ("metaknight", "Meta Knight"),
         ("mewtwo", "Mewtwo"),
         ("miifighter", "Mii Brawler"),

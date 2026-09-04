@@ -195,7 +195,14 @@ pub fn verify_export_with_expression(
         let subject = format!("{fighter} / {move_name}");
         let emitted = crate::acmd::preview_game_fn(script, move_name);
         verify_move(&subject, script, &emitted, &mut report);
-        if !sources.iter().any(|text| text.contains(&emitted)) {
+        // A costume-gated move ships the same body under `<name>_costume`, so the shipped
+        // text is compared against both spellings. Dropping this check for gated moves would
+        // stop verifying that the body reached disk at all.
+        let gated = crate::roster::scaffold::costume_arm_source(&emitted);
+        if !sources
+            .iter()
+            .any(|text| text.contains(&emitted) || text.contains(&gated))
+        {
             report.blocker(
                 &subject,
                 "the generated hitbox script is missing from the exported project",
@@ -463,10 +470,25 @@ fn check_module_wiring(project: &ModProject, report: &mut Report) {
                     ),
                 );
             }
-            if !contents.contains(&format!(", {name}, smashline::Priority")) {
+            // A costume-gated move emits three functions: the two arms and the dispatcher that
+            // picks between them. Only the dispatcher is registered, and the arms are reached
+            // through it — so the arms are checked for being *called* rather than registered.
+            // Requiring a registration for them would be wrong; requiring nothing would let a
+            // genuinely orphaned function through.
+            let gated_arm = name.ends_with("_costume") || name.ends_with("_original");
+            let reachable = if gated_arm {
+                contents.contains(&format!("{name}(agent);"))
+            } else {
+                contents.contains(&format!(", {name}, smashline::Priority"))
+            };
+            if !reachable {
                 report.blocker(
                     *path,
-                    format!("`{name}` is generated but never registered, so it would not run"),
+                    if gated_arm {
+                        format!("`{name}` is generated but nothing calls it, so it would not run")
+                    } else {
+                        format!("`{name}` is generated but never registered, so it would not run")
+                    },
                 );
             }
         }

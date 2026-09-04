@@ -602,7 +602,28 @@ pub fn replace_loaded_file(path_hash: u64) -> bool {
     let buffer = unsafe { std::slice::from_raw_parts_mut(data_ptr as *mut u8, decomp_size) };
     let out_size = match crate::slight::effect_viewer::arcrop::load_file(path_hash, buffer) {
         Some(n) => n,
-        None => return false,
+        None => {
+            // Fallback: direct SD read for the live roster file.
+            let live_path = "sd:/ultimate/mods/visionary_roster_live/ui/param/database/ui_chara_db.prc";
+            if path_hash == smash::hash40(live_path.strip_prefix("sd:/").unwrap_or(live_path)) {
+                if let Ok(data) = std::fs::read(live_path) {
+                    if data.len() <= buffer.len() {
+                        buffer[..data.len()].copy_from_slice(&data);
+                        if data.len() < buffer.len() {
+                            buffer[data.len()..].fill(0);
+                        }
+                        crate::slight::diag::note(format!("resource_reload: refreshed {path_hash:#x} via direct SD {} ({} B)", live_path, data.len()));
+                        data.len()
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
     };
     crate::slight::diag::note(format!(
         "resource_reload: refreshed in-memory file {path_hash:#x} ({out_size} B)"
@@ -662,4 +683,20 @@ pub fn debug_line() -> String {
     format!(
         "arc_lookup_ok={arc_ok} search_lookup_ok={search_ok} kirby_eff_search_index={kirby_idx}"
     )
+}
+
+/// Register a no-op disk callback for the UI roster DB path so we get a logged trace
+/// when the game attempts to load the file via Arcropolis. The callback returns `false`
+/// so the normal arcrop path proceeds; this is purely diagnostic.
+pub fn register_ui_db_probe() -> bool {
+    const UI_CHARA_DB: &str = "ui/param/database/ui_chara_db.prc";
+    let hash = smash::hash40(UI_CHARA_DB);
+
+    extern "C" fn disk_cb(_hash: u64, _out: *mut u8, _max: usize, _out_len: &mut usize) -> bool {
+        crate::slight::diag::note("arcrop: ui_chara_db requested (probe)");
+        // Returning false — do not claim the data — so the game's normal loader continues.
+        false
+    }
+
+    crate::slight::effect_viewer::arcrop::register_disk(hash, 0, disk_cb)
 }

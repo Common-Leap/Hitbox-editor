@@ -4924,6 +4924,14 @@ pub fn build_mod_project_full(
     )
 }
 
+/// One move that belongs to a single costume rather than to the fighter as a whole:
+/// `(fighter, move) → (slot, the fighter's own script source)`.
+///
+/// The original source is not optional. A Smashline script replaces the move for *every*
+/// costume, so a gate with no else arm removes the move from the donor and every other costume
+/// of it — a break that only shows up when someone plays the donor normally.
+pub type SlotGates = std::collections::HashMap<(String, String), (u8, String)>;
+
 /// Like [`build_mod_project_full`] with editable `expression_` scripts included.
 pub fn build_mod_project_full_with_expression(
     edits: &[(String, String, crate::data::AcmdScript)],
@@ -4932,6 +4940,29 @@ pub fn build_mod_project_full_with_expression(
     expression_edits: &[(String, String, crate::data::AcmdScript)],
     live_tweaks: &[crate::mod_project::LiveTweak],
     plugin_name: &str,
+) -> ModProject {
+    build_mod_project_with_slot_gates(
+        edits,
+        effect_edits,
+        sound_edits,
+        expression_edits,
+        live_tweaks,
+        plugin_name,
+        &SlotGates::new(),
+    )
+}
+
+/// Like [`build_mod_project_full_with_expression`], with `game_` scripts that belong to one
+/// costume emitted behind a costume gate.
+#[allow(clippy::too_many_arguments)]
+pub fn build_mod_project_with_slot_gates(
+    edits: &[(String, String, crate::data::AcmdScript)],
+    effect_edits: &[EffectExport],
+    sound_edits: &[(String, String, crate::data::AcmdScript)],
+    expression_edits: &[(String, String, crate::data::AcmdScript)],
+    live_tweaks: &[crate::mod_project::LiveTweak],
+    plugin_name: &str,
+    slot_gates: &SlotGates,
 ) -> ModProject {
     use std::collections::HashMap;
 
@@ -5120,7 +5151,16 @@ pub fn install() {{
             let (fn_name, fn_src) = emit_move_fn(script, move_name);
             // The acmd script name used in agent.acmd() is "game_{movename_no_underscores}"
             let acmd_name = script_function_name("game", move_name);
-            acmd_src.push_str(&fn_src);
+            match slot_gates.get(&((*fighter).to_string(), (*move_name).to_string())) {
+                Some((slot, original)) => {
+                    // The registered name stays `fn_name`; the authored body moves to a
+                    // private name and the fighter's own script becomes the other arm.
+                    acmd_src.push_str(&crate::roster::scaffold::costume_gated_source(
+                        &fn_name, *slot, &fn_src, original,
+                    ));
+                }
+                None => acmd_src.push_str(&fn_src),
+            }
             acmd_src.push('\n');
             fn_entries.push((fn_name, acmd_name));
         }

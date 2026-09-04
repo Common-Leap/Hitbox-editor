@@ -361,6 +361,51 @@ fn parse_tcp_payload(raw: &str) -> Option<ParsedEdit> {
         return None;
     }
 
+    // Pin UI character slots: [{ "ui_chara_id": 12345, "slot": 3 }, ...]
+    if let Some(pins_v) = v.get("pin_ui_chara") {
+        #[derive(serde::Deserialize)]
+        struct PinItem {
+            ui_chara_id: u64,
+            slot: u8,
+        }
+        match serde_json::from_value::<Vec<PinItem>>(pins_v.clone()) {
+            Ok(list) => {
+                let mut map = std::collections::BTreeMap::new();
+                for p in list {
+                    map.insert(p.ui_chara_id, p.slot);
+                }
+                let n = map.len();
+                crate::slight::roster_pin::set_pins(map);
+                crate::slight::diag::note(format!("roster_pin: set {} pin(s)", n));
+            }
+            Err(e) => crate::slight::diag::note(format!("pin_ui_chara parse error: {e}")),
+        }
+        return None;
+    }
+
+    // Live CSS order patch: { "live_css_order": { "<key>": i8 }, "live_css_hidden": ["<key>", ...] }
+    // Properly scoped: each key is a stable RosterKey ("mario", "mario#c08", "ui:ptrainer").
+    // The heap patcher validates every disp_order before touching memory (see offsets.rs),
+    // and falls back to file-based reload if heap offsets are not yet measured (R-81).
+    if v.get("live_css_order").is_some() || v.get("live_css_hidden").is_some() {
+        let order: std::collections::BTreeMap<String, i8> = v
+            .get("live_css_order")
+            .and_then(|o| serde_json::from_value(o.clone()).ok())
+            .unwrap_or_default();
+        let hidden: std::collections::BTreeSet<String> = v
+            .get("live_css_hidden")
+            .and_then(|h| serde_json::from_value(h.clone()).ok())
+            .unwrap_or_default();
+        crate::slight::roster_pin::apply_live_css_order(&order, &hidden);
+        return None;
+    }
+
+    // Roster probe — dump resident ui_chara_db head bytes for R-82 / R-86 harness.
+    if v.get("command").and_then(|c| c.as_str()) == Some("roster_probe") {
+        crate::slight::roster_pin::probe_roster();
+        return None;
+    }
+
     // Stripped donor eff bytes to inject as resident data (live cross-character transplant).
     if let Some(bytes_v) = v.get("donor_bytes") {
         #[derive(serde::Deserialize)]

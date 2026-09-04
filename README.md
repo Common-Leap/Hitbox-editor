@@ -27,22 +27,99 @@ Rust dependencies automatically during the build.
 Use ArcExplorer to dump the `fighter` and `effect` folders from your
 `data.arc`. The `data.arc` file is located in the game's RomFS.
 
-Keep both dumped folders beneath the same export root:
+Keep the dumped folders beneath the same export root:
 
 ```text
 ArcExplorer export/
 ├── fighter/
-└── effect/
+├── effect/
+└── ui/        (optional — needed for the Roster window)
 ```
 
 Open this export root in Visionary when prompted. The `fighter` folder provides
 character models, motion data, and parameters; the `effect` folder provides the
 `.eff` files used by the effect editor.
 
+The `ui` folder is optional and only the Roster window needs it. Dump it if you
+want to edit the character select screen: it provides
+`ui/param/database/ui_chara_db.prc` (the roster database, which decides who
+appears on the select screen and in what order), `ui/message/` (display names),
+and the character portraits. Visionary looks for it in the export root first and
+then in each enabled mod root in load order, so a mod that ships its own roster
+database is picked up without any extra configuration. Without a `ui` folder,
+every other part of the editor works normally and the character select tab says
+what is missing.
+
 The viewport follows each motion list's animation references across the fighter's
 motion parts. This includes Kirby copy-ability animations stored in donor body
 directories, so copied specials preview with their intended animation when the
 corresponding files are present in the export.
+
+## Roster
+
+The **Roster** window (Windows → Roster, or File → Mod Library) covers everything about a
+fighter that is not one move.
+
+### Mod library
+
+Import compiled mods — folders, or `.zip` and `.7z` archives, many at once. Visionary finds
+the game folders inside whatever wrapper a mod ships with (`romfs/`, a folder named after the
+mod, and so on) and says which level it chose. Each mod can be enabled, renamed, and moved in
+load order; **later mods win** any file an earlier one also provides, and every such conflict
+is listed per fighter with the winner named.
+
+Mods that ship a compiled `.nro` plugin are flagged: Visionary cannot read compiled plugin
+code, so for those fighters what the editor shows is the vanilla script rather than what the
+mod does.
+
+Archives are extracted into Visionary's cache. Folders are used in place, so a mod folder you
+maintain yourself stays live as you edit it.
+
+### Character select
+
+Needs the game's `ui/` folder dumped alongside `fighter/` and `effect/`. Shows the roster as a
+grid of portraits in the game's own order, with modded and authored characters marked. Drag a
+portrait onto another to move it; hide a character and restore it later. Every change is stored
+as a sparse override, so exporting rebuilds the roster database from whatever base file is
+installed rather than from a copy taken when you made the edit.
+
+Positions come from `disp_order` in `ui/param/database/ui_chara_db.prc`. The column count in
+the preview is a display choice — the game's own grid geometry lives in its layout files, which
+Visionary does not read. What the preview is authoritative about is the order.
+
+### New character
+
+Adds a character as a **costume of an existing fighter**. It gets its own model, animations,
+effects, display name, and moveset, and you select it by choosing that fighter and then its
+costume. It does not get its own square on the select screen; see `docs/roster/PLAN.md` for the
+measurement behind that.
+
+Creating one makes the folders your model and animations go in and adds them to the mod
+library, so the slot is editable immediately. The panel reports what is still missing —
+including animation files that no motion list names, which are present but will never play.
+
+Turn on **Edit this character's moves** and the moves you edit in the main window belong to
+that costume. The exported plugin gates them, so the donor's other costumes keep their own
+version of everything you change. If Visionary does not have the fighter's original script for
+a move you scoped, the export stops and says so rather than shipping a plugin that removes that
+move from every other costume.
+
+### Traits
+
+Weight, gravity, walk and run speeds, jump heights, landing lag, shield size, and the rest, from
+`fighter/common/param/fighter_param.prc`. Grouped and explained, with every field reachable
+behind a full list, and the base value shown beside anything you change.
+
+These values are stored per fighter and **not** per costume — there is no per-costume version of
+any of them. A costume-backed character therefore shares all of them with its donor, and the
+editor says so.
+
+### Applying and exporting
+
+**Apply to game** writes the roster and value changes into the game's mod folder. They are read
+when the character select screen or a fighter loads, so back out to the select screen to see
+them; they do not change mid-match. Exporting a mod folder writes them alongside the ACMD and
+effect files, in one report — anything that could not be written is named rather than dropped.
 
 ## Desktop editor
 

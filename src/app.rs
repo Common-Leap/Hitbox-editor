@@ -2617,7 +2617,14 @@ pub struct VisionaryApp {
     export_dir: Option<PathBuf>,
     /// Extra roots holding modded content — added-character mods and slot-add packs. Each
     /// has the same `fighter/<name>/…` + `effect/fighter/<name>/…` layout as the data root.
+    ///
+    /// Derived from [`roster`](Self::roster)'s enabled mods, in load order, and refreshed
+    /// whenever the library changes. The mod library is the authoring surface; this stays as
+    /// the resolved list every existing path lookup already reads.
     extra_roots: Vec<PathBuf>,
+    /// The Roster workspace: mod library, character select screen, new characters, traits.
+    /// `app.rs` owns this one field and the menu entry; everything else is under `src/roster/`.
+    roster: crate::roster::window::RosterWindow,
     /// Fighters the user has forgotten from the sidebar. Their source files remain on disk;
     /// this is the persisted roster filter used by the right-click "Forget fighter" action.
     forgotten_fighters: BTreeSet<String>,
@@ -2896,6 +2903,15 @@ impl VisionaryApp {
         // editor's root, so a folder the user picked in that window has to be captured first.
         let saved_eff_root = load_config_path(EFF_ROOT_CONFIG_KEY);
         let saved_mod_roots = load_mod_roots();
+        // The library owns mod roots from here on. Initializing before the fighter index is
+        // built means the first scan already sees every enabled mod, and adopting the old
+        // `mod_roots` file means an upgrading user keeps the setup they had.
+        let mut roster = crate::roster::window::RosterWindow::default();
+        roster.ensure_initialized(&saved_mod_roots);
+        if std::env::var_os("VISIONARY_ROSTER_OPEN").is_some() {
+            roster.open = true;
+        }
+        let resolved_mod_roots = roster.enabled_roots();
 
         #[cfg(target_os = "linux")]
         let wayland_icon = cc.winit_window().and_then(|window| {
@@ -2969,7 +2985,8 @@ impl VisionaryApp {
             credits: crate::credits::CreditsWindow::default(),
             show_edit_log: false,
             export_dir: saved_export_dir,
-            extra_roots: saved_mod_roots,
+            extra_roots: resolved_mod_roots,
+            roster,
             forgotten_fighters: load_forgotten_fighters(),
             current_eff_path: None,
             recent_effs: load_recent_effs(),
@@ -3124,33 +3141,6 @@ impl VisionaryApp {
         }
         roots.extend(self.extra_roots.iter().cloned());
         roots
-    }
-
-    /// Add a mod root (a folder containing `fighter/<name>/…`, i.e. the layout an
-    /// Arcropolis mod uses) and re-index. Added-character mods live here; the game-data root
-    /// stays untouched.
-    fn add_mod_root(&mut self, path: PathBuf) {
-        if self.extra_roots.contains(&path) {
-            self.state.status = format!("Mod root already added: {}", path.display());
-            return;
-        }
-        if !path.join("fighter").is_dir() && !path.join("effect").is_dir() {
-            self.state.status = format!(
-                "{} has no fighter/ or effect/ subdirectory — pick the folder that CONTAINS \
-                 fighter/<name>, not the fighter folder itself",
-                path.display()
-            );
-            return;
-        }
-        self.extra_roots.push(path);
-        save_mod_roots(&self.extra_roots);
-        self.reindex_fighters();
-    }
-
-    fn remove_mod_root(&mut self, path: &std::path::Path) {
-        self.extra_roots.retain(|p| p != path);
-        save_mod_roots(&self.extra_roots);
-        self.reindex_fighters();
     }
 
     fn set_data_root(&mut self, path: PathBuf) {
@@ -6865,6 +6855,8 @@ impl VisionaryApp {
         let mut clear_eff_fighter: Option<String> = None;
         let mut clear_tweak_hash: Option<u64> = None;
         let mut export_all = false;
+        // Roster revert requested from the log, applied after the window.
+        let mut clear_roster: Option<crate::roster::window::RosterLogClear> = None;
 
         // Union of fighters across every edit source shown here. Sound and expression used to
         // be absent from this index, which made their saved edits invisible and impossible to
@@ -6916,6 +6908,16 @@ impl VisionaryApp {
                     .or_insert_with(|| crate::data::fighter_display_name(fighter));
             }
         }
+        // Fighter-wide value edits, authored in the Roster window. Included for the same
+        // reason sound and expression edits are: a window that claims to hold every edit and
+        // silently omits one kind makes those edits impossible to find or undo.
+        for (fighter, params) in &self.roster.params {
+            if !params.is_empty() {
+                fighters
+                    .entry(fighter.clone())
+                    .or_insert_with(|| crate::data::fighter_display_name(fighter));
+            }
+        }
 
         let mut open = self.show_edit_log;
         let saved = self.window_geometry.get("edits").copied();
@@ -6936,15 +6938,194 @@ impl VisionaryApp {
             }
 
             ui.label(
-                egui::RichText::new(
+                RichText::new(
                     "All edits across the toolkit — hitboxes, effect spawns, sounds, \
-                     expression, live tweaks, and authored eff values. Saved automatically; \
-                     use ↶ to restore the source (also un-sends the live state).",
+                     expression, live tweaks, authored eff values, fighter-wide values, \
+                     and every roster edit (positions, names, portraits, new characters). \
+                     Saved automatically; use ↶ to restore the source (also un-sends the live \
+                     state).",
                 )
                 .small()
                 .color(egui::Color32::GRAY),
             );
             ui.separator();
+
+            // ── Roster — every roster edit kind, each revertible ──
+            {
+                let roster = &self.roster.project;
+                let order = roster.order.len();
+                let hidden = roster.hidden.len();
+                let names = roster.names.len();
+                let variants = roster.name_variants.len();
+                let costume_names: usize =
+                    roster.per_costume_names.values().map(|m| m.len()).sum();
+                let images: usize =
+                    roster.ui_images.values().map(|m| m.len()).sum();
+                let row_patches = roster.chara_overrides.len();
+                let authored = roster.authored.clone();
+                // Snapshots: the frame below mutates the roster (jumps and
+                // reverts), so nothing here may hold its borrow.
+                let hidden_keys: Vec<crate::roster::RosterKey> =
+                    roster.hidden.iter().take(5).cloned().collect();
+                let total = order
+                    + hidden
+                    + names
+                    + variants
+                    + costume_names
+                    + images
+                    + row_patches
+                    + authored.len();
+                if total > 0 {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(34, 38, 50))
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::symmetric(8, 6))
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(55, 65, 85)))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("⧉  Roster").small().strong().color(Color32::from_rgb(160, 200, 240)));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{total} edit{}",
+                                        if total == 1 { "" } else { "s" },
+                                    ))
+                                    .small()
+                                    .weak()
+                                    .color(Color32::from_rgb(150, 165, 185)),
+                                );
+                                if ui.small_button("Open Roster").on_hover_text("Open the Roster window").clicked() {
+                                    self.roster.open = true;
+                                    self.roster.focus_character_select();
+                                }
+                            });
+                            ui.add_space(4.0);
+                            // One row per edit kind with a revert and a jump.
+                            // `clear` is None for rows with no safe bulk undo
+                            // (new characters are removed where their files
+                            // live, not from here).
+                            let rows: Vec<(&str, usize, Option<crate::roster::window::RosterLogClear>)> = vec![
+                                ("↔  positions", order, Some(crate::roster::window::RosterLogClear::Positions)),
+                                ("⊘  hidden", hidden, Some(crate::roster::window::RosterLogClear::Hidden)),
+                                ("✎  display names", names, Some(crate::roster::window::RosterLogClear::DisplayNames)),
+                                ("✎  name variants (chr0/1/2)", variants, Some(crate::roster::window::RosterLogClear::NameVariants)),
+                                ("✎  per-costume names", costume_names, Some(crate::roster::window::RosterLogClear::CostumeNames)),
+                                ("🖼  portraits/stocks", images, Some(crate::roster::window::RosterLogClear::Images)),
+                                ("▦  roster row fields", row_patches, Some(crate::roster::window::RosterLogClear::RowPatches)),
+                            ];
+                            for (label, count, clear) in rows {
+                                if count == 0 {
+                                    continue;
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    ui.label(RichText::new(format!("{label} — {count}")).small());
+                                    if ui
+                                        .small_button("↺")
+                                        .on_hover_text("Revert these roster edits")
+                                        .clicked()
+                                    {
+                                        clear_roster = clear;
+                                    }
+                                    if ui
+                                        .small_button("Edit")
+                                        .on_hover_text("Open these in the Roster window")
+                                        .clicked()
+                                    {
+                                        self.roster.open = true;
+                                        self.roster.focus_character_select();
+                                    }
+                                });
+                            }
+                            if !authored.is_empty() {
+                                for entry in &authored {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(12.0);
+                                        ui.label(
+                                            RichText::new(format!("＋ {}  (c{:02} of {})", entry.display_name, entry.slot, entry.donor))
+                                                .small()
+                                                .strong()
+                                                .color(Color32::from_rgb(130, 225, 150)),
+                                        );
+                                        if ui
+                                            .small_button("Edit")
+                                            .on_hover_text("Open this character in the Roster window")
+                                            .clicked()
+                                        {
+                                            self.roster.open = true;
+                                            self.roster.focus_new_character();
+                                        }
+                                    });
+                                }
+                            }
+                            if hidden > 0 {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    for key in hidden_keys.iter().take(4) {
+                                        ui.label(RichText::new(key.to_string()).small().weak().monospace());
+                                    }
+                                    if hidden > 4 {
+                                        ui.label(RichText::new(format!("+{} more", hidden - 4)).small().weak());
+                                    }
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                ui.label(
+                                    RichText::new("Saved with project · included when you export a mod")
+                                        .small()
+                                        .weak()
+                                        .color(Color32::from_rgb(130, 145, 165)),
+                                );
+                            });
+                        });
+                    ui.add_space(6.0);
+                }
+            }
+
+            // ── Fighter-wide values (weight, gravity, speeds) ──────────────
+            let value_edits: Vec<(String, usize)> = self
+                .roster
+                .params
+                .iter()
+                .map(|(fighter, params)| (fighter.clone(), params.field_count()))
+                .filter(|(_, count)| *count > 0)
+                .collect();
+            if !value_edits.is_empty() {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(34, 38, 50))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(55, 65, 85)))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("◈  Fighter values").small().strong().color(Color32::from_rgb(160, 200, 240)));
+                            ui.label(RichText::new(format!("{} fighter(s)", value_edits.len())).small().weak());
+                        });
+                        ui.add_space(2.0);
+                        for (fighter, count) in &value_edits {
+                            ui.horizontal(|ui| {
+                                ui.add_space(12.0);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} — {count} changed value{}",
+                                        crate::data::fighter_display_name(fighter),
+                                        if *count == 1 { "" } else { "s" }
+                                    ))
+                                    .small(),
+                                );
+                                if ui
+                                    .small_button("Edit")
+                                    .on_hover_text("Open these in the Roster window")
+                                    .clicked()
+                                {
+                                    self.roster.open = true;
+                                    self.roster.focus_traits();
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(6.0);
+            }
 
             // ── Live color/speed tweaks (kind-global runtime multipliers) ──
             let tweaks = self.live_overrides.tweaked();
@@ -7411,6 +7592,21 @@ impl VisionaryApp {
         if let Some(hash) = clear_tweak_hash {
             self.live_overrides.clear_tweak(hash);
         }
+        if let Some(kind) = clear_roster {
+            // Roster edits live in the Roster window's project (plus the CSS
+            // editor's typed drafts for positions) — the index rebuilds from
+            // the project on its next draw, so nothing else must be told.
+            use crate::roster::window::RosterLogClear as Clear;
+            match kind {
+                Clear::Positions => self.roster.clear_positions(),
+                Clear::Hidden => self.roster.project.hidden.clear(),
+                Clear::DisplayNames => self.roster.project.names.clear(),
+                Clear::NameVariants => self.roster.project.name_variants.clear(),
+                Clear::CostumeNames => self.roster.project.per_costume_names.clear(),
+                Clear::Images => self.roster.project.ui_images.clear(),
+                Clear::RowPatches => self.roster.project.chara_overrides.clear(),
+            }
+        }
         if let Some((fighter, move_name)) = export_move {
             self.export_logged_move(&fighter, &move_name);
         }
@@ -7576,13 +7772,18 @@ impl VisionaryApp {
         } else {
             rebuild_script_from_hitboxes(&self.state.script, &self.state.hitboxes)
         };
-        self.state.edit_log.save(
+        // When the Roster window has a character you added set as the edit target, this move
+        // belongs to that costume rather than to the fighter as a whole. The export then gates
+        // it, so the donor's other costumes keep their own version of the move.
+        let slot_scope = self.roster.slot_scope_for(&fighter.name);
+        self.state.edit_log.save_scoped(
             &fighter.name,
             &fighter.display_name,
             &move_name,
             script,
             self.state.hitboxes_pristine.clone(),
             self.state.hitboxes.clone(),
+            slot_scope,
         );
     }
 
@@ -15753,7 +15954,16 @@ impl VisionaryApp {
             version: crate::mod_project::PROJECT_VERSION,
             name: self.project_name.clone(),
             fighters: HashMap::new(),
+            roster: self.roster.project.clone(),
         };
+        // Trait edits are authored in the Roster window and have no edit-log entry, so a
+        // fighter whose only change is a value edit would otherwise be absent from the project
+        // entirely — the edit would be saved nowhere and exported nowhere.
+        for (fighter, params) in &self.roster.params {
+            if !params.is_empty() {
+                project.fighters.entry(fighter.clone()).or_default().params = params.clone();
+            }
+        }
         for (fighter, moves) in &self.state.edit_log.entries {
             let fm = project.fighters.entry(fighter.clone()).or_default();
             fm.display = moves
@@ -16018,12 +16228,93 @@ impl VisionaryApp {
             }
         };
         let ExportOutcome {
-            report,
-            errors,
+            mut report,
+            mut errors,
             warnings,
             built_source_root,
             has_source,
         } = outcome;
+
+        // Roster files ride along in the same folder as their own section in the
+        // export tree. They are written after `run_export` succeeds so a refused
+        // ACMD/effect export leaves nothing behind, and their warnings join the
+        // same report rather than a second channel nobody reads.
+        match self.roster.export_into(
+            &dest,
+            &project.roster,
+            &self.state.fighters,
+            self.state.data_root.as_ref(),
+        ) {
+            Ok(roster_report) => {
+                if !roster_report.files.is_empty() {
+                    // Separate, tree-like Roster section — counts first, then the files
+                    let order = project.roster.order.len();
+                    let hidden = project.roster.hidden.len();
+                    let names = project.roster.names.len();
+                    let authored = project.roster.authored.len();
+                    let trait_edits: usize = project
+                        .fighters
+                        .values()
+                        .map(|f| f.params.field_count())
+                        .sum();
+                    let header = format!(
+                        "Roster — {} order, {} hidden, {} name{}, {} new, {} trait value{} ({} file{})",
+                        order,
+                        hidden,
+                        names,
+                        if names == 1 { "" } else { "s" },
+                        authored,
+                        trait_edits,
+                        if trait_edits == 1 { "" } else { "s" },
+                        roster_report.files.len(),
+                        if roster_report.files.len() == 1 { "" } else { "s" }
+                    );
+                    report.push(header);
+                    for file in &roster_report.files {
+                        report.push(format!("  └ roster: {file}"));
+                    }
+                    // Append a dedicated Roster section to the README that `run_export` wrote,
+                    // so the mod folder itself documents the roster tree (not just a status line).
+                    let readme_path = dest.join("README.md");
+                    if let Ok(existing) = std::fs::read_to_string(&readme_path) {
+                        let mut roster_section = String::from("\n## Roster\n\n");
+                        roster_section.push_str(
+                            "This mod changes the character select screen and/or fighter-wide values. \
+                             The files below are included alongside the ACMD/EFF plugin so the roster \
+                             is installed as one complete mod.\n\n",
+                        );
+                        if order + hidden > 0 {
+                            roster_section.push_str(&format!(
+                                "- Select screen order / visibility: {} position edit{}, {} hidden\n",
+                                order,
+                                if order == 1 { "" } else { "s" },
+                                hidden
+                            ));
+                        }
+                        if names > 0 {
+                            roster_section.push_str(&format!("- Display names: {names} override{}\n", if names == 1 { "" } else { "s" }));
+                        }
+                        if authored > 0 {
+                            roster_section.push_str(&format!("- New characters: {authored}\n"));
+                        }
+                        if trait_edits > 0 {
+                            roster_section.push_str(&format!("- Fighter traits: {trait_edits} value{} across {} fighter(s)\n",
+                                if trait_edits == 1 { "" } else { "s" },
+                                project.fighters.len()));
+                        }
+                        roster_section.push_str("\nFiles:\n\n");
+                        for file in &roster_report.files {
+                            roster_section.push_str(&format!("- `{file}`\n"));
+                        }
+                        roster_section.push_str("\nThese are saved with your project and re-exported every time — no separate apply step.\n");
+                        let new_readme = existing + &roster_section + &export_warning_section(&roster_report.warnings);
+                        let _ = std::fs::write(&readme_path, new_readme);
+                    }
+                }
+                errors.extend(roster_report.warnings);
+            }
+            Err(error) => errors.push(format!("roster export failed: {error:#}")),
+        }
 
         // 3. Mod-folder exports compile the generated plugin in the background and keep the NRO
         // inside that ARCropolis mod. Developer exports intentionally stop at editable source.
@@ -16134,7 +16425,12 @@ impl VisionaryApp {
                 return;
             }
         };
-        if let Err(error) = crate::mod_export::validate_project(&project)
+        // Before anything reads the project: bring it to the current format, and refuse a file
+        // written by a newer build. Loading one of those would present it as complete and then
+        // re-save it with whatever this build cannot read silently removed.
+        if let Err(error) = project
+            .migrate()
+            .and_then(|_| crate::mod_export::validate_project(&project))
             .and_then(|_| crate::mod_export::resolve_project_assets(&mut project, path))
         {
             self.state.status = format!("Project load failed: {error}");
@@ -16175,6 +16471,15 @@ impl VisionaryApp {
             }
         }
         self.project_name = project.name.clone();
+        // Loading is replacement here too: the roster window's edits belong to the project
+        // that was open, not to the one being loaded.
+        self.roster.project = std::mem::take(&mut project.roster);
+        self.roster.params = project
+            .fighters
+            .iter()
+            .filter(|(_, fm)| !fm.params.is_empty())
+            .map(|(fighter, fm)| (fighter.clone(), fm.params.clone()))
+            .collect();
         let mut n_acmd = 0;
         let mut n_calls = 0;
         let mut n_eff = 0;
@@ -29876,59 +30181,29 @@ impl eframe::App for VisionaryApp {
                     }
                     // ── Modded characters + extra skins ──────────────────────────────
                     if ui
-                        .button("Add Mod Root…")
+                        .button("Mod Library…")
                         .on_hover_text(
-                            "Point at a mod folder that CONTAINS fighter/<name>/ (an \
-                             Arcropolis-style mod). Added-character mods appear in the fighter \
-                             list; slot-add mods extend an existing fighter's skin list.",
+                            "Import compiled mods — folders or .zip/.7z archives, many at \
+                             once — and set which one wins when two provide the same file. \
+                             Added-character mods appear in the fighter list; slot-add mods \
+                             extend an existing fighter's skin list.",
                         )
                         .clicked()
                     {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_title("Add mod root (folder containing fighter/…)")
-                            .pick_folder()
-                        {
-                            self.add_mod_root(path);
-                        }
+                        self.roster.open = true;
                         ui.close();
                     }
-                    if !self.extra_roots.is_empty() {
-                        let roots = self.extra_roots.clone();
-                        ui.menu_button(format!("Mod Roots ({})", roots.len()), |ui| {
-                            let mut drop: Option<PathBuf> = None;
-                            for p in &roots {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .small_button("✖")
-                                        .on_hover_text("Remove this mod root and re-index")
-                                        .clicked()
-                                    {
-                                        drop = Some(p.clone());
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(p.to_string_lossy().to_string())
-                                            .small(),
-                                    );
-                                });
-                            }
-                            ui.separator();
-                            if ui
-                                .button("Rescan skins")
-                                .on_hover_text(
-                                    "Re-read every fighter's costume slots from disk (after \
-                                     installing a new skin)",
-                                )
-                                .clicked()
-                            {
-                                self.rescan_costume_slots();
-                                self.state.status = "Rescanned costume slots.".into();
-                                ui.close();
-                            }
-                            if let Some(p) = drop {
-                                self.remove_mod_root(&p);
-                                ui.close();
-                            }
-                        });
+                    if ui
+                        .button("Rescan skins")
+                        .on_hover_text(
+                            "Re-read every fighter's costume slots from disk (after \
+                             installing a new skin)",
+                        )
+                        .clicked()
+                    {
+                        self.rescan_costume_slots();
+                        self.state.status = "Rescanned costume slots.".into();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Open Effect File…")
@@ -29962,6 +30237,11 @@ impl eframe::App for VisionaryApp {
                 });
 
                 ui.menu_button("Windows", |ui| {
+                    ui.checkbox(&mut self.roster.open, "Roster")
+                        .on_hover_text(
+                            "Mod library, character select screen, new characters, and \
+                             fighter-wide trait values (separate window)",
+                        );
                     let eff_toggle = ui
                         .checkbox(&mut self.eff_editor.open, "Eff Editor  Ctrl+Shift+E")
                         .on_hover_text("Edit .eff authored values with in-game live preview (separate window)");
@@ -29978,7 +30258,7 @@ impl eframe::App for VisionaryApp {
                             "Transplant any effect from another EFF into the current fighter's \
                              EFF and redirect its uses",
                         );
-                    let has_log = !self.state.edit_log.is_empty() || self.show_edit_log;
+                    let has_log = !self.state.edit_log.is_empty() || self.roster.has_edits() || self.show_edit_log;
                     ui.add_enabled_ui(has_log, |ui| {
                         ui.checkbox(&mut self.show_edit_log, "Edit Log")
                             .on_hover_text("View and manage all saved edits");
@@ -30265,6 +30545,23 @@ impl eframe::App for VisionaryApp {
         }
         let t = self.perf.start();
         self.eff_editor.show(&ctx, &self.game_link);
+        // Which moves each added character has replaced, read from the edit log so the roster
+        // panel does not need its own copy of it.
+        self.roster.authored_moves = self.roster.replaced_moves(&self.state.edit_log);
+        self.roster.show(
+            &ctx,
+            &self.state.fighters,
+            self.state.data_root.as_ref(),
+            &self.state.labels,
+        );
+        // The library is the authoring surface for mod roots; `extra_roots` is the resolved
+        // list every existing path lookup reads. Refreshing here rather than inside the window
+        // keeps the roster module from reaching into the fighter index.
+        if std::mem::take(&mut self.roster.library_dirty) {
+            self.extra_roots = self.roster.enabled_roots();
+            save_mod_roots(&self.extra_roots);
+            self.reindex_fighters();
+        }
         self.perf.end("eff_editor", t);
         for removal in self.eff_editor.take_transplant_removals() {
             self.remove_transplant_from_editor(removal);
@@ -41702,6 +41999,7 @@ mod blocked_export_writes_nothing_tests {
                 script,
                 hitboxes_pristine: Vec::new(),
                 hitboxes: Vec::new(),
+                slot_scope: None,
             },
         );
         fm

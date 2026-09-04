@@ -76,10 +76,15 @@ pub fn poll(boid: u32) -> InitAction {
 
 pub fn install() {
     load_defaults();
+    let _ = crate::slight::effect_viewer::resource_reload::register_ui_db_probe();
     skyline::println!("[SLight] Init frame gates ready");
 }
 
-pub fn on_frame() {}
+pub fn on_frame() {
+    // Stage 2 hook: refresh the CSS roster data when a pin set has changed so the game
+    // sees the authored slot map without waiting for a full menu reboot.
+    crate::slight::roster_pin::enforce_pins();
+}
 
 fn load_defaults() {
     // Jorge FUN_71000ed20c — per-facade motion/status rows (0 = match any).
