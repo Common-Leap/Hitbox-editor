@@ -31,14 +31,8 @@ fn check_and_deploy() -> anyhow::Result<()> {
     let built_exists = built.is_file();
     let deployed_exists = deployed.is_file();
 
-    let needs_build = if !built_exists {
-        true
-    } else if !deployed_exists {
-        true
-    } else {
-        // Compare mtimes: if any source file is newer than the deployed NRO, rebuild.
-        is_source_newer_than(&deployed)?
-    };
+    // Compare mtimes: if any source file is newer than the deployed NRO, rebuild.
+    let needs_build = !built_exists || !deployed_exists || is_source_newer_than(&deployed)?;
 
     if !needs_build {
         return Ok(());

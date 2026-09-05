@@ -64,9 +64,8 @@ pub fn ui_image_path(kind: &str, name_id: &str, slot: u8) -> String {
     // also ship stocks next to the chara portraits. Normalize:
     if kind.starts_with("stock") {
         format!("ui/replace/stock/{kind}/{kind}_{name_id}_{slot:02}.bntx")
-    } else if kind.starts_with("chara") {
-        format!("ui/replace/chara/{kind}/{kind}_{name_id}_{slot:02}.bntx")
     } else {
+        // Chara portraits and every other kind land side by side.
         format!("ui/replace/chara/{kind}/{kind}_{name_id}_{slot:02}.bntx")
     }
 }
@@ -82,8 +81,8 @@ pub fn ui_image_path(kind: &str, name_id: &str, slot: u8) -> String {
 /// `gamma_upload` when true applies sRGB→linear (`pow 2.2`) before encode so
 /// that a bright preview PNG ends up with the right contrast in game.
 pub fn encode_ui_png(png_bytes: &[u8], gamma_upload: bool) -> Result<Vec<u8>> {
-    use image::ImageFormat as ImgFmt;
     use bntx::Bntx;
+    use image::ImageFormat as ImgFmt;
     use image_dds::{ImageFormat, Mipmaps, Quality, SurfaceRgba8};
 
     let mut image = image::load_from_memory_with_format(png_bytes, ImgFmt::Png)
@@ -114,10 +113,7 @@ pub fn encode_ui_png(png_bytes: &[u8], gamma_upload: bool) -> Result<Vec<u8>> {
     // Ensure the BNTX reports sRGB (BC7Srgb) — `Bntx::from_surface` already does for this ImageFormat.
 
     let mut out = std::io::Cursor::new(Vec::new());
-    {
-        use binrw::BinWrite;
-        built.write(&mut out).context("writing the BNTX")?;
-    }
+    built.write(&mut out).context("writing the BNTX")?;
     Ok(out.into_inner())
 }
 
@@ -132,7 +128,10 @@ pub fn encode_ui_png(png_bytes: &[u8], gamma_upload: bool) -> Result<Vec<u8>> {
 pub fn export_ui_images(
     mod_root: &Path,
     index: &crate::roster::index::RosterIndex,
-    overrides: &BTreeMap<crate::roster::RosterKey, BTreeMap<String, crate::mod_project::UiImageOverride>>,
+    overrides: &BTreeMap<
+        crate::roster::RosterKey,
+        BTreeMap<String, crate::mod_project::UiImageOverride>,
+    >,
     report: &mut crate::roster::export::RosterExport,
 ) -> Result<()> {
     for (key, kinds) in overrides {
@@ -168,7 +167,9 @@ pub fn export_ui_images(
             let bntx = match encode_ui_png(&png_bytes, ov.gamma_upload) {
                 Ok(b) => b,
                 Err(e) => {
-                    report.warnings.push(format!("{key} {stored_key}: encoding failed: {e:#}"));
+                    report
+                        .warnings
+                        .push(format!("{key} {stored_key}: encoding failed: {e:#}"));
                     continue;
                 }
             };
@@ -177,8 +178,7 @@ pub fn export_ui_images(
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&dest, bntx)
-                .with_context(|| format!("writing {}", dest.display()))?;
+            std::fs::write(&dest, bntx).with_context(|| format!("writing {}", dest.display()))?;
             report.files.push(rel);
         }
     }
@@ -255,13 +255,10 @@ mod tests {
         let bntx_bytes = encode_ui_png(&png_bytes, false).expect("encode");
         // Must be a BNTX.
         assert_eq!(&bntx_bytes[..4], b"BNTX");
-        // And decodable as one texture.
-        let pool = bntx_bytes.clone();
-        // Decode via texture_import path (single texture pool of 1)
-        // We just ensure the BNTX parses as Bntx.
+        // And decodable as one texture: we just ensure the BNTX parses.
         use binrw::BinRead;
-        use std::io::Cursor;
         use bntx::Bntx;
+        use std::io::Cursor;
         let b = Bntx::read_le(&mut Cursor::new(&bntx_bytes)).expect("parse BNTX");
         assert_eq!(b.width(), 32);
         assert_eq!(b.height(), 32);
@@ -269,7 +266,7 @@ mod tests {
 
     #[test]
     fn gamma_flag_changes_bytes() {
-        let mut img = image::RgbaImage::from_pixel(16, 16, image::Rgba([64, 64, 64, 255]));
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([64, 64, 64, 255]));
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(img.clone())
             .write_to(&mut png, image::ImageFormat::Png)

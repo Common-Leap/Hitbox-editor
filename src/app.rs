@@ -2614,6 +2614,7 @@ pub struct VisionaryApp {
     capture_debug_kind: Option<i32>,
     credits: crate::credits::CreditsWindow,
     show_edit_log: bool,
+    show_workspace: bool,
     export_dir: Option<PathBuf>,
     /// Extra roots holding modded content — added-character mods and slot-add packs. Each
     /// has the same `fighter/<name>/…` + `effect/fighter/<name>/…` layout as the data root.
@@ -2750,6 +2751,18 @@ pub struct VisionaryApp {
     /// object is still dying can hang the game's loader outright.
     carrier_push_callers: Vec<String>,
     project_name: String,
+    /// The open project's `modproject.json` path. `None` means in-memory only
+    /// ("Browse without project"). Persisted so the hub can Resume last.
+    project_path: Option<PathBuf>,
+    /// Last saved editable snapshot (move sources cleared), for the unsaved-edits
+    /// guard. `None` means "never saved this session" — dirty iff non-empty.
+    last_saved_snapshot: Option<serde_json::Value>,
+    /// Project Hub cold-start / mid-session window state.
+    project_hub: crate::project_hub::HubState,
+    /// Hub action awaiting the unsaved-edits confirmation.
+    hub_pending: Option<crate::project_hub::HubAction>,
+    /// Last mod-import report, shown until dismissed.
+    import_report: Option<crate::mod_import::ImportReport>,
     /// Kept so background workers can wake the (reactive) UI when their result lands.
     egui_ctx: egui::Context,
     /// Saved window geometry (`"main"`, `"transplant"`, `"edits"`), persisted between runs.
@@ -2984,6 +2997,7 @@ impl VisionaryApp {
             capture_debug_kind: None,
             credits: crate::credits::CreditsWindow::default(),
             show_edit_log: false,
+            show_workspace: false,
             export_dir: saved_export_dir,
             extra_roots: resolved_mod_roots,
             roster,
@@ -3041,6 +3055,13 @@ impl VisionaryApp {
             eff_mods: HashMap::new(),
             carrier_push_callers: Vec::new(),
             project_name: "unnamed_mod".into(),
+            project_path: None,
+            last_saved_snapshot: None,
+            project_hub: crate::project_hub::HubState::cold_start(
+                &app_config_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
+            ),
+            hub_pending: None,
+            import_report: None,
             egui_ctx: cc.egui_ctx.clone(),
             window_geometry: load_window_geometry(),
             geometry_dirty: false,
@@ -7774,16 +7795,17 @@ impl VisionaryApp {
         };
         // When the Roster window has a character you added set as the edit target, this move
         // belongs to that costume rather than to the fighter as a whole. The export then gates
-        // it, so the donor's other costumes keep their own version of the move.
-        let slot_scope = self.roster.slot_scope_for(&fighter.name);
-        self.state.edit_log.save_scoped(
+        // it, so the donor's other costumes keep their own version of the move. A multi-skin
+        // character scopes to every slot it owns, so one moveset covers c08–c15.
+        let slot_scopes = self.roster.slot_scopes_for(&fighter.name);
+        self.state.edit_log.save_scoped_multi(
             &fighter.name,
             &fighter.display_name,
             &move_name,
             script,
             self.state.hitboxes_pristine.clone(),
             self.state.hitboxes.clone(),
-            slot_scope,
+            &slot_scopes,
         );
     }
 
@@ -16129,6 +16151,14 @@ impl VisionaryApp {
         if let Some(dir) = &self.export_dir {
             dialog = dialog.set_directory(dir);
         }
+        // Start in the current project's folder so Save-adjacent exports land together.
+        if let Some(current) = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        {
+            dialog = dialog.set_directory(current);
+        }
         let Some(path) = dialog.save_file() else {
             return;
         };
@@ -16139,7 +16169,11 @@ impl VisionaryApp {
             .unwrap_or_else(|| "project".into());
         let asset_dir = format!("{stem}_assets");
         match crate::mod_export::write_portable_project(&project, &path, &asset_dir) {
-            Ok(()) => self.state.status = format!("Project exported to {}", path.display()),
+            Ok(()) => {
+                // Export adopts the path: the next Save writes here silently.
+                self.adopt_project_path(&path, &project);
+                self.state.status = format!("Project exported to {}", path.display());
+            }
             Err(e) => self.state.status = format!("Project export failed: {e}"),
         }
     }
@@ -16152,6 +16186,601 @@ impl VisionaryApp {
             return;
         };
         self.load_project_from(&path);
+    }
+
+    // ── Project Hub: one current project ────────────────────────────────
+    //
+    // One current project holds every edit. Its path is persisted so the hub can
+    // Resume last; Save writes silently when it is known; Save As relocates;
+    // Export/Load adopt the path they touched. Hub switches with unsaved edits
+    // warn first.
+
+    /// Canonical snapshot for the unsaved-edits guard: the editable project
+    /// with move-source provenance cleared. Browsing moves records provenance
+    /// without editing anything, and must not read as dirty.
+    fn snapshot_for_dirty(project: &crate::mod_project::ModProjectFile) -> serde_json::Value {
+        let mut without_sources = project.clone();
+        for fighter in without_sources.fighters.values_mut() {
+            fighter.move_sources.clear();
+        }
+        serde_json::to_value(&without_sources).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// True when in-memory edits differ from the last save/load.
+    fn is_project_dirty(&mut self) -> bool {
+        let project = self.build_project();
+        if self.last_saved_snapshot.is_none() {
+            return !project.is_empty();
+        }
+        let current = Self::snapshot_for_dirty(&project);
+        self.last_saved_snapshot.as_ref() != Some(&current)
+    }
+
+    /// Record a successful save/load/export-adopt: the path, the snapshot, and
+    /// the persisted recent/last entries the hub reads on cold start.
+    fn adopt_project_path(
+        &mut self,
+        path: &std::path::Path,
+        project: &crate::mod_project::ModProjectFile,
+    ) {
+        self.project_path = Some(path.to_path_buf());
+        self.last_saved_snapshot = Some(Self::snapshot_for_dirty(project));
+        if let Some(config_dir) = app_config_dir() {
+            crate::project_hub::push_recent(&config_dir, path);
+            self.project_hub.last = Some(path.to_path_buf());
+            let mut recent = crate::project_hub::load_recent_projects(&config_dir);
+            recent.retain(|p| p.is_file());
+            self.project_hub.recent = recent;
+        }
+    }
+
+    /// Save silently to the current path, or fall back to Save As.
+    /// Returns whether the project ended up saved — the roster Deploy flow
+    /// needs the answer without parsing the status line back out.
+    fn save_project_silent(&mut self) -> bool {
+        let Some(path) = self.project_path.clone() else {
+            self.save_project_as();
+            return self.project_path.is_some();
+        };
+        let project = self.build_project();
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(crate::mod_export::slugify)
+            .unwrap_or_else(|| "project".into());
+        let asset_dir = format!("{stem}_assets");
+        match crate::mod_export::write_portable_project(&project, &path, &asset_dir) {
+            Ok(()) => {
+                self.adopt_project_path(&path, &project);
+                self.state.status = format!("Saved {}", path.display());
+                true
+            }
+            Err(e) => {
+                self.state.status = format!("Save failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Save As always asks, then relocates the current project there.
+    fn save_project_as(&mut self) {
+        let project = self.build_project();
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save project as…")
+            .set_file_name(crate::mod_project::PROJECT_FILE_NAME)
+            .add_filter("Mod project", &["json"]);
+        if let Some(current) = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        {
+            dialog = dialog.set_directory(current);
+        } else if let Some(dir) = &self.export_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(crate::mod_export::slugify)
+            .unwrap_or_else(|| "project".into());
+        let asset_dir = format!("{stem}_assets");
+        match crate::mod_export::write_portable_project(&project, &path, &asset_dir) {
+            Ok(()) => {
+                self.adopt_project_path(&path, &project);
+                self.state.status = format!("Saved {}", path.display());
+            }
+            Err(e) => self.state.status = format!("Save failed: {e}"),
+        }
+    }
+
+    /// Start empty in a picked workspace folder: scaffold it so every edit has
+    /// a home from the first save, then clear every edit store and the live game.
+    fn new_project_in(&mut self, workspace: &std::path::Path) {
+        let name = workspace
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unnamed_mod");
+        // Scaffold first so a failure leaves the current project untouched.
+        let file = match crate::project_hub::scaffold_workspace(workspace, name) {
+            Ok(file) => file,
+            Err(e) => {
+                self.state.status = format!("New project failed: {e:#}");
+                return;
+            }
+        };
+        self.game_link.begin_project_batch();
+        self.clear_all_game_edits();
+        self.eff_editor.reset_project_state();
+        self.state.edit_log.entries.clear();
+        self.state.effect_call_edits.clear();
+        self.state.effect_call_full.clear();
+        self.state.effect_dropped_lines.clear();
+        self.state.effect_frame_residue.clear();
+        self.state.sound_script_edits.clear();
+        self.state.expression_script_edits.clear();
+        self.state.capture_branch_warnings.clear();
+        self.move_source_cache.clear();
+        self.source_mismatch_prompt = None;
+        self.eff_mods.clear();
+        self.live_overrides = crate::game_link::LiveOverrides::default();
+        self.roster.project = crate::mod_project::RosterMod::default();
+        self.roster.params.clear();
+        self.edit_history.clear();
+        self.game_link.end_project_batch();
+        self.game_link.send_reset_pins();
+        self.publish_live_rule_union();
+        self.project_name = crate::mod_export::slugify(name);
+        // Adopt the scaffolded file immediately: Save writes silently from here.
+        let project = self.build_project();
+        self.adopt_project_path(&file, &project);
+        self.import_report = None;
+        self.project_hub.show = false;
+        self.state.status = format!("New project at {}.", workspace.display());
+    }
+
+    /// A hub choice was clicked: guard discarding actions with the unsaved-edits
+    /// modal, otherwise run immediately.
+    fn request_hub_action(&mut self, action: crate::project_hub::HubAction) {
+        if crate::project_hub::needs_hub_warning(self.is_project_dirty(), &action) {
+            self.hub_pending = Some(action);
+            return;
+        }
+        self.execute_hub_action(action);
+    }
+
+    fn execute_hub_action(&mut self, action: crate::project_hub::HubAction) {
+        match action {
+            crate::project_hub::HubAction::ResumeLast(path)
+            | crate::project_hub::HubAction::Open(path)
+            | crate::project_hub::HubAction::OpenRecent(path) => {
+                self.project_hub.show = false;
+                self.load_project_from(&path);
+            }
+            crate::project_hub::HubAction::New(workspace) => self.new_project_in(&workspace),
+            crate::project_hub::HubAction::ImportMod(folder) => {
+                // The folder was picked from the hub row; keep the hub open
+                // behind the report so the user can still pick another action.
+                self.import_mod_folder(&folder);
+            }
+            crate::project_hub::HubAction::BrowseWithoutProject => {
+                self.project_hub.show = false;
+                self.state.status =
+                    "Browsing without a project — edits stay in memory until saved.".into();
+            }
+        }
+    }
+
+    /// Import any mod folder as an editable project: detect the arc root, adopt
+    /// the reversibly editable files, copy source text as reference, link loose
+    /// assets via the mod library, and report per file.
+    fn import_mod_folder(&mut self, mod_folder: &std::path::Path) {
+        // The project needs a home for its PNG assets + reference copies before
+        // the import runs. Ask where `modproject.json` should live.
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save imported project as…")
+            .set_file_name(crate::mod_project::PROJECT_FILE_NAME)
+            .add_filter("Mod project", &["json"]);
+        if let Some(dir) = &self.export_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(project_file) = dialog.save_file() else {
+            return;
+        };
+        let project_dir = project_file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let stem = project_file
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .map(crate::mod_export::slugify)
+            .unwrap_or_else(|| "imported_mod".into());
+        let asset_dir = format!("{stem}_assets");
+
+        let known_fighters: Vec<String> =
+            self.state.fighters.iter().map(|f| f.name.clone()).collect();
+        // Param labels: the downloaded CSV first, then whatever the dump carries.
+        let mut labels = self.downloaded_labels.clone();
+        labels.extend(self.state.labels.clone());
+        let base_roots = self.all_roots();
+        let options = crate::mod_import::ImportOptions {
+            known_fighters: &known_fighters,
+            labels: &labels,
+            base_roots: &base_roots,
+            asset_dir_name: &asset_dir,
+        };
+        let (mut project, mut report) =
+            match crate::mod_import::import_mod_as_project(mod_folder, &project_dir, &options) {
+                Ok(done) => done,
+                Err(e) => {
+                    self.state.status = format!("Import failed: {e:#}");
+                    return;
+                }
+            };
+        project.name = stem.clone();
+        // Write the adopted project beside its assets so Save round-trips silently.
+        match crate::mod_export::write_portable_project(&project, &project_file, &asset_dir) {
+            Ok(()) => {}
+            Err(e) => {
+                self.state.status = format!("Import wrote no project: {e:#}");
+                self.import_report = Some(report);
+                return;
+            }
+        }
+        // Link loose assets via the mod library so models/motions stay live.
+        // Folders are used in place; a mod folder the user maintains stays live.
+        if let Err(e) = self.roster.library.import_directory(
+            crate::roster::library::ModSource::Folder(mod_folder.to_path_buf()),
+            None,
+        ) {
+            report.warn(format!("mod library link failed: {e:#}"));
+        } else {
+            crate::roster::library::save(&self.roster.library);
+            self.extra_roots = self.roster.enabled_roots();
+            self.reindex_fighters();
+        }
+        // Load the adopted project exactly as Open would, then adopt the new path.
+        let path = project_file.clone();
+        self.load_project_from(&path);
+        // `load_project_from` already adopted the path on success; keep the
+        // report visible even though the hub closes.
+        self.import_report = Some(report);
+        self.project_hub.show = false;
+    }
+
+    fn draw_project_hub(&mut self, ctx: &egui::Context) {
+        if !self.project_hub.show {
+            return;
+        }
+        let mut chosen: Option<crate::project_hub::HubAction> = None;
+        let last = self.project_hub.last.clone();
+        let recent = self.project_hub.recent.clone();
+        let current_path = self.project_path.clone();
+        // Computed once before the window: building the project commits pending
+        // panel edits, which must not happen inside the UI closure.
+        let dirty = self.is_project_dirty();
+        egui::Window::new("Project Hub")
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("One workspace folder holds every edit. Pick where to start.");
+                ui.label(
+                    egui::RichText::new(
+                        "New scaffolds modproject.json + assets/ + romfs/ overlay. \
+                         Models/animations go in romfs/fighter/… — see Windows → Project Files.",
+                    )
+                    .small()
+                    .color(egui::Color32::GRAY),
+                );
+                ui.add_space(6.0);
+                if let Some(last) = &last {
+                    if ui
+                        .button(format!("Resume last — {}", last.display()))
+                        .on_hover_text("Reopen the project that was open last session")
+                        .clicked()
+                    {
+                        chosen = Some(crate::project_hub::HubAction::ResumeLast(last.clone()));
+                    }
+                }
+                if ui
+                    .button("New project…")
+                    .on_hover_text(
+                        "Pick a workspace folder — every edit lives there from the first save",
+                    )
+                    .clicked()
+                {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        chosen = Some(crate::project_hub::HubAction::New(folder));
+                    }
+                }
+                if ui
+                    .button("Open… (modproject.json)")
+                    .on_hover_text("Open an editable project for further editing")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Mod project", &["json"])
+                        .pick_file()
+                    {
+                        chosen = Some(crate::project_hub::HubAction::Open(path));
+                    }
+                }
+                if ui
+                    .button("Import mod…")
+                    .on_hover_text(
+                        "Import any mod folder as an editable project: roster, names, \
+                         portraits, and values are adopted; compiled scripts stay reference-only",
+                    )
+                    .clicked()
+                {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        chosen = Some(crate::project_hub::HubAction::ImportMod(folder));
+                    }
+                }
+                if !recent.is_empty() {
+                    ui.separator();
+                    ui.label("Recent");
+                    for path in &recent {
+                        if Some(path) == last.as_ref() {
+                            continue;
+                        }
+                        let label = path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_else(|| path.to_str().unwrap_or("project"));
+                        if ui.button(format!("{label} — {}", path.display())).clicked() {
+                            chosen = Some(crate::project_hub::HubAction::OpenRecent(path.clone()));
+                        }
+                    }
+                }
+                ui.separator();
+                if ui
+                    .button("Browse without project")
+                    .on_hover_text("Keep looking around with no project open")
+                    .clicked()
+                {
+                    chosen = Some(crate::project_hub::HubAction::BrowseWithoutProject);
+                }
+                if dirty {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Unsaved edits — switching projects will warn first.",
+                    );
+                }
+                if let Some(path) = &current_path {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!("Current: {}", path.display()))
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+        if let Some(action) = chosen {
+            // Import needs its own save-location dialog; run it directly so the
+            // hub stays responsive behind the native picker.
+            if matches!(action, crate::project_hub::HubAction::ImportMod(_)) {
+                self.execute_hub_action(action);
+            } else {
+                self.request_hub_action(action);
+            }
+        }
+    }
+
+    fn draw_hub_pending_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.hub_pending.clone() else {
+            return;
+        };
+        let mut decision: Option<&'static str> = None;
+        egui::Window::new("Unsaved edits")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("The current project has unsaved edits. Save them first?");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        decision = Some("save");
+                    }
+                    if ui.button("Discard").clicked() {
+                        decision = Some("discard");
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some("cancel");
+                    }
+                });
+            });
+        match decision {
+            Some("save") => {
+                self.save_project_silent();
+                // A Save As cancel leaves the edits unsaved — stay put.
+                if self.is_project_dirty() && self.project_path.is_none() {
+                    return;
+                }
+                self.hub_pending = None;
+                self.execute_hub_action(pending);
+            }
+            Some("discard") => {
+                self.hub_pending = None;
+                self.execute_hub_action(pending);
+            }
+            Some(_) => self.hub_pending = None,
+            None => {}
+        }
+    }
+
+    fn draw_import_report(&mut self, ctx: &egui::Context) {
+        let Some(report) = self.import_report.clone() else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new(format!("Import report — {}", report.summary()))
+            .collapsible(true)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Found via: {}", report.detection));
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for file in &report.files {
+                            let (icon, color) = match file.outcome {
+                                crate::mod_import::FileOutcome::Adopted => {
+                                    ("✓", egui::Color32::from_rgb(120, 220, 120))
+                                }
+                                crate::mod_import::FileOutcome::ReferenceOnly => {
+                                    ("◈", egui::Color32::from_rgb(150, 180, 230))
+                                }
+                                crate::mod_import::FileOutcome::Linked => {
+                                    ("⇄", egui::Color32::from_rgb(220, 200, 120))
+                                }
+                                crate::mod_import::FileOutcome::Skipped => {
+                                    ("–", egui::Color32::GRAY)
+                                }
+                            };
+                            ui.horizontal(|ui| {
+                                ui.colored_label(color, icon);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} [{}] — {}",
+                                        file.path,
+                                        match file.outcome {
+                                            crate::mod_import::FileOutcome::Adopted => "adopted",
+                                            crate::mod_import::FileOutcome::ReferenceOnly => {
+                                                "reference-only"
+                                            }
+                                            crate::mod_import::FileOutcome::Linked => "linked",
+                                            crate::mod_import::FileOutcome::Skipped => "skipped",
+                                        },
+                                        file.detail
+                                    ))
+                                    .small(),
+                                );
+                            });
+                        }
+                        if !report.warnings.is_empty() {
+                            ui.separator();
+                            for warning in &report.warnings {
+                                ui.label(
+                                    egui::RichText::new(format!("⚠ {warning}"))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(230, 180, 100)),
+                                );
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    if ui.button("Project Hub…").clicked() {
+                        self.project_hub.show = true;
+                    }
+                });
+            });
+        if close {
+            self.import_report = None;
+        }
+    }
+
+    /// Project Files: one folder holds every edit. Supported edits live in
+    /// `modproject.json` / `assets/`; anything the tool does not model
+    /// (models, animations, …) lives in the manual `romfs/` overlay and ships
+    /// verbatim on export.
+    fn draw_workspace_panel(&mut self, ctx: &egui::Context) {
+        if !self.show_workspace {
+            return;
+        }
+        let mut open = self.show_workspace;
+        let workspace = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        egui::Window::new("Project Files")
+            .open(&mut open)
+            .resizable(true)
+            .show(ctx, |ui| {
+                match &workspace {
+                    Some(dir) => {
+                        ui.label(format!("Workspace: {}", dir.display()));
+                        ui.label(
+                            egui::RichText::new(
+                                "Manual files go under romfs/ in arc layout and ship on export.",
+                            )
+                            .small()
+                            .color(egui::Color32::GRAY),
+                        );
+                    }
+                    None => {
+                        ui.label("No project open — pick one in the Project Hub first.");
+                        ui.label(
+                            egui::RichText::new(
+                                "New picks a workspace folder so every edit has a home.",
+                            )
+                            .small()
+                            .color(egui::Color32::GRAY),
+                        );
+                    }
+                }
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(380.0)
+                    .show(ui, |ui| {
+                        for entry in crate::project_hub::workspace_map() {
+                            let (icon, color) = match entry.support {
+                                crate::project_hub::WorkspaceSupport::Supported => {
+                                    ("✓", egui::Color32::from_rgb(120, 220, 120))
+                                }
+                                crate::project_hub::WorkspaceSupport::Reference => {
+                                    ("◈", egui::Color32::from_rgb(150, 180, 230))
+                                }
+                                crate::project_hub::WorkspaceSupport::Manual => {
+                                    ("▣", egui::Color32::from_rgb(220, 200, 120))
+                                }
+                            };
+                            let support = match entry.support {
+                                crate::project_hub::WorkspaceSupport::Supported => "supported",
+                                crate::project_hub::WorkspaceSupport::Reference => "reference",
+                                crate::project_hub::WorkspaceSupport::Manual => "manual",
+                            };
+                            ui.horizontal(|ui| {
+                                ui.colored_label(color, icon);
+                                ui.label(egui::RichText::new(entry.kind).strong().small());
+                                ui.label(
+                                    egui::RichText::new(format!("[{support}]"))
+                                        .small()
+                                        .color(color),
+                                );
+                            });
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "workspace: {}  →  game: {}",
+                                    entry.workspace_path, entry.game_path
+                                ))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                            );
+                            ui.label(egui::RichText::new(entry.notes).small());
+                            ui.add_space(4.0);
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Project Hub…").clicked() {
+                        self.project_hub.show = true;
+                    }
+                });
+            });
+        self.show_workspace = open;
     }
 
     /// Export one directly installable ARCropolis mod folder. The generated Skyline plugin
@@ -16292,28 +16921,63 @@ impl VisionaryApp {
                             ));
                         }
                         if names > 0 {
-                            roster_section.push_str(&format!("- Display names: {names} override{}\n", if names == 1 { "" } else { "s" }));
+                            roster_section.push_str(&format!(
+                                "- Display names: {names} override{}\n",
+                                if names == 1 { "" } else { "s" }
+                            ));
                         }
                         if authored > 0 {
                             roster_section.push_str(&format!("- New characters: {authored}\n"));
                         }
                         if trait_edits > 0 {
-                            roster_section.push_str(&format!("- Fighter traits: {trait_edits} value{} across {} fighter(s)\n",
+                            roster_section.push_str(&format!(
+                                "- Fighter traits: {trait_edits} value{} across {} fighter(s)\n",
                                 if trait_edits == 1 { "" } else { "s" },
-                                project.fighters.len()));
+                                project.fighters.len()
+                            ));
                         }
                         roster_section.push_str("\nFiles:\n\n");
                         for file in &roster_report.files {
                             roster_section.push_str(&format!("- `{file}`\n"));
                         }
                         roster_section.push_str("\nThese are saved with your project and re-exported every time — no separate apply step.\n");
-                        let new_readme = existing + &roster_section + &export_warning_section(&roster_report.warnings);
+                        let new_readme = existing
+                            + &roster_section
+                            + &export_warning_section(&roster_report.warnings);
                         let _ = std::fs::write(&readme_path, new_readme);
                     }
                 }
                 errors.extend(roster_report.warnings);
             }
             Err(error) => errors.push(format!("roster export failed: {error:#}")),
+        }
+
+        // 2b. Workspace manual overlay: models, animations, and anything the
+        // tool does not model ships verbatim from <workspace>/romfs/.
+        if let Some(workspace) = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        {
+            let overlay = crate::project_hub::workspace_romfs(&workspace);
+            if overlay.is_dir() {
+                match crate::project_hub::merge_romfs_overlay(&overlay, &dest) {
+                    Ok((copied, skipped)) => {
+                        if copied > 0 {
+                            report.push(format!(
+                                "Workspace overlay — {copied} manual file{} (models/animations/…) from romfs/",
+                                if copied == 1 { "" } else { "s" }
+                            ));
+                        }
+                        for conflict in skipped {
+                            errors.push(format!(
+                                "{conflict}: workspace romfs overlay skipped — generated file wins"
+                            ));
+                        }
+                    }
+                    Err(e) => errors.push(format!("workspace overlay failed: {e:#}")),
+                }
+            }
         }
 
         // 3. Mod-folder exports compile the generated plugin in the background and keep the NRO
@@ -16677,6 +17341,18 @@ impl VisionaryApp {
             self.project_name
         );
         self.state.status.push_str(&live_report.status_suffix());
+        // Load adopts the path: the next Save writes here silently.
+        let snapshot = Self::snapshot_for_dirty(&self.build_project());
+        self.project_path = Some(path.to_path_buf());
+        self.last_saved_snapshot = Some(snapshot);
+        if let Some(config_dir) = app_config_dir() {
+            crate::project_hub::push_recent(&config_dir, path);
+            self.project_hub.last = Some(path.to_path_buf());
+            let mut recent = crate::project_hub::load_recent_projects(&config_dir);
+            recent.retain(|p| p.is_file());
+            self.project_hub.recent = recent;
+        }
+        self.project_hub.show = false;
     }
 
     /// "Game has existing edits" prompt: the plugin persists pins across sessions, so a
@@ -30142,6 +30818,13 @@ impl eframe::App for VisionaryApp {
             self.apply_history_action(HistoryAction::Redo);
             self.history_suppress_frame = true;
         }
+        // One current project holds every edit: Ctrl+S writes silently to its file.
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::S)
+                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
+        }) {
+            self.save_project_silent();
+        }
         self.begin_history_frame();
 
         // Edit log window
@@ -30173,6 +30856,31 @@ impl eframe::App for VisionaryApp {
                 ui.separator();
 
                 ui.menu_button("File", |ui| {
+                    if ui.button("Project Hub…").on_hover_text("Resume / New / Open / Import mod / Recent / Browse without project").clicked() {
+                        self.project_hub.show = true;
+                        ui.close();
+                    }
+                    if ui.button("Save  Ctrl+S").on_hover_text("Write the current project silently to its file (asks once when it has none)").clicked() {
+                        self.save_project_silent();
+                        ui.close();
+                    }
+                    if ui.button("Save As…").on_hover_text("Relocate the current project to a new modproject.json").clicked() {
+                        self.save_project_as();
+                        ui.close();
+                    }
+                    if ui.button("New Project…").on_hover_text("Pick a workspace folder — every edit lives there (warns first with unsaved edits)").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.request_hub_action(crate::project_hub::HubAction::New(folder));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Import Mod as Project…").on_hover_text("Adopt a compiled mod folder as an editable project").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.request_hub_action(crate::project_hub::HubAction::ImportMod(folder));
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Open Data Root…").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.set_data_root(path);
@@ -30268,6 +30976,11 @@ impl eframe::App for VisionaryApp {
                             "Read and edit ACMD scripts from your own smashline project, \
                              instead of the online archive of vanilla scripts",
                         );
+                    ui.checkbox(&mut self.show_workspace, "Project Files")
+                        .on_hover_text(
+                            "Where every edit lives: what Visionary models vs the manual \
+                             romfs overlay for models, animations, and other unsupported files",
+                        );
                     ui.checkbox(&mut self.show_debug, "Debug");
                     ui.checkbox(&mut self.show_capture_debug, "Capture Debug")
                         .on_hover_text(
@@ -30282,7 +30995,34 @@ impl eframe::App for VisionaryApp {
                         ui.label("name:");
                         ui.add(egui::TextEdit::singleline(&mut self.project_name).desired_width(140.0));
                     });
+                    if let Some(path) = &self.project_path {
+                        ui.label(
+                            egui::RichText::new(format!("file: {}", path.display()))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("file: in memory (Save will ask)")
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    }
                     ui.separator();
+                    if ui.button("Save  Ctrl+S")
+                        .on_hover_text("Write the current project silently to its file")
+                        .clicked()
+                    {
+                        self.save_project_silent();
+                        ui.close();
+                    }
+                    if ui.button("Save As…")
+                        .on_hover_text("Relocate the current project to a new modproject.json")
+                        .clicked()
+                    {
+                        self.save_project_as();
+                        ui.close();
+                    }
                     if ui.button("Export Project…")
                         .on_hover_text("Export an editable modproject.json and its assets separately from installable mod and developer files")
                         .clicked()
@@ -30295,6 +31035,15 @@ impl eframe::App for VisionaryApp {
                         .clicked()
                     {
                         self.load_project();
+                        ui.close();
+                    }
+                    if ui.button("Import Mod as Project…")
+                        .on_hover_text("Adopt any mod folder as an editable project (roster/names/portraits/values adopted, binaries reference-only)")
+                        .clicked()
+                    {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.request_hub_action(crate::project_hub::HubAction::ImportMod(folder));
+                        }
                         ui.close();
                     }
                     ui.separator();
@@ -30409,6 +31158,21 @@ impl eframe::App for VisionaryApp {
                             RichText::new("Unsaved edits")
                                 .small()
                                 .color(Color32::YELLOW),
+                        );
+                    }
+                    // One current project holds every edit: always show where Save goes.
+                    ui.separator();
+                    if let Some(path) = &self.project_path {
+                        ui.label(
+                            RichText::new(format!("Project: {}", path.display()))
+                                .small()
+                                .color(Color32::GRAY),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Project: in memory")
+                                .small()
+                                .color(Color32::GRAY),
                         );
                     }
                 });
@@ -30554,6 +31318,16 @@ impl eframe::App for VisionaryApp {
             self.state.data_root.as_ref(),
             &self.state.labels,
         );
+        // Deploy stages from in-memory state, so persist the project alongside
+        // it — `build_project` carries the roster edits (order, names, new
+        // characters, traits), keeping the file on disk level with the SD.
+        // Silent only when the project has a path: a Save As dialog popping
+        // out of Deploy would hijack the flow, so a pathless project stages
+        // from memory and is told to save.
+        if self.roster.take_save_request() {
+            let saved = self.project_path.is_some() && self.save_project_silent();
+            self.roster.note_deploy_saved(saved);
+        }
         // The library is the authoring surface for mod roots; `extra_roots` is the resolved
         // list every existing path lookup reads. Refreshing here rather than inside the window
         // keeps the roster module from reaching into the fighter index.
@@ -30862,6 +31636,11 @@ impl eframe::App for VisionaryApp {
         }
         self.draw_pin_sync_modal(&ctx);
         self.draw_source_mismatch_modal(&ctx);
+        // Project Hub (cold start + mid-session) and its guards.
+        self.draw_project_hub(&ctx);
+        self.draw_hub_pending_modal(&ctx);
+        self.draw_import_report(&ctx);
+        self.draw_workspace_panel(&ctx);
         let t = self.perf.start();
         self.draw_transplant_studio(&ctx);
         self.perf.end("transplant_window", t);
@@ -34055,6 +34834,13 @@ fn parse_hurtbox_visibility(body: &str) -> bool {
 fn config_path(key: &str) -> Option<std::path::PathBuf> {
     let base = dirs::config_dir()?;
     Some(base.join("visionary").join(key))
+}
+
+/// Config directory for hub persistence (`project_path`, `recent_projects`).
+/// Split out so the hub state can be built from one place in `new()` and from
+/// tests against a tempdir.
+fn app_config_dir() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|base| base.join("visionary"))
 }
 
 fn legacy_config_path(key: &str) -> Option<std::path::PathBuf> {
@@ -42000,6 +42786,7 @@ mod blocked_export_writes_nothing_tests {
                 hitboxes_pristine: Vec::new(),
                 hitboxes: Vec::new(),
                 slot_scope: None,
+                slot_scopes: Vec::new(),
             },
         );
         fm

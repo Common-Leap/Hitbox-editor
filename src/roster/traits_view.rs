@@ -242,7 +242,12 @@ impl TraitsView {
         }
     }
 
-    fn draw_traits_header(&mut self, ui: &mut Ui, index: &RosterIndex, params: &BTreeMap<String, ParamMod>) {
+    fn draw_traits_header(
+        &mut self,
+        ui: &mut Ui,
+        index: &RosterIndex,
+        params: &BTreeMap<String, ParamMod>,
+    ) {
         // Header card — uses group frame like the main sidebar headings
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::symmetric(10, 8))
@@ -365,7 +370,10 @@ impl TraitsView {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(section.title).size(12.0).strong());
-                        let edited_in_section = matching.iter().filter(|f| traits::edits_for(edits).contains_key(f.key)).count();
+                        let edited_in_section = matching
+                            .iter()
+                            .filter(|f| traits::edits_for(edits).contains_key(f.key))
+                            .count();
                         if edited_in_section > 0 {
                             ui.colored_label(
                                 Color32::from_rgb(240, 200, 120),
@@ -396,7 +404,11 @@ impl TraitsView {
             ui.add_space(12.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(format!("No fields match \"{}\"", self.filter)).weak());
-                ui.label(RichText::new("Try a shorter term or clear the filter.").small().weak());
+                ui.label(
+                    RichText::new("Try a shorter term or clear the filter.")
+                        .small()
+                        .weak(),
+                );
             });
         }
     }
@@ -420,7 +432,11 @@ impl TraitsView {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("All fields").strong());
-                    ui.label(RichText::new(format!("{} field(s)", keys.len())).small().weak());
+                    ui.label(
+                        RichText::new(format!("{} field(s)", keys.len()))
+                            .small()
+                            .weak(),
+                    );
                 });
                 ui.add_space(6.0);
                 for key in keys {
@@ -430,6 +446,9 @@ impl TraitsView {
             });
     }
 
+    // One row needs ui, data, edits, key, label, description, draft state,
+    // and the pending queue — the traversal bundle again, not a real smell.
+    #[allow(clippy::too_many_arguments)]
     fn draw_field(
         &mut self,
         ui: &mut Ui,
@@ -467,11 +486,12 @@ impl TraitsView {
                 // row below. The old narrow/wide split duplicated this whole
                 // body for a 420px breakpoint.
                 ui.horizontal_wrapped(|ui| {
-                    let name = ui.label(RichText::new(label).small().strong().color(if is_edited {
-                        Color32::from_rgb(240, 200, 120)
-                    } else {
-                        ui.visuals().text_color()
-                    }));
+                    let name =
+                        ui.label(RichText::new(label).small().strong().color(if is_edited {
+                            Color32::from_rgb(240, 200, 120)
+                        } else {
+                            ui.visuals().text_color()
+                        }));
                     if let Some(description) = description {
                         name.on_hover_text(description);
                     }
@@ -481,12 +501,22 @@ impl TraitsView {
                             .corner_radius(8)
                             .inner_margin(egui::Margin::symmetric(5, 1))
                             .show(ui, |ui| {
-                                ui.label(RichText::new("edited").small().strong().color(Color32::from_rgb(240,200,120)));
+                                ui.label(
+                                    RichText::new("edited")
+                                        .small()
+                                        .strong()
+                                        .color(Color32::from_rgb(240, 200, 120)),
+                                );
                             });
                     }
                     if let Some(desc) = description {
-                        ui.label(RichText::new("ⓘ").small().weak().color(Color32::from_rgb(120,140,170)))
-                            .on_hover_text(desc);
+                        ui.label(
+                            RichText::new("ⓘ")
+                                .small()
+                                .weak()
+                                .color(Color32::from_rgb(120, 140, 170)),
+                        )
+                        .on_hover_text(desc);
                     }
                 });
                 ui.add_space(4.0);
@@ -514,10 +544,18 @@ impl TraitsView {
                         }
                     }
                     if is_edited {
-                        if ui.small_button(RichText::new(" ↺ ").small()).on_hover_text("Return to the game's value").clicked() {
+                        if ui
+                            .small_button(RichText::new(" ↺ ").small())
+                            .on_hover_text("Return to the game's value")
+                            .clicked()
+                        {
                             pending.push((key.to_string(), None));
                         }
-                        ui.label(RichText::new(format!("was {}", render(base))).small().weak());
+                        ui.label(
+                            RichText::new(format!("was {}", render(base)))
+                                .small()
+                                .weak(),
+                        );
                     }
                 });
             });

@@ -84,10 +84,11 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
         let mut moves: Vec<_> = edits.acmd.iter().collect();
         moves.sort_by(|a, b| a.0.cmp(b.0));
         for (move_name, record) in moves {
-            // A move scoped to one costume needs the fighter's own script as the other arm.
+            // A move scoped to costumes needs the fighter's own script as the other arm.
             // Without it the generated script would remove this move from every other costume
             // of the fighter, so a missing original is refused rather than exported wide.
-            if let Some(slot) = record.slot_scope {
+            let scopes = record.effective_scopes();
+            if !scopes.is_empty() {
                 match edits
                     .move_sources
                     .get(move_name)
@@ -97,16 +98,23 @@ pub fn source_project(project: &ModProjectFile) -> Result<Option<GeneratedSource
                     Some(body) => {
                         slot_gates.insert(
                             (fighter.clone(), move_name.clone()),
-                            (slot, body.to_string()),
+                            (scopes.clone(), body.to_string()),
                         );
                     }
-                    None => bail!(
-                        "{fighter}'s {move_name} is set to costume c{slot:02} only, but the \
-                         fighter's own version of it was not saved with the project. Exporting \
-                         it now would remove {move_name} from every other costume of \
-                         {fighter}. Open the move in the editor once so its original is \
-                         recorded, then export again."
-                    ),
+                    None => {
+                        let slot_list = scopes
+                            .iter()
+                            .map(|slot| format!("c{slot:02}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        bail!(
+                            "{fighter}'s {move_name} is set to costume(s) {slot_list} only, but the \
+                             fighter's own version of it was not saved with the project. Exporting \
+                             it now would remove {move_name} from every other costume of \
+                             {fighter}. Open the move in the editor once so its original is \
+                             recorded, then export again."
+                        )
+                    }
                 }
             }
             acmd_edits.push((fighter.clone(), move_name.clone(), record.script.clone()));
@@ -385,17 +393,16 @@ pub fn make_portable_project(
                 .extension()
                 .and_then(|part| part.to_str())
                 .unwrap_or("png");
+            let stem = source
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("image");
             let relative = asset_ui
                 .join(portable_component(&roster_key.to_string()))
                 .join(format!(
                     "{}_{}.{}",
                     portable_component(kind),
-                    portable_component(
-                        &source
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("image")
-                    ),
+                    portable_component(stem),
                     extension
                 ));
             if !used_destinations.insert(relative.clone()) {
@@ -459,7 +466,10 @@ pub fn resolve_project_assets(project: &mut ModProjectFile, project_path: &Path)
             let candidate = PathBuf::from(&ov.png_path);
             if candidate.is_relative() {
                 if !valid_relative(&candidate) {
-                    bail!("project roster UI image path escapes its project folder: {}", ov.png_path);
+                    bail!(
+                        "project roster UI image path escapes its project folder: {}",
+                        ov.png_path
+                    );
                 }
                 ov.png_path = parent.join(candidate).to_string_lossy().to_string();
             }
@@ -1189,6 +1199,7 @@ mod slot_gate_tests {
             hitboxes_pristine: Vec::new(),
             hitboxes: Vec::new(),
             slot_scope: slot,
+            slot_scopes: Vec::new(),
         };
         let mut fighter = FighterMod {
             acmd: HashMap::from([("attack_11".to_string(), record)]),

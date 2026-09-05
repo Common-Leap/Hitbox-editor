@@ -4925,12 +4925,14 @@ pub fn build_mod_project_full(
 }
 
 /// One move that belongs to a single costume rather than to the fighter as a whole:
-/// `(fighter, move) → (slot, the fighter's own script source)`.
+/// `(fighter, move) → (slots, the fighter's own script source)`.
 ///
 /// The original source is not optional. A Smashline script replaces the move for *every*
 /// costume, so a gate with no else arm removes the move from the donor and every other costume
 /// of it — a break that only shows up when someone plays the donor normally.
-pub type SlotGates = std::collections::HashMap<(String, String), (u8, String)>;
+/// `slots` holds every costume the gate covers, ascending (one entry for a
+/// single-slot character, 8 for a c08–c15 one).
+pub type SlotGates = std::collections::HashMap<(String, String), (Vec<u8>, String)>;
 
 /// Like [`build_mod_project_full`] with editable `expression_` scripts included.
 pub fn build_mod_project_full_with_expression(
@@ -5152,11 +5154,11 @@ pub fn install() {{
             // The acmd script name used in agent.acmd() is "game_{movename_no_underscores}"
             let acmd_name = script_function_name("game", move_name);
             match slot_gates.get(&((*fighter).to_string(), (*move_name).to_string())) {
-                Some((slot, original)) => {
+                Some((slots, original)) => {
                     // The registered name stays `fn_name`; the authored body moves to a
                     // private name and the fighter's own script becomes the other arm.
-                    acmd_src.push_str(&crate::roster::scaffold::costume_gated_source(
-                        &fn_name, *slot, &fn_src, original,
+                    acmd_src.push_str(&crate::roster::scaffold::costume_gated_source_multi(
+                        &fn_name, slots, &fn_src, original,
                     ));
                 }
                 None => acmd_src.push_str(&fn_src),

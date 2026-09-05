@@ -47,9 +47,7 @@ pub fn image_candidates(kind: &str, name_id: &str, slot: u8) -> Vec<String> {
     if kind.starts_with("stock") {
         return STOCK_DIRS
             .iter()
-            .map(|directory| {
-                format!("{directory}/{kind}/{kind}_{name_id}_{slot:02}.bntx")
-            })
+            .map(|directory| format!("{directory}/{kind}/{kind}_{name_id}_{slot:02}.bntx"))
             .collect();
     }
     let mut sets = vec![kind];
@@ -67,12 +65,7 @@ pub fn image_candidates(kind: &str, name_id: &str, slot: u8) -> Vec<String> {
 ///
 /// `roots` is searched in order, so a mod that ships its own file wins over
 /// the base game exactly as it does for every other game file.
-pub fn find_image(
-    roots: &[PathBuf],
-    kind: &str,
-    name_id: &str,
-    slot: u8,
-) -> Option<PathBuf> {
+pub fn find_image(roots: &[PathBuf], kind: &str, name_id: &str, slot: u8) -> Option<PathBuf> {
     for candidate in image_candidates(kind, name_id, slot) {
         for root in roots {
             let path = root.join(&candidate);
@@ -102,26 +95,22 @@ pub fn load_portrait(path: &Path) -> Result<image::RgbaImage> {
 pub fn load_portrait_with_gamma(path: &Path, gamma_render: bool) -> Result<image::RgbaImage> {
     let image = load_portrait(path)?;
     Ok(if gamma_render {
-        crate::roster::gamma::gamma_corrected(
-            &image,
-            crate::roster::gamma::DEFAULT_GAMMA,
-            false,
-        )
+        crate::roster::gamma::gamma_corrected(&image, crate::roster::gamma::DEFAULT_GAMMA, false)
     } else {
         image
     })
 }
 
 /// Decode a PNG override for preview, with optional gamma fix.
-pub fn load_png_override(path: &Path, gamma_render: bool, max_edge: Option<u32>) -> Result<image::RgbaImage> {
+pub fn load_png_override(
+    path: &Path,
+    gamma_render: bool,
+    max_edge: Option<u32>,
+) -> Result<image::RgbaImage> {
     let bytes = std::fs::read(path)?;
     let image = crate::texture_import::decode_png_rgba(&bytes, max_edge)?;
     Ok(if gamma_render {
-        crate::roster::gamma::gamma_corrected(
-            &image,
-            crate::roster::gamma::DEFAULT_GAMMA,
-            false,
-        )
+        crate::roster::gamma::gamma_corrected(&image, crate::roster::gamma::DEFAULT_GAMMA, false)
     } else {
         image
     })
@@ -172,12 +161,24 @@ impl PortraitCache {
         gamma_render: bool,
         png_override: Option<&Path>,
     ) -> Option<Result<&egui::TextureHandle, &str>> {
-        self.get_image_with_gamma(ctx, roots, "chara_1", name_id, slot, gamma_render, png_override)
+        self.get_image_with_gamma(
+            ctx,
+            roots,
+            "chara_1",
+            name_id,
+            slot,
+            gamma_render,
+            png_override,
+        )
     }
 
     /// Same, but the game file is looked up as `kind` (a stock tab previews
     /// stock files, not grid portraits). A picked PNG always wins over the
     /// game file regardless of kind.
+    ///
+    /// Eight lookup args (ctx, roots, kind, name, slot, gamma, override) is
+    /// the cache key spelled out; bundling would hide that, not reduce it.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_image_with_gamma(
         &mut self,
         ctx: &egui::Context,
@@ -312,13 +313,8 @@ mod tests {
     #[test]
     fn each_chara_set_prefers_its_own_files() {
         let kinds = image_candidates("chara_2", "mario", 0);
-        assert_eq!(
-            kinds[0],
-            "ui/replace/chara/chara_2/chara_2_mario_00.bntx"
-        );
-        assert!(kinds
-            .iter()
-            .any(|path| path.contains("chara_1")));
+        assert_eq!(kinds[0], "ui/replace/chara/chara_2/chara_2_mario_00.bntx");
+        assert!(kinds.iter().any(|path| path.contains("chara_1")));
     }
 
     /// Stock tabs look for stock files, never grid portraits: showing a
@@ -328,10 +324,7 @@ mod tests {
         let kinds = image_candidates("stock_90", "mario", 3);
         assert!(!kinds.is_empty());
         assert!(kinds.iter().all(|path| path.contains("stock_90")));
-        assert_eq!(
-            kinds[0],
-            "ui/replace/stock/stock_90/stock_90_mario_03.bntx"
-        );
+        assert_eq!(kinds[0], "ui/replace/stock/stock_90/stock_90_mario_03.bntx");
         let dir = tempfile::tempdir().unwrap();
         let roots = vec![dir.path().to_path_buf()];
         assert!(find_image(&roots, "stock_90", "mario", 3).is_none());

@@ -73,7 +73,8 @@ pub fn probe_roster() {
     const UI_CHARA_DB: &str = "ui/param/database/ui_chara_db.prc";
     let hash = smash::hash40(UI_CHARA_DB);
     if let Some((size, head, found)) =
-        crate::slight::effect_viewer::resource_reload::resident_probe(hash, &[]) {
+        crate::slight::effect_viewer::resource_reload::resident_probe(hash, &[])
+    {
         crate::slight::diag::note(format!(
             "roster_probe: {} -> size={} head={:02x?} needle_found={}",
             UI_CHARA_DB, size, head, found
@@ -136,7 +137,9 @@ pub fn apply_live_css_order(order: &BTreeMap<String, i8>, hidden: &BTreeSet<Stri
     // Heap-only, no file fallback.
     let instant = crate::slight::roster_heap::patch_instant(order, hidden);
     if instant {
-        crate::slight::diag::note("live_css_order: heap patch succeeded — CSS should update without re-enter");
+        crate::slight::diag::note(
+            "live_css_order: heap patch succeeded — CSS should update without re-enter",
+        );
     } else {
         crate::slight::diag::note("live_css_order: heap patch not yet instant — need DumpUiCharaDb/DumpCssRebuild for heap offsets");
     }
@@ -204,7 +207,8 @@ pub fn enforce_pins() {
     const UI_CHARA_DB: &str = "ui/param/database/ui_chara_db.prc";
     let hash = smash::hash40(UI_CHARA_DB);
     if let Some((size, head, found)) =
-        crate::slight::effect_viewer::resource_reload::resident_probe(hash, &[]) {
+        crate::slight::effect_viewer::resource_reload::resident_probe(hash, &[])
+    {
         crate::slight::diag::note(format!(
             "roster_pin: resident_probe {} -> size={} head={:02x?} needle_found={}",
             UI_CHARA_DB, size, head, found

@@ -259,10 +259,7 @@ pub struct RosterMod {
     /// even when those costumes are not separate roster cells. This is what lets
     /// a vanilla fighter's alt costumes each carry their own name while the CSS
     /// entry remains one.
-    #[serde(
-        default,
-        skip_serializing_if = "std::collections::BTreeMap::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub per_costume_names:
         std::collections::BTreeMap<String, std::collections::BTreeMap<u8, String>>,
     /// Entries this project created from nothing.
@@ -277,8 +274,10 @@ pub struct RosterMod {
     /// and the value records the PNG the user picked plus gamma toggles. Stored
     /// per entry so each character's images are editable independently.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub ui_images:
-        std::collections::BTreeMap<crate::roster::RosterKey, std::collections::BTreeMap<String, UiImageOverride>>,
+    pub ui_images: std::collections::BTreeMap<
+        crate::roster::RosterKey,
+        std::collections::BTreeMap<String, UiImageOverride>,
+    >,
     /// Per-entry overrides for `ui_chara_db` fields beyond `disp_order`/`can_select`
     /// (which live in `order`/`hidden`). Lets the user edit everything about a
     /// roster row — `color_num`, etc. — without touching the file copy.
@@ -347,10 +346,17 @@ pub struct CharaOverrides {
 /// rather than copying the donor's, so "did my model get picked up" is answerable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuthoredEntry {
-    /// Stable key, `"<donor>#c<NN>"`.
+    /// Stable key, `"<donor>#c<NN>"` of the first slot.
     pub key: crate::roster::RosterKey,
     pub donor: String,
+    /// First (primary) slot. Kept for every project written before multi-slot
+    /// characters existed; [`AuthoredEntry::all_slots`] is what new code reads.
     pub slot: u8,
+    /// Additional slots beyond [`AuthoredEntry::slot`]. Empty for every
+    /// single-slot character, so old projects load unchanged. A new character
+    /// with 8 skins holds all 8 here as primary + 7 additional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<u8>,
     pub display_name: String,
     /// The `name_id` of the `ui_chara_db` row this entry adds. Distinct from the donor's, and
     /// what every select screen file for this character is named after.
@@ -365,6 +371,19 @@ pub struct AuthoredEntry {
     /// folder to reveal. Optional so old projects load unchanged.
     #[serde(default)]
     pub files_root: Option<std::path::PathBuf>,
+}
+
+impl AuthoredEntry {
+    /// Every costume slot this character owns, ascending and de-duplicated:
+    /// the primary [`AuthoredEntry::slot`] plus [`AuthoredEntry::slots`].
+    pub fn all_slots(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + self.slots.len());
+        out.push(self.slot);
+        out.extend(self.slots.iter().copied());
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
 }
 
 /// Sparse parameter edits for one fighter.
@@ -1063,6 +1082,7 @@ mod tests {
                         hitboxes_pristine: Vec::new(),
                         hitboxes: Vec::new(),
                         slot_scope: None,
+                        slot_scopes: Vec::new(),
                     },
                 )]),
                 ..Default::default()
@@ -1164,6 +1184,7 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
                         hitboxes_pristine: Vec::new(),
                         hitboxes: Vec::new(),
                         slot_scope: None,
+                        slot_scopes: Vec::new(),
                     },
                 )]),
                 eff: Some(EffMod {
@@ -1212,6 +1233,7 @@ unsafe extern "C" fn expression_fixture(agent: &mut L2CAgentBase) {
             hitboxes_pristine: Vec::new(),
             hitboxes: Vec::new(),
             slot_scope: None,
+            slot_scopes: Vec::new(),
         };
         let second_record = EditRecord {
             move_name: "second".into(),
@@ -1444,6 +1466,7 @@ mod version_three_tests {
             key: key.clone(),
             donor: "mario".into(),
             slot: 8,
+            slots: Vec::new(),
             display_name: "Vision".into(),
             name_id: "vision".into(),
             moveset_scaffolded: false,

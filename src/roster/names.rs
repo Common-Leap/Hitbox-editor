@@ -75,28 +75,16 @@ impl DetailedNameOverride {
         let name_id = self.name_id.to_ascii_lowercase();
         let slot = format!("{:02}", self.slot);
         let mut out = Vec::new();
-        if let Some(text) = self
-            .chr0
-            .clone()
-            .or_else(|| self.fallback.clone())
-        {
+        if let Some(text) = self.chr0.clone().or_else(|| self.fallback.clone()) {
             out.push((format!("nam_chr0_{slot}_{name_id}"), text));
         }
-        if let Some(text) = self
-            .chr1
-            .clone()
-            .or_else(|| self.fallback.clone())
-        {
+        if let Some(text) = self.chr1.clone().or_else(|| self.fallback.clone()) {
             out.push((format!("nam_chr1_{slot}_{name_id}"), text));
         }
         if let Some(text) = self
             .chr2
             .clone()
-            .or_else(|| {
-                self.fallback
-                    .clone()
-                    .map(|s| s.to_uppercase())
-            })
+            .or_else(|| self.fallback.clone().map(|s| s.to_uppercase()))
             .or_else(|| {
                 self.chr0
                     .clone()

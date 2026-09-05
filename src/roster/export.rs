@@ -68,18 +68,29 @@ pub fn resolve_order(
 /// Resolve the project's name edits into `.xmsbt` overrides.
 ///
 /// A name is written per costume slot, which is what lets a slot-backed character carry its
-/// own name while the donor keeps its.
+/// own name while the donor keeps its. A multi-skin character writes one override
+/// per slot it owns, all carrying the same display text.
 pub fn resolve_names(index: &RosterIndex, project: &RosterMod) -> (Vec<NameOverride>, Vec<String>) {
     let mut overrides = Vec::new();
     let mut unwritable = Vec::new();
     for (key, display) in &project.names {
         match index.by_key(key) {
             Some(entry) => match &entry.name_id {
-                Some(name_id) => overrides.push(NameOverride {
-                    name_id: name_id.clone(),
-                    slot: entry.backing.slot().unwrap_or(0),
-                    display: display.clone(),
-                }),
+                Some(name_id) => {
+                    let slots = entry.backing.all_slots();
+                    let slots = if slots.is_empty() {
+                        vec![entry.backing.slot().unwrap_or(0)]
+                    } else {
+                        slots
+                    };
+                    for slot in slots {
+                        overrides.push(NameOverride {
+                            name_id: name_id.clone(),
+                            slot,
+                            display: display.clone(),
+                        });
+                    }
+                }
                 None => unwritable.push(key.to_string()),
             },
             None => unwritable.push(key.to_string()),
@@ -111,14 +122,22 @@ pub fn resolve_detailed_names(
                         .get(key)
                         .cloned()
                         .or_else(|| Some(entry.display_name.clone()));
-                    overrides.push(DetailedNameOverride {
-                        name_id: name_id.clone(),
-                        slot: entry.backing.slot().unwrap_or(0),
-                        chr0: variants.chr0.clone(),
-                        chr1: variants.chr1.clone(),
-                        chr2: variants.chr2.clone(),
-                        fallback,
-                    });
+                    let slots = entry.backing.all_slots();
+                    let slots = if slots.is_empty() {
+                        vec![entry.backing.slot().unwrap_or(0)]
+                    } else {
+                        slots
+                    };
+                    for slot in slots {
+                        overrides.push(DetailedNameOverride {
+                            name_id: name_id.clone(),
+                            slot,
+                            chr0: variants.chr0.clone(),
+                            chr1: variants.chr1.clone(),
+                            chr2: variants.chr2.clone(),
+                            fallback: fallback.clone(),
+                        });
+                    }
                 }
                 None => unwritable.push(key.to_string()),
             },
@@ -154,7 +173,7 @@ pub fn resolve_per_costume_names(
         let name_id = match representative.and_then(|e| e.name_id.clone()) {
             Some(id) => id,
             None => {
-                for (slot, _) in slots {
+                for slot in slots.keys() {
                     unwritable.push(format!("{fighter} c{slot:02}"));
                 }
                 continue;
@@ -214,7 +233,10 @@ pub fn resolve_all_names(
 pub fn resolve_chara_overrides(
     index: &RosterIndex,
     project: &RosterMod,
-) -> (BTreeMap<String, crate::mod_project::CharaOverrides>, Vec<String>) {
+) -> (
+    BTreeMap<String, crate::mod_project::CharaOverrides>,
+    Vec<String>,
+) {
     let mut out = BTreeMap::new();
     let mut unwritable = Vec::new();
     for (key, patch) in &project.chara_overrides {
@@ -403,29 +425,36 @@ pub fn export_authored_files(
     report: &mut RosterExport,
 ) -> Result<()> {
     for entry in authored {
+        // Every skin ships, not just the primary slot: a multi-skin character
+        // whose extra costumes are missing plays the donor's files (or
+        // nothing) under a moveset gated to slots that do not exist.
+        let all = entry.all_slots();
         let mut copied = 0;
-        for relative in super::scaffold::directories(&entry.donor, entry.slot) {
+        for relative in super::scaffold::directories_for_slots(&entry.donor, &all) {
             for root in roots {
                 copied += copy_tree(&root.join(&relative), &mod_root.join(&relative))?;
             }
         }
-        let effect = super::scaffold::effect_file(&entry.donor, entry.slot);
-        for root in roots {
-            let source = root.join(&effect);
-            if source.is_file() {
-                let destination = mod_root.join(&effect);
-                if let Some(parent) = destination.parent() {
-                    std::fs::create_dir_all(parent)?;
+        for effect in super::scaffold::effect_files(&entry.donor, &all) {
+            for root in roots {
+                let source = root.join(&effect);
+                if source.is_file() {
+                    let destination = mod_root.join(&effect);
+                    if let Some(parent) = destination.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::copy(&source, &destination)?;
+                    copied += 1;
                 }
-                std::fs::copy(&source, &destination)?;
-                copied += 1;
             }
         }
         if copied == 0 {
             report.warnings.push(format!(
-                "{}: no model, animation, or effect files were found for costume c{:02} of {}, \
+                "{}: no model, animation, or effect files were found for costume {} of {}, \
                  so the exported mod contains its moveset but not the character itself.",
-                entry.display_name, entry.slot, entry.donor
+                entry.display_name,
+                slot_span(&all),
+                entry.donor
             ));
         } else {
             report
@@ -434,6 +463,21 @@ pub fn export_authored_files(
         }
     }
     Ok(())
+}
+
+/// `c08` for one slot, `c08…c15` for a range — for messages about a
+/// character's whole costume block.
+fn slot_span(slots: &[u8]) -> String {
+    match slots {
+        [] => "—".to_string(),
+        [only] => format!("c{only:02}"),
+        _ => {
+            let (Some(first), Some(last)) = (slots.first(), slots.last()) else {
+                return "—".to_string();
+            };
+            format!("c{first:02}…c{last:02}")
+        }
+    }
 }
 
 /// Copy a directory's files, returning how many were copied.
@@ -536,8 +580,7 @@ mod tests {
                 },
             );
         }
-        let overrides =
-            std::collections::BTreeMap::from([(RosterKey::fighter("mario"), kinds)]);
+        let overrides = std::collections::BTreeMap::from([(RosterKey::fighter("mario"), kinds)]);
         let mod_root = dir.path().join("mod");
         let mut report = RosterExport::default();
         crate::roster::ui_images::export_ui_images(&mod_root, &index, &overrides, &mut report)
@@ -602,6 +645,7 @@ mod tests {
             key: key.clone(),
             donor: "mario".into(),
             slot: 8,
+            slots: Vec::new(),
             display_name: "Vision".into(),
             name_id: "vision".into(),
             moveset_scaffolded: true,
@@ -676,14 +720,14 @@ mod tests {
 #[cfg(test)]
 mod authored_file_tests {
     use super::*;
-    use crate::roster::{new_character::authored_entry, scaffold};
+    use crate::roster::{new_character::authored_entry_multi, scaffold};
 
     #[test]
     fn an_authored_characters_own_files_are_copied_into_the_exported_mod() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("character");
         let mod_root = dir.path().join("mod");
-        scaffold::create(&source, "mario", 8).unwrap();
+        scaffold::create_many(&source, "mario", &[8]).unwrap();
         std::fs::write(
             source.join("fighter/mario/model/body/c08/model.numdlb"),
             b"model",
@@ -699,8 +743,8 @@ mod authored_file_tests {
         let mut report = RosterExport::default();
         export_authored_files(
             &mod_root,
-            &[source.clone()],
-            &[authored_entry("mario", 8, "Vision", "vision")],
+            std::slice::from_ref(&source),
+            &[authored_entry_multi("mario", &[8], "Vision", "vision")],
             &mut report,
         )
         .unwrap();
@@ -719,18 +763,61 @@ mod authored_file_tests {
             .exists());
     }
 
+    /// A multi-skin character used to ship only its primary slot: the other
+    /// costumes' movesets were gated to slots with no files, which is a
+    /// crash-shaped hole on hardware that does not fall back gracefully.
+    #[test]
+    fn a_multi_skin_characters_extra_skins_ship_too() {
+        use crate::roster::new_character::authored_entry_multi;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("character");
+        for slot in [8u8, 15] {
+            std::fs::create_dir_all(source.join(format!("fighter/mario/model/body/c{slot:02}")))
+                .unwrap();
+            std::fs::write(
+                source.join(format!("fighter/mario/model/body/c{slot:02}/model.numdlb")),
+                b"model",
+            )
+            .unwrap();
+        }
+        let mut report = RosterExport::default();
+        export_authored_files(
+            &dir.path().join("mod"),
+            &[source],
+            &[authored_entry_multi(
+                "mario",
+                &[8, 9, 10, 11, 12, 13, 14, 15],
+                "Vision",
+                "vision",
+            )],
+            &mut report,
+        )
+        .unwrap();
+        let mod_root = dir.path().join("mod");
+        assert!(mod_root
+            .join("fighter/mario/model/body/c08/model.numdlb")
+            .is_file());
+        assert!(
+            mod_root
+                .join("fighter/mario/model/body/c15/model.numdlb")
+                .is_file(),
+            "the last skin of the block did not ship"
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
     /// A mod with the moveset and no model is a character that appears as the donor running
     /// the wrong moveset, which looks like the costume gate being broken.
     #[test]
     fn an_authored_character_with_no_files_yet_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("character");
-        scaffold::create(&source, "mario", 8).unwrap();
+        scaffold::create_many(&source, "mario", &[8]).unwrap();
         let mut report = RosterExport::default();
         export_authored_files(
             &dir.path().join("mod"),
             &[source],
-            &[authored_entry("mario", 8, "Vision", "vision")],
+            &[authored_entry_multi("mario", &[8], "Vision", "vision")],
             &mut report,
         )
         .unwrap();

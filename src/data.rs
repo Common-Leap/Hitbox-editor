@@ -6569,6 +6569,12 @@ pub struct EditRecord {
     /// costumes keep their own version of the move instead of losing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_scope: Option<u8>,
+    /// Additional slots beyond [`EditRecord::slot_scope`] for a multi-skin
+    /// character (c08–c15 shares one moveset across all 8). Empty for every
+    /// single-slot edit, so old projects load unchanged.
+    /// [`EditRecord::effective_scopes`] is what new code reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_scopes: Vec<u8>,
 }
 
 /// Persistent log of all edits, keyed fighter_name → move_name → record.
@@ -6578,14 +6584,35 @@ pub struct EditLog {
     pub entries: HashMap<String, HashMap<String, EditRecord>>,
 }
 
+impl EditRecord {
+    /// Every costume slot this edit is scoped to, ascending. Empty means
+    /// unscoped (every costume). Reads the legacy [`EditRecord::slot_scope`]
+    /// when [`EditRecord::slot_scopes`] is empty, so old projects behave.
+    pub fn effective_scopes(&self) -> Vec<u8> {
+        if self.slot_scopes.is_empty() {
+            self.slot_scope.into_iter().collect()
+        } else {
+            let mut out = Vec::with_capacity(self.slot_scopes.len() + 1);
+            if let Some(primary) = self.slot_scope {
+                out.push(primary);
+            }
+            out.extend(self.slot_scopes.iter().copied());
+            out.sort_unstable();
+            out.dedup();
+            out
+        }
+    }
+}
+
 impl EditLog {
-    /// Record an edit, optionally scoped to one costume slot.
-    ///
-    /// A scoped edit keeps its scope across a re-save of the same move; an unscoped save of a
-    /// move that was scoped would silently widen it to every costume of the donor, which is
-    /// the one direction of this change nobody would notice until they played the donor.
+    /// Record an edit scoped to every slot in `slots` (empty = every costume).
+    /// A re-save with an empty scope keeps the existing scopes: widening to
+    /// every costume must be explicit, since an unscoped save of a move that
+    /// was scoped would silently widen it to every costume of the donor, which
+    /// is the one direction of this change nobody would notice until they
+    /// played the donor.
     #[allow(clippy::too_many_arguments)]
-    pub fn save_scoped(
+    pub fn save_scoped_multi(
         &mut self,
         fighter: &str,
         fighter_display: &str,
@@ -6593,14 +6620,22 @@ impl EditLog {
         script: AcmdScript,
         hitboxes_pristine: Vec<Hitbox>,
         hitboxes: Vec<Hitbox>,
-        slot_scope: Option<u8>,
+        slots: &[u8],
     ) {
         let moves = self.entries.entry(fighter.to_string()).or_default();
-        let slot_scope = slot_scope.or_else(|| {
-            moves
-                .get(move_name)
-                .and_then(|existing| existing.slot_scope)
-        });
+        let (slot_scope, slot_scopes) = if slots.is_empty() {
+            match moves.get(move_name) {
+                Some(existing) => (existing.slot_scope, existing.slot_scopes.clone()),
+                None => (None, Vec::new()),
+            }
+        } else {
+            let mut sorted: Vec<u8> = slots.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let primary = sorted.first().copied();
+            let rest: Vec<u8> = sorted.into_iter().skip(1).collect();
+            (primary, rest)
+        };
         moves.insert(
             move_name.to_string(),
             EditRecord {
@@ -6611,6 +6646,7 @@ impl EditLog {
                 hitboxes_pristine,
                 hitboxes,
                 slot_scope,
+                slot_scopes,
             },
         );
     }

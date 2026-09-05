@@ -604,7 +604,8 @@ pub fn replace_loaded_file(path_hash: u64) -> bool {
         Some(n) => n,
         None => {
             // Fallback: direct SD read for the live roster file.
-            let live_path = "sd:/ultimate/mods/visionary_roster_live/ui/param/database/ui_chara_db.prc";
+            let live_path =
+                "sd:/ultimate/mods/visionary_roster_live/ui/param/database/ui_chara_db.prc";
             if path_hash == smash::hash40(live_path.strip_prefix("sd:/").unwrap_or(live_path)) {
                 if let Ok(data) = std::fs::read(live_path) {
                     if data.len() <= buffer.len() {
@@ -612,7 +613,11 @@ pub fn replace_loaded_file(path_hash: u64) -> bool {
                         if data.len() < buffer.len() {
                             buffer[data.len()..].fill(0);
                         }
-                        crate::slight::diag::note(format!("resource_reload: refreshed {path_hash:#x} via direct SD {} ({} B)", live_path, data.len()));
+                        crate::slight::diag::note(format!(
+                            "resource_reload: refreshed {path_hash:#x} via direct SD {} ({} B)",
+                            live_path,
+                            data.len()
+                        ));
                         data.len()
                     } else {
                         return false;

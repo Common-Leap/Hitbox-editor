@@ -238,7 +238,7 @@ Front-loaded and blocking. Do not build the preview on assumptions.
   Create model/motion/effect/ui directories per PLAN.md. Do **not** copy donor
   assets. Write a README naming expected filenames.
   Blocks on: R-41
-  Done: 2026-08-25 — scaffold::create makes the model/motion/effect directories and leaves a placement guide naming the expected filenames. It copies nothing from the donor, deliberately: a copied slot looks identical whether or not the user files were picked up. 3 tests.
+  Done: 2026-08-25 — scaffold::create_many makes the model/motion/effect directories and leaves a placement guide naming the expected filenames. It copies nothing from the donor, deliberately: a copied slot looks identical whether or not the user files were picked up. 3 tests.
 
 - [x] **R-43 — Readiness panel**
   Per-entry: model present, motion file count, effect stub, portrait, name,
@@ -532,8 +532,9 @@ is the workbench; `src/roster/` must not import half-verified offsets.
   into the `ModLibrary` so the fighter index and `RosterIndex` see it on the
   next frame (`window.rs:523` `handle_new_character` + `library_dirty` → `app.rs`
   rescan). Each entry is keyed `donor#cNN` (`RosterKey::slot`) and its moveset
-  is gated per-slot (`scaffold::costume_gated_source` + `EditRecord.slot_scope`
-  + `window.rs:270` `slot_scope_for` checks donor case-insensitively). Donor's
+  is gated per-slot (`scaffold::costume_gated_source_multi` +
+  `EditRecord.slot_scopes` + `window.rs` `slot_scopes_for` checks donor
+  case-insensitively). Donor's
   other costumes keep their own moves; `index.rs` proves an authored entry
   appears before its row exists and merges after export.
   Blocks on: R-41, R-42

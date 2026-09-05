@@ -122,8 +122,7 @@ const CELL_MIN_W: f32 = 56.0;
 /// real window width — inside it, the width is unbounded and the answer is
 /// meaningless.
 fn grid_layout(avail_w: f32) -> (usize, f32) {
-    let cols = (((avail_w - 4.0) + GRID_SPACING) / (CELL_W + GRID_SPACING))
-        .floor() as usize;
+    let cols = (((avail_w - 4.0) + GRID_SPACING) / (CELL_W + GRID_SPACING)).floor() as usize;
     let cols = cols.clamp(GRID_COLUMNS_MIN, GRID_COLUMNS_MAX);
     let cell_w = ((avail_w - 4.0) - (cols - 1) as f32 * GRID_SPACING) / cols as f32;
     (cols, cell_w.max(CELL_MIN_W))
@@ -132,16 +131,11 @@ fn grid_layout(avail_w: f32) -> (usize, f32) {
 /// One dossier dot: bright when the slot has it, dim when missing, with
 /// the counts behind a hover.
 fn slot_dot(ui: &mut Ui, on: bool, label: &str, hover: String) {
-    ui.label(
-        RichText::new(label)
-            .small()
-            .strong()
-            .color(if on {
-                Color32::from_rgb(130, 225, 150)
-            } else {
-                ui.visuals().weak_text_color()
-            }),
-    )
+    ui.label(RichText::new(label).small().strong().color(if on {
+        Color32::from_rgb(130, 225, 150)
+    } else {
+        ui.visuals().weak_text_color()
+    }))
     .on_hover_text(hover);
 }
 
@@ -196,6 +190,7 @@ fn matches_grid_filter(entry: &RosterEntry, query: &str) -> bool {
 }
 
 /// The character select tab's own state.
+#[derive(Default)]
 pub struct CssView {
     db: Option<CharaDb>,
     /// The arc root the database was loaded from, and the roots portraits are searched in.
@@ -250,36 +245,6 @@ pub struct CssView {
     /// Image kind shown on the preview stage. The stage is the big,
     /// game-vs-custom comparison; the rows below do the picking.
     img_preview_kind: Option<String>,
-}
-
-impl Default for CssView {
-    fn default() -> Self {
-        Self {
-            db: None,
-            ui_root: None,
-            load_error: None,
-            attempted: false,
-            portraits: PortraitCache::default(),
-            grid_filter: String::new(),
-            off_roster_filter: String::new(),
-            bulk_filter: String::new(),
-            focus_detail: false,
-            focus_off_roster: false,
-            focus_names: false,
-            goto_new_character_tab: false,
-            selected: BTreeSet::new(),
-            last_selected: None,
-            dragging: None,
-            marquee_start: None,
-            show_off_roster: false,
-            pending_hide: false,
-            status: String::new(),
-            show_bulk_names: false,
-            order_drafts: Default::default(),
-            image_slot_pick: Default::default(),
-            img_preview_kind: None,
-        }
-    }
 }
 
 impl CssView {
@@ -385,20 +350,19 @@ impl CssView {
                         );
                         ui.add_space(6.0);
                         // Escape hatch in place: no need to hunt the list below.
-                        if !project.hidden.is_empty() {
-                            if ui
+                        if !project.hidden.is_empty()
+                            && ui
                                 .button(RichText::new("Bring everyone back").strong())
                                 .on_hover_text("Restore every hidden character to the select screen")
                                 .clicked()
-                            {
-                                project.hidden.clear();
-                                self.status = "The full roster is back on the select screen.".into();
-                            }
+                        {
+                            project.hidden.clear();
+                            self.status = "The full roster is back on the select screen.".into();
                         }
                     });
                 });
         } else {
-                egui::Frame::new()
+            egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(2, 2))
                 .show(ui, |ui| {
                     // Sideways scroll is the last resort: the layout already
@@ -485,7 +449,10 @@ impl CssView {
             .inner_margin(egui::Margin::symmetric(14, 12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(Color32::from_rgb(230, 180, 80), RichText::new("⚠").size(18.0));
+                    ui.colored_label(
+                        Color32::from_rgb(230, 180, 80),
+                        RichText::new("⚠").size(18.0),
+                    );
                     ui.label(RichText::new("No roster database found").heading());
                 });
                 ui.add_space(6.0);
@@ -546,7 +513,11 @@ impl CssView {
                             self.focus_off_roster = true;
                         }
                     }
-                    let bulk_label = if self.show_bulk_names { "▣ Names" } else { "▢ Names" };
+                    let bulk_label = if self.show_bulk_names {
+                        "▣ Names"
+                    } else {
+                        "▢ Names"
+                    };
                     if ui
                         .selectable_label(self.show_bulk_names, RichText::new(bulk_label).small())
                         .on_hover_text("Edit display names for every visible entry in one table")
@@ -576,8 +547,8 @@ impl CssView {
                     // in the off-roster list; clearing a single entry's edits
                     // happens in its detail panel.
                     let has_selection = !self.selected.is_empty();
-                    let can_hide = has_selection
-                        && visible_len.saturating_sub(self.selected.len()) >= 8;
+                    let can_hide =
+                        has_selection && visible_len.saturating_sub(self.selected.len()) >= 8;
                     if ui
                         .add_enabled(can_hide, egui::Button::new(RichText::new("Hide").small()))
                         .on_hover_text(if can_hide {
@@ -620,13 +591,20 @@ impl CssView {
                                     .weak(),
                             );
                         } else {
-                            ui.label(RichText::new(format!("{visible_len} on screen")).small().weak());
+                            ui.label(
+                                RichText::new(format!("{visible_len} on screen"))
+                                    .small()
+                                    .weak(),
+                            );
                         }
                     });
                 });
             });
     }
 
+    // Eight traversal args (ui, roots, index, project, …) is the shape of
+    // every draw_* here; bundling them would churn all call sites for nothing.
+    #[allow(clippy::too_many_arguments)]
     fn draw_grid(
         &mut self,
         ui: &mut Ui,
@@ -655,9 +633,12 @@ impl CssView {
         };
         if shown.is_empty() {
             ui.label(
-                RichText::new(format!("No characters match “{}”.", self.grid_filter.trim()))
-                    .small()
-                    .weak(),
+                RichText::new(format!(
+                    "No characters match “{}”.",
+                    self.grid_filter.trim()
+                ))
+                .small()
+                .weak(),
             );
             return;
         }
@@ -684,10 +665,7 @@ impl CssView {
                         }
                         self.dragging = Some(self.selected.clone());
                     }
-                    if self.dragging.is_some()
-                        && response.hovered()
-                        && pointer_released
-                    {
+                    if self.dragging.is_some() && response.hovered() && pointer_released {
                         drop_on = Some(entry.key.clone());
                     }
                     // A drag that ends over a cell also produces a click; ignore
@@ -706,7 +684,7 @@ impl CssView {
                             if let Some(last) = self.last_selected.clone() {
                                 if let (Some(a), Some(b)) = (
                                     shown.iter().position(|e| e.key == last),
-                                    shown.iter().position(|e| &e.key == &entry.key),
+                                    shown.iter().position(|e| e.key == entry.key),
                                 ) {
                                     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
                                     for e in &shown[lo..=hi] {
@@ -740,7 +718,10 @@ impl CssView {
             .iter()
             .any(|(_, r)| r.contains(pointer_pos.unwrap_or(Pos2::ZERO)));
 
-        if pointer_pressed && !hovered_any_cell && grid_rect.contains(pointer_pos.unwrap_or(Pos2::ZERO)) {
+        if pointer_pressed
+            && !hovered_any_cell
+            && grid_rect.contains(pointer_pos.unwrap_or(Pos2::ZERO))
+        {
             self.marquee_start = pointer_pos;
         }
         if let (Some(start), Some(current)) = (self.marquee_start, pointer_pos) {
@@ -763,11 +744,7 @@ impl CssView {
                         }
                     }
                     self.selected = new_sel;
-                    if let Some(last) = cell_rects
-                        .iter()
-                        .filter(|(_, r)| marquee.intersects(*r))
-                        .last()
-                    {
+                    if let Some(last) = cell_rects.iter().rfind(|(_, r)| marquee.intersects(*r)) {
                         self.last_selected = Some(last.0.clone());
                     }
                 }
@@ -778,8 +755,11 @@ impl CssView {
                     egui::Stroke::new(1.0, Color32::from_rgb(120, 185, 235)),
                     egui::StrokeKind::Inside,
                 );
-                ui.painter()
-                    .rect_filled(marquee, 2.0, Color32::from_rgba_premultiplied(30, 65, 95, 40));
+                ui.painter().rect_filled(
+                    marquee,
+                    2.0,
+                    Color32::from_rgba_premultiplied(30, 65, 95, 40),
+                );
             }
         }
         if pointer_released {
@@ -820,9 +800,9 @@ impl CssView {
             {
                 self.hide_selected(index, project);
             }
-            if ui.input(|i| {
-                (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A)
-            }) {
+            if ui
+                .input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A))
+            {
                 self.selected = shown.iter().map(|e| e.key.clone()).collect();
                 self.last_selected = shown.last().map(|e| e.key.clone());
                 self.focus_detail = true;
@@ -868,7 +848,7 @@ impl CssView {
         let dragging = self
             .dragging
             .as_ref()
-            .map_or(false, |set| set.contains(&entry.key));
+            .is_some_and(|set| set.contains(&entry.key));
         let hovered = response.hovered();
         let visuals = ui.visuals();
         let base_stroke = origin_color(entry.origin);
@@ -910,7 +890,10 @@ impl CssView {
 
         let image_rect = egui::Rect::from_min_size(
             rect.min + egui::vec2(3.0, 3.0) * zoom,
-            egui::vec2(rect.width() - 6.0 * zoom, rect.height() - label_h - 3.0 * zoom),
+            egui::vec2(
+                rect.width() - 6.0 * zoom,
+                rect.height() - label_h - 3.0 * zoom,
+            ),
         );
         // The grid is the gamma-fixed display: portraits render corrected,
         // like the game shows them. The per-image preview toggle in the
@@ -992,7 +975,11 @@ impl CssView {
                 rect.min + egui::vec2(4.0, 4.0) * zoom,
                 egui::vec2(16.0, 12.0) * zoom,
             );
-            painter.rect_filled(badge_rect, 6.0, Color32::from_rgba_premultiplied(0, 0, 0, 120));
+            painter.rect_filled(
+                badge_rect,
+                6.0,
+                Color32::from_rgba_premultiplied(0, 0, 0, 120),
+            );
             painter.text(
                 badge_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -1270,7 +1257,10 @@ impl CssView {
                     || project.chara_overrides.contains_key(&entry.key)
                     || project.ui_images.contains_key(&entry.key);
                 if ui
-                    .add_enabled(has_edits, egui::Button::new(RichText::new("Reset entry").small()))
+                    .add_enabled(
+                        has_edits,
+                        egui::Button::new(RichText::new("Reset entry").small()),
+                    )
                     .on_hover_text("Clear this entry's name, position, row, and image edits")
                     .clicked()
                 {
@@ -1302,7 +1292,11 @@ impl CssView {
                 egui::TextEdit::singleline(&mut name)
                     .desired_width(name_w)
                     .hint_text("display name")
-                    .text_color(if is_edited { Color32::from_rgb(240,200,120) } else { ui.visuals().text_color() }),
+                    .text_color(if is_edited {
+                        Color32::from_rgb(240, 200, 120)
+                    } else {
+                        ui.visuals().text_color()
+                    }),
             );
             if response.changed() {
                 if name.trim().is_empty() || name == entry.display_name {
@@ -1312,10 +1306,17 @@ impl CssView {
                 }
             }
             if is_edited {
-                if ui.small_button("↺").on_hover_text("Use the game's name").clicked() {
+                if ui
+                    .small_button("↺")
+                    .on_hover_text("Use the game's name")
+                    .clicked()
+                {
                     project.names.remove(&entry.key);
                 }
-                ui.colored_label(Color32::from_rgb(240, 200, 120), RichText::new("edited").small());
+                ui.colored_label(
+                    Color32::from_rgb(240, 200, 120),
+                    RichText::new("edited").small(),
+                );
             }
         });
         ui.add_space(4.0);
@@ -1350,15 +1351,22 @@ impl CssView {
             .get(&entry.key)
             .map(|m| m.len())
             .unwrap_or(0);
-        egui::CollapsingHeader::new(RichText::new(format!(
-            "Images{}",
-            if image_count > 0 { format!(" • {image_count}") } else { String::new() }
-        )).small())
-            .default_open(image_count > 0)
-            .id_salt(format!("images_{}", entry.key.as_str()))
-            .show(ui, |ui| {
-                self.draw_images(ui, entry, project, roots);
-            });
+        egui::CollapsingHeader::new(
+            RichText::new(format!(
+                "Images{}",
+                if image_count > 0 {
+                    format!(" • {image_count}")
+                } else {
+                    String::new()
+                }
+            ))
+            .small(),
+        )
+        .default_open(image_count > 0)
+        .id_salt(format!("images_{}", entry.key.as_str()))
+        .show(ui, |ui| {
+            self.draw_images(ui, entry, project, roots);
+        });
 
         // ── Roster row (position + ui_chara_db fields) ────────────────────
         egui::CollapsingHeader::new(RichText::new("Roster row (position, slots)").small())
@@ -1375,14 +1383,21 @@ impl CssView {
                 v.chr0.is_some() as usize + v.chr1.is_some() as usize + v.chr2.is_some() as usize
             })
             .unwrap_or(0);
-        egui::CollapsingHeader::new(RichText::new(format!(
-            "Name variants (chr0/1/2){}",
-            if variant_count > 0 { format!(" • {variant_count}") } else { String::new() }
-        )).small())
-            .id_salt(format!("name_variants_{}", entry.key.as_str()))
-            .show(ui, |ui| {
-                self.draw_name_variants(ui, entry, project);
-            });
+        egui::CollapsingHeader::new(
+            RichText::new(format!(
+                "Name variants (chr0/1/2){}",
+                if variant_count > 0 {
+                    format!(" • {variant_count}")
+                } else {
+                    String::new()
+                }
+            ))
+            .small(),
+        )
+        .id_salt(format!("name_variants_{}", entry.key.as_str()))
+        .show(ui, |ui| {
+            self.draw_name_variants(ui, entry, project);
+        });
 
         if entry.name_id.is_none() {
             ui.add_space(4.0);
@@ -1404,7 +1419,11 @@ impl CssView {
                 .weak(),
         );
         ui.add_space(4.0);
-        let variants = project.name_variants.get(&entry.key).cloned().unwrap_or_default();
+        let variants = project
+            .name_variants
+            .get(&entry.key)
+            .cloned()
+            .unwrap_or_default();
         let mut chr0 = variants.chr0.clone().unwrap_or_default();
         let mut chr1 = variants.chr1.clone().unwrap_or_default();
         let mut chr2 = variants.chr2.clone().unwrap_or_default();
@@ -1499,9 +1518,11 @@ impl CssView {
             .and_then(|a| a.files_root.clone());
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new("M model · A anims · E effect · P portrait — dim = missing, hover for counts")
-                    .small()
-                    .weak(),
+                RichText::new(
+                    "M model · A anims · E effect · P portrait — dim = missing, hover for counts",
+                )
+                .small()
+                .weak(),
             );
             if let Some(root) = files_root {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1542,7 +1563,12 @@ impl CssView {
                 .cloned()
                 .unwrap_or_default();
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("c{slot:02}")).small().monospace().weak());
+                ui.label(
+                    RichText::new(format!("c{slot:02}"))
+                        .small()
+                        .monospace()
+                        .weak(),
+                );
                 slot_dot(
                     ui,
                     inv.meshes > 0,
@@ -1633,9 +1659,11 @@ impl CssView {
 
     fn draw_roster_row(&mut self, ui: &mut Ui, entry: &RosterEntry, project: &mut RosterMod) {
         ui.label(
-            RichText::new("What the game reads for CSS placement. Dragging the grid edits position too.")
-                .small()
-                .weak(),
+            RichText::new(
+                "What the game reads for CSS placement. Dragging the grid edits position too.",
+            )
+            .small()
+            .weak(),
         );
         ui.add_space(4.0);
         let db_row = entry
@@ -1698,7 +1726,10 @@ impl CssView {
                 ui.label(RichText::new(format!("now {o}")).small().weak());
             }
             if project.order.contains_key(&key)
-                && ui.small_button("↺").on_hover_text("Use the game's position").clicked()
+                && ui
+                    .small_button("↺")
+                    .on_hover_text("Use the game's position")
+                    .clicked()
             {
                 project.order.remove(&key);
                 clear_override = true;
@@ -1723,36 +1754,69 @@ impl CssView {
         }
 
         // color_num / save_no
-        let current_patch = project.chara_overrides.get(&entry.key).cloned().unwrap_or_default();
-        let mut color = current_patch.color_num.unwrap_or_else(|| db_color.unwrap_or(8));
-        let mut save = current_patch.save_no.unwrap_or_else(|| db_save.unwrap_or(0));
+        let current_patch = project
+            .chara_overrides
+            .get(&entry.key)
+            .cloned()
+            .unwrap_or_default();
+        let mut color = current_patch
+            .color_num
+            .unwrap_or_else(|| db_color.unwrap_or(8));
+        let mut save = current_patch
+            .save_no
+            .unwrap_or_else(|| db_save.unwrap_or(0));
         let mut patch = current_patch.clone();
         let mut patch_touched = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Costumes offered").small().weak());
-            if ui.add(egui::DragValue::new(&mut color).range(1..=64).speed(1)).on_hover_text("8 is vanilla — higher needs a slot-expansion mod").changed() {
-                patch.color_num = if Some(color) == db_color { None } else { Some(color) };
+            if ui
+                .add(egui::DragValue::new(&mut color).range(1..=64).speed(1))
+                .on_hover_text("8 is vanilla — higher needs a slot-expansion mod")
+                .changed()
+            {
+                patch.color_num = if Some(color) == db_color {
+                    None
+                } else {
+                    Some(color)
+                };
                 patch_touched = true;
             }
             if let Some(dbv) = db_color {
                 ui.label(RichText::new(format!("was {dbv}")).small().weak());
             }
             if patch.color_num.is_some() {
-                ui.colored_label(Color32::from_rgb(240,200,120), RichText::new("edited").small());
+                ui.colored_label(
+                    Color32::from_rgb(240, 200, 120),
+                    RichText::new("edited").small(),
+                );
             }
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Save slot").small().weak());
-            if ui.add(egui::DragValue::new(&mut save).range(-1..=127).speed(1)).changed() {
-                patch.save_no = if Some(save) == db_save { None } else { Some(save) };
+            if ui
+                .add(egui::DragValue::new(&mut save).range(-1..=127).speed(1))
+                .changed()
+            {
+                patch.save_no = if Some(save) == db_save {
+                    None
+                } else {
+                    Some(save)
+                };
                 patch_touched = true;
             }
             if let Some(v) = db_save {
                 ui.label(RichText::new(format!("was {v}")).small().weak());
             }
             if patch.save_no.is_some() {
-                ui.colored_label(Color32::from_rgb(240,200,120), RichText::new("edited").small());
-                if ui.small_button("↺").on_hover_text("Use the game's save slot").clicked() {
+                ui.colored_label(
+                    Color32::from_rgb(240, 200, 120),
+                    RichText::new("edited").small(),
+                );
+                if ui
+                    .small_button("↺")
+                    .on_hover_text("Use the game's save slot")
+                    .clicked()
+                {
                     patch.save_no = None;
                     patch_touched = true;
                 }
@@ -1772,6 +1836,8 @@ impl CssView {
     /// across two lookups, so game and custom are snapshotted one at a time.
     /// `kind` selects the game file (stocks preview stock files); a picked
     /// PNG wins regardless of kind.
+    // Same traversal-bundle note as `draw_grid`.
+    #[allow(clippy::too_many_arguments)]
     fn stage_tex(
         &mut self,
         ctx: &egui::Context,
@@ -1828,7 +1894,11 @@ impl CssView {
             });
         ui.horizontal_wrapped(|ui| {
             for k in kinds {
-                let dot = if overridden_kinds.contains(k) { " •" } else { "" };
+                let dot = if overridden_kinds.contains(k) {
+                    " •"
+                } else {
+                    ""
+                };
                 ui.selectable_value(&mut kind, k.to_string(), format!("{k}{dot}"));
             }
         });
@@ -1884,19 +1954,13 @@ impl CssView {
                             let longest = px.x.max(px.y).max(1.0);
                             ui.vertical(|ui| {
                                 ui.image((id, px * (84.0 / longest)));
-                                ui.label(
-                                    RichText::new(format!("game c{slot:02}"))
-                                        .small()
-                                        .weak(),
-                                );
+                                ui.label(RichText::new(format!("game c{slot:02}")).small().weak());
                             });
                         }
                         _ => {
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("no game file — custom only")
-                                        .small()
-                                        .weak(),
+                                    RichText::new("no game file — custom only").small().weak(),
                                 );
                             });
                         }
@@ -1914,9 +1978,11 @@ impl CssView {
                 let longest = px.x.max(px.y).max(1.0);
                 ui.image((id, px * (200.0 / longest)));
                 ui.label(
-                    RichText::new(format!("game {kind} c{slot:02} — pick a PNG below to replace"))
-                        .small()
-                        .weak(),
+                    RichText::new(format!(
+                        "game {kind} c{slot:02} — pick a PNG below to replace"
+                    ))
+                    .small()
+                    .weak(),
                 );
             }
             (_, _, false) => {
@@ -2049,10 +2115,7 @@ impl CssView {
                             // Drop both spellings for this slot: a legacy bare
                             // key and a suffixed one would otherwise shadow.
                             map.remove(&stored_key(sel_slot));
-                            map.remove(&crate::roster::ui_images::image_key(
-                                kind,
-                                Some(sel_slot),
-                            ));
+                            map.remove(&crate::roster::ui_images::image_key(kind, Some(sel_slot)));
                             if map.is_empty() {
                                 project.ui_images.remove(&key);
                             }
@@ -2088,9 +2151,7 @@ impl CssView {
                             }
                             ov_entry.gamma_upload = gamma_upload;
                             self.portraits.clear_for(&cache_name, sel_slot);
-                            self.status = format!(
-                                "Set {kind} c{sel_slot:02} for {display}"
-                            );
+                            self.status = format!("Set {kind} c{sel_slot:02} for {display}");
                         }
                     }
                 });
@@ -2099,28 +2160,22 @@ impl CssView {
             if multi_slot {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Costume").small().weak());
-                    egui::ComboBox::from_id_salt(format!(
-                        "img_slot_{}_{kind}",
-                        entry.key.as_str()
-                    ))
-                    .selected_text(format!("c{sel_slot:02}"))
-                    .show_ui(ui, |ui| {
-                        for cand in &candidates {
-                            let set_here = overridden.contains(cand);
-                            let label = if set_here {
-                                format!("c{cand:02} • set")
-                            } else {
-                                format!("c{cand:02}")
-                            };
-                            if ui
-                                .selectable_label(*cand == sel_slot, label)
-                                .clicked()
-                            {
-                                self.image_slot_pick
-                                    .insert((key.clone(), kind.to_string()), *cand);
+                    egui::ComboBox::from_id_salt(format!("img_slot_{}_{kind}", entry.key.as_str()))
+                        .selected_text(format!("c{sel_slot:02}"))
+                        .show_ui(ui, |ui| {
+                            for cand in &candidates {
+                                let set_here = overridden.contains(cand);
+                                let label = if set_here {
+                                    format!("c{cand:02} • set")
+                                } else {
+                                    format!("c{cand:02}")
+                                };
+                                if ui.selectable_label(*cand == sel_slot, label).clicked() {
+                                    self.image_slot_pick
+                                        .insert((key.clone(), kind.to_string()), *cand);
+                                }
                             }
-                        }
-                    });
+                        });
                     ui.label(
                         RichText::new("each skin exports its own file")
                             .small()
@@ -2519,7 +2574,10 @@ fn next_free_order(index: &RosterIndex) -> i8 {
     let mut max = -1i8;
     for e in index.visible() {
         if let Some(o) = e.css_order {
-            if o != crate::roster::css::OFF_ROSTER && o != crate::roster::css::RANDOM_SLOT_ORDER && o > max {
+            if o != crate::roster::css::OFF_ROSTER
+                && o != crate::roster::css::RANDOM_SLOT_ORDER
+                && o > max
+            {
                 max = o;
             }
         }
@@ -2696,7 +2754,7 @@ mod tests {
         assert!(there.iter().all(|(_, position)| position.is_some()));
 
         // Now the roster as it looks after that move, dragged back.
-        let moved = vec![
+        let moved = [
             entry("fox", 0),
             entry("mario", 1),
             entry("link", 2),
@@ -2720,7 +2778,7 @@ mod tests {
     /// for a one-character move, and would move entries into positions other rows occupy.
     #[test]
     fn existing_positions_are_reused_rather_than_densely_renumbered() {
-        let owned = vec![entry("a", 10), entry("b", 20), entry("c", 30)];
+        let owned = [entry("a", 10), entry("b", 20), entry("c", 30)];
         let refs: Vec<&RosterEntry> = owned.iter().collect();
         let result: Vec<Option<i8>> = renumber(&refs, 2, 0, |_| None)
             .into_iter()
@@ -2733,7 +2791,7 @@ mod tests {
     /// position list. The tail must keep what it had rather than being pushed off the end.
     #[test]
     fn a_shared_position_does_not_push_the_tail_off_the_sequence() {
-        let owned = vec![entry("pyra", 80), entry("mythra", 80), entry("kazuya", 81)];
+        let owned = [entry("pyra", 80), entry("mythra", 80), entry("kazuya", 81)];
         let refs: Vec<&RosterEntry> = owned.iter().collect();
         let result = renumber(&refs, 2, 0, |_| None);
         assert_eq!(result.len(), 2, "an entry was dropped from the sequence");
@@ -2799,7 +2857,9 @@ mod tests {
     #[test]
     fn costume_rows_cover_disk_slots_and_orphaned_overrides() {
         let overrides: std::collections::BTreeMap<u8, String> =
-            [(2, "Alt".into()), (9, "Extra".into())].into_iter().collect();
+            [(2, "Alt".into()), (9, "Extra".into())]
+                .into_iter()
+                .collect();
         assert_eq!(
             costume_slots_for(&[0, 1, 2, 7], Some(&overrides)),
             vec![0, 1, 2, 7, 9]

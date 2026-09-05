@@ -739,16 +739,32 @@ installs looks exactly like one that does nothing.
 
 ## Projects and mod exports
 
+The **Project Hub** appears on launch — **Resume last / New / Open
+(`modproject.json`) / Import mod / Recent / Browse without project** — and
+reopens from **File → Project Hub** mid-session. One current project holds
+every edit: its path is remembered, **Save** (`Ctrl+S`) writes silently,
+**Save As** relocates, and Export/Load adopt the path they touched. Switching
+projects with unsaved edits warns first.
+
 The **Mod** menu keeps hitbox, effect-spawn, authored effect, texture, and
 transplant edits together:
 
-- **Export Project** writes a portable `modproject.json`. If imported texture
-  images are used, keep the generated asset folder beside the JSON file. These
-  editable files are exported separately from mod and developer files.
+- **Save / Save As** writes the current `modproject.json` silently (or asks once
+  when it has no file yet). If imported texture images are used, keep the
+  generated asset folder beside the JSON file.
+- **Export Project** writes a portable `modproject.json` and adopts its path.
+  These editable files are exported separately from mod and developer files.
 - **Load Project** replaces the current project, restores every edit, and sends
   the available live rules and effects to a connected game. Added or retimed
   move events may ask you to perform that move once so the plugin can capture
   the original arguments safely.
+- **Import Mod as Project** adopts any mod folder: `ui_chara_db` diffs
+  (order/visibility/row fields), `.xmsbt` names, BNTX portraits→PNG assets, and
+  `fighter_param` diffs become editable; source text is copied as reference and
+  loose assets stay linked via the mod library. Compiled ACMD, binary
+  EFF/MSBT, and `.nro` plugins are reference-only by design, unknown roster
+  rows are reported never fabricated, and missing base dumps skip their diff
+  honestly. Every file is accounted for in the import report.
 - **Export Mod Folder** creates one complete ARCropolis mod directory. Copy that
   directory into `<SD root>/ultimate/mods/`. Rebuilt effects are under `effect/`,
   and the built ACMD plugin is chainloaded from `plugin.nro` at the root of the

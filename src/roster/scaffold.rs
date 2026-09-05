@@ -52,36 +52,73 @@ pub fn effect_file(donor: &str, slot: u8) -> String {
 pub struct Scaffold {
     pub donor: String,
     pub slot: u8,
+    /// Every slot scaffolded, ascending (single-slot scaffolds hold one).
+    pub slots: Vec<u8>,
     pub created: Vec<String>,
 }
 
-/// Create the directory tree and the placement guide for a new costume slot.
-pub fn create(mod_root: &Path, donor: &str, slot: u8) -> Result<Scaffold> {
+/// Create the directory trees and placement guides for every slot in `slots`.
+///
+/// One mod root holds the whole range (c08–c15 lives in one folder), so this
+/// loops the single-slot layout rather than inventing a second one. `slots`
+/// must be non-empty; entries are de-duplicated and the scaffold reports them
+/// ascending with the lowest as [`Scaffold::slot`].
+pub fn create_many(mod_root: &Path, donor: &str, slots: &[u8]) -> Result<Scaffold> {
     if donor.trim().is_empty() {
         bail!("a new character needs a donor fighter to be a costume of");
     }
-    let mut created = Vec::new();
-    for relative in directories(donor, slot) {
-        let path = mod_root.join(&relative);
-        std::fs::create_dir_all(&path)?;
-        created.push(relative);
+    if slots.is_empty() {
+        bail!("a new character needs at least one costume slot");
     }
-    let guide = mod_root
-        .join(format!(
-            "fighter/{}/model/body/c{slot:02}",
+    let mut sorted: Vec<u8> = slots.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut created = Vec::new();
+    for slot in &sorted {
+        for relative in directories(donor, *slot) {
+            let path = mod_root.join(&relative);
+            std::fs::create_dir_all(&path)?;
+            if !created.contains(&relative) {
+                created.push(relative);
+            }
+        }
+        let guide = mod_root
+            .join(format!(
+                "fighter/{}/model/body/c{slot:02}",
+                donor.to_ascii_lowercase()
+            ))
+            .join("PUT_YOUR_MODEL_HERE.txt");
+        std::fs::write(&guide, placement_guide(donor, *slot))?;
+        created.push(format!(
+            "fighter/{}/model/body/c{slot:02}/PUT_YOUR_MODEL_HERE.txt",
             donor.to_ascii_lowercase()
-        ))
-        .join("PUT_YOUR_MODEL_HERE.txt");
-    std::fs::write(&guide, placement_guide(donor, slot))?;
-    created.push(format!(
-        "fighter/{}/model/body/c{slot:02}/PUT_YOUR_MODEL_HERE.txt",
-        donor.to_ascii_lowercase()
-    ));
+        ));
+    }
     Ok(Scaffold {
         donor: donor.to_ascii_lowercase(),
-        slot,
+        slot: sorted[0],
+        slots: sorted,
         created,
     })
+}
+
+/// Directories for every slot in `slots`, de-duplicated (the shared
+/// `effect/fighter/<donor>` dir appears once).
+pub fn directories_for_slots(donor: &str, slots: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for slot in slots {
+        for relative in directories(donor, *slot) {
+            if !out.contains(&relative) {
+                out.push(relative);
+            }
+        }
+    }
+    out
+}
+
+/// Per-slot effect files for every slot in `slots`.
+pub fn effect_files(donor: &str, slots: &[u8]) -> Vec<String> {
+    slots.iter().map(|slot| effect_file(donor, *slot)).collect()
 }
 
 /// The note left in the model directory, naming the files the game expects.
@@ -210,12 +247,7 @@ const MESH_EXTS: &[&str] = &["numdlb", "numshb", "numatb", "nusktb", "numshexb"]
 ///
 /// `name_id` is the roster row's id for the portrait lookup, when the slot
 /// has a row (a slot without one simply reports no portrait).
-pub fn inventory(
-    roots: &[PathBuf],
-    donor: &str,
-    slot: u8,
-    name_id: Option<&str>,
-) -> SlotInventory {
+pub fn inventory(roots: &[PathBuf], donor: &str, slot: u8, name_id: Option<&str>) -> SlotInventory {
     let donor = donor.to_ascii_lowercase();
     let mut out = SlotInventory::default();
     // Later roots win, so walk reversed: the first hit is the mod the user
@@ -452,14 +484,35 @@ pub const MOVESET_TEMPLATE: &[&str] = &[
 /// are renamed by replacing their declared name, which is exact rather than a substring
 /// rewrite: the name appears once, in the declaration.
 ///
+/// Emit an authored function, the fighter's own function, and a dispatcher between them,
+/// gated to every slot in `slots`.
+///
+/// The dispatcher keeps the **registered** name, so the `agent.acmd` line the exporter already
+/// writes needs no change. The authored body moves to `<name>_costume` and the fighter's own
+/// script becomes `<name>_original`. A multi-skin character shares one moveset across all its
+/// costumes, so the gate is an OR over its slots (`color == 8 || color == 9 …`).
+///
+/// `authored_source` and `original_source` are whole `unsafe extern "C" fn …` definitions. Both
+/// are renamed by replacing their declared name, which is exact rather than a substring
+/// rewrite: the name appears once, in the declaration.
+///
 /// The original arm is mandatory in the same way it is in [`wrap_with_slot_guard`]: without it
 /// this move would be removed from every other costume of the donor.
-pub fn costume_gated_source(
+pub fn costume_gated_source_multi(
     registered_name: &str,
-    slot: u8,
+    slots: &[u8],
     authored_source: &str,
     original_source: &str,
 ) -> String {
+    let mut sorted: Vec<u8> = slots.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    debug_assert!(!sorted.is_empty(), "a costume gate needs at least one slot");
+    let condition = sorted
+        .iter()
+        .map(|slot| format!("color == {slot}"))
+        .collect::<Vec<_>>()
+        .join(" || ");
     let authored_name = format!("{registered_name}_costume");
     let original_name = format!("{registered_name}_original");
     format!(
@@ -472,7 +525,7 @@ pub fn costume_gated_source(
          \x20       agent.module_accessor,\n\
          \x20       *smash::lib::lua_const::FIGHTER_INSTANCE_WORK_ID_INT_COLOR,\n\
          \x20   );\n\
-         \x20   if color == {slot} {{\n\
+         \x20   if {condition} {{\n\
          \x20       {authored_name}(agent);\n\
          \x20   }} else {{\n\
          \x20       {original_name}(agent);\n\
@@ -481,7 +534,7 @@ pub fn costume_gated_source(
         authored = rename_function(authored_source, registered_name, &authored_name),
         original = rename_declared_function(original_source, &original_name),
         registered_name = registered_name,
-        slot = slot,
+        condition = condition,
         authored_name = authored_name,
         original_name = original_name,
     )
@@ -529,7 +582,7 @@ mod tests {
     #[test]
     fn the_scaffold_creates_the_slots_own_directories_and_leaves_a_guide() {
         let dir = tempfile::tempdir().unwrap();
-        let scaffold = create(dir.path(), "Mario", 8).unwrap();
+        let scaffold = create_many(dir.path(), "Mario", &[8]).unwrap();
         assert_eq!(scaffold.donor, "mario");
         assert!(dir.path().join("fighter/mario/model/body/c08").is_dir());
         assert!(dir.path().join("fighter/mario/motion/body/c08").is_dir());
@@ -548,7 +601,7 @@ mod tests {
     #[test]
     fn the_scaffold_copies_nothing_from_the_donor() {
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), "mario", 8).unwrap();
+        create_many(dir.path(), "mario", &[8]).unwrap();
         let model = dir.path().join("fighter/mario/model/body/c08");
         let files: Vec<String> = std::fs::read_dir(&model)
             .unwrap()
@@ -561,7 +614,7 @@ mod tests {
     #[test]
     fn readiness_reports_an_empty_slot_as_empty() {
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), "mario", 8).unwrap();
+        create_many(dir.path(), "mario", &[8]).unwrap();
         let readiness = measure(&[dir.path().to_path_buf()], "mario", 8, false);
         assert_eq!(
             readiness.model_files, 0,
@@ -580,7 +633,7 @@ mod tests {
     #[test]
     fn animations_without_a_motion_list_are_called_out() {
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), "mario", 8).unwrap();
+        create_many(dir.path(), "mario", &[8]).unwrap();
         std::fs::write(
             dir.path()
                 .join("fighter/mario/motion/body/c08/attack.nuanmb"),
@@ -666,7 +719,7 @@ mod tests {
 
     #[test]
     fn a_costume_gate_keeps_the_registered_name_and_renames_both_arms() {
-        let generated = costume_gated_source("game_attack11", 8, AUTHORED, ORIGINAL);
+        let generated = costume_gated_source_multi("game_attack11", &[8], AUTHORED, ORIGINAL);
         assert!(generated.contains("fn game_attack11_costume(agent"));
         assert!(generated.contains("fn game_attack11_original(agent"));
         assert!(generated.contains("unsafe extern \"C\" fn game_attack11(agent"));
@@ -681,13 +734,13 @@ mod tests {
     /// registered name. Two definitions, or none, both fail to build.
     #[test]
     fn exactly_one_function_carries_the_registered_name() {
-        let generated = costume_gated_source("game_attack11", 8, AUTHORED, ORIGINAL);
+        let generated = costume_gated_source_multi("game_attack11", &[8], AUTHORED, ORIGINAL);
         assert_eq!(generated.matches("fn game_attack11(").count(), 1);
     }
 
     #[test]
     fn a_costume_gated_function_set_parses_as_rust() {
-        let generated = costume_gated_source("game_attack11", 8, AUTHORED, ORIGINAL);
+        let generated = costume_gated_source_multi("game_attack11", &[8], AUTHORED, ORIGINAL);
         let source = format!("mod generated {{ use smash::lib::lua_const::*; {generated} }}");
         if let Err(error) = syn::parse_file(&source) {
             panic!("costume-gated source does not parse: {error}\n\n{generated}");

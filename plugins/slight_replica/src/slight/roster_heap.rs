@@ -51,10 +51,7 @@ fn hash40(s: &str) -> u64 {
     (!hash) as u64 | (s.len() as u64) << 32
 }
 
-pub fn patch_raw_prc(
-    _order: &BTreeMap<String, i8>,
-    _hidden: &BTreeSet<String>,
-) -> usize {
+pub fn patch_raw_prc(_order: &BTreeMap<String, i8>, _hidden: &BTreeSet<String>) -> usize {
     0
 }
 
@@ -68,10 +65,7 @@ pub fn patch_raw_prc(
 /// by reading the current heap values before patching.
 ///
 /// Returns number of entries patched, or 0 if not found / not safe.
-pub fn patch_parsed_heap(
-    order: &BTreeMap<String, i8>,
-    hidden: &BTreeSet<String>,
-) -> usize {
+pub fn patch_parsed_heap(order: &BTreeMap<String, i8>, hidden: &BTreeSet<String>) -> usize {
     if order.is_empty() && hidden.is_empty() {
         return 0;
     }
@@ -111,21 +105,30 @@ pub fn patch_parsed_heap(
     }
 
     // Raw file buffer range to avoid mistaking it for the parsed heap.
-    let raw_base = crate::slight::effect_viewer::resource_reload::resident_buffer(smash::hash40("ui/param/database/ui_chara_db.prc"))
-        .map(|p| p as usize)
-        .unwrap_or(0);
-    let raw_len = crate::slight::effect_viewer::resource_reload::resident_len(smash::hash40("ui/param/database/ui_chara_db.prc")).unwrap_or(0);
+    let raw_base = crate::slight::effect_viewer::resource_reload::resident_buffer(smash::hash40(
+        "ui/param/database/ui_chara_db.prc",
+    ))
+    .map(|p| p as usize)
+    .unwrap_or(0);
+    let raw_len = crate::slight::effect_viewer::resource_reload::resident_len(smash::hash40(
+        "ui/param/database/ui_chara_db.prc",
+    ))
+    .unwrap_or(0);
     let raw_end = raw_base + raw_len;
 
-    let heap_base = unsafe { skyline::hooks::getRegionAddress(skyline::hooks::Region::Heap) as usize };
+    let heap_base =
+        unsafe { skyline::hooks::getRegionAddress(skyline::hooks::Region::Heap) as usize };
     if heap_base == 0 {
         crate::slight::diag::note("heap_patch: Heap base is null");
         return 0;
     }
     const SCAN_SIZE: usize = 0x10000000; // 256MB
-    // Whole-array fast path: try strided scan for the disp array.
+                                         // Whole-array fast path: try strided scan for the disp array.
     if let Some(n) = try_patch_disp_array(heap_base, raw_base, raw_end, &wanted) {
-        crate::slight::diag::note(format!("heap_patch: whole-array scan patched {} entries", n));
+        crate::slight::diag::note(format!(
+            "heap_patch: whole-array scan patched {} entries",
+            n
+        ));
         return n;
     }
     let old_disp_map = get_old_disp_from_raw(&wanted);
@@ -551,10 +554,7 @@ fn load_rebuild_addr() -> Option<usize> {
 }
 
 /// Heap-only patch entry point.
-pub fn patch_instant(
-    order: &BTreeMap<String, i8>,
-    hidden: &BTreeSet<String>,
-) -> bool {
+pub fn patch_instant(order: &BTreeMap<String, i8>, hidden: &BTreeSet<String>) -> bool {
     let heap_patched = patch_parsed_heap(order, hidden);
     if heap_patched > 0 {
         let rebuilt = trigger_rebuild();
@@ -562,7 +562,11 @@ pub fn patch_instant(
             "heap_patch: heap patched {} entries, rebuild={} — {}",
             heap_patched,
             rebuilt,
-            if rebuilt { "instant" } else { "heap patched, needs rebuild" }
+            if rebuilt {
+                "instant"
+            } else {
+                "heap patched, needs rebuild"
+            }
         ));
         return rebuilt;
     }

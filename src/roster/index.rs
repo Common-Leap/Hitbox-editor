@@ -115,6 +115,7 @@ impl RosterIndex {
                 Some(authored) => RosterBacking::SlotClone {
                     donor: authored.donor.clone(),
                     slot: authored.slot,
+                    slots: authored.slots.clone(),
                 },
                 None => RosterBacking::Fighter,
             };
@@ -212,6 +213,7 @@ impl RosterIndex {
                 backing: RosterBacking::SlotClone {
                     donor: authored.donor.clone(),
                     slot: authored.slot,
+                    slots: authored.slots.clone(),
                 },
                 key,
             });
@@ -515,6 +517,7 @@ mod tests {
             key: RosterKey::slot("missingdonor", 8),
             donor: "missingdonor".into(),
             slot: 8,
+            slots: Vec::new(),
             display_name: "Ghost".into(),
             name_id: "ghost".into(),
             moveset_scaffolded: false,
@@ -542,6 +545,7 @@ mod tests {
             key: key.clone(),
             donor: "mario".into(),
             slot: 8,
+            slots: Vec::new(),
             display_name: "Vision".into(),
             name_id: "vision".into(),
             moveset_scaffolded: false,
@@ -596,7 +600,7 @@ mod reopen_tests {
     use crate::data::{FighterEntry, FighterSource};
     use crate::mod_project::{ModProjectFile, PROJECT_VERSION};
     use crate::roster::css::{fighter_kind_hash, test_db};
-    use crate::roster::new_character::authored_entry;
+    use crate::roster::new_character::authored_entry_multi;
     use std::path::PathBuf;
 
     fn fighter(name: &str) -> FighterEntry {
@@ -614,7 +618,7 @@ mod reopen_tests {
     }
 
     fn saved_project() -> ModProjectFile {
-        let entry = authored_entry("mario", 8, "Vision", "vision");
+        let entry = authored_entry_multi("mario", &[8], "Vision", "vision");
         let mut project = ModProjectFile {
             version: PROJECT_VERSION,
             name: "reopen".into(),

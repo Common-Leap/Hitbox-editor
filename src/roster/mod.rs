@@ -112,7 +112,15 @@ pub enum RosterBacking {
     /// One costume slot of a donor fighter, promoted to its own CSS cell. The entry plays
     /// as `donor` with `slot` forced, and carries its own model, motion, effects, and
     /// slot-gated ACMD.
-    SlotClone { donor: String, slot: u8 },
+    SlotClone {
+        donor: String,
+        slot: u8,
+        /// Additional slots beyond `slot` for a multi-skin character (c08–c15
+        /// owns 8 costumes under one entry). Empty for every single-slot
+        /// entry, so all existing construction sites keep meaning primary-only.
+        #[allow(dead_code)]
+        slots: Vec<u8>,
+    },
 }
 
 impl RosterBacking {
@@ -135,6 +143,40 @@ impl RosterBacking {
         match self {
             Self::Fighter => None,
             Self::SlotClone { slot, .. } => Some(*slot),
+        }
+    }
+
+    /// Every costume slot this entry owns, ascending. Single-slot entries
+    /// return exactly [`RosterBacking::slot`]; a multi-skin character returns
+    /// its primary plus all additional slots.
+    pub fn all_slots(&self) -> Vec<u8> {
+        match self {
+            Self::Fighter => Vec::new(),
+            Self::SlotClone { slot, slots, .. } => {
+                let mut out = Vec::with_capacity(1 + slots.len());
+                out.push(*slot);
+                out.extend(slots.iter().copied());
+                out.sort_unstable();
+                out.dedup();
+                out
+            }
+        }
+    }
+
+    /// True when this entry owns `slot` (primary or additional).
+    ///
+    /// No callers yet — `all_slots().contains()` covers today's checks — but
+    /// the multi-skin ownership semantics below are pinned by tests, so the
+    /// predicate stays as their subject rather than being re-derived later.
+    #[allow(dead_code)]
+    pub fn owns_slot(&self, slot: u8) -> bool {
+        match self {
+            Self::Fighter => false,
+            Self::SlotClone {
+                slot: primary,
+                slots,
+                ..
+            } => *primary == slot || slots.contains(&slot),
         }
     }
 }
@@ -257,7 +299,8 @@ mod backing_agnostic_tests {
         assert!(!RosterBacking::Fighter.shares_engine_fighter());
         assert!(RosterBacking::SlotClone {
             donor: "mario".into(),
-            slot: 8
+            slot: 8,
+            slots: Vec::new(),
         }
         .shares_engine_fighter());
     }
@@ -270,10 +313,25 @@ mod backing_agnostic_tests {
         assert_eq!(
             RosterBacking::SlotClone {
                 donor: "mario".into(),
-                slot: 8
+                slot: 8,
+                slots: Vec::new(),
             }
             .slot(),
             Some(8)
         );
+    }
+
+    #[test]
+    fn a_multi_skin_entry_reports_every_slot_it_owns() {
+        let backing = RosterBacking::SlotClone {
+            donor: "mario".into(),
+            slot: 8,
+            slots: vec![10, 9],
+        };
+        assert_eq!(backing.slot(), Some(8));
+        assert_eq!(backing.all_slots(), vec![8, 9, 10]);
+        assert!(backing.owns_slot(9));
+        assert!(!backing.owns_slot(11));
+        assert!(RosterBacking::Fighter.all_slots().is_empty());
     }
 }

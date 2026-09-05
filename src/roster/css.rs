@@ -161,13 +161,19 @@ impl CharaDb {
         let mut missing = Vec::new();
         for (name_id, patch) in patches {
             if let Some(n) = patch.color_num {
-                if self.set_field(name_id, "color_num", ParamKind::U8(n)).is_err() {
+                if self
+                    .set_field(name_id, "color_num", ParamKind::U8(n))
+                    .is_err()
+                {
                     missing.push(name_id.clone());
                     continue;
                 }
             }
             if let Some(n) = patch.save_no {
-                if self.set_field(name_id, "save_no", ParamKind::I8(n)).is_err() {
+                if self
+                    .set_field(name_id, "save_no", ParamKind::I8(n))
+                    .is_err()
+                {
                     if !missing.contains(name_id) {
                         missing.push(name_id.clone());
                     }
@@ -175,9 +181,7 @@ impl CharaDb {
                 }
             }
         }
-        if !missing.is_empty() {
-            self.refresh();
-        } else if !patches.is_empty() {
+        if !missing.is_empty() || !patches.is_empty() {
             self.refresh();
         }
         missing
